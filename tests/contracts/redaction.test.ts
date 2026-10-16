@@ -23,7 +23,8 @@ describe('sensitive data redaction', () => {
       'GET https://reader.test/api?token=secret-token&query=artist Authorization: Bearer auth-secret',
     );
 
-    expect(redacted).toContain('query=artist');
+    expect(redacted).not.toContain('reader.test');
+    expect(redacted).not.toContain('query=artist');
     expect(redacted).not.toContain('secret-token');
     expect(redacted).not.toContain('auth-secret');
   });

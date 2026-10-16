@@ -47,7 +47,7 @@ import { findMissingArchives } from '../lib/archiveExistence';
 import { ehGalleryFromTags } from '../lib/archiveDeletion';
 import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
-import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailTagTime, useArchiveCover, useDetailTagGroups, useTwoLineTitle } from './ArchiveDetailSections';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailTagTime, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
 import { useDetailActions, useDetailDateKind } from '../app/preferences';
 
 const repository = new NativeLibraryRepository();
@@ -335,15 +335,15 @@ detailBasePath?: string | undefined }) {
     onDeleted: () => navigate(shelfBase, { replace: true }),
   });
   const title = metadata?.title || '';
-  /** Title fitting: at most two lines, stepping the font down a notch at a
-   * time when the text still overflows, and letting the CSS line-clamp cut the
+  /** Title fitting: one stable line, stepping the font down a notch at a
+   * time when the text still overflows, and letting CSS ellipsis cut the
    * rest to an ellipsis only when even the smallest size cannot fit.
    *
    * 它必须在下面那个早退之前：服务器离线时第一次渲染走的是完整骨架（全部挂钩都
    * 在），metadata 请求失败后第二次渲染落到「读不到」那一支——若这一支少调一个
    * 挂钩，React 会抛 #300（「Rendered fewer hooks than expected」）并**整个应用
    * 一起卸载**，页面就成了一块纯色。 */
-  const titleRef = useTwoLineTitle(title);
+  const titleRef = useSingleLineTitle(title);
 
   if (error && !metadata) {
     return (

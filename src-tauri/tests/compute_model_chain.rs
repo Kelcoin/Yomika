@@ -322,7 +322,7 @@ fn a_builtin_chain_upscales_a_page_without_any_model_on_disk() {
         "这条链是 x2，倍率该来自预设而不是调用方填的那个数"
     );
     assert!(
-        artifact.pipeline_revision.starts_with("worker-v1:"),
+        artifact.pipeline_revision.starts_with("worker-v2-adaptive-input:"),
         "revision 由这一份 run 派生：{}",
         artifact.pipeline_revision
     );
@@ -450,7 +450,7 @@ fn the_host_hands_a_model_and_a_page_to_a_real_engine() {
         artifact.staging_name
     );
     assert!(
-        artifact.pipeline_revision.starts_with("worker-v1:"),
+        artifact.pipeline_revision.starts_with("worker-v2-adaptive-input:"),
         "revision 由这一份 run 派生：{}",
         artifact.pipeline_revision
     );

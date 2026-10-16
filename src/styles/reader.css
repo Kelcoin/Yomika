@@ -1,6 +1,8 @@
 .reader-screen {
   position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   place-items: center;
   width: 100%;
   min-width: 320px;
@@ -13,11 +15,11 @@
   touch-action: pan-y;
 }
 
-/* The reader scheme's own primary, not --focus-ring: that one flips with the
-   theme, and in the light theme it is a deep vermilion barely 2.5:1 against
-   this canvas. */
+/* The canvas owns keyboard paging; a viewport-sized ring looks like a native
+   window border. Individual reader controls keep their shared focus rings. */
 .reader-screen:focus-visible {
-  box-shadow: inset 0 0 0 2px var(--reader-primary);
+  outline: none;
+  box-shadow: none;
 }
 
 /* Every rendition of a page draws at the size the *first* one measured.
@@ -45,6 +47,7 @@
    The track carries the drag offset, so a neighbour slides in from exactly where
    it will land — the gesture used to drag the page off an empty background. */
 .reader-track {
+  grid-area: 1 / 1;
   /* Layout containment only: `paint` clipped every descendant to the track's
      own box, and the swipe-neighbour frames live at translateX(±100%) — they
      were invisible for their whole life, so a drag slid the page over black. */
@@ -118,7 +121,7 @@
    pointer-events: none，翻页、缩放照旧。 */
 .reader-deriving {
   position: absolute;
-  top: calc(var(--safe-top) + var(--space-3));
+  top: var(--space-3);
   left: 50%;
   transform: translateX(-50%);
   /* 这一层里的序位（不是相对画面）：压住画面靠的是祖先 `.reader-chrome`（它是带
@@ -163,10 +166,16 @@
 }
 
 .reader-webtoon {
+  grid-area: 1 / 1;
   flex-direction: column;
   justify-content: flex-start;
   overflow-y: auto;
+  /* The reader compensates measured heights itself; native scroll anchoring
+     must not also shift the viewport as virtual spacers change. */
+  overflow-anchor: none;
 }
+
+.reader-webtoon-spacer { flex: none; width: 100%; }
 
 .reader-webtoon .reader-page {
   max-width: min(100%, 900px);
@@ -218,10 +227,8 @@
 .reader-page-status .loading-indicator { color: var(--reader-ink); }
 .reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
 
-/* 钉在第二行：顶栏默认隐藏时它是网格里唯一的孩子，不钉住就会被排进第一行
-   （`auto`，也就是高度 0 的那条顶栏轨道）而贴到屏幕顶上；钉住之后顶栏来去
-   都不挪窝。 */
-.reader-screen-loading .loading-indicator { grid-row: 2; }
+/* Loading, errors and pages use the entire canvas; chrome never reserves space. */
+.reader-screen-loading .loading-indicator { grid-area: 1 / 1; }
 
 .reader-error {
   width: min(100% - 32px, 480px);
@@ -232,17 +239,10 @@
    The bar is the same M3 small top app bar as the reading chrome (64dp plus the
    safe area, 4dp inline), so the two never look like different screens. */
 .reader-screen-error {
-  grid-template-rows: auto 1fr;
   place-items: stretch;
 }
 
-/* 加载态是「顶栏 + 中间内容」两行网格——`place-items: center` 会把那条顶栏从通栏
-   压成一枚居中的小块。这两行现在**无条件**成立（原来是 `:has(.reader-error-bar)`
-   配一条常显的顶栏）：顶栏改成默认隐藏之后，有它没它轮到结构变一次，中间那枚指示器
-   就会跟着上下跳一下。行结构固定、指示器钉在第二行（`grid-row: 2`），露不露顶栏都
-   不影响它的位置。 */
 .reader-screen-loading {
-  grid-template-rows: auto 1fr;
   place-items: stretch;
 }
 
@@ -253,6 +253,11 @@
    右边一旦挂上第二颗按钮就会向左溢出压住标题——阅读态那条栏正是这么坏掉的，修法见
    `.reader-chrome-top`。这条错误态栏只挂一颗返回，所以先照原样留着。 */
 .reader-error-bar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: var(--z-reader-chrome);
   display: grid;
   grid-template-columns: minmax(var(--icon-button-size), 1fr) minmax(0, auto) minmax(var(--icon-button-size), 1fr);
   align-items: center;
@@ -287,10 +292,8 @@
   white-space: nowrap;
 }
 
-/* `grid-row: 2` 的理由同加载态那条：顶栏收起时错误信息是唯一的孩子，不钉住就会
-   落进高度 0 的第一行而顶到屏幕最上面。 */
 .reader-screen-error .reader-error {
-  grid-row: 2;
+  grid-area: 1 / 1;
   align-self: center;
   justify-self: center;
 }
@@ -328,7 +331,7 @@
 .reader-chrome {
   position: absolute;
   inset: 0;
-  z-index: var(--z-reader-chrome);
+  z-index: calc(var(--z-reader-overview) + 1);
   pointer-events: none;
 }
 
@@ -390,7 +393,7 @@
   pointer-events: auto;
 }
 
-.reader-chrome-top.is-leaving { animation: reader-chrome-top-out var(--duration-exit) var(--ease-exit) forwards; }
+.reader-chrome-top.is-leaving { animation: reader-chrome-top-out var(--duration-exit) var(--ease-exit) forwards; pointer-events: none; }
 
 /* 和 `.reader-error-bar` 同一条三列布局（理由见那一处）：标题相对**整条栏**居中，
    两侧各留一个图标宽的上限/下限，标题自己收省略号。 */
@@ -456,12 +459,11 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: var(--tracking-wide);
   pointer-events: none;
-  /* 只有透明度会动：胶囊不再因为底栏而换位置（见下面 `.is-leaving` 那条注释）。 */
-  transition: opacity var(--motion-standard);
+  /* Keep a full fade even when chrome mounts or artwork overlap changes. */
+  transition: opacity var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1), translate var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1), scale var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1);
   opacity: 1;
   translate: 0 0;
   scale: 1;
-  transition-property: opacity, translate, scale;
 }
 
 /* Width-filling image: there is real room below it — take the centre slot. */
@@ -473,7 +475,7 @@
 
 /* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */
 .reader-page-indicator[data-visible='false'] { opacity: 0; translate: 0 6px; scale: 0.96; }
-.reader-page-indicator[data-visible='true'] { animation: reader-indicator-in var(--motion-standard) backwards; }
+.reader-page-indicator[data-visible='true'] { animation: reader-indicator-in var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1) backwards; }
 @keyframes reader-indicator-in {
   from { opacity: 0; translate: 0 6px; scale: 0.96; }
   to { opacity: 1; translate: 0 0; scale: 1; }
@@ -535,8 +537,8 @@
    滑到屏幕底、横穿整条栏——那个动作没有了，那条过渡也就没有存在的理由。 */
 .reader-page-indicator.is-leaving {
   opacity: 0;
-  transition-duration: var(--duration-exit);
-  transition-timing-function: var(--ease-exit);
+  transition-duration: var(--duration-reader-indicator);
+  transition-timing-function: cubic-bezier(.2, 0, .2, 1);
 }
 
 /* M3 subtitle role in an app bar: on-surface-variant. */
@@ -676,7 +678,7 @@
   pointer-events: none;
 }
 
-.reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; }
+.reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; pointer-events: none; }
 
 /* 组只管间距，不带底色。M3 的 bottom app bar 是一排 standard icon button，没有
    分组容器这一层，所以这里只把相关的图标凑近、组与组之间留 8dp。图标颜色走

@@ -1250,7 +1250,7 @@ fn declared_backend_label() -> &'static str {
 
 /// 流水线口径的版本。修订号里没有别的字段能表达「同一份模型、同一份起点，但中间
 /// 多了一道处理」——阶段顺序、参数、后处理改了就把对应的这个 +1，旧产物当场作废。
-const UPSCALE_PIPELINE_REVISION: &str = "upscale:1";
+const UPSCALE_PIPELINE_REVISION: &str = "upscale:2-adaptive-input-128mp-lanczos3";
 
 /// 派生图（超分产物）的缓存修订号。
 ///
@@ -2314,6 +2314,11 @@ mod tests {
         let reader_page = enhanced_revision(&None);
         assert!(reader_page.starts_with("rev:v1:"), "形状：{reader_page}");
         assert_eq!(reader_page, enhanced_revision(&None));
+        assert_ne!(
+            reader_page,
+            derived_cache_revision(&upscaler_fingerprint(&None), "reader-page", "upscale:1", declared_backend_label()),
+            "preprocessing changes must invalidate previously cached output"
+        );
 
         // 起点那一步的身份：原图没有 revision；只有超分一条链了。
         let models_data = std::path::Path::new("no-such-models-root");

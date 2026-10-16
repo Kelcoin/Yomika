@@ -353,7 +353,7 @@ select {
 textarea {
   min-height: 96px;
   padding: 10px 12px;
-  resize: vertical;
+  resize: none;
 }
 
 /* 移动端 WebView 有一条硬规矩：聚焦时算出来小于 16px 的输入框，会把整个页面

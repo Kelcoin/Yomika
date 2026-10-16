@@ -1,5 +1,6 @@
+import { RefreshIcon as RefreshCw } from '../components/RefreshIcon';
 import { loadFavoriteArchives } from '../lib/favoritesMirror';
-import { Bookmark, BookOpen, Eraser, FolderHeart, RefreshCw, Server, Shuffle } from 'lucide-react';
+import { Bookmark, BookOpen, Eraser, FolderHeart, Server, Shuffle } from 'lucide-react';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 import { Link, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from 'react-router-dom';

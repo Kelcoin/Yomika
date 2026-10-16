@@ -1,6 +1,8 @@
+import { AutoTextarea } from './AutoTextarea';
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { BookOpen, ExternalLink, MessageCircle, RefreshCw, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { BookOpen, ExternalLink, MessageCircle, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { z } from 'zod';
 import type { EhComment } from '../services/ehClient';
 import { EhCommentSchema, NativeEhRepository } from '../repositories/nativeEhRepository';
@@ -231,7 +233,7 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
   return (
     <section className="eh-comments" aria-label="E-Hentai 评论">
       <div className="eh-comments-heading">
-        <h2><MessageCircle aria-hidden="true" />E-Hentai 评论{comments.length > 0 && <span className="eh-comments-count" aria-label={`${comments.length} 条评论`}>{comments.length}</span>}</h2>
+        <h2><MessageCircle aria-hidden="true" />E-Hentai 评论</h2>
         <button className="icon-action" type="button" onClick={refresh} disabled={loading} aria-label="刷新 E-Hentai 评论" title="刷新评论"><RefreshCw aria-hidden="true" className={loading ? 'is-spinning' : undefined} /></button>
       </div>
       {loading && comments.length === 0
@@ -245,17 +247,17 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
           </div>
           <p>{renderCommentBody(comment.body, openLink)}</p>
           {!comment.isUploader && <div className="eh-comment-votes">
-            <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>
               <span className="eh-comment-votes-actions" role="group" aria-label={`${comment.author || '匿名用户'} 的评论投票`}>
                 {/* Colour and aria-pressed identify the selected direction. */}
-                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ThumbsUp aria-hidden="true" /></button>
-                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ThumbsDown aria-hidden="true" /></button>
+                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ThumbsUp aria-hidden="true" fill="currentColor" /></button>
+                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ThumbsDown aria-hidden="true" fill="currentColor" /></button>
               </span>
+            <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>
           </div>}
         </li>
       ))}</ul>}
       <div className="eh-comment-composer">
-        <textarea value={body} onChange={(event) => setBody(event.target.value)} aria-label="发表评论" placeholder="发表评论…" rows={3} />
+        <AutoTextarea value={body} onChange={(event) => setBody(event.target.value)} aria-label="发表评论" placeholder="发表评论…" rows={3} />
         <button className="primary-action" type="button" disabled={posting || !body.trim()} onClick={() => void post()} aria-label="发送评论"><Send aria-hidden="true" />{posting ? '发送中…' : '发送'}</button>
       </div>
       {linkMenu && <DropdownMenu.Root open onOpenChange={(open) => { if (!open) setLinkMenu(undefined); }}>

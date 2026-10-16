@@ -440,7 +440,7 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
         put("at", "epoch:" + System.currentTimeMillis())
         put("level", "warn")
         put("source", "eh/in-app-login")
-        put("message", step)
+        put("message", LogRedaction.text(step))
         put("detail", JSONObject.NULL)
       }
       File(directory, "crash.log").appendText(line.toString() + "\n")

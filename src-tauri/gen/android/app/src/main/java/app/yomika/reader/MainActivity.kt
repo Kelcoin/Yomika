@@ -107,8 +107,8 @@ class MainActivity : TauriActivity() {
           put("at", "epoch:" + System.currentTimeMillis())
           put("level", "error")
           put("source", "core/java-crash")
-          put("message", thread.name + " · " + error.toString())
-          put("detail", error.stackTrace.joinToString("\n") { it.toString() })
+          put("message", LogRedaction.text(thread.name + " · " + error.toString()))
+          put("detail", LogRedaction.text(error.stackTrace.joinToString("\n") { it.toString() }))
         }
         File(directory, "java-crash.log").appendText(line.toString() + "\n")
       }

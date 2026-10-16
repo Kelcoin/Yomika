@@ -4,7 +4,63 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 
-afterEach(() => setImageDecoderForTests(undefined));
+afterEach(() => { setImageDecoderForTests(undefined); vi.useRealTimers(); vi.restoreAllMocks(); });
+
+it('retries a page request that never settles and aborts its old consumer', async () => {
+  vi.useFakeTimers();
+  let firstSignal: AbortSignal | undefined;
+  const loadPage = vi.fn().mockImplementationOnce((_index, signal) => { firstSignal = signal; return new Promise(() => {}); }).mockResolvedValue('blob:recovered');
+  render(<MemoryRouter><ReaderScreen archiveId="hung" title="Hung" pages={['']} layout="single" loadPage={loadPage} /></MemoryRouter>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(firstSignal?.aborted).toBe(true);
+  expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:recovered');
+});
+
+it('retries a rejected request instead of leaving it indefinitely loading', async () => {
+  vi.useFakeTimers();
+  const loadPage = vi.fn().mockRejectedValueOnce(new Error('network')).mockResolvedValue('blob:recovered');
+  render(<MemoryRouter><ReaderScreen archiveId="reject" title="Reject" pages={['']} layout="single" loadPage={loadPage} /></MemoryRouter>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:recovered');
+});
+
+it('remeasures indicator overlap when a displayed page loads again without changing its natural size', async () => {
+  vi.useFakeTimers();
+  render(<MemoryRouter><ReaderScreen archiveId="measure" title="Measure" pages={['blob:plain']} layout="single" /></MemoryRouter>);
+  const image = screen.getByRole('img', { name: '第 1 页' });
+  Object.defineProperties(image, { naturalWidth: { value: 100 }, naturalHeight: { value: 100 } });
+  let bottom = 800;
+  vi.spyOn(image, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, 1000, bottom));
+  const pill = document.querySelector('.reader-page-indicator')!;
+  vi.spyOn(pill, 'getBoundingClientRect').mockImplementation(() => new DOMRect(900, 700, 80, 30));
+  fireEvent.load(image);
+  await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+  expect(pill).toHaveAttribute('data-visible', 'false');
+  bottom = 600;
+  fireEvent.load(image);
+  await act(async () => { await vi.advanceTimersByTimeAsync(32); });
+  expect(pill).toHaveAttribute('data-visible', 'true');
+});
+
+it('offers a retry if the displayed image never emits load or error', async () => {
+  vi.useFakeTimers();
+  render(<MemoryRouter><ReaderScreen archiveId="image-timeout" title="Image timeout" pages={['blob:never-loads']} layout="single" /></MemoryRouter>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument();
+});
+
+it('keeps a healthy image when candidate decode times out and ignores a late completion', async () => {
+  vi.useFakeTimers();
+  let finish: (() => void) | undefined;
+  setImageDecoderForTests(() => new Promise<void>((resolve) => { finish = resolve; }));
+  const props = { archiveId: 'decode-timeout', title: 'Decode timeout', pages: ['blob:plain'], layout: 'single' as const };
+  const view = render(<MemoryRouter><ReaderScreen {...props} /></MemoryRouter>);
+  fireEvent.load(screen.getByRole('img', { name: '第 1 页' }));
+  view.rerender(<MemoryRouter><ReaderScreen {...props} derivedPages={new Map([[0, 'blob:slow']])} /></MemoryRouter>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); finish?.(); });
+  expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:plain');
+  expect(screen.queryByRole('button', { name: '重试加载' })).not.toBeInTheDocument();
+});
 
 it('turns a DOM image failure into a page retry that reacquires its handle', async () => {
   const loadPage = vi.fn().mockResolvedValueOnce('blob:broken').mockResolvedValue('blob:fresh');

@@ -159,7 +159,7 @@ describe('reader screen', () => {
     }
   });
 
-  it('continues panning with the remaining finger after a pinch', () => {
+  it('continues panning with the remaining finger after a pinch', async () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
@@ -169,6 +169,7 @@ describe('reader screen', () => {
     fireEvent.touchMove(reader, { touches: [{ clientX: x - 100, clientY: y }, { clientX: x + 100, clientY: y }] });
     fireEvent.touchEnd(reader, { touches: [{ clientX: x - 100, clientY: y }] });
     fireEvent.touchMove(reader, { touches: [{ clientX: x, clientY: y + 40 }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
     expect(frame.style.transform).toBe('scale(2) translate(50px, 20px)');
     expect(frame.style.transition).toBe('none');
     fireEvent.touchEnd(reader, { touches: [] });
@@ -192,7 +193,7 @@ describe('reader screen', () => {
     } finally { view.unmount(); vi.useRealTimers(); }
   });
 
-  it('pans an enlarged page without paging and disables transform easing during drag', () => {
+  it('pans an enlarged page without paging and disables transform easing during drag', async () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
@@ -201,6 +202,7 @@ describe('reader screen', () => {
     fireEvent.doubleClick(reader, { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 });
     fireEvent.mouseDown(reader, { button: 0, clientX: 300, clientY: 300 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 400, clientY: 360 });
+    await act(async () => { await new Promise(requestAnimationFrame); });
     expect(frame.style.transform).toBe('scale(2) translate(50px, 30px)');
     expect(frame.style.transition).toBe('none');
     fireEvent.mouseUp(reader, { button: 0, clientX: 400, clientY: 360 });
@@ -225,7 +227,7 @@ describe('reader screen', () => {
     expect(2 * (fromCentre + panX)).toBe(fromCentre);
   });
 
-  it('zooms about the midpoint of two fingers and springs undershoot back', () => {
+  it('zooms about the midpoint of two fingers and springs undershoot back', async () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
@@ -233,8 +235,10 @@ describe('reader screen', () => {
     const x = window.innerWidth / 2 + 100;
     fireEvent.touchStart(reader, { touches: [{ clientX: x - 50, clientY: y }, { clientX: x + 50, clientY: y }] });
     fireEvent.touchMove(reader, { touches: [{ clientX: x - 100, clientY: y }, { clientX: x + 100, clientY: y }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
     expect(frame.style.transform).toBe('scale(2) translate(-50px, 0px)');
     fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
     expect(frame.style.transform).toContain('scale(0.88)');
     fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] });
     expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
@@ -1355,8 +1359,8 @@ describe('reader screen', () => {
     // Continuous mode used to call every page visible, so it asked for all sixty
     // at once — with an enhancement enabled, sixty ONNX runs. That is the freeze.
     expect(loadPage.mock.calls.length).toBeLessThan(10);
-    expect(loadPage).toHaveBeenCalledWith(0);
-    expect(loadPage).not.toHaveBeenCalledWith(59);
+    expect(loadPage).toHaveBeenCalledWith(0, expect.any(AbortSignal));
+    expect(loadPage.mock.calls.some(([index]) => index === 59)).toBe(false);
   });
 
   it('shows a page that has not arrived as loading rather than as a failure', async () => {

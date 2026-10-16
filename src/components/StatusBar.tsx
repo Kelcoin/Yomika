@@ -1,5 +1,6 @@
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { usePageActive } from '../app/RetainedPage';
-import { CircleDot, Database, ListTodo, LibraryBig, RefreshCw } from 'lucide-react';
+import { CircleDot, Database, ListTodo, LibraryBig } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';

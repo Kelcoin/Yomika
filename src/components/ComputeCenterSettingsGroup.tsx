@@ -1,6 +1,7 @@
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { Link2, Monitor, MonitorSmartphone, Plus, RefreshCw, Save, Server, Smartphone, Tablet, Unlink, Wand2 } from 'lucide-react';
+import { Link2, Monitor, MonitorSmartphone, Plus, Save, Server, Smartphone, Tablet, Unlink, Wand2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsMenu } from './SettingsValueControls';

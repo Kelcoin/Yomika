@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { DomainErrorCodeSchema } from '../../src/domain/errors';
 
 function read(path: string): string {
-  return readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8');
+  return readFileSync(fileURLToPath(new URL(path, import.meta.url)), 'utf8').replace(/\r\n/g, '\n');
 }
 
 /**
@@ -869,7 +869,7 @@ describe('native shell configuration', () => {
     expect(budget, '判据只能是 worker 用的那一个数').toContain(
       'resource_policy::pixels_within_page_limit(self.width, self.height)',
     );
-    expect(budget, '两边的边界要钉在同一处').toContain('8192×8192 恰好是这个上限本身');
+    expect(budget, '两边的边界要钉在同一处').toContain('16000×8000 恰好是这个上限本身');
 
     const manager = read('../../src-tauri/src/compute/manager.rs');
     const identityAt = manager.indexOf('if source.content_hash != content_hash {');
@@ -1013,7 +1013,7 @@ describe('native shell configuration', () => {
     expect(harness, '人读的那份也要落盘').toContain('summary.md');
   });
 
-  it('churns the worker twenty times and refuses an over-budget page without dying', () => {
+  it('churns the worker twenty times and processes large pages without dying', () => {
     // §12.4 ⑥ 与 ③。这两条要证的都是**「不出现什么」**，所以判据必须点名每一样东西，
     // 不能靠「没报错」：孤儿进程要问进程表，staging 遗留要在一次**没有握手**的会话结束之后
     // 看目录，错误 cache 要逐文件哈希回文件名，重复终态要看事件流。大页那一档同理：
@@ -1093,11 +1093,11 @@ describe('native shell configuration', () => {
     expect(large, '源上限是预算门自己算出来的，不是另抄一个数').toContain(
       'let allowed_source = PAGE_PIXEL_LIMIT / u64::from(SCALE).pow(2);',
     );
-    expect(large, '被挡住的那一档，判决只能是预算门那个码').toContain(
-      'code, RESOURCE_LIMIT_CODE,',
+    expect(large, '25 MP tier must run actual inference under the relaxed budget').toContain(
+      'run_tier(2, refused_pages, false, &manager, &mut pid, &mut rows, &mut computed);',
     );
-    expect(large, '拒了一页之后这一代 worker 还得在').toContain(
-      '大页被拒不该把这一代 worker 换掉',
+    expect(large, 'worker must remain alive while memory is measured').toContain(
+      'private_commit(known).expect(',
     );
     expect(large, '100 页是 §12.4 ③ 的原话，可调但不许悄悄改小').toContain(
       'fn large_pages_to_run() -> u32 {',
@@ -1121,7 +1121,7 @@ describe('native shell configuration', () => {
     expect(harness, '大页档由入口按需加跑，不是每跑一次都拖着').toContain('[int] $LargePages = 0');
   });
 
-  it('refuses a page the scale cannot afford before the worker sees it, and times the queue the interface waits on', () => {
+  it('adapts oversized delivery before inference and times the queue the interface waits on', () => {
     const policy = read('../../src-tauri/src/compute/resource_policy.rs');
     expect(policy, '同一笔预算有两端：源图自己，与乘上倍率之后').toContain(
       'pub fn output_pixels_within_budget(source_pixels: u64, scale: u32) -> bool {',
@@ -1134,22 +1134,23 @@ describe('native shell configuration', () => {
     );
 
     const manager = read('../../src-tauri/src/compute/manager.rs');
-    expect(manager, '派发前要把流水线的倍率乘一遍').toContain(
-      'resource_policy::chain_output_pixels(pixels.count(), &scales)',
-    );
-    expect(manager, '判决用的是 worker 那一个上限，不是宿主新立的一个').toContain(
+    expect(manager, 'source decode guard stays before dispatch').toContain('if !pixels.within_limit() {');
+    expect(manager, 'delivery projection must reach worker preprocessing').not.toContain(
       'if projected > resource_policy::PAGE_PIXEL_LIMIT {',
     );
-    expect(manager, '说清楚被拒的是哪一页、倍率乘出来多少').toContain(
-      '这条流水线（倍率 {}）算出来是 {} 像素，超过一档 {} 像素的预算',
+    const worker = read('../../src-tauri/worker/src/upscale.rs');
+    expect(worker, 'worker shrinks inference input to the delivery budget').toContain(
+      'fit::fit_processing_input(decoded.into_rgba8(), delivery_scale, request.run.budgets.max_pixels)',
     );
-
+    expect(worker, 'source decoding retains its own hard guard').toContain(
+      'if source_pixels > request.run.budgets.max_pixels {',
+    );
+    expect(worker, 'real inference and previous-stage delivery are exercised').toContain(
+      'fn oversized_delivery_is_preprocessed_and_reaches_the_real_engine()',
+    );
     const it = read('../../src-tauri/tests/compute_manager.rs');
-    expect(it, '一页自己装得下、乘上倍率装不下的那一格').toContain(
-      'fn a_page_that_fits_alone_is_refused_once_the_scale_is_applied() {',
-    );
-    expect(it, '「派发前」要有观察量：被拒的页不许进输入根').toContain(
-      '被拒的那一页不该被摆进输入根：派发前拒的意思就是 worker 连源图的字节都没见过',
+    expect(it, 'host dispatches pages requiring adaptive inference').toContain(
+      'fn a_page_with_an_oversized_delivery_projection_reaches_the_worker()',
     );
 
     const scheduler = read('../../src-tauri/src/compute/scheduler.rs');

@@ -55,18 +55,19 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       if (host) delete host.dataset.edgeBounce;
       host = undefined; start = undefined; claimed = false;
     };
-    const touchStart = (event: TouchEvent) => {
+    let wheelRelease: number | undefined;
+    let wheelTravel = 0;
+    const begin = (target: EventTarget | null, x: number, y: number, wheel = false) => {
       reset();
-      const target = event.target;
-      if (!(target instanceof Element) || event.touches.length !== 1) return;
-      if (target.closest('input, textarea, select, [contenteditable], [role="slider"], [role="dialog"], .library-workspace, .reader-screen, [hidden]')) return;
+      if (!(target instanceof Element)) return;
+      if (target.closest('input, textarea, select, [contenteditable], [role="slider"], [role="dialog"], .reader-screen, [hidden]') || (!wheel && target.closest('.library-workspace'))) return;
       let scroller: HTMLElement | undefined;
       for (let node = target as HTMLElement | null; node; node = node.parentElement) {
         const style = getComputedStyle(node);
         // Horizontal rails defer axis ownership until the first decisive move.
         const rail = node.matches('.archive-rail-grid, [data-horizontal-scroll]') || node.scrollWidth > node.clientWidth + 1;
         if (rail && node !== root && !node.matches('[data-scroll-region]')) continue;
-        if (node === root || node.matches('[data-scroll-region]')) {
+        if (node === root || node.matches('[data-scroll-region]') || wheel && (style.overflowY === 'auto' || style.overflowY === 'scroll')) {
           if (style.overflowY === 'auto' || style.overflowY === 'scroll') { scroller = node; break; }
         } else if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && node.scrollHeight > node.clientHeight + 1) return;
         if (node === root) break;
@@ -75,21 +76,23 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       const edge = scroller.scrollTop <= 1 ? 1 : scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1 ? -1 : undefined;
 
       host = scroller;
-      const touch = event.touches[0]!;
-      start = { x: touch.clientX, y: touch.clientY, edge };
+      start = { x, y, edge };
     };
-    const touchMove = (event: TouchEvent) => {
-      if (!host || !start) return;
+    const touchStart = (event: TouchEvent) => {
+      if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
       if (event.touches.length !== 1) { reset(); return; }
-      const touch = event.touches[0]!;
-      const dx = touch.clientX - start.x;
-      const dy = touch.clientY - start.y;
+      begin(event.target, event.touches[0]!.clientX, event.touches[0]!.clientY);
+    };
+    const move = (x: number, y: number, event: { cancelable: boolean; preventDefault: () => void }) => {
+      if (!host || !start) return;
+      const dx = x - start.x;
+      const dy = y - start.y;
       if (!start.edge) {
         // Native scrolling may reach an edge during this gesture. Rebase there;
         // if the browser can no longer cancel, leave the gesture native.
         const edge = host.scrollTop <= 0 && dy > 0 ? 1 : host.scrollTop + host.clientHeight >= host.scrollHeight - 1 && dy < 0 ? -1 : undefined;
         if (!edge) return;
-        start = { x: touch.clientX, y: touch.clientY, edge };
+        start = { x, y, edge };
         return;
       }
       if (claimed && (!event.cancelable || host.scrollTop !== claimedScrollTop)) { reset(); return; }
@@ -126,6 +129,10 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       if (event.cancelable) event.preventDefault();
       schedulePaint(start.edge * rubberBand(Math.max(0, travel)));
     };
+    const touchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 1) { reset(); return; }
+      move(event.touches[0]!.clientX, event.touches[0]!.clientY, event);
+    };
     const touchEnd = () => {
       if (!host || !claimed) { reset(); return; }
       if (frame !== undefined) window.cancelAnimationFrame(frame);
@@ -135,7 +142,25 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       start = undefined; claimed = false;
       settle = window.setTimeout(reset, reduced ? 0 : EDGE_SETTLE_MS);
     };
+    const wheel = (event: WheelEvent) => {
+      if (event.defaultPrevented || event.ctrlKey || !event.cancelable || Math.abs(event.deltaX) > Math.abs(event.deltaY) || !event.deltaY) return;
+      // Horizontal rails own their wheel even when they have reached an end.
+      const target = event.target instanceof Element ? event.target : undefined;
+      if (target?.closest('.archive-rail-grid, [data-horizontal-scroll]')) return;
+      const direction = event.deltaY < 0 ? 1 : -1;
+      if (!host || !claimed || start?.edge !== direction) {
+        begin(event.target, 0, 0, true);
+        wheelTravel = 0;
+      }
+      if (!host || start?.edge !== direction) { reset(); return; }
+      if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? host.clientHeight : 1;
+      wheelTravel = Math.min(400, wheelTravel + Math.abs(event.deltaY) * unit);
+      move(0, direction * wheelTravel, event);
+      wheelRelease = window.setTimeout(() => { wheelRelease = undefined; touchEnd(); }, 100);
+    };
     const visibility = () => { if (document.visibilityState !== 'visible') reset(); };
+    root.addEventListener('wheel', wheel, { passive: false });
     root.addEventListener('touchstart', touchStart, { passive: true });
     root.addEventListener('touchmove', touchMove, { passive: false });
     root.addEventListener('touchend', touchEnd, { passive: true });
@@ -143,6 +168,8 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
     document.addEventListener('visibilitychange', visibility);
     return () => {
       reset();
+      if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
+      root.removeEventListener('wheel', wheel);
       root.removeEventListener('touchstart', touchStart);
       root.removeEventListener('touchmove', touchMove);
       root.removeEventListener('touchend', touchEnd);

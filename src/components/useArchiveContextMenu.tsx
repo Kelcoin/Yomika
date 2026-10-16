@@ -48,6 +48,7 @@ export function useArchiveContextMenu(options: {
   const pageActive = usePageActive();
   const { showToast } = useToast();
   const [target, setTarget] = useState<ArchiveContextMenuTarget>();
+  const [unavailableTarget, setUnavailableTarget] = useState<ArchiveContextMenuTarget>();
   const [deleteTarget, setDeleteTarget] = useState<ArchiveRecord>();
   useLayoutEffect(() => {
     setTarget(undefined);
@@ -59,13 +60,15 @@ export function useArchiveContextMenu(options: {
   const membershipRequest = useRef(0);
   useEffect(() => {
     setMembership(undefined);
+    setUnavailableTarget(undefined);
     if (!target) return;
     const refresh = () => {
       const request = ++membershipRequest.current;
       void (async () => {
         const servers = await repository.listServers();
         const server = servers.ok ? servers.value.find((server) => server.id === target.archive.serverId) : undefined;
-        if (!server || request !== membershipRequest.current) return;
+        if (request !== membershipRequest.current) return;
+        if (!server) { setUnavailableTarget(target); return; }
         // Progress is local and remains available while the remote favorites lookup is pending.
         setMembership(current => current?.scopeId === server.scopeId && current.archiveId === target.archive.archiveId
           ? current
@@ -101,13 +104,17 @@ export function useArchiveContextMenu(options: {
     })();
   };
   const open = useCallback(
-    (archive: ArchiveRecord, at: { x: number; y: number }) => setTarget({ archive, ...at }),
+    (archive: ArchiveRecord, at: { x: number; y: number }) => {
+      setMembership(undefined);
+      setUnavailableTarget(undefined);
+      setTarget({ archive, ...at });
+    },
     [],
   );
 
   const menu = (<>
     <ArchiveContextMenu
-      target={target}
+      target={progress.ready || unavailableTarget === target ? target : undefined}
       hiddenActions={options.hiddenActions}
       onClearProgress={progress.hasProgress && !progress.busy ? () => { void progress.clear(); } : undefined}
       onClose={() => setTarget(undefined)}

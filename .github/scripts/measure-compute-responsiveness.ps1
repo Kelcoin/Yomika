@@ -295,7 +295,7 @@ if ($LargePages -gt 0) {
   $log = Join-Path $OutputDir 'soak-large.log'
   Write-Host "== 大页 soak（真算那两档各 $LargePages 页，25MP 那档固定 100 页）"
   $started = Get-Date
-  & cargo test --manifest-path $manifest --test compute_soak -- --ignored --nocapture --test-threads=1 --exact a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down 2>&1 |
+  & cargo test --manifest-path $manifest --test compute_soak -- --ignored --nocapture --test-threads=1 --exact a_hundred_large_pages_complete_without_taking_the_process_down 2>&1 |
     Tee-Object -FilePath $log | Out-Null
   $code = $LASTEXITCODE
   $seconds = [math]::Round(((Get-Date) - $started).TotalSeconds, 2)
@@ -727,13 +727,13 @@ if ($soak) {
 if ($soakLarge) {
   $reading = $soakLargeResult.reading
   # 同一道空表守卫：JSON 是直接序列化的，md 是再写一遍的。
-  if (@($reading.rows).Count -ne [int]($reading.realPages * 2 + $reading.refusedPages + 2)) {
-    throw "大页 soak 读数里页数对不上：$(@($reading.rows).Count) 行 vs 预期 $(($reading.realPages * 2 + $reading.refusedPages + 2)) 行（md 不能拿空表交差）"
+  if (@($reading.rows).Count -ne [int]($reading.computedPages)) {
+    throw "大页 soak 读数里页数对不上：$(@($reading.rows).Count) 行 vs 预期 $(($reading.computedPages)) 行（md 不能拿空表交差）"
   }
   $lines.Add('## 大页 soak（§12.4 ③）')
   $lines.Add('')
   $tierText = ($reading.tiers | ForEach-Object { "$($_.width)×$($_.height)（$([math]::Round($_.pixels / 1000000, 1)) MP）" }) -join '、'
-  $lines.Add("三档：$tierText；源上限 $($reading.allowedSourcePixels) 像素（由预算门自己算出来），所以最大的那一档必然被挡。")
+  $lines.Add("三档：$tierText；源上限 $($reading.allowedSourcePixels) 像素（由预算门自己算出来），超出输出预算时先等比缩小输入，再执行超分。")
   $lines.Add('')
   $lines.Add('| 档 | 热身 MiB | 最坏涨 MiB | 峰值 MiB | 峰值涨 MiB |')
   $lines.Add('| --- | --- | --- | --- | --- |')
@@ -741,7 +741,7 @@ if ($soakLarge) {
     $lines.Add("| $($tier.width)×$($tier.height) | $($tier.warmCommitMib) | $($tier.growthMib) | $($tier.peakMib) | $($tier.peakGrowthMib) |")
   }
   $lines.Add('')
-  $lines.Add("- 真算 $($reading.computedPages) 页；25 MP 那档 $($reading.refusedPages) 页全部按 ``resource_limit`` 被挡（判决码只有一个，进程不换）。")
+  $lines.Add("- 真算 $($reading.computedPages) 页；预算拒绝 $($reading.refusedPages) 页；25 MP 档也实际执行超分。")
   $lines.Add("- 层数：$($reading.layers.why)")
   $lines.Add("- 收摊后 worker 进程（pid $($reading.workerPid)）不在了。")
   $lines.Add('')

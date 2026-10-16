@@ -409,6 +409,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const screenOwnedPagesRef = useRef(new Set<number>());
   const thumbnailHandlesRef = useRef(new Map<number, ImageHandle>());
   const pendingPagesRef = useRef(new Map<number, Promise<string | undefined>>());
+  const pendingPageAbortsRef = useRef(new Map<number, AbortController>());
   const derivedHandlesRef = useRef(new Map<number, ImageHandle>());
   const retiredDerivedRef = useRef(new Map<number, ImageHandle[]>());
   const derivedAttemptedRef = useRef(new Set<number>());
@@ -611,6 +612,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     thumbnailHandlesRef.current.clear();
     if (coverHandleRef.current) imageCache.release(coverHandleRef.current);
     coverHandleRef.current = undefined;
+    for (const controller of pendingPageAbortsRef.current.values()) controller.abort();
+    pendingPageAbortsRef.current.clear();
     pendingPagesRef.current.clear();
   }, [cancelWorkspaceRelease]);
 
@@ -657,6 +660,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     const pending = pendingPagesRef.current.get(pageIndex);
     if (pending) return pending;
 
+    // Bound even sweep-owned requests: a screen joining one must not inherit
+    // an unbounded wait. The cache detaches aborted consumers for fresh retries.
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    pendingPageAbortsRef.current.set(pageIndex, controller);
+    const timeout = window.setTimeout(abort, 30_000);
     const promise = (async () => {
       const handle = await imageCache.load({
         scopeId: context.scopeId,
@@ -665,9 +676,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         pageIndex,
         rendition: 'reader-page',
         sourcePath: path,
-      }, signal ? { signal } : {});
+      }, { signal: controller.signal });
       const current = contextRef.current;
-      if (!mountedRef.current || !current || current.generation !== context.generation || signal?.aborted) {
+      if (!mountedRef.current || !current || current.generation !== context.generation || controller.signal.aborted) {
         imageCache.release(handle);
         return undefined;
       }
@@ -678,7 +689,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
       pageHandlesRef.current.set(pageIndex, handle);
       return handle.url;
-    })().catch(() => undefined);
+    })().catch(() => undefined).finally(() => {
+      window.clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
+      if (pendingPageAbortsRef.current.get(pageIndex) === controller) pendingPageAbortsRef.current.delete(pageIndex);
+    });
     pendingPagesRef.current.set(pageIndex, promise);
     void promise.then(() => {
       if (pendingPagesRef.current.get(pageIndex) === promise) pendingPagesRef.current.delete(pageIndex);
@@ -1378,8 +1393,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   //
   // 加载态带的是和失败态同一条顶栏：这一支原来只画一个转圈，而阅读器的 chrome
   // 要等第一页到达才唤得出来，于是「加载慢/卡住就退不出去」。顶栏的样式沿用
-  // `.reader-error-bar`（同一条 M3 small top app bar，见 `src/styles/reader.css`
-  // 里 `.reader-screen-loading:has(.reader-error-bar)` 那条规则），行为则和加载完成后
+  // `.reader-error-bar`（同一条覆盖在画布上的 M3 small top app bar），行为则和加载完成后
   // 那两条栏一样是**默认隐藏、落到带上才出现**（用户报的 ③）。
   if (pages.length === 0) {
     return (

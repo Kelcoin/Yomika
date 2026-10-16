@@ -113,18 +113,13 @@ export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
  *   （判定仍然照原样返回失败：`update-notice` 那份 UI 靠它决定显示什么。）
  * - `EH_LOGIN_WINDOW_CLOSED`：登录窗口是**用户自己关掉的**，这不是故障。
  *
- * **「连不上服务器」不在这份名单里，这是刻意的。** `NETWORK` / `REMOTE_TIMEOUT` /
- * `REMOTE_RATE_LIMIT` / `REMOTE_UNAVAILABLE` / `EH_UNAVAILABLE` 曾经也在名单上
- * （2026-10-14 那一轮加进来的），2026-10-15 的独立复核指出：那是把「办不成」当成了
- * 「现在就是这样」。服务器地址写错、TLS/代理/DNS 不通、缩略图正文被截断，最终都会落到
- * 同一个 `NETWORK` 上，于是用户报「连不上」时错误日志里一个字都没有——界面上照常报错，
- * 丢掉的恰恰是要查的那个现场。判据是「再试一次还会不会这样」：名单只收**设计上就会
- * 自己过去**的退让（队列满/忙/取消）与**用户自己点名要静音**的那一类（本体更新检查）。
- * 判据 `tests/contracts/backpressure-quiet-codes.test.ts` 钉住两侧名单一致，也钉住这
- * 几个码**必须**留下现场。 */
+ * 用户要求纯传输故障保持安静：REMOTE_TIMEOUT 在此，NETWORK 仅在可重试且消息明确
+ * 表示传输失败时由 errorLog.ts 过滤，不能把 schema、解码逻辑或计算模型错误一起吞掉。
+ */
 export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
   'QUEUE_FULL', 'CANCELLED', 'CANCELED', 'ABORTED', 'ABORT_ERR',
   'ERR_CANCELED',
+  'REMOTE_TIMEOUT',
   'LRR_NOT_FOUND',
   'EH_LOGIN_WINDOW_CLOSED',
   'INFERENCE_CANCELLED',

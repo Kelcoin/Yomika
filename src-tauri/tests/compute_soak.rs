@@ -31,7 +31,6 @@ use windows::Win32::System::ProcessStatus::{
 use windows::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
 };
-use yomika_lib::compute::leases::RESOURCE_LIMIT_CODE;
 use yomika_lib::compute::manager::{
     no_events, ComputeManager, SourceFile, SubmitRequest, SupervisorConfig, WorkerEngine,
     WorkerStatus,
@@ -698,24 +697,11 @@ struct LargeReading {
     elapsed: Duration,
 }
 
-/// §12.4 ③：预热之后一页页跑 5MP→10MP→25MP。
-///
-/// 这一段要证的是两件事，都不靠「没报错」：
-///
-/// 1. **被预算门挡住的那一档，是一句结论，不是一次无声退出**：25 MP 的源图在 scale=2 下
-///    超过 worker 的源上限（`PAGE_PIXEL_LIMIT / scale²`），每一页都必须收到
-///    `COMPUTE_RESOURCE_LIMIT` 这个终态——而不是 `COMPUTE_WORKER_LOST`、更不是测试进程
-///    自己没了。跑满 100 页，中途 worker 的进程号不许换、会话不许断。
-/// 2. **真算的那两档，每页的峰值不许一页页往上爬**：门槛照 §12.4 ② 的 32 MiB（它写在小规格
-///    那一条上，但「固定 budget 下后台不得无限增长」是同一句话），观察量是进程峰值提交——
-///    单调量，真漏了它一定爬。
-///
-/// 层数（1/3/5 层）这一维今天在本机没有载体：协议里那个 `layers` 字段没有任何代码读它，
-/// §12.4 里的「层」对应的是 DLSSNR 的 `settings.passes`，只有真 NGX + GPU 那条路跑得到。
-/// 所以这一条**不假装**量了层数，报告里照实写「未测」。
+/// Repeated real inference at 5, 10 and 25 MP, with independent warmup and
+/// bounded commit growth per tier. The relaxed budget permits all three tiers.
 #[test]
 #[ignore = "大页 soak：分钟级，由 .github/scripts/measure-compute-responsiveness.ps1 -LargePages 单跑"]
-fn a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down() {
+fn a_hundred_large_pages_complete_without_taking_the_process_down() {
     let refused_pages = large_pages_to_run();
     let real_pages = large_real_pages();
     let allowed_source = PAGE_PIXEL_LIMIT / u64::from(SCALE).pow(2);
@@ -735,7 +721,6 @@ fn a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down(
     let mut pid: Option<u32> = None;
     let mut rows: Vec<LargeReading> = Vec::new();
     let mut computed = 0u32;
-    let mut refused = 0u32;
 
     // 真算的那两档：跑之前先热身几页（同一个尺寸上连跑，让 ORT 的 arena 到平台期）。
     let run_tier = |index: usize,
@@ -801,56 +786,13 @@ fn a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down(
     run_tier(1, 1, true, &manager, &mut pid, &mut rows, &mut computed);
     run_tier(1, real_pages, false, &manager, &mut pid, &mut rows, &mut computed);
 
-    // 25 MP 那一档：预算门。跑满 100 页，中途不许换进程、不许断会话。
-    let known = pid.expect("前面真算过，worker 进程号该有了");
-    let (large_path, large_tier) = &pages[2];
-    assert!(
-        pixels(*large_tier) > allowed_source,
-        "这一档本来就该被门挡住（{} 像素 > 源上限 {allowed_source}）",
-        pixels(*large_tier)
-    );
-    for round in 0..refused_pages {
-        let started = Instant::now();
-        let settings = format!("large-refused-{round}");
-        let submitted = manager
-            .submit(request(model, large_path, &settings))
-            .unwrap_or_else(|error| panic!("宿主该收下这一页（拒在 worker 那一步）：{error:?}"));
-        let state = wait_until(&format!("大页第 {round} 页的结论"), HANDOFF, || {
-            terminal_of(&manager, &submitted.job_id)
-        });
-        match &state {
-            JobState::Failed { code } => assert_eq!(
-                code, RESOURCE_LIMIT_CODE,
-                "大页被挡住时该是预算门那个码，而不是别的：{state:?}"
-            ),
-            other => panic!("大页第 {round} 页该被预算门挡住，实际是 {other:?}"),
-        }
-        // 判决是它自己下的，进程得还在、会话不能换、下一件还得有人接。
-        match manager.worker_status() {
-            WorkerStatus::Ready { peer_pid, .. } => assert_eq!(
-                peer_pid, known,
-                "大页被拒不该把这一代 worker 换掉（换掉就说明上一代是死掉的）"
-            ),
-            other => panic!("大页被拒之后这一代 worker 该还在：{other:?}"),
-        }
-        let (commit, peak) = private_commit(known).expect("拒了一页之后 worker 还得活着");
-        refused += 1;
-        rows.push(LargeReading {
-            page: rows.len() as u32 + 1,
-            width: large_tier.0,
-            height: large_tier.1,
-            verdict: format!("{RESOURCE_LIMIT_CODE}（预算门）"),
-            warmup: false,
-            worker_commit: commit,
-            worker_peak: peak,
-            elapsed: started.elapsed(),
-        });
-    }
+    // 25 MP at x2 now fits the 128 MP delivery budget. Exercise repeated
+    // real inference and verify the same worker survives the complete tier.
+    run_tier(2, 1, true, &manager, &mut pid, &mut rows, &mut computed);
+    run_tier(2, refused_pages, false, &manager, &mut pid, &mut rows, &mut computed);
+    let known = pid.expect("worker started");
+    let refused = 0u32;
 
-    eprintln!(
-        "大页档：{} 页被预算门挡住（{}×{}，{} 像素 > 源上限 {allowed_source}），{computed} 页真算过",
-        refused, large_tier.0, large_tier.1, pixels(*large_tier)
-    );
     eprintln!("页\t尺寸\t结论\tworker 提交 MiB\tworker 峰值 MiB\t本页耗时 ms");
     for row in &rows {
         eprintln!(
@@ -869,7 +811,7 @@ fn a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down(
     // 真算那两档各自的峰值与增量。**按尺寸分组**：10 MP 那档本来就比 5 MP 占得多，
     // 混在一起比会得出一个假的红。
     let mut per_tier: Vec<(u32, u32, u64, u64, u64, u64)> = Vec::new();
-    for tier in [LARGE_TIERS[0], LARGE_TIERS[1]] {
+    for tier in LARGE_TIERS {
         let group: Vec<&LargeReading> = rows
             .iter()
             .filter(|row| row.verdict == "Completed" && row.width == tier.0 && row.height == tier.1)
@@ -929,7 +871,7 @@ fn a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down(
     });
 
     let report = serde_json::json!({
-        "test": "a_hundred_large_pages_hit_the_budget_gate_instead_of_taking_the_process_down",
+        "test": "a_hundred_large_pages_complete_without_taking_the_process_down",
         "tiers": LARGE_TIERS.iter().map(|tier| serde_json::json!({
             "width": tier.0,
             "height": tier.1,

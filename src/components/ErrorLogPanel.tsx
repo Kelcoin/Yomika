@@ -5,6 +5,7 @@ import { writeClipboardText } from '../bridge/clipboard';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { pickSavePath } from '../bridge/filePicker';
 import { flushErrorLog } from '../lib/errorLog';
+import { redactLogText } from '../lib/redaction';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { NativeErrorLogRepository, type ErrorLogEntry } from '../repositories/nativeErrorLogRepository';
 import { NativeAppInfoRepository, type AppBuildInfo } from '../repositories/nativeAppInfoRepository';
@@ -40,7 +41,7 @@ function entryText(entry: ErrorLogEntry): string {
   const lines = [`${formatEntryTime(entry.at)}  ${entry.level}  ${entry.source}`, `  ${entry.message}`];
   // 明细可能是多行的（Java 栈、命令行），缩进四格让它读起来还是「这条的附注」。
   if (entry.detail) lines.push(...entry.detail.split('\n').map((line) => `    ${line}`));
-  return lines.join('\n');
+  return redactLogText(lines.join('\n'));
 }
 
 /** 导出的是**用户眼前这一份**：同一批条目、同一套时间格式。之前是原生侧再拼一个版本

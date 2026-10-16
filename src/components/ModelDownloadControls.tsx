@@ -1,4 +1,5 @@
-import { Download, RefreshCw } from 'lucide-react';
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
+import { Download } from 'lucide-react';
 import { CardProgressBar } from './CardProgressBar';
 
 /** 模型下载那一对控件：行尾的下载按钮与它下面贴边的那条进度条。

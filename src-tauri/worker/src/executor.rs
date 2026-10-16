@@ -263,7 +263,7 @@ fn revision_of(run: &Run) -> String {
     let encoded = yomika_compute_protocol::messages::encode(&Message::Run(run.clone()))
         .unwrap_or_default();
     let hash = blake3::hash(encoded.as_bytes()).to_hex().to_string();
-    format!("worker-v1:{}", &hash[..16])
+    format!("worker-v2-adaptive-input:{}", &hash[..16])
 }
 
 fn failure(epoch: &str, run: &Run, code: &str, message: &str) -> Message {

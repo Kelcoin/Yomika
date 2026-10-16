@@ -22,10 +22,9 @@
 //! 两边各写一套边界的话，同一条界线迟早会分叉成两条，而分叉之后「worker 拒了、宿主放行」
 //! 这类现象查起来要从两个进程同时看。
 //!
-//! 同一笔预算有**两个方向**，两处都要判：源图自己的像素（[`PagePixels::within_limit`]），
-//! 以及乘上倍率之后的输出像素（[`PagePixels::output_within_limit`]）。只判前者会漏掉
-//! 「20 MP 的页自己装得下、x2 之后 80 MP 装不下」那一格——worker 就在那一格上拒，而它那时
-//! 已经把图读完、模型装好了。
+//! The host rejects only decoded sources over the hard limit. Output projections
+//! are advisory: workers shrink the inference input before upscaling when the
+//! requested delivery frame would exceed the same budget.
 
 use std::path::Path;
 
@@ -47,7 +46,7 @@ impl PagePixels {
         crate::compute::resource_policy::pixels_within_page_limit(self.width, self.height)
     }
 
-    /// 这一页按某个倍率交出来会有多少像素（**模型原生**倍率，不是交付倍率）。
+    /// 这一页按某个倍率交出来会有多少像素（调用方传入交付倍率）。
     pub fn projected_output(self, scale: u32) -> u64 {
         crate::compute::resource_policy::projected_output_pixels(self.count(), scale)
     }
@@ -162,25 +161,25 @@ mod tests {
         let limit = crate::compute::resource_policy::PAGE_PIXEL_LIMIT;
         assert_eq!(
             PagePixels {
-                width: 8192,
-                height: 8192
+                width: 16000,
+                height: 8000
             }
             .count(),
             limit,
-            "8192×8192 恰好是这个上限本身"
+            "16000×8000 恰好是这个上限本身"
         );
         assert!(
             PagePixels {
-                width: 8192,
-                height: 8192
+                width: 16000,
+                height: 8000
             }
             .within_limit(),
             "恰好到顶是允许的（与 worker 的 `<=` 一致）"
         );
         assert!(
             !PagePixels {
-                width: 8192,
-                height: 8193
+                width: 16000,
+                height: 8001
             }
             .within_limit(),
             "多一行也拒"
@@ -199,26 +198,26 @@ mod tests {
     #[test]
     fn the_output_side_uses_the_same_budget() {
         let on_the_line = PagePixels {
-            width: 4096,
-            height: 4096,
+            width: 8000,
+            height: 4000,
         };
-        assert_eq!(on_the_line.projected_output(2), 67_108_864);
+        assert_eq!(on_the_line.projected_output(2), 128_000_000);
         assert!(
             on_the_line.output_within_limit(2),
             "x2 之后恰好是上限本身：允许"
         );
         assert!(
             !PagePixels {
-                width: 5000,
-                height: 4000
+                width: 8000,
+                height: 5000
             }
             .output_within_limit(2),
-            "20 000 000 自己没超，x2 = 80 000 000 超了：这一格就是宿主从前不判的那个"
+            "40 MP source projects to 160 MP at x2, requiring worker preprocessing"
         );
         assert!(
             PagePixels {
-                width: 8192,
-                height: 8192
+                width: 16000,
+                height: 8000
             }
             .output_within_limit(1),
             "x1 与源图那一侧同一条线"

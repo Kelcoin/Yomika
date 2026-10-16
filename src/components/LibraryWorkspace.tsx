@@ -1,6 +1,8 @@
+import { AutoTextarea } from './AutoTextarea';
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, RefreshCw, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
@@ -1356,7 +1358,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   <fieldset className="metadata-edit-fields" disabled={savingMetadata}>
                   <label>标题<input name="title" aria-label="标题" autoComplete="off" defaultValue={metadata.title || selected.title} /></label>
                   <label>标签<input name="tags" aria-label="标签" autoComplete="off" spellCheck={false} defaultValue={metadata.tags} /></label>
-                  <label>简介<textarea name="summary" aria-label="简介" defaultValue={metadata.summary ?? ''} /></label>
+                  <label>简介<AutoTextarea name="summary" aria-label="简介" defaultValue={metadata.summary ?? ''} /></label>
                   <button className="primary-action" type="submit" disabled={savingMetadata} aria-busy={savingMetadata}><Save aria-hidden="true" />{savingMetadata ? '保存中…' : '保存元数据'}</button>
                   </fieldset>
                   {metadataError && <p role="alert">{metadataError}</p>}

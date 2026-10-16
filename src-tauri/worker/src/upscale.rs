@@ -303,20 +303,22 @@ impl Engine for UpscaleEngine {
             .map_err(|error| StageError::input_invalid(format!("读不到这一阶段的输入：{error}")))?;
         let (probe_width, probe_height) = probe_dimensions(&source)?;
         let delivery_scale = stage.output_scale.unwrap_or(scale).min(scale).max(1);
-        let allowed_source = (request.run.budgets.max_pixels / u64::from(delivery_scale).pow(2)).max(1);
         let source_pixels = u64::from(probe_width).saturating_mul(u64::from(probe_height));
-        if source_pixels > allowed_source {
+        // Keep the decode guard: preprocessing cannot rescue an allocation that
+        // is already too large to decode. Only the delivery projection adapts.
+        if source_pixels > request.run.budgets.max_pixels {
             return Err(StageError::failed(
                 RESOURCE_LIMIT_CODE,
                 format!(
-                    "源图 {probe_width}×{probe_height} 超出这次预算：交付 x{delivery_scale} 之后放不进 {} 像素",
+                    "源图 {probe_width}×{probe_height} 超出解码预算的 {} 像素",
                     request.run.budgets.max_pixels
                 ),
             ));
         }
         let decoded = image::load_from_memory(&source)
             .map_err(|error| StageError::input_invalid(format!("解不开这张图：{error}")))?;
-        let rgba = decoded.to_rgba8();
+        let rgba = fit::fit_processing_input(decoded.into_rgba8(), delivery_scale, request.run.budgets.max_pixels)
+            .ok_or_else(|| StageError::failed(RESOURCE_LIMIT_CODE, "预算装不下一张最小输出"))?;
         let (width, height) = (rgba.width(), rgba.height());
         if width == 0 || height == 0 || rgba.as_raw().len() != (width as usize) * (height as usize) * 4
         {
@@ -489,6 +491,52 @@ fn open_forced_gpu(
 mod tests {
     use super::*;
     use yomika_compute_core::onnx::RuntimeChoice;
+
+    #[test]
+    fn oversized_delivery_is_preprocessed_and_reaches_the_real_engine() {
+        use crate::engine::{StageInput, StageSink};
+        use yomika_compute_core::cancel::CancelToken;
+        use yomika_compute_protocol::messages::{Budgets, PipelineStage, Priority, Run, RunInput};
+        let root = std::env::temp_dir().join(format!("yomika-adaptive-input-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("input.png");
+        image::RgbaImage::from_pixel(20, 10, image::Rgba([90, 50, 20, 255])).save(&path).unwrap();
+        let preset = anime4k::preset_by_id("anime4k").unwrap();
+        let stage = PipelineStage {
+            stage_id: "adaptive".into(), model_spec_id: "anime4k".into(),
+            engine_policy: EnginePolicy::Cpu, scale: Some(2), output_scale: Some(2),
+            tile: Some(32), layers: None, settings_id: None, model: None, dlssnr: None,
+            builtin: Some(BuiltinChainGrant { chain_id: preset.id.into(), version: preset.version.into(), scale: 2 }),
+            min_input_edge: None,
+        };
+        let run = Run {
+            protocol_version: yomika_compute_protocol::PROTOCOL_MAJOR, worker_epoch: "epoch".into(),
+            job_id: "job".into(), generation: 1,
+            input: RunInput { input_id: "input".into(), content_hash: "0".repeat(64), byte_length: 1, relative_path: None },
+            pipeline: vec![stage.clone()], output_grant_id: "grant".into(), priority: Priority::Foreground,
+            deadline_ms: 60000, budgets: Budgets { max_pixels: 200, max_output_bytes: 1000000, intra_threads: 1 },
+        };
+        let input = StageInput::Granted { relative: "input.png".into(), path };
+        let sink = StageSink::new(&root);
+        let cancel = CancelToken::none();
+        let engine = UpscaleEngine::new(root.clone());
+        let output = engine.execute(StageRequest { run: &run, stage: &stage, input: Some(&input), cancel: &cancel, sink: &sink, progress: &|_| {} }).unwrap();
+        assert_eq!((output.width, output.height), (20, 10));
+        assert_eq!(output.engine.id, ANIME4K_ENGINE_ID);
+        let decoded = image::open(root.join(&output.relative_name)).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (20, 10));
+        // A second upscale in a chain must independently fit the previous output.
+        let previous = StageInput::Previous { relative: output.relative_name.clone(), path: root.join(output.relative_name) };
+        let mut next = stage.clone();
+        next.stage_id = "adaptive-next".into();
+        let second = engine.execute(StageRequest { run: &run, stage: &next, input: Some(&previous), cancel: &cancel, sink: &sink, progress: &|_| {} }).unwrap();
+        assert_eq!((second.width, second.height), (20, 10));
+        let mut too_small = run.clone();
+        too_small.budgets.max_pixels = 199;
+        let refused = engine.execute(StageRequest { run: &too_small, stage: &stage, input: Some(&input), cancel: &cancel, sink: &sink, progress: &|_| {} });
+        assert_eq!(refused.err().unwrap().code, RESOURCE_LIMIT_CODE, "source decode ceiling remains enforced");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// 「点的是显卡、跑的是 CPU」这句话要么别说，要说就得说全：谁被换掉了、换成了谁、
     /// 为什么。

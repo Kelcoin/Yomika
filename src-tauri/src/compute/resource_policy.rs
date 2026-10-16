@@ -6,8 +6,10 @@
 //!
 //! 为什么阈值要写在一处：宿主和 worker 对同一个数字有两种理解时，先崩的永远是用户的机器。
 
-/// 单页像素上限（§8.4 沿用既有的 64M）。超过它说明这张图不是「一页」，是别的什么。
-pub const PAGE_PIXEL_LIMIT: u64 = 64 * 1024 * 1024;
+/// Hard decoded-source and delivered-frame ceiling. 128 MP allows large scans
+/// at x2 while keeping each RGBA frame below the decoder's 512 MiB default.
+/// Upscale stages downsample before inference when delivery would exceed this.
+pub const PAGE_PIXEL_LIMIT: u64 = 128_000_000;
 
 /// worker 重任务的 CPU 线程上限。再多就是和界面抢核，而重任务已经在 GPU 上了。
 pub const MAX_WORKER_INTRA_THREADS: usize = 2;
@@ -290,9 +292,9 @@ mod tests {
 
     #[test]
     fn a_page_over_the_pixel_limit_is_refused_at_the_boundary() {
-        assert!(pixels_within_page_limit(8192, 8192), "恰好 64M 像素是允许的");
+        assert!(pixels_within_page_limit(16000, 8000), "恰好 128 MP 像素是允许的");
         assert!(pixels_within_page_limit(1, 1));
-        assert!(!pixels_within_page_limit(8192, 8193), "多一行也不行");
+        assert!(!pixels_within_page_limit(16000, 8001), "多一行也不行");
         // 相乘要按 u64 算：32K×32K 的 u32 乘积还没溢出，但再大就会。
         assert!(!pixels_within_page_limit(u32::MAX, u32::MAX));
     }
@@ -300,18 +302,18 @@ mod tests {
     /// 一页自己装得下、乘上倍率就装不下——这条边界与 worker 那边是同一个数，所以这里钉的是
     /// 「两侧算的是不是同一件事」，不是「宿主自己新立了一个上限」。
     #[test]
-    fn a_scaled_page_is_refused_at_the_same_boundary_the_worker_uses() {
+    fn delivery_projection_reports_when_preprocessing_is_needed() {
         assert!(
-            output_pixels_within_budget(4096 * 4096, 2),
-            "4096×4096 x2 恰好 67 108 864 像素：与源图那一侧一样，卡在线上是允许的"
+            output_pixels_within_budget(8000 * 4000, 2),
+            "8000×4000 x2 恰好 128 000 000 像素：与源图那一侧一样，卡在线上是允许的"
         );
         assert!(
-            !output_pixels_within_budget(4096 * 4097, 2),
+            !output_pixels_within_budget(8000 * 4001, 2),
             "多一行也过不去"
         );
         assert!(
-            !output_pixels_within_budget(5000 * 4000, 2),
-            "20 MP 自己没超、x2 之后超了：这正是宿主以前不判的那一格"
+            !output_pixels_within_budget(8000 * 5000, 2),
+            "40 MP 自己没超、x2 之后超了：这正是宿主以前不判的那一格"
         );
         assert!(output_pixels_within_budget(8192 * 8192, 1), "x1 就是源图自己");
         assert!(

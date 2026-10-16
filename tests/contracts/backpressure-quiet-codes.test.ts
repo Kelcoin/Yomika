@@ -98,9 +98,13 @@ describe('backpressure codes stay out of the error log', () => {
       await flushErrorLog();
 
       expect(result.ok).toBe(false);
+      if (code === 'NETWORK' || code === 'REMOTE_TIMEOUT') {
+        expect(records).toHaveLength(0);
+        return;
+      }
       expect(records).toHaveLength(1);
       expect(records[0]?.source).toBe('bridge/save_server');
-      expect(records[0]?.message).toBe(`${code}: 无法连接 LANraragi：error sending request for url (http://192.168.50.9:3000/api/info)`);
+      expect(records[0]?.message).toBe(`${code}: 无法连接 LANraragi：error sending request for url ([REDACTED])`);
     });
   }
 
@@ -143,7 +147,7 @@ describe('backpressure codes stay out of the error log', () => {
     expect(records[0]?.source).toBe('bridge/compute_submit_reader_page');
     expect(records[0]?.message).toBe('COMPUTE_MODEL_UNAVAILABLE: 这台机器上还没有这个超分模型：realcugan-2x-conservative（先去设置里下载它）');
     expect(JSON.parse(records[0]!.detail!)).toEqual({
-      request: { archiveId: 'a:12' },
+      request: { archiveId: '[REDACTED]' },
       error: {
         code: 'COMPUTE_MODEL_UNAVAILABLE',
         message: '这台机器上还没有这个超分模型：realcugan-2x-conservative（先去设置里下载它）',

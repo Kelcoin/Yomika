@@ -49,9 +49,53 @@ pub fn fit_rgba_scale(
     (resized.into_raw(), target_width, target_height)
 }
 
+/// Largest aspect-preserving input that leaves room for the delivered full frame.
+/// Native model tiles retain their own allocation recovery; only delivery scale
+/// determines the full-frame allocation. A skinny image still needs one pixel
+/// across, so clamp the other edge after rounding as well.
+pub fn processing_dimensions(width: u32, height: u32, scale: u32, max_pixels: u64) -> Option<(u32, u32)> {
+    if width == 0 || height == 0 || scale == 0 { return None; }
+    let allowed = max_pixels / u64::from(scale).pow(2);
+    if allowed == 0 { return None; }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels <= allowed { return Some((width, height)); }
+    let ratio = (allowed as f64 / pixels as f64).sqrt();
+    let mut w = ((f64::from(width) * ratio).floor() as u32).max(1);
+    let mut h = ((f64::from(height) * ratio).floor() as u32).max(1);
+    w = w.min((allowed / u64::from(h)).max(1).min(u64::from(u32::MAX)) as u32);
+    h = h.min((allowed / u64::from(w)).max(1).min(u64::from(u32::MAX)) as u32);
+    Some((w, h))
+}
+
+/// Downsample before inference, without duplicating the original RGBA buffer.
+pub fn fit_processing_input(image: image::RgbaImage, scale: u32, max_pixels: u64) -> Option<image::RgbaImage> {
+    let target = processing_dimensions(image.width(), image.height(), scale, max_pixels)?;
+    if image.dimensions() == target { return Some(image); }
+    Some(image::imageops::resize(&image, target.0, target.1, image::imageops::FilterType::Lanczos3))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn processing_input_fits_the_delivery_budget() {
+        assert_eq!(processing_dimensions(3661, 5339, 2, 128_000_000), Some((3661, 5339)));
+        let (w, h) = processing_dimensions(10000, 10000, 4, 128_000_000).unwrap();
+        assert!(u64::from(w) * u64::from(h) * 16 <= 128_000_000);
+        assert_eq!(w, h);
+        assert!(w > 2800);
+        assert_eq!(processing_dimensions(1, 10000, 2, 100), Some((1, 25)));
+        assert_eq!(processing_dimensions(1, 1, 4, 15), None);
+    }
+
+    #[test]
+    fn preprocessing_resizes_pixels_and_preserves_alpha() {
+        let source = image::RgbaImage::from_pixel(20, 10, image::Rgba([90, 50, 20, 255]));
+        let fitted = fit_processing_input(source, 2, 200).unwrap();
+        assert_eq!(fitted.dimensions(), (10, 5));
+        assert!(fitted.pixels().all(|p| p.0 == [90, 50, 20, 255]));
+    }
 
     /// 一张四角颜色不同的方图：缩放之后还能认出「这是同一张图、只是小了」。
     fn quadrants(size: u32) -> Vec<u8> {

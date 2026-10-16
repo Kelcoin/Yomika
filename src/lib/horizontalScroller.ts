@@ -51,9 +51,7 @@ const POINTER_STYLE_KEYS = ['touchAction', 'WebkitOverflowScrolling', 'overscrol
  * A wheel over the cards moves the rail — sideways input (a trackpad swipe, a
  * tilted wheel) and the plain vertical wheel alike. ctrl+wheel is zoom and stays
  * untouched; shift+wheel is the mouse's explicit sideways ask and follows the
- * axis Chromium reports. Which events reach here at all is decided per gesture
- * by `handleWheel`: a gesture that starts mid-rail belongs to the rail, one that
- * starts past either end belongs to the page.
+ * axis Chromium reports. Overflowing rails retain ownership at both ends.
  */
 export function getHorizontalWheelDelta(
   event: Pick<WheelEvent, 'ctrlKey' | 'shiftKey' | 'deltaX' | 'deltaY'>,
@@ -85,11 +83,6 @@ type PointerStyleWatch = {
   listener: () => void;
 };
 
-/** Wheel events closer together than this belong to one gesture. Ownership of
- * the wheel is decided when the gesture starts and frozen until it settles —
- * see `handleWheel` for why the page may not join a gesture half way through. */
-export const WHEEL_GESTURE_SETTLE_MS = 250;
-
 export function useHorizontalScroller() {
   const elementRef = useRef<HTMLElement | null>(null);
   const dragRef = useRef<DragState>({ active: false, element: null, startX: 0, startScrollLeft: 0, moved: false, suppressClickUntil: 0, previousUserSelect: '', lastX: 0, lastAt: 0, velocity: 0 });
@@ -104,7 +97,6 @@ export function useHorizontalScroller() {
     coastRef.current = undefined;
     restoreSnap();
   }, [restoreSnap]);
-  const gestureRef = useRef({ lastAt: 0, owns: false });
   const pointerStyleRef = useRef<PointerStyleWatch | null>(null);
 
   const finishDrag = useCallback((event?: Event) => {
@@ -168,19 +160,7 @@ export function useHorizontalScroller() {
     if (!element) return;
     const delta = getHorizontalWheelDelta(event, element.scrollWidth, element.clientWidth);
     if (delta === null) return;
-    // Ownership is per gesture, decided when the gesture starts and frozen until
-    // the wheel settles: a gesture that begins mid-rail belongs to the rail even
-    // after it runs out (otherwise the horizontal scroll dragged the page along
-    // with it, half way through the same gesture), and a gesture that begins at
-    // either end belongs to the page — the rails span nearly the whole viewport,
-    // and only this keeps the page reachable from a pointer resting on the cards.
-    const now = Date.now();
-    const fresh = now - gestureRef.current.lastAt > WHEEL_GESTURE_SETTLE_MS;
-    gestureRef.current.lastAt = now;
-    const atStart = element.scrollLeft <= 0;
-    const atEnd = element.scrollLeft >= element.scrollWidth - element.clientWidth - 1;
-    if (fresh) gestureRef.current.owns = !((delta < 0 && atStart) || (delta > 0 && atEnd));
-    if (!gestureRef.current.owns) return;
+    // An overflowing rail retains the wheel at both ends, including fresh gestures.
     if (event.cancelable) event.preventDefault();
     event.stopPropagation();
     element.scrollLeft += delta * 2.4;

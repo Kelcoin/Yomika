@@ -20,6 +20,17 @@ const buildInfo = {
 };
 
 describe('native error log bridge', () => {
+  it('anonymizes legacy records and export contents at the repository boundary', async () => {
+    const adapter = vi.fn(async (command: string) => command === 'error_log_read'
+      ? { ok: true, value: [{ at: 'epoch:1', level: 'error', source: 'reader', message: 'failed https://private.example/api', detail: '{"serverId":"private-server"}' }] }
+      : { ok: true, value: 'chosen.log' });
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeErrorLogRepository();
+    const response = await repository.list();
+    expect(JSON.stringify(response)).not.toContain('private');
+    await repository.exportTo('chosen.log', 'failed https://private.example/api');
+    expect(adapter).toHaveBeenLastCalledWith('error_log_export', { path: 'chosen.log', contents: 'failed [REDACTED]' });
+  });
   it('clears both rounds through the native bridge', async () => {
     const adapter = vi.fn(async () => ({ ok: true, value: 7 }));
     setInvokeAdapterForTests(adapter);

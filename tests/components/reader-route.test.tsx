@@ -1831,7 +1831,9 @@ describe('reader route', () => {
     // 抓「排空之后过一会儿再交回 DLSSNR 工作区」那个定时器：宽限期是 30 秒，等真的
     // 30 秒过完不现实，所以在这里手动触发它一次（见 `scheduleWorkspaceRelease`）。
     const setTimeoutSpy = vi.spyOn(window, 'setTimeout');
-    const armedIdleRelease = () => setTimeoutSpy.mock.calls.find(([, delay]) => delay === 30_000);
+    const clearTimeoutSpy = vi.spyOn(window, 'clearTimeout');
+    const armedIdleRelease = () => setTimeoutSpy.mock.calls.filter(([, delay], index) => delay === 30_000
+      && !clearTimeoutSpy.mock.calls.some(([id]) => id === setTimeoutSpy.mock.results[index]?.value)).at(-1);
     const commands: string[] = [];
     const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => identity.rendition === 'dlssnr'
       ? { key: `dlssnr-${identity.pageIndex}`, url: `blob:dlssnr-${identity.pageIndex}`, bytes: pageBytes }

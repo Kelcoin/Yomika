@@ -85,9 +85,7 @@ it('drops expected outcomes but preserves unknown network-related bugs', async (
   expect(written.map((record) => record.message).sort()).toEqual([
     'GPU_OUTPUT_INVALID: bad output',
     'NETWORK: try again',
-    'REMOTE_TIMEOUT: try again',
     'network decoder invariant failed',
-    'operation failed',
     'operation failed',
   ]);
 });

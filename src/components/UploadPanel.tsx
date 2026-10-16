@@ -1,3 +1,4 @@
+import { AutoTextarea } from './AutoTextarea';
 import { CloudDownload, FolderOpen, Play, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -166,7 +167,7 @@ export function UploadPanel() {
       ) : (
         <div className="upload-url-form">
           <label className="upload-url-label" htmlFor="upload-urls">要下载的链接（一行一个）</label>
-          <textarea
+          <AutoTextarea
             id="upload-urls"
             className="is-selectable"
             rows={6}

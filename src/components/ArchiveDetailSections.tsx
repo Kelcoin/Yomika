@@ -125,33 +125,25 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
   </>;
 }
 
-/** 标题最多两行：撑不下就一档一档降字号，最小的那档还溢出才交给 CSS 的省略号。 */
-export function useTwoLineTitle(title: string) {
+/** Fit one line before falling back to CSS ellipsis. */
+export function useSingleLineTitle(title: string) {
   const ref = useRef<HTMLHeadingElement>(null);
   useLayoutEffect(() => {
     const element = ref.current;
-    if (!element) return undefined;
-    const sizes = ['var(--text-lg)', 'var(--text-md)', 'var(--text-sm)'];
+    if (!element) return;
     const fit = () => {
-      // The stylesheet clamps the element to two lines, which pins scrollHeight
-      // to the clamped height — lift it for the measurement, restore after.
-      const previousDisplay = element.style.display;
-      element.style.display = 'block';
-      let step = 0;
-      element.style.fontSize = sizes[0]!;
-      while (step < sizes.length - 1) {
-        const style = window.getComputedStyle(element);
-        // line-height resolves to px already (1.4 × font-size); the two-line
-        // budget is just that height doubled.
-        const lineHeight = style.lineHeight === 'normal' ? parseFloat(style.fontSize) * 1.4 : parseFloat(style.lineHeight);
-        if (element.scrollHeight <= lineHeight * 2 + 2) break;
-        step += 1;
-        element.style.fontSize = sizes[step]!;
+      for (const size of ['var(--text-lg)', 'var(--text-md)', 'var(--text-sm)']) {
+        element.style.fontSize = size;
+        if (element.scrollWidth <= element.clientWidth + 1) break;
       }
-      element.style.display = previousDisplay;
     };
     fit();
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => fit());
+    let width = element.clientWidth;
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+      if (width === element.clientWidth) return;
+      width = element.clientWidth;
+      fit();
+    });
     observer?.observe(element);
     return () => observer?.disconnect();
   }, [title]);

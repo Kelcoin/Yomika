@@ -1200,9 +1200,9 @@ fn deliberate_retirements_do_not_count_as_a_crash_loop() {
 #[test]
 fn a_page_over_the_pixel_limit_is_refused_before_the_worker_is_asked() {
     let sandbox = Sandbox::new("over-limit");
-    // 8193×8192 = 67 117 056 像素，比上限（64×1024×1024 = 67 108 864）多一行。
+    // 16001×8000 exceeds the hard 128 MP decode limit.
     let page = sandbox.root.join("page.png");
-    write_page(&page, 8193, 8192);
+    write_page(&page, 16001, 8000);
     let (byte_length, content_hash) =
         yomika_lib::compute::artifacts::hash_file(&page).expect("源图该读得出来");
 
@@ -1222,7 +1222,7 @@ fn a_page_over_the_pixel_limit_is_refused_before_the_worker_is_asked() {
         JobState::Failed {
             code: "COMPUTE_RESOURCE_LIMIT".to_string()
         },
-        "67 117 056 像素超过 67 108 864 像素的上限：派发前就该拒，措辞是资源上限"
+        "128 008 000 像素超过 128 000 000 像素的上限：派发前就该拒，措辞是资源上限"
     );
     assert!(
         manager.job_artifacts(&submitted.job_id).is_empty(),
@@ -1269,56 +1269,25 @@ fn a_page_over_the_pixel_limit_is_refused_before_the_worker_is_asked() {
     manager.shutdown();
 }
 
-/// 一页自己装得下、**乘上倍率**就装不下了——同一把刀，换一根算术。
-///
-/// 为什么这一条也要在派发前判：worker 那边其实一直在判（`upscale.rs` 拿
-/// `budgets.max_pixels / scale²` 反推源图上限，就是这一条），但那时它已经把图读进来、把模型
-/// 或 165 MB 的片段装好、上下文也建起来了。宿主手里那两个数在派发前就齐了：源图多大是刚量
-/// 出来的，倍率是这条流水线自己写的。判在这里，被拒的代价只剩「读一个图头」，worker 一个
-/// 字节都没见过。
-///
-/// 后半段是**对照**：同一台机器、同一份 worker，倍率乘完仍在预算之内的那一页照样算得出来。
+/// Delivery over budget must reach the adaptive worker preprocessing path.
+/// This harness uses echo; real inference and chained resizing live in worker tests.
 #[test]
-fn a_page_that_fits_alone_is_refused_once_the_scale_is_applied() {
+fn a_page_with_an_oversized_delivery_projection_reaches_the_worker() {
     let sandbox = Sandbox::new("over-budget");
-    // 5000×4000 = 20 000 000 像素：一页的上限（64×1024×1024 = 67 108 864）装得下；
-    // x2 之后是 80 000 000，装不下。
     let page = sandbox.root.join("page.png");
-    write_page(&page, 5000, 4000);
+    write_page(&page, 3661, 5339);
     let (byte_length, content_hash) =
-        yomika_lib::compute::artifacts::hash_file(&page).expect("源图该读得出来");
-
-    let manager = ComputeManager::start(config(&sandbox), no_events()).expect("起 supervisor");
+        yomika_lib::compute::artifacts::hash_file(&page).expect("hash source");
+    let manager = ComputeManager::start(config(&sandbox), no_events()).expect("start supervisor");
     let mut over = request("book", 611, 0);
-    over.pipeline[0].scale = Some(2);
-    over.source = Some(SourceFile {
-        path: page,
-        content_hash,
-        byte_length,
-    });
-    let submitted = manager.submit(over).expect("收下这件任务，判决在派发前那一步");
-    let state = wait_until("倍率乘完超预算的那一页该被拒", HANDOFF, || {
+    over.pipeline[0].scale = Some(4);
+    over.source = Some(SourceFile { path: page, content_hash, byte_length });
+    let submitted = manager.submit(over).expect("submit adaptive page");
+    let state = wait_until("delivery projection reaches worker", HANDOFF, || {
         terminal_of(&manager, &submitted.job_id)
     });
-    assert_eq!(
-        state,
-        JobState::Failed {
-            code: "COMPUTE_RESOURCE_LIMIT".to_string()
-        },
-        "20 000 000 像素 x2 = 80 000 000 超过 67 108 864 的预算：派发前就该拒"
-    );
-    assert!(
-        manager.job_artifacts(&submitted.job_id).is_empty(),
-        "既然拒了，就不该有产物落到手里"
-    );
-    let inputs_root = yomika_lib::compute::inputs::inputs_root_for(&sandbox.staging);
-    let staged = std::fs::read_dir(&inputs_root)
-        .map(|entries| entries.filter_map(Result::ok).count())
-        .unwrap_or(0);
-    assert_eq!(
-        staged, 0,
-        "被拒的那一页不该被摆进输入根：派发前拒的意思就是 worker 连源图的字节都没见过"
-    );
+    assert_eq!(state, JobState::Completed);
+    assert!(!manager.job_artifacts(&submitted.job_id).is_empty());
 
     let small = sandbox.root.join("small.png");
     write_page(&small, 2000, 2000);

@@ -91,28 +91,35 @@ export function isExpectedError(value: unknown, depth = 0): boolean {
   if (depth > 3 || value == null) return false;
   if (typeof value === 'string') {
     const code = value.match(/^([A-Z][A-Z0-9_]+)(?=[:：\s]|$)/)?.[1];
-    return code !== undefined && QUIET_ERROR_CODES.has(code);
+    return (code !== undefined && QUIET_ERROR_CODES.has(code)) || /^(?:Failed to fetch|Load failed|Network request failed)\.?$/i.test(value.trim());
   }
   if (typeof value !== 'object') return false;
-  const error = value as { code?: unknown; name?: unknown; message?: unknown; error?: unknown; cause?: unknown };
+  const error = value as { code?: unknown; retryable?: unknown; name?: unknown; message?: unknown; error?: unknown; cause?: unknown };
   if (typeof error.code === 'string' && QUIET_ERROR_CODES.has(error.code)) return true;
+  if (typeof error.code === 'string') {
+    // A transport cause must never hide the actual schema/model failure above it.
+    return error.code === 'NETWORK' && error.retryable === true && typeof error.message === 'string'
+      && /(?:error sending request for url|error decoding response body|failed to fetch|connection (?:reset|refused)|dns error|operation timed out)/i.test(error.message);
+  }
   if (error.name === 'AbortError' || error.name === 'NetworkError' || error.name === 'TimeoutError') return true;
   if (error.name === 'TypeError' && typeof error.message === 'string' && /^(Failed to fetch|Load failed|Network request failed|Failed to execute 'fetch' on 'Window': Failed to fetch)\.?$/.test(error.message)) return true;
   return isExpectedError(error.error, depth + 1) || isExpectedError(error.cause, depth + 1);
 }
 
 export function logError(source: string, message: unknown, context?: unknown, level: ErrorLogRecord['level'] = 'error'): void {
-  if (!sinkAvailable || isExpectedError(message) || isExpectedError(context)) return;
   const structured = message && typeof message === 'object' ? message as { code?: unknown; message?: unknown } : undefined;
+  const code = structured?.code ?? (typeof message === 'string' ? message.match(/^([A-Z][A-Z0-9_]+)(?=[:：\s]|$)/)?.[1] : undefined);
+  const diagnostic = typeof code === 'string' && code !== 'NETWORK' && !QUIET_ERROR_CODES.has(code);
+  if (!sinkAvailable || isExpectedError(message) || (!diagnostic && isExpectedError(context))) return;
   const text = structured && 'message' in structured ? `${structured.code ? `${structured.code}: ` : ''}${String(structured.message)}` : String(message ?? '');
-  const safeMessage = flat(text, MAX_MESSAGE_CHARS);
+  const safeMessage = flat(String(redactSensitive(text)), MAX_MESSAGE_CHARS);
   if (!safeMessage) return;
   const detail = describe(context);
   const record: ErrorLogRecord = {
     at: new Date().toISOString(),
     level,
-    source: flat(source || 'app', 80),
-    message: flat(String(redactSensitive(safeMessage)), MAX_MESSAGE_CHARS),
+    source: flat(String(redactSensitive(source || 'app')), 80),
+    message: safeMessage,
     ...(detail === undefined ? {} : { detail }),
   };
   buffered.push(record);

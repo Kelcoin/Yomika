@@ -102,8 +102,7 @@ describe('horizontal scroller', () => {
   it('takes a wheel that is going sideways, and a vertical wheel over the cards', () => {
     expect(getHorizontalWheelDelta({ ctrlKey: false, shiftKey: false, deltaX: -90, deltaY: 30 }, 500, 200)).toBe(-90);
     // The plain vertical wheel moves the rail too — that is how a mouse asks a
-    // horizontal strip to move. handleWheel hands it back to the page at either
-    // end of the strip, which is what keeps the page reachable.
+    // horizontal strip to move. The strip retains wheel ownership at either end.
     expect(getHorizontalWheelDelta({ ctrlKey: false, shiftKey: false, deltaX: 0, deltaY: 80 }, 500, 200)).toBe(80);
     expect(getHorizontalWheelDelta({ ctrlKey: false, shiftKey: false, deltaX: 20, deltaY: 80 }, 500, 200)).toBe(80);
     // A mouse has no deltaX: shift+wheel is how it asks, and Chromium reports one
@@ -155,48 +154,18 @@ describe('horizontal scroller', () => {
     expect(onOuterWheel).toHaveBeenCalledTimes(1);
   });
 
-  it('hands the wheel to the page only when a gesture starts at either end', () => {
-    const clock = vi.spyOn(Date, 'now');
-    const onOuterWheel = vi.fn();
-    render(<HorizontalScrollerHarness onOuterWheel={onOuterWheel} />);
+  it('retains wheel ownership when a fresh gesture begins at either end', () => {
+    const outer = vi.fn();
+    render(<HorizontalScrollerHarness onOuterWheel={outer} />);
     const rail = screen.getByTestId('rail');
     setOverflow(rail, 800, 200);
-    Object.defineProperty(rail, 'scrollLeft', { configurable: true, writable: true, value: 599 });
-    clock.mockReturnValue(1_000);
-
-    // A gesture that begins at the right end belongs to the page, whatever the
-    // wheel asks for, and stays with the page until the wheel settles.
-    fireEvent.wheel(rail, { deltaX: 50 });
-    expect(onOuterWheel).toHaveBeenCalledTimes(1);
-    clock.mockReturnValue(1_100);
-    fireEvent.wheel(rail, { deltaY: 50 });
-    expect(onOuterWheel).toHaveBeenCalledTimes(2);
-
-    clock.mockReturnValue(1_600);
-    Object.defineProperty(rail, 'scrollLeft', { configurable: true, writable: true, value: 0 });
-    // A new gesture beginning at the start: a leftward wheel passes through.
-    fireEvent.wheel(rail, { deltaX: -50 });
-    expect(onOuterWheel).toHaveBeenCalledTimes(3);
-
-    clock.mockReturnValue(2_200);
-    // A new gesture beginning mid-rail belongs to the rail for its whole length,
-    // even past the end — the horizontal scroll must not drag the page along.
-    fireEvent.wheel(rail, { deltaX: 50 });
-    expect(rail.scrollLeft).toBe(120);
-    expect(onOuterWheel).toHaveBeenCalledTimes(3);
-    clock.mockReturnValue(2_260);
-    Object.defineProperty(rail, 'scrollLeft', { configurable: true, writable: true, value: 599 });
-    fireEvent.wheel(rail, { deltaY: 50 });
-    // The wheel is swallowed mid-gesture: the event never reaches the page.
-    // (jsdom does not clamp scrollLeft — a real browser pins it to the end.)
-    expect(rail.scrollLeft).toBe(719);
-    expect(onOuterWheel).toHaveBeenCalledTimes(3);
-
-    clock.mockReturnValue(3_000);
-    // The wheel has settled: a fresh gesture at the end goes back to the page.
-    fireEvent.wheel(rail, { deltaY: 50 });
-    expect(onOuterWheel).toHaveBeenCalledTimes(4);
-    clock.mockRestore();
+    for (const [position, delta] of [[0, -50], [600, 50]]) {
+      rail.scrollLeft = position!;
+      const event = new WheelEvent('wheel', { deltaY: delta!, bubbles: true, cancelable: true });
+      rail.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+    }
+    expect(outer).not.toHaveBeenCalled();
   });
 
   it('swallows the click that ends a drag', () => {

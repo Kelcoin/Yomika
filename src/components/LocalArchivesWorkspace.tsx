@@ -9,7 +9,7 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
 import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './ArchiveContextMenu';
-import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useTwoLineTitle } from './ArchiveDetailSections';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
 import { SelectField, type SelectOption } from './SelectField';
@@ -694,7 +694,7 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
     archiveId: serverCopy?.archiveId,
     enabled: Boolean(serverCopy),
   });
-  const titleRef = useTwoLineTitle(archive.title);
+  const titleRef = useSingleLineTitle(archive.title);
   const facts = [
     { kind: 'pages' as const, label: '页数', value: archive.pageCount ? `${archive.pageCount} 页` : '未知' },
     { kind: 'size' as const, label: '体积', value: formatByteSize(archive.fileSize) },

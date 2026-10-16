@@ -405,6 +405,9 @@
        different speeds (the multi-select bar did exactly that). */
     --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
     --motion-fast: 140ms var(--ease-standard);
+    --duration-reader-indicator: 280ms;
+    --motion-toast-enter: 280ms cubic-bezier(.2,.8,.2,1);
+    --motion-toast-exit: 280ms cubic-bezier(.4,0,1,1);
     --motion-dock: 280ms cubic-bezier(.22, 1, .36, 1);
     --motion-bounce: 360ms cubic-bezier(.22, 1, .36, 1);
     --motion-page: 180ms cubic-bezier(.2, .8, .2, 1);

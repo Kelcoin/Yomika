@@ -2136,41 +2136,10 @@ impl Supervisor {
                                 ),
                             });
                         }
-                        // 同一笔预算的另一端：源图自己装得下，**乘上倍率**就未必了。worker
-                        // 一直在判这一条（`upscale.rs` 拿 `max_pixels / delivery_scale²` 反推源图上限
-                        // 就是），但判的时候图已经读进来、模型也装好了——同样的几十秒 GPU
-                        // 时间，宿主这里只花一次乘法。
-                        //
-                        // 每一阶以交付倍率接到下一阶，worker 逐块缩小后才拼接整帧。
-                        // 为什么取的是**乘积**而不是某一个阶段的倍率：链是一阶一阶接的
-                        // （`worker/src/executor.rs` 的 `previous`），第二阶段的输入就是第一
-                        // 阶段交出来的那张图，所以两阶 x2 是 x16 而不是 x4。按乘积判，与 worker
-                        // 逐阶段判的结果完全一致：谁先越线就在谁那儿拒。
-                        let scales: Vec<u32> = template
-                            .pipeline
-                            .iter()
-                            .filter_map(|stage| stage.scale.map(|scale| stage.output_scale.unwrap_or(scale).min(scale)))
-                            .collect();
-                        let projected =
-                            resource_policy::chain_output_pixels(pixels.count(), &scales);
-                        if projected > resource_policy::PAGE_PIXEL_LIMIT {
-                            return Err(StageFailure {
-                                code: super::leases::RESOURCE_LIMIT_CODE,
-                                detail: format!(
-                                    "这一页 {}×{} 是 {} 像素，这条流水线（倍率 {}）算出来是 {} 像素，超过一档 {} 像素的预算：这一档算不了它（原图还在）",
-                                    pixels.width,
-                                    pixels.height,
-                                    pixels.count(),
-                                    scales
-                                        .iter()
-                                        .map(|scale| format!("x{scale}"))
-                                        .collect::<Vec<_>>()
-                                        .join("→"),
-                                    projected,
-                                    resource_policy::PAGE_PIXEL_LIMIT
-                                ),
-                            });
-                        }
+                        // Delivery projections are adaptive: the worker downsamples
+                        // before each upscale stage. Keep only the source decode
+                        // guard here; rejecting the cumulative scale would prevent
+                        // that bounded preprocessing path from ever running.
                     }
                     let relative_path = crate::compute::inputs::stage(
                         &config.inputs_root,

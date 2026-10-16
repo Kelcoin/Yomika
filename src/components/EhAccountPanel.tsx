@@ -1,4 +1,6 @@
-import { KeyRound, LogIn, RefreshCw, Download, LogOut, Pencil, Save, X } from 'lucide-react';
+import { AutoTextarea } from './AutoTextarea';
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
+import { KeyRound, LogIn, Download, LogOut, Pencil, Save, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { writeClipboardText } from '../bridge/clipboard';
 import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
@@ -254,7 +256,7 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
           ) : (
             <form className="eh-account-form" onSubmit={submitCookie}>
               <label>Cookie
-                <textarea name="ehCookie" required rows={3} spellCheck={false} placeholder="粘贴整段 Cookie，或 ipb_member_id 与 ipb_pass_hash" />
+                <AutoTextarea name="ehCookie" required rows={3} spellCheck={false} placeholder="粘贴整段 Cookie，或 ipb_member_id 与 ipb_pass_hash" />
               </label>
               <button className="primary-action" type="submit" disabled={saving} aria-busy={saving}><Save aria-hidden="true" />{saving ? '保存中…' : '保存 Cookie'}</button>
             </form>

@@ -1,3 +1,4 @@
+import { AutoTextarea } from './AutoTextarea';
 import { ArrowLeft, BookOpen, LoaderCircle, Play, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -235,7 +236,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
             {!busy && <TagSuggest inputValue={tagDraft} anchorRef={tagInputRef} exact={false} onSelect={(tag) => commitTagDraft(tag)} />}
           </label>
         </div>
-        <label>简介<textarea value={summary} autoCapitalize="sentences" spellCheck onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
+        <label>简介<AutoTextarea value={summary} autoCapitalize="sentences" spellCheck onChange={(event) => setSummary(event.target.value)} rows={8} /></label>
         {plugins.length > 0 && <div className="metadata-plugin-row"><SelectField name="metadataPlugin" aria-label="元数据插件" value={plugin} onChange={setPlugin} options={plugins.map((item) => ({ value: item.id, label: item.name }))} /><button className="secondary-action" type="button" disabled={!!busy} onClick={() => void runPlugin()}><Play aria-hidden="true" />执行插件</button></div>}
         {pluginError && <div><StatusLine tone="error">插件列表读取失败：{pluginError}</StatusLine><button className="secondary-action" type="button" onClick={() => setPluginReload(value => value + 1)}><RotateCcw aria-hidden="true" />重新读取插件</button></div>}
       {/* Same as the sync panel: a save landing or failing is an event, and the

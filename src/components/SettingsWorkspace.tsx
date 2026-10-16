@@ -1,3 +1,5 @@
+import { AutoTextarea } from './AutoTextarea';
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { usePageActive } from '../app/RetainedPage';
@@ -5,7 +7,7 @@ import { Languages, ArrowDownWideNarrow,
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
-  Paintbrush, Palette, PanelBottom, Pencil, Plus, RefreshCw, Rocket, RotateCcw, Save, Scale, ShieldCheck, X, Check,
+  Paintbrush, Palette, PanelBottom, Pencil, Plus, Rocket, RotateCcw, Save, Scale, ShieldCheck, X, Check,
   SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
 } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
@@ -1294,7 +1296,7 @@ export function SettingsWorkspace() {
                         </button>
                       ))}
                     </div>
-                    <textarea
+                    <AutoTextarea
                       name="customCss"
                       aria-label="自定义 CSS"
                       className="is-selectable"
@@ -1496,7 +1498,7 @@ export function SettingsWorkspace() {
                   onClose={() => { setMigrationText(''); setImportAvailable([]); setImportItems([]); }}
                 >
                   <form className="legacy-import-form" onSubmit={(event) => { event.preventDefault(); if (importAvailable.length > 0) void runSelectedImport(); else void runMigrationImport(migrationText); }}>
-                    <textarea
+                    <AutoTextarea
                       id="migration-json"
                       name="migrationJson"
                       aria-label="导出 JSON"
@@ -1659,10 +1661,10 @@ export function SettingsWorkspace() {
                 />
                 {preferenceDraft.upscaleAutoEnable && (preferenceDraft.upscaleAutoTagMode === 'whitelist'
                   ? <SettingsPanel icon={<Tags />} label="自动超分白名单" hint="每行一个标签；仅匹配的档案会自动开启" value={preferenceDraft.upscaleAutoWhitelist.trim() ? '已设置' : '无'}>
-                    <textarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
+                    <AutoTextarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
                   </SettingsPanel>
                   : <SettingsPanel icon={<EyeOff />} label="自动超分黑名单" hint="每行一个标签；匹配的档案不会自动开启" value={preferenceDraft.upscaleAutoBlacklist.trim() ? '已设置' : '无'}>
-                    <textarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
+                    <AutoTextarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
                   </SettingsPanel>)}
               </div>
             )}

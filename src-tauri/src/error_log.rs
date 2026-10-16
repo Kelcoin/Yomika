@@ -16,7 +16,7 @@
 //! 黑匣子、上次的错误。「上次运行 ·」前缀来自这里，前端按它把两轮分开数。
 //!
 //! 敏感值不进日志：前端写入前已经用 redaction 处理过（API key、Authorization
-//! 这类字段会被替换掉），这里只负责落盘。
+//! 这类字段会被替换掉），原生写入、旧日志读取与导出仍独立脱敏。
 
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
@@ -88,7 +88,7 @@ fn crash_path(app: &tauri::AppHandle, name: &str) -> Result<PathBuf, String> {
 }
 
 fn field(value: &str) -> String {
-    let flat = value.replace(['\r', '\n', '\t'], " ");
+    let flat = crate::diagnostics::redact_text(value).replace(['\r', '\n', '\t'], " ");
     if flat.chars().count() <= MAX_FIELD_CHARS {
         return flat;
     }
@@ -131,9 +131,9 @@ fn append_json_lines(path: &Path, entries: &[ErrorLogEntry]) -> Result<(), Strin
             serde_json::json!({
                 "at": entry.at,
                 "level": entry.level,
-                "source": entry.source,
-                "message": entry.message,
-                "detail": entry.detail,
+                "source": crate::diagnostics::redact_text(&entry.source),
+                "message": crate::diagnostics::redact_text(&entry.message),
+                "detail": entry.detail.as_deref().map(crate::diagnostics::redact_text),
             })
             .to_string()
         })
@@ -298,15 +298,27 @@ fn read_file(directory: &Path, name: &str, carried: bool) -> Vec<ErrorLogEntry> 
     } else {
         parse_json_lines(&text)
     };
-    entries
+    let entries = entries
         .into_iter()
         .map(|mut entry| {
-            if carried {
-                entry.source = format!("{CARRIED_PREFIX}{}", entry.source);
-            }
+            entry.source = crate::diagnostics::redact_text(&entry.source);
+            entry.message = crate::diagnostics::redact_text(&entry.message);
+            entry.detail = entry.detail.as_deref().map(crate::diagnostics::redact_text);
             entry
         })
-        .collect()
+        .collect::<Vec<_>>();
+    // Retained logs from older versions may contain raw private values. Migrate
+    // them too, so the on-disk copy is safe after the first read.
+    let sanitized = entries.iter().map(|entry| if name.starts_with("error") {
+        text_line(entry)
+    } else {
+        serde_json::to_string(entry).unwrap_or_default()
+    }).collect::<Vec<_>>().join("\n") + "\n";
+    if carried && sanitized != text { let _ = fs::write(directory.join(name), sanitized); }
+    entries.into_iter().map(|mut entry| {
+        if carried { entry.source = format!("{CARRIED_PREFIX}{}", entry.source); }
+        entry
+    }).collect()
 }
 
 /// 界面要的那一份：从新到旧，本次在前、上次在后。
@@ -400,15 +412,8 @@ fn error_log_write(app: &tauri::AppHandle, entry: &ErrorLogEntry) -> CommandResu
     error_log_write_all(app, std::slice::from_ref(entry))
 }
 
-// Only explicit outcome codes are quiet. Never suppress arbitrary messages
-// containing words such as "network": schema/engine faults need diagnostics.
-//
-// 「连不上服务器」这一类**不在**名单里（2026-10-15 的独立复核指出）：服务器地址写错、
-// TLS/代理/DNS 不通、正文被截断，最终都落到同一个 `NETWORK` 上，静音它等于用户报
-// 「连不上」时日志里一个字都没有。名单只收**设计上就会自己过去**的退让（队列满/忙/取消）
-// 与**用户自己点名要静音**的那一类（本体更新检查）。两侧名单（这里与
-// `src/domain/errors.ts` 的 `QUIET_ERROR_CODES`）由
-// `tests/contracts/backpressure-quiet-codes.test.ts` 钉住一致。
+// Explicit quiet outcomes; transport messages are handled separately below.
+// Keep this list aligned with src/domain/errors.ts.
 fn expected_outcome(message: &str) -> bool {
     let code = message.trim_start().split(|ch: char| ch == ':' || ch == '：' || ch.is_whitespace()).next().unwrap_or("");
     matches!(code,
@@ -416,11 +421,17 @@ fn expected_outcome(message: &str) -> bool {
         "INFERENCE_CANCELLED" | "COMPUTE_CANCELLED" |
         "COMPUTE_QUEUE_FULL" | "COMPUTE_UNAVAILABLE" | "COMPUTE_WORKER_BUSY" |
         "APP_RELEASE_CHECK_FAILED" | "APP_RELEASE_UNREACHABLE" |
-        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" | "ERR_CANCELED")
+        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" | "ERR_CANCELED" | "REMOTE_TIMEOUT")
+}
+
+fn transport_failure(message: &str) -> bool {
+    let text = message.trim().to_ascii_lowercase();
+    if matches!(text.as_str(), "failed to fetch" | "failed to fetch." | "load failed" | "network request failed") { return true; }
+    text.starts_with("network:") && ["error sending request for url", "error decoding response body", "failed to fetch", "connection reset", "connection refused", "dns error", "operation timed out"].iter().any(|signature| text.contains(signature))
 }
 
 fn error_log_write_all(app: &tauri::AppHandle, entries: &[ErrorLogEntry]) -> CommandResult<()> {
-    let entries = entries.iter().filter(|entry| !expected_outcome(&entry.message)).collect::<Vec<_>>();
+    let entries = entries.iter().filter(|entry| !expected_outcome(&entry.message) && !transport_failure(&entry.message)).collect::<Vec<_>>();
     if entries.is_empty() { return CommandResult::success(()); }
     let path = match log_path(app) {
         Ok(path) => path,
@@ -445,7 +456,7 @@ pub(crate) fn record_at_data_dir(
     message: &str,
     detail: Option<&str>,
 ) -> Result<(), String> {
-    if message.trim().is_empty() || expected_outcome(message) {
+    if message.trim().is_empty() || expected_outcome(message) || transport_failure(message) {
         return Ok(());
     }
     let directory = data_dir.join("logs");
@@ -518,7 +529,7 @@ pub async fn error_log_export(
     if contents.trim().is_empty() {
         return Ok(CommandResult::failure("INVALID_INPUT", "Error log is empty", false));
     }
-    match write_export(&app, trimmed, &contents).await {
+    match write_export(&app, trimmed, &crate::diagnostics::redact_text(&contents)).await {
         Ok(()) => Ok(CommandResult::success(trimmed.to_string())),
         Err(message) => Ok(CommandResult::failure("UNKNOWN", message, true)),
     }
@@ -539,6 +550,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sanitizes_persisted_records_and_legacy_reads() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let message = "GPU_OUTPUT_INVALID: error at https://private.example/api 192.168.12.34";
+        record_at_data_dir(dir.path(), "error", "test", message, Some(r#"{"username":"Alice","path":"private-path","code":"GPU_OUTPUT_INVALID"}"#)).expect("record");
+        let logs = dir.path().join("logs");
+        let persisted = fs::read_to_string(logs.join(ERROR_LOG)).expect("persisted");
+        for secret in ["private.example", "192.168.12.34", "Alice", "private-path"] { assert!(!persisted.contains(secret)); }
+        fs::write(logs.join(ERROR_PREVIOUS), format!("epoch:1\terror\ttest\t{message}\t{{\"serverId\":\"private-server\"}}\n")).expect("legacy seed");
+        let entries = read_file(&logs, ERROR_PREVIOUS, true);
+        assert_eq!(entries.len(), 1);
+        let migrated = fs::read_to_string(logs.join(ERROR_PREVIOUS)).expect("migrated");
+        assert!(!migrated.contains("private-server"));
+        assert!(!migrated.contains("private.example"));
+        assert!(migrated.contains("GPU_OUTPUT_INVALID"));
+    }
+
+    #[test]
+    fn pure_transport_faults_are_quiet_but_decoder_and_compute_faults_are_not() {
+        assert!(transport_failure("NETWORK: error decoding response body"));
+        assert!(transport_failure("Failed to fetch"));
+        assert!(!transport_failure("INVALID_RESPONSE: error decoding response body"));
+        assert!(!transport_failure("COMPUTE_INTERNAL: Failed to fetch"));
+        assert!(!transport_failure("NETWORK: schema decoder invariant failed"));
+    }
+
+    #[test]
     fn expected_outcomes_never_create_a_log_file() {
         let dir = std::env::temp_dir().join(format!("yomika-quiet-outcomes-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -549,7 +586,7 @@ mod tests {
         for message in ["REMOTE_UNAVAILABLE: protocol or engine failure", "GPU_OUTPUT_INVALID: corrupt", "network decoder invariant failed", "INVALID_RESPONSE: network response malformed",
             // 「连不上服务器」必须留下现场：地址写错、DNS/代理不通、正文被截断最终都落到
             // 这几个码上，静音它们等于用户报「连不上」时日志里一个字都没有。
-            "NETWORK: offline", "REMOTE_TIMEOUT: slow server", "REMOTE_RATE_LIMIT: 429",
+            "NETWORK: offline", "REMOTE_RATE_LIMIT: 429",
             "ENOTFOUND: dns", "ECONNRESET: reset", "ECONNREFUSED: refused", "ETIMEDOUT: timed out",
             "EH_UNAVAILABLE: blocked", "ERR_NETWORK: fetch failed"] {
             assert!(!expected_outcome(message));
@@ -656,7 +693,7 @@ mod tests {
         assert!(parse_text("\n\n").is_empty());
         // 写回去还是同一行（导出的文本就是这些字段）。
         let entry = parse_text(line).remove(0);
-        assert_eq!(text_line(&entry), line);
+        assert_eq!(text_line(&entry), line.replace("https://lrr.test/api/info", "[REDACTED]"));
     }
 
     #[test]

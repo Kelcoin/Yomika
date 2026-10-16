@@ -1,7 +1,8 @@
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { CardTagRows, ArchiveCardTags } from './CardTagRows';
 import { CardProgressBar } from './CardProgressBar';
 import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
-import { Heart, RefreshCw } from 'lucide-react';
+import { Heart } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';

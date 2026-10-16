@@ -55,7 +55,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     timers.current.set(id, window.setTimeout(() => {
       timers.current.delete(id);
       setItems((current) => current.filter((item) => item.id !== id));
-    }, 220));
+    }, 280));
   }, []);
   const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600, meta?: ToastMeta) => {
     const message = String(text ?? '').trim();
@@ -78,24 +78,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     timers.current.set(id, window.setTimeout(() => closeToast(id), duration));
   }, [closeToast]);
   const clearToasts = useCallback((type?: ToastType) => {
-    const removed = itemsRef.current.filter((item) => !type || item.type === type);
-    for (const item of removed) {
-      const timer = timers.current.get(item.id);
-      if (timer) window.clearTimeout(timer);
-      timers.current.delete(item.id);
-    }
-    // Keep deduplication in sync even if a retry emits the same message before
-    // React commits the removal in this event.
-    itemsRef.current = itemsRef.current.filter((item) => type && item.type !== type);
-    setItems(itemsRef.current);
-  }, []);
+    const removed = itemsRef.current.filter((item) => !item.closing && (!type || item.type === type));
+    // Mark synchronously so a same-tick retry creates a fresh, visible toast.
+    itemsRef.current = itemsRef.current.map(item => removed.includes(item) ? { ...item, closing: true } : item);
+    for (const item of removed) closeToast(item.id);
+  }, [closeToast]);
   useEffect(() => () => timers.current.forEach((timer) => window.clearTimeout(timer)), []);
   const value = useMemo(() => ({ showToast, clearToasts }), [clearToasts, showToast]);
   // 挂到 body（`OverlayLayer`）：留在页面容器里，容器自己的层叠上下文（`.workspace` 的
   // 入场 transform、列表的 z-index…）会把这个栈关在里面，二级菜单那道 `position: fixed`
   // 的遮罩就会盖在它上面——浮层当初就是因为这个才改用 portal 的，toast 同理。
   return <ToastContext.Provider value={value}>{children}<OverlayLayer><div className="toast-stack" aria-live="polite">
-    {items.map((item) => <div className={`toast-card is-${item.type}${item.closing ? ' is-closing' : ''}`} role={item.type === 'error' ? 'alert' : 'status'} data-testid={item.testId} {...item.attributes} key={item.id}>
+    {items.map((item) => <div className={`toast-card is-${item.type}${item.closing ? ' is-closing' : ''}`} aria-hidden={item.closing || undefined} role={item.type === 'error' ? 'alert' : 'status'} data-testid={item.testId} {...item.attributes} key={item.id}>
       <span className="toast-icon" aria-hidden="true"><ToastMark type={item.type} /></span><span className="toast-text">{item.text}</span>{item.action && <button className="toast-action" type="button" onClick={item.action.run}>{item.action.label}</button>}<button className="toast-close" type="button" aria-label="关闭提示" onClick={() => closeToast(item.id)}><X aria-hidden="true" /></button>
     </div>)}
   </div></OverlayLayer></ToastContext.Provider>;

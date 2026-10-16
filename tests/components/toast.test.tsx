@@ -44,7 +44,8 @@ describe('toast marks', () => {
     render(<ToastProvider><Retry /></ToastProvider>);
     await user.click(screen.getByRole('button', { name: 'fail' }));
     await user.click(screen.getByRole('button', { name: 'retry' }));
-    expect(screen.getByText('请求失败')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent('请求失败');
+    expect(document.querySelector('.toast-card.is-closing')).toBeInTheDocument();
   });
 
   it('draws one semantic mark per type, none of them a cross', async () => {

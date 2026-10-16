@@ -237,7 +237,7 @@ describe('design system contract', () => {
     // 手势也归画布自己管——ReaderScreen 按布局把 touch-action 写在画布上，连续
     // 模式让浏览器纵向滚动，单页/双页整个交给自己的双击、双指与滚轮。
     const reader = read('src/components/ReaderScreen.tsx');
-    expect(reader).toMatch(/transform: `scale\(\$\{zoom\.scale\}\)/);
+    expect(reader).toMatch(/transform: `scale\(\$\{zoomRef\.current\.scale\}\)/);
     expect(reader).toMatch(/touchAction: effectiveLayout === 'webtoon' \? 'pan-y' : 'none'/);
     // 阅读页里没有任何文本控件，所以下面那条字号下限够不到它。
     expect(reader).not.toMatch(/<input|<textarea|<select/);
@@ -980,7 +980,7 @@ describe('design system contract', () => {
       expect(page).not.toMatch(/pickCardTags\(/);
     }
     // 详情分区：标题、封面、事实网格、标签墙都住在共用模块里。
-    for (const name of ['ArchiveDetailCover', 'ArchiveDetailFacts', 'ArchiveDetailTagSection', 'useDetailTagGroups', 'useArchiveCover', 'useTwoLineTitle']) {
+    for (const name of ['ArchiveDetailCover', 'ArchiveDetailFacts', 'ArchiveDetailTagSection', 'useDetailTagGroups', 'useArchiveCover', 'useSingleLineTitle']) {
       expect(sections).toContain(`export function ${name}`);
     }
     expect(local).toContain('ArchiveDetailTagSection');
@@ -1095,7 +1095,7 @@ describe('design system contract', () => {
     // 骨架屏不是可点元素；分隔线纯装饰；`:disabled:hover` 是禁用态
     // 的中和规则；输入框在触屏上点一下就直接聚焦，聚焦环就是反馈；下拉的选项行外层是
     // `div[role=option]`，被标记的是行里那个真正的按钮，所以按下态写在 .select-option-main 上。
-    const exempt = (selector: string) => /titlebar|metadata-tag|data-sfw|is-skeleton|panel-separator|:disabled:hover|^input:hover|^select:hover|^textarea:hover|^\.select-option:hover$/.test(selector);
+    const exempt = (selector: string) => /titlebar|^\.error-log-entry:hover$|metadata-tag|data-sfw|is-skeleton|panel-separator|:disabled:hover|^input:hover|^select:hover|^textarea:hover|^\.select-option:hover$/.test(selector);
     // 只比颜色：悬停规则里那点位移（`transform: translateY(-1px)`）按下去不该复刻，
     // 布局一动就会跳。
     const colour = (body: string) => [...body.matchAll(/(background(?:-color)?|color|border-color)\s*:\s*([^;]+)/g)].map((match) => `${match[1]}: ${match[2]?.trim()}`);
@@ -1444,7 +1444,7 @@ describe('design system contract', () => {
     expect(indicatorScreen, '初始首帧也采用设备默认位置').toMatch(/const indicatorPlacement = coarsePointer \? 'bottom' : 'corner';/);
     expect(indicatorScreen, '只有结论变了（或缩放还在缓动）才排第二趟测量').toMatch(/if \(!measure\(true\)\) settle = window\.setTimeout\(\(\) => \{ measure\(true\); \}, 240\);/);
     expect(indicatorScreen, '还没解码的页不能拿来量底缝').toMatch(/if \(image\.naturalWidth === 0\) continue;/);
-    expect(indicatorScreen, '指针类型进了依赖，换设备也要重量一次').toMatch(/\}, \[coarsePointer, effectiveLayout, pages\.length, viewport\.width, viewport\.height, visibleIndexes, zoom\.scale\]\);/);
+    expect(indicatorScreen, '指针类型进了依赖，换设备也要重量一次').toMatch(/\}, \[coarsePointer, effectiveLayout,[^\]]*pageMeasurement[^\]]*bottomPresence\.mounted[^\]]*zoom\.scale\]\);/);
     expect(indicatorScreen, '退场窗口里胶囊要认领 is-leaving').toMatch(/bottomPresence\.leaving \? ' is-leaving' : ''/);
     // 2026-10-15 用户要求：底栏一出现，页码就隐藏。这一条钉的是**安静条件的组成**——
     // 少了 `mounted` 就退回「胶囊压在栏上」，少了 `leaving` 就会在栏淡出的 260ms 里
@@ -1831,7 +1831,7 @@ describe('design system contract', () => {
     }
     // 而「压住画面」这件事只由那一层容器负责：它自己有 z-index，所以子元素各自往哪排
     // 都还在画面之上，不必每个装饰都去抬一层。
-    expect(ruleBody(reader, '.reader-chrome')).toMatch(/z-index:\s*var\(--z-reader-chrome\)/);
+    expect(ruleBody(reader, '.reader-chrome')).toMatch(/z-index:\s*calc\(var\(--z-reader-overview\)\s*\+\s*1\)/);
   });
 
   it('renders the library grid thumbnail with the shared card component', () => {

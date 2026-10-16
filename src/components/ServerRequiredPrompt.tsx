@@ -1,4 +1,5 @@
-import { RefreshCw, Server } from 'lucide-react';
+import { RefreshIcon as RefreshCw } from './RefreshIcon';
+import { Server } from 'lucide-react';
 import { Link } from 'react-router-dom';
 
 /** 「添加服务器」的图标：一格机架（指示灯 + 槽位）加右下角一枚加号。
