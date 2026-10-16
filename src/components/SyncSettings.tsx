@@ -101,9 +101,7 @@ export function useSyncSettings(enabled = true) {
     };
   }, [resetAccount, resetting]);
 
-  // Both reach the toast as well as the page. This panel is embedded in settings,
-  // where every neighbouring control reports that way, and an error rendered only
-  // at the bottom of a scrolled panel is an error nobody sees.
+  // 与元数据编辑面板同一条规矩：错误既进页面也进吐司（理由见 MetadataEditRoute.tsx）。
   useEffect(() => {
     if (error) showToast(error, 'error');
   }, [error, showToast]);

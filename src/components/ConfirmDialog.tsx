@@ -45,7 +45,7 @@ function ConfirmDialogContent({ title, description, confirmLabel = '确认', dan
       if (mounted.current) setBusy(false);
     }
   };
-  // 返回手势先关这一层；忙的时候拒绝（守卫会自己补回去）。
+  // 返回手势先关这一层（规矩见 lib/overlayBackGuard）；忙的时候拒绝，守卫会自己补回去。
   useOverlayBackGuard(true, close);
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) close(); }}>

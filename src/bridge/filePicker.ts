@@ -61,8 +61,7 @@ export async function pickTextFile(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
-/** A directory, for installing a model bundle that is far too large to hand over
- * as bytes — the de-censoring bundle is 337 MB. */
+/** 选一个目录：装那种大到不能当字节递过来的东西——DLSSNR 的 NGX 片段一个就 158 MB。 */
 export async function pickDirectory(): Promise<string | null> {
   if (testDirectoryPicker) return testDirectoryPicker();
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;

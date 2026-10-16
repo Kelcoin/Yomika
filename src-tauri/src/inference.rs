@@ -1,3 +1,10 @@
+//! 宿主这一侧的推理编排：选哪一档超分、模型怎么装、产物怎么缓存。
+//!
+//! 真正的计算不在这个进程里——ONNX 与内置的 Anime4K 着色器链都跑在 worker（见
+//! `compute/`、docs/71 §11）。这里管的是「宿主知道什么」：模型目录与清单、可用档位的
+//! 解析（`resolve_upscaler`）、装机与校验，以及把一页交给计算进程、按身份缓存产物。
+//! 所以这里的错误几乎都是「这一档现在能不能用」，不是像素对不对。
+
 /// 计算错误的宿主别名。
 ///
 /// 定义搬去了 [`yomika_compute_core::error`]（docs/71 §11 Task 2）：算法层要能在
@@ -1106,7 +1113,7 @@ pub fn inference_clear_cache(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }
@@ -1938,7 +1945,7 @@ pub fn inference_checkpoint(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }
@@ -1968,7 +1975,7 @@ fn transition_command(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }
@@ -2007,7 +2014,7 @@ pub fn inference_start(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }
@@ -2030,7 +2037,7 @@ pub fn inference_get_job(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }
@@ -2051,7 +2058,7 @@ pub fn inference_cancel(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }

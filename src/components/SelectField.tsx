@@ -28,6 +28,7 @@ export function SelectField({ id, name, value, options, onChange, optionAction, 
   const instanceId = useId();
   const selected = options.find((option) => option.value === value) ?? options[0];
   const listId = `${id ?? name}-${instanceId}-options`;
+  // 返回手势先收起这一层（规矩见 lib/overlayBackGuard），不把整个页面带走。
   useOverlayBackGuard(open, () => setOpen(false));
   useEffect(() => {
     if (!open) return;

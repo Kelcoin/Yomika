@@ -1,3 +1,18 @@
+# 在 Windows 上打一份可交付的 release：前端 → 算力进程 → 宿主，然后把载荷读回来自证。
+#
+# 为什么是这个顺序：交付形态是**一个可执行文件**（worker 载荷内嵌进宿主，见 docs/71 §12
+# 与 docs/14），所以必须「先编子进程 → 把它的二进制路径交给宿主构建 → 宿主再把它嵌进去」。
+# 顺序错了不会报错，只会拿到一个跑不起来的包，而包自检要到最后一步才说话。
+#
+# 下面代码里三处不显眼但会致命的动作：碰一下 `src-tauri/tauri.conf.json` 的 mtime（build.rs
+# 只按 mtime 决定要不要重新嵌入载荷）、构建戳只认 `git rev-parse --short=12 HEAD`（不认文件
+# 时间）、把 `DirectML.dll` 的符号链接换成真文件（否则打进包里的是个链接而不是 18 MB 的库）。
+#
+# 跑法（仓库根目录）：
+#     .\.github\scripts\build-windows.ps1 -Release
+#     .\.github\scripts\build-windows.ps1 -Release -UseHostTools    # 用机器上的工具链
+#
+# 规格：docs/19-windows-local-build.md；对账口径与交付纪律：docs/14。
 [CmdletBinding()]
 param(
     [switch]$Release,

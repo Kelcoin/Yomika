@@ -1,3 +1,12 @@
+//! Tauri 宿主的接线层：窗口与托盘、单实例、URI 方案、命令注册表。
+//!
+//! 这里只做「把各模块挂到应用上」的事，不写业务：命令实现在 `commands/`，计算与推理在
+//! `compute/`、`inference/`，本地库在 `cache`、`library`。想知道某个行为从哪来，先在
+//! 这里找到它的注册点，再进对应模块。
+//!
+//! 两条不变量写在别处、这里只遵守：同步命令不许 `block_on`、不许锁那把全局库锁、不许
+//! 等子进程（见 `command_dispatch`）；窗口背景保持 `#0B0B0F00`（首帧契约见 docs/20）。
+
 mod app_release;
 mod bundled_models;
 mod cache;

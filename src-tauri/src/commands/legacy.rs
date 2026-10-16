@@ -570,7 +570,7 @@ pub fn import_worker_export(
 ) -> CommandResult<WorkerImportReport> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match import_worker_sections(&mut connection, input) {
         Ok(report) => CommandResult::success(report),
@@ -585,7 +585,7 @@ pub fn import_legacy_export(
 ) -> CommandResult<usize> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match import_legacy_export_for_local_device(&mut connection, &input.scope_id, &input.serialized)
     {

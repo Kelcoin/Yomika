@@ -88,7 +88,8 @@ textarea,
 
 /* Material 3 icon convention: one optical weight, round caps and joins, on a
    24px grid. Lucide supplies the geometry; pinning the stroke here stops the
-   1.4/1.5/1.8 per-icon overrides from mixing thin and heavy glyphs. */svg.lucide {
+   1.4/1.5/1.8 per-icon overrides from mixing thin and heavy glyphs. */
+svg.lucide {
   stroke-width: 1.75;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -140,7 +141,8 @@ textarea,
 .select-trigger > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Anything the field shows at its right before the chevron — the sort direction
-   arrow. It takes the auto margin, so the chevron keeps its 4px beside it. */.select-trailing { display: grid; margin-left: auto; color: var(--ink-secondary); }
+   arrow. It takes the auto margin, so the chevron keeps its 4px beside it. */
+.select-trailing { display: grid; margin-left: auto; color: var(--ink-secondary); }
 .select-trailing svg { width: 15px; height: 15px; }
 .select-trailing + svg { margin-left: 4px; }
 
@@ -289,7 +291,8 @@ a {
 
 /* Desktop-app feel: nothing is selectable or draggable by default, so a stray
    drag cannot rip a cover out of the window or leave text highlighted. Inputs
-   and anything explicitly marked selectable keep normal behaviour. */:root {
+   and anything explicitly marked selectable keep normal behaviour. */
+:root {
   user-select: none;
   -webkit-user-select: none;
 }

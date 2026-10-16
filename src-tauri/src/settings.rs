@@ -1,3 +1,10 @@
+//! 偏好存储：一张 `settings` 表 + 一份带默认值的读取层。
+//!
+//! 读写都走 `CommandResult` 信封（IPC 契约见 docs/20）；锁拿不到时回 `cache::LOCK_FAILED`，
+//! 因为那是「这一下没抢到，重试有意义」，调用点靠这个字符串区分重试与真失败。
+//! 「开机自启」这一项要在启动时与注册表对一次账（`autostart_value` / `autostart_action`），
+//! 因为它可能在应用之外被改；那次对账不许弹出控制台窗口（见 `hidden_process`）。
+
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -771,7 +778,7 @@ pub fn import_legacy_preferences_from(
 pub fn load_preferences(database: tauri::State<'_, Database>) -> CommandResult<PreferenceSnapshot> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match load_preferences_from(&connection) {
         Ok(value) => CommandResult::success(value),
@@ -789,7 +796,7 @@ pub fn save_preferences(
 ) -> CommandResult<PreferenceSnapshot> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     #[cfg(target_os = "windows")]
     {
@@ -927,7 +934,7 @@ pub fn import_legacy_preferences(
 ) -> CommandResult<LegacyPreferenceImport> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match import_legacy_preferences_from(&mut connection, &encoded) {
         Ok(value) => CommandResult::success(value),

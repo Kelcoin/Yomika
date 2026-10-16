@@ -353,8 +353,9 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
 });
 
 function PageStatus({ failed, onRetry }: { failed: boolean; onRetry: () => void }) {
-  // 同一个 M3 指示器，全应用只此一个（它自己的深色画布由 .reader-page-status 上色）。
-  if (!failed) return <div className="reader-page-status"><LoadingIndicator variant="reader" /></div>;
+  // 同一个 M3 指示器，全应用只此一个；形状由 `.reader-page-status` 那几条规则收（去轨道、
+  // 只留一段伸缩的弧，2026-10-16 起中间不再压 LOGO）。
+  if (!failed) return <div className="reader-page-status"><LoadingIndicator /></div>;
   return (
     <div className="reader-page-status is-failed">
       <button type="button" className="reader-retry-button" aria-label="重试加载" onClick={(event) => { event.stopPropagation(); onRetry(); }}>

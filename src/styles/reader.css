@@ -43,7 +43,8 @@
 
 /* Three frames on one track: the slot being read, and the two a swipe reveals.
    The track carries the drag offset, so a neighbour slides in from exactly where
-   it will land — the gesture used to drag the page off an empty background. */.reader-track {
+   it will land — the gesture used to drag the page off an empty background. */
+.reader-track {
   /* Layout containment only: `paint` clipped every descendant to the track's
      own box, and the swipe-neighbour frames live at translateX(±100%) — they
      were invisible for their whole life, so a drag slid the page over black. */
@@ -71,7 +72,8 @@
 /* The zoom lives inside the frame being read — it is applied inline to the same
    element that carries the layout class — so the neighbours stay exactly one
    viewport away whatever the scale is. On the track it scaled the gaps too, and
-   zooming out brought both neighbours into view beside the page. */.reader-single,
+   zooming out brought both neighbours into view beside the page. */
+.reader-single,
 .reader-spread,
 .reader-webtoon {
   display: flex;
@@ -85,7 +87,8 @@
 /* Two halves, each anchored to the middle of the viewport. As a centred flex row
    the first page sat in the middle alone and jumped left when the second one
    arrived, so the pair is a fixed grid and an unloaded page still holds its
-   slot. */.reader-spread {
+   slot. */
+.reader-spread {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
@@ -96,7 +99,8 @@
 
 .reader-spread .reader-slot:first-child { justify-self: end; }
 .reader-spread .reader-slot:last-child { justify-self: start; }
-/* Right to left: the lower page number is the right-hand half. */.reader-spread.is-rtl .reader-slot:first-child { grid-column: 2; justify-self: start; }
+/* Right to left: the lower page number is the right-hand half. */
+.reader-spread.is-rtl .reader-slot:first-child { grid-column: 2; justify-self: start; }
 .reader-spread.is-rtl .reader-slot:last-child { grid-column: 1; justify-self: end; }
 
 .reader-slot {
@@ -152,7 +156,8 @@
 /* 指示器落在阅读器自己的深色画布上，用亮墨（与 .reader-page-status 同一条）。 */
 .reader-deriving .loading-indicator { color: var(--reader-ink); }
 
-/* Keep the incoming and outgoing pages visually identical at the handoff. */.reader-single.is-dragging,
+/* Keep the incoming and outgoing pages visually identical at the handoff. */
+.reader-single.is-dragging,
 .reader-spread.is-dragging {
   cursor: grabbing;
 }
@@ -173,7 +178,8 @@
 
 /* One slot per page, of a height the renderer and the windowing arithmetic both
    know. Only the slots inside the window hold anything: continuous mode used to
-   mount the entire archive at once, which is what froze the app. */.reader-webtoon-slot {
+   mount the entire archive at once, which is what froze the app. */
+.reader-webtoon-slot {
   display: flex;
   flex: none;
   align-items: flex-start;
@@ -189,7 +195,8 @@
 /* Loading and failure are one shape in two moods, so a page still on its way and
    a page that gave up read as the same object rather than as two unrelated
    screens — they used to share a branch, and every unloaded page was announced
-   as a failure. */.reader-page-status {
+   as a failure. */
+.reader-page-status {
   display: grid;
   place-items: center;
   gap: var(--space-3);
@@ -206,7 +213,8 @@
 .reader-page-status.is-failed { text-align: center; }
 
 /* 阅读器里的加载指示就是全应用那一个（M3 圆形指示器），只换颜色：它落在自己的
-   深色画布上，用阅读器的亮墨，免得第一页到达前先在浅色底上闪一下。 */.reader-screen-loading .loading-indicator,
+   深色画布上，用阅读器的亮墨，免得第一页到达前先在浅色底上闪一下。 */
+.reader-screen-loading .loading-indicator,
 .reader-page-status .loading-indicator { color: var(--reader-ink); }
 .reader-screen-loading .loading-indicator svg { stroke: var(--reader-ink); }
 
@@ -316,7 +324,8 @@
 
 /* The two bars are positioned, not laid out in a grid, because they animate
    separately: as one grid with one transform the bottom bar slid in from the top
-   of the screen, which is not where it lives. */.reader-chrome {
+   of the screen, which is not where it lives. */
+.reader-chrome {
   position: absolute;
   inset: 0;
   z-index: var(--z-reader-chrome);
@@ -430,7 +439,8 @@
    corner slot rides the right gap of a height-filling one, and both fade out
    in continuous mode and while zoomed. It carries M3's label-medium: 12sp at
    weight 500 with 0.5sp tracking. 底色与「处理中」胶囊同一档
-   （surface-container-high），两者都是浮在画面上的小台面。 */.reader-page-indicator {
+   （surface-container-high），两者都是浮在画面上的小台面。 */
+.reader-page-indicator {
   position: fixed;
   z-index: var(--z-reader-chrome);
   right: 16px;
@@ -454,13 +464,15 @@
   transition-property: opacity, translate, scale;
 }
 
-/* Width-filling image: there is real room below it — take the centre slot. */.reader-page-indicator[data-placement='bottom'] {
+/* Width-filling image: there is real room below it — take the centre slot. */
+.reader-page-indicator[data-placement='bottom'] {
   right: auto;
   left: 50%;
   transform: translateX(-50%);
 }
 
-/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */.reader-page-indicator[data-visible='false'] { opacity: 0; translate: 0 6px; scale: 0.96; }
+/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */
+.reader-page-indicator[data-visible='false'] { opacity: 0; translate: 0 6px; scale: 0.96; }
 .reader-page-indicator[data-visible='true'] { animation: reader-indicator-in var(--motion-standard) backwards; }
 @keyframes reader-indicator-in {
   from { opacity: 0; translate: 0 6px; scale: 0.96; }
@@ -474,12 +486,15 @@
    那一条，胶囊整段淡出、栏摘掉后按基准那条 `--motion-standard` 淡回，位置一次都不动
    ——所以这里没有对应的规则。留这条注释是为了下次有人想把它加回来时先看到理由。 */
 
-/* 阅读器里的等待标记（2026-10-15 用户要求：去掉背景部分、更具液态感）。
+/* 阅读器里的等待标记（2026-10-15 去背景；2026-10-16 用户要求：中间不要有 LOGO、再简洁）。
  *
  * 一、M3 那圈淡轨道在这里是多余的：阅读器这两块容器本来就是纯色画布，淡圈既不是
  *     页面也不是台面，只是噪声，去掉。
- * 二、弧的伸缩改成「一滴水拉长—回缩—滑走」：弧长先慢后快地涨落，整枚标记的转速带
- *     缓动并叠一点点呼吸（静止像水滴、动起来像流动），而不是原来那种等速地转。
+ * 二、中间那枚 `YomikaMark` 拿掉了：一个「正在加载」的圈里压着品牌标是两件事叠在一起
+ *     （用户 2026-10-16 报「中间不要有LOGO啥的」）。标记只剩一段弧。
+ * 三、运动只剩两件：整圈匀速转 + 弧长「拉长—回缩—滑走」。原先还叠了一点 scale 呼吸，
+ *     看上去在抖，去掉。尺寸也统一了：整页那档跟着 `is-lg` 是 72px、中间还压着一枚
+ *     24px 的标，现在两个容器都收到 44px、笔画 3px，是同一个安静的小圈。
  *
  * 只落在阅读器的两个容器上（整页加载与单页加载），全应用那一个 M3 指示器不动。
  * 减弱动效那一档在 shell.css 的通杀块里被压成呼吸，形状动画由那边一条 `!important`
@@ -489,38 +504,30 @@
 
 .reader-screen-loading .loading-indicator svg,
 .reader-page-status .loading-indicator svg {
+  width: 44px;
+  height: 44px;
   animation: reader-loading-flow var(--duration-pulse) var(--ease-pulse) infinite;
 }
 
 .reader-screen-loading .loading-indicator-arc,
 .reader-page-status .loading-indicator-arc {
+  stroke-width: 3;
   animation: reader-loading-drop var(--duration-pulse) var(--ease-pulse) infinite;
 }
 
 /* 2πr ≈ 125.7（r=20），所以每一帧的 dasharray 之和都取 126，和 M3 那套同尺。 */
 @keyframes reader-loading-flow {
-  0% { transform: rotate(0deg) scale(1); }
-  50% { transform: rotate(200deg) scale(1.05); }
-  100% { transform: rotate(360deg) scale(1); }
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
 @keyframes reader-loading-drop {
   0% { stroke-dasharray: 2 124; stroke-dashoffset: 0; }
-  30% { stroke-dasharray: 74 52; stroke-dashoffset: -10; }
-  55% { stroke-dasharray: 122 4; stroke-dashoffset: -48; }
-  80% { stroke-dasharray: 44 82; stroke-dashoffset: -104; }
+  35% { stroke-dasharray: 64 62; stroke-dashoffset: -14; }
+  60% { stroke-dasharray: 96 30; stroke-dashoffset: -52; }
+  85% { stroke-dasharray: 40 86; stroke-dashoffset: -108; }
   100% { stroke-dasharray: 2 124; stroke-dashoffset: -126; }
 }
-
-.loading-indicator.is-reader { --yomika-mark-plate: transparent; }
-.loading-indicator.is-reader > svg { grid-area: 1 / 1; }
-.loading-indicator.is-reader > .reader-loading-glyph {
-  width: 24px;
-  height: 24px;
-  animation: none;
-  color: var(--reader-primary);
-}
-.loading-indicator.is-reader .loading-indicator-arc { stroke-width: 2.5; stroke: var(--reader-primary); }
 
 /* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时跟着栏一起淡出（`is-leaving` 就是这一
    档）。它**不再有落位要推迟**：胶囊在「栏在 + 退场」整段里根本不移动（2026-10-15 改成
@@ -717,7 +724,8 @@
   flex: 0 0 var(--icon-button-size);
 }
 
-/* Every control is an icon now, so no button needs extra text width. */.reader-webtoon-inner {
+/* Every control is an icon now, so no button needs extra text width. */
+.reader-webtoon-inner {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -746,7 +754,8 @@
 
 .reader-retry-button svg { width: 24px; height: 24px; }
 
-/* Centred overview instead of a side drawer: cover, size, tags, then pages. */.reader-overview-backdrop {
+/* Centred overview instead of a side drawer: cover, size, tags, then pages. */
+.reader-overview-backdrop {
   position: absolute;
   inset: 0;
   z-index: var(--z-reader-overview);
@@ -766,7 +775,6 @@
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: var(--space-4);
   width: min(100%, 880px);
-  max-height: min(86vh, 760px);
   max-height: min(86dvh, 760px);
   /* M3 dialog: 24dp of padding inside a container that uses the extra-large
      corner (--radius-overlay), on the surface-container-high role.
@@ -816,13 +824,15 @@
 
 /* Cover with its own facts underneath: page count and byte size describe the
    archive, not its tags, and in the wide column they pushed every tag group down
-   a line. */.reader-overview-identity {
+   a line. */
+.reader-overview-identity {
   display: grid;
   align-content: start;
   gap: var(--space-2);
 }
 
-/* 框负责尺寸与裁切，图片只负责填满：模糊与放大都发生在框里面。 */.reader-overview-cover-frame {
+/* 框负责尺寸与裁切，图片只负责填满：模糊与放大都发生在框里面。 */
+.reader-overview-cover-frame {
   display: block;
   width: 120px;
   aspect-ratio: 3 / 4;
@@ -838,7 +848,8 @@
 }
 
 /* SFW 也覆盖这面概览：封面与页缩略图是浏览用的画面，和档案库的封面一样默认
-   模糊，悬停或聚焦到才显示。正在读的那一页不在此列——那是内容本身。 */:root[data-sfw='true'] .reader-overview-cover,
+   模糊，悬停或聚焦到才显示。正在读的那一页不在此列——那是内容本身。 */
+:root[data-sfw='true'] .reader-overview-cover,
 :root[data-sfw='true'] .reader-overview-thumbnails img {
   filter: blur(14px);
   transform: scale(1.12);
@@ -879,7 +890,8 @@
 .reader-overview-stats dt svg { width: 16px; height: 16px; }
 .reader-overview-stats dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
-   rather than being one run of identical chips. */.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
+   rather than being one run of identical chips. */
+.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
 .reader-overview-tags .tag-group { display: grid; gap: 4px; }
 /* 命名空间的标题就是那枚带色芯片（`.tag-group h3`），所以这里不能再写颜色：这条
    规则的特异性 (0,2,1) 压得住 `.tag-group-artist h3` 那几条 (0,1,1)，一写就把芯片
@@ -924,7 +936,8 @@
    value is a deep teal — invisible against the panel it sits on. */
 .reader-overview-thumbnails button[aria-current="true"] { border-color: var(--primary); }
 /* Preview mode (opened from the duplicate workspace): the grid is reference
-   only, and it must not look like a control that will turn the page. */.reader-overview-thumbnails.is-preview button { cursor: default; }
+   only, and it must not look like a control that will turn the page. */
+.reader-overview-thumbnails.is-preview button { cursor: default; }
 .reader-overview-thumbnails img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 
 /* 页码压在缩略图上，底下的画面可能是任何亮度（SFW 下还带着模糊），所以它和阅读
@@ -947,7 +960,8 @@
    shell's own media query. 底栏**不在这条查询里改对齐**：上一轮把 ≤900px 的
    `justify-content` 压成 `flex-start`，于是窗口一窄，页码就从栏中间滑到左边
    （user report: 「修复移动模式下底栏组件没有居中的问题」）。三段式的网格在
-   900px 下仍然放得开，只有组内间距收一档。 */@media (max-width: 900px) {
+   900px 下仍然放得开，只有组内间距收一档。 */
+@media (max-width: 900px) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
   .reader-overview-cover-frame { width: 88px; }
   .reader-toolbar {

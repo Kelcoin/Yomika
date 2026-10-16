@@ -862,7 +862,7 @@ pub fn save_sync_account(
 ) -> CommandResult<SyncAccountRecord> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     save_sync_account_record(&mut connection, &SystemWebdavCredentialStore, input)
 }
@@ -940,7 +940,7 @@ async fn test_sync_account_inner(
         let stored = {
             let connection = match database.connection.lock() {
                 Ok(connection) => connection,
-                Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+                Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
             };
             connection
                 .query_row(
@@ -1031,7 +1031,7 @@ pub fn save_sync_scope(
 ) -> CommandResult<SyncAccountRecord> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let serialized = serialize_sync_scope(&parse_sync_scope(&sync_scope));
     let updated = match connection.execute(
@@ -1056,7 +1056,7 @@ pub fn list_sync_accounts(
 ) -> CommandResult<Vec<SyncAccountRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match query_sync_accounts(&connection) {
         Ok(accounts) => CommandResult::success(accounts),
@@ -1817,7 +1817,7 @@ async fn sync_remote_scope_inner(
     let (account, key, local_state, pending, enabled) = {
         let connection = match database.connection.lock() {
             Ok(connection) => connection,
-            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+            Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
         };
         let account = match read_sync_account(&connection, &account_id) {
             Ok(account) => account,
@@ -1954,7 +1954,7 @@ pub fn export_scoped_data(
 ) -> CommandResult<ScopedExportReport> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     // 文件这条路认的是导出词表（含应用设置），不是同步词表：见
     // `data_transfer::parse_record_categories`。
@@ -2030,7 +2030,7 @@ pub fn import_scoped_data(
     };
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     // 同 `export_scoped_data`：导入按导出词表裁，应用设置才搬得动。
     let enabled = crate::data_transfer::parse_record_categories(&categories);
@@ -2154,7 +2154,7 @@ pub fn sync_account_credential(
 ) -> CommandResult<String> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let account = match read_sync_account(&connection, &account_id) {
         Ok(account) => account,
@@ -2188,7 +2188,7 @@ async fn reset_remote_state_inner(
     let (account, credential) = {
         let connection = match database.connection.lock() {
             Ok(connection) => connection,
-            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+            Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
         };
         let account = match read_sync_account(&connection, &account_id) {
             Ok(account) => account,
@@ -2386,7 +2386,7 @@ async fn sync_scope_impl(
     {
         let mut connection = match database.connection.lock() {
             Ok(connection) => connection,
-            Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+            Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
         };
         let sequences = pending.iter().map(|record| record.sequence).collect::<Vec<_>>();
         if let Err(error) =
@@ -2698,7 +2698,7 @@ pub fn claim_sync_journal(
 ) -> CommandResult<Vec<SyncJournalRecord>> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match claim_journal_entries(&mut connection, &scope_id, limit) {
         Ok(records) => CommandResult::success(records),
@@ -2713,7 +2713,7 @@ pub fn append_sync_journal(
 ) -> CommandResult<SyncJournalRecord> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match append_journal_entry(&connection, entry) {
         Ok(record) => CommandResult::success(record),
@@ -2729,7 +2729,7 @@ pub fn list_sync_journal(
 ) -> CommandResult<Vec<SyncJournalRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match query_journal_entries(&connection, &scope_id, status.as_deref()) {
         Ok(records) => CommandResult::success(records),
@@ -2744,7 +2744,7 @@ pub fn set_sync_journal_state(
 ) -> CommandResult<SyncJournalRecord> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match update_journal_state(
         &connection,

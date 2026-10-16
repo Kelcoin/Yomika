@@ -1,3 +1,11 @@
+//! LANraragi 客户端命令：服务器、档案、分类、搜索、元数据、阅读进度与书架。
+//!
+//! 这一层是「远端服务器 + 本机镜像」两边的缝合处，规矩按数据归属分：远端是真相来源的
+//! 东西以远端为准、失败就如实报错（`read_favorites_category` 不再拿本地缓存兜底），
+//! 本机独有的东西落本地库、镜像只单向写回（`persist_archive_metadata` 不会反过来覆盖
+//! 用户自己的整理）。所有同步命令都必须遵守 `command_dispatch` 的不变量：不许 `block_on`、
+//! 不许锁那把全局库锁、不许等子进程。
+
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Client;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -917,7 +925,7 @@ pub async fn list_categories(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -1069,7 +1077,7 @@ pub async fn add_archive_to_category(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -1147,7 +1155,7 @@ pub async fn remove_archive_from_category(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -1220,7 +1228,7 @@ pub async fn update_archive_metadata(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -1308,7 +1316,7 @@ pub async fn list_metadata_plugins(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -1357,7 +1365,7 @@ pub async fn use_metadata_plugin(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -1420,7 +1428,7 @@ pub async fn load_archive_metadata(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -1453,7 +1461,7 @@ pub async fn load_archive_metadata(
         let reconciliation = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|connection| {
                 reconcile_missing_archive_status(&connection, &server_id, &archive_id, status)
             });
@@ -1491,7 +1499,7 @@ pub async fn load_archive_metadata(
         ));
     }
     let persisted = database.connection.lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|mut connection| persist_archive_metadata(&mut connection, &server_id, &wire));
     if let Err(error) = persisted {
         return Ok(CommandResult::failure("LOCAL_DATABASE", error, true));
@@ -1528,7 +1536,7 @@ pub async fn download_archive(
         let connection = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())?;
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
         let (base_url, scope_id) = server_connection(&connection, &server_id)?;
         let directory = resolved_download_directory(&app, &connection)?;
         (base_url, scope_id, directory)
@@ -2036,7 +2044,7 @@ fn create_download_task(
     let connection = database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())?;
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
     let id = new_task_id();
     connection
         .execute(
@@ -3192,7 +3200,7 @@ pub fn list_local_archives(
 ) -> CommandResult<Vec<LocalArchiveRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let directory = match resolved_download_directory(&app, &connection) {
         Ok(directory) => directory,
@@ -3216,7 +3224,7 @@ pub fn delete_local_archives(
 ) -> CommandResult<usize> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let directory = match resolved_download_directory(&app, &connection) {
         Ok(directory) => directory,
@@ -3291,7 +3299,7 @@ pub async fn resume_download(
         let connection = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())?;
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
         connection
             .query_row(
                 "SELECT label, server_id, archive_id, local_path, received_bytes, total_bytes, status
@@ -3346,7 +3354,7 @@ pub async fn resume_download(
         let connection = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())?;
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
         server_connection(&connection, &server_id)?
     };
     // 文件被外部删掉或者短了，就从它现在真正有的地方接。
@@ -3422,7 +3430,7 @@ pub async fn delete_archive(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -3478,7 +3486,7 @@ pub async fn delete_archive(
         Err(_) => {
             return Ok(CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             ))
         }
@@ -3527,7 +3535,7 @@ pub(crate) async fn delete_archive_with_favorite_sync(
                 let connection = database
                     .connection
                     .lock()
-                    .map_err(|_| "Database lock failed".to_string())?;
+                    .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
                 connection
                     .query_row(
                         "SELECT id FROM eh_accounts WHERE is_active=1 ORDER BY id LIMIT 1",
@@ -3630,7 +3638,7 @@ pub async fn load_reader_manifest(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -3728,7 +3736,7 @@ async fn load_reader_page_bytes(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -3834,7 +3842,7 @@ pub(crate) async fn load_archive_thumbnail_bytes(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -4028,7 +4036,7 @@ async fn load_archive_page_thumbnail_bytes(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -4522,7 +4530,7 @@ pub fn replace_archives(
     };
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match replace_server_archives(&mut connection, &input.server_id, &archives) {
         Ok(records) => CommandResult::success(records),
@@ -4830,7 +4838,7 @@ pub async fn read_favorites_category(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -5066,7 +5074,7 @@ pub async fn refresh_archives(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &input.server_id))
     {
         Ok(value) => value,
@@ -5093,7 +5101,7 @@ pub async fn refresh_archives(
         Err(_) => {
             return Ok(CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed".to_string(),
+                crate::cache::LOCK_FAILED.to_string(),
                 true,
             ))
         }
@@ -5201,7 +5209,7 @@ pub async fn probe_new_archives(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &server_id))
     {
         Ok(value) => value,
@@ -5251,7 +5259,7 @@ pub async fn probe_new_archives(
         Err(_) => {
             return Ok(CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed".to_string(),
+                crate::cache::LOCK_FAILED.to_string(),
                 true,
             ))
         }
@@ -5325,7 +5333,7 @@ pub async fn search_archives_page(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &input.server_id))
     {
         Ok(value) => value,
@@ -5372,7 +5380,7 @@ pub async fn search_archives_page(
         Err(_) => {
             return Ok(CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed".to_string(),
+                crate::cache::LOCK_FAILED.to_string(),
                 true,
             ))
         }
@@ -5511,7 +5519,7 @@ pub async fn search_random_archives(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|c| server_connection(&c, &input.server_id))
     {
         Ok(value) => value,
@@ -5559,7 +5567,7 @@ pub async fn search_random_archives(
         Err(_) => {
             return Ok(CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed".to_string(),
+                crate::cache::LOCK_FAILED.to_string(),
                 true,
             ))
         }
@@ -5879,7 +5887,7 @@ pub fn set_server_enabled(
 ) -> CommandResult<ServerRecord> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     set_server_enabled_record(&mut connection, &server_id, enabled)
 }
@@ -5978,7 +5986,7 @@ pub async fn save_server(
         Err(_) => {
             return Ok(CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             ))
         }
@@ -6009,7 +6017,7 @@ pub fn read_server_api_key(scope_id: String) -> CommandResult<String> {
 pub fn list_servers(database: State<'_, Database>) -> CommandResult<Vec<ServerRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     read_servers(&connection)
 }
@@ -6023,7 +6031,7 @@ pub fn delete_server(
 ) -> CommandResult<Vec<ServerRecord>> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     delete_server_record(&mut connection, &server_id, |scope_id| {
         // 凭据条目挂在 scope id 上。删不到（本来就没存过）不算失败：目标状态是「没有
@@ -6042,7 +6050,7 @@ pub async fn check_server_status(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -6137,7 +6145,7 @@ pub fn list_archives(
 ) -> CommandResult<Vec<ArchiveRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match query_archive_records(&connection, &server_id) {
         Ok(archives) => CommandResult::success(archives),
@@ -6164,7 +6172,7 @@ pub fn list_archive_identities(
 ) -> CommandResult<Vec<ArchiveIdentity>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let query = || -> Result<Vec<ArchiveIdentity>, String> {
         let mut statement = connection.prepare(
@@ -6199,7 +6207,7 @@ pub fn list_archives_page(
 ) -> CommandResult<ArchivePage> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match query_archive_page(&connection, &input) {
         Ok(page) => CommandResult::success(page),
@@ -6218,7 +6226,7 @@ pub fn list_archives_by_ids(
 ) -> CommandResult<Vec<ArchiveRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match query_archive_records_by_ids(&connection, &server_id, &archive_ids) {
         Ok(archives) => CommandResult::success(archives),
@@ -6256,7 +6264,7 @@ pub async fn verify_archives_exist(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -6317,7 +6325,7 @@ pub async fn verify_archives_exist(
         let tombstoned = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|connection| {
                 reconcile_missing_archive_status(&connection, &server_id, &archive_id, status)
             });
@@ -6355,7 +6363,7 @@ pub fn save_reading_progress(
     }
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let record = match persist_reading_progress(&mut connection, progress) {
         Ok(record) => record,
@@ -6782,7 +6790,7 @@ pub fn save_search_preset(
     }
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match write_search_preset(&mut connection, &input) {
         Ok(record) => CommandResult::success(record),
@@ -6798,7 +6806,7 @@ pub fn delete_search_preset(
 ) -> CommandResult<SearchPresetRecord> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let result = (|| -> Result<SearchPresetRecord, String> {
         let transaction = connection
@@ -6830,7 +6838,7 @@ pub fn list_search_presets(
 ) -> CommandResult<Vec<SearchPresetRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let result = (|| -> Result<Vec<SearchPresetRecord>, String> {
         let mut statement = connection
@@ -6877,7 +6885,7 @@ pub fn set_reading_list(
 ) -> CommandResult<WatchlistRecord> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match set_reading_list_entry(&mut connection, &scope_id, &archive_id, added) {
         Ok(record) => CommandResult::success(record),
@@ -6902,7 +6910,7 @@ pub fn get_archive_membership(
 ) -> CommandResult<ArchiveMembershipStatus> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let probe = |table: &str| -> Result<bool, String> {
         connection
@@ -6935,7 +6943,7 @@ pub fn list_reading_list(
 ) -> CommandResult<Vec<WatchlistRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let result =
         (|| -> Result<Vec<WatchlistRecord>, String> {
@@ -6975,7 +6983,7 @@ pub fn set_watchlist(
 ) -> CommandResult<WatchlistRecord> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match set_watchlist_entry(&mut connection, &scope_id, &archive_id, added) {
         Ok(record) => CommandResult::success(record),
@@ -6990,7 +6998,7 @@ pub fn list_watchlist(
 ) -> CommandResult<Vec<WatchlistRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let result =
         (|| -> Result<Vec<WatchlistRecord>, String> {
@@ -7179,7 +7187,7 @@ pub fn delete_history_records(
 ) -> CommandResult<usize> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match delete_history_records_in(&mut connection, &scope_id, &archive_ids) {
         Ok(removed) => CommandResult::success(removed),
@@ -7192,7 +7200,7 @@ pub fn delete_history_records(
 pub fn prune_history(database: State<'_, Database>) -> CommandResult<usize> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match prune_reading_history(&mut connection, now_millis()) {
         Ok(removed) => CommandResult::success(removed),
@@ -7321,7 +7329,7 @@ pub fn prune_dangling_records(
 ) -> CommandResult<PrunedRecords> {
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match prune_dangling_records_for_server(&mut connection, &server_id) {
         Ok(pruned) => CommandResult::success(pruned),
@@ -7337,7 +7345,7 @@ pub fn list_reading_history(
 ) -> CommandResult<Vec<ReadingHistoryRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let result = (|| -> Result<Vec<ReadingHistoryRecord>, String> {
         let mut statement = connection
@@ -7378,7 +7386,7 @@ pub fn load_reading_progress(
 ) -> CommandResult<Option<ReadingProgressRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match connection
         .query_row(
@@ -7410,7 +7418,7 @@ pub fn create_task(task: TaskInput, database: State<'_, Database>) -> CommandRes
     let id = new_task_id();
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let result = connection.execute(
         "INSERT INTO tasks (id, kind, label, status, progress) VALUES (?1, ?2, ?3, 'queued', 0)",
@@ -7444,7 +7452,7 @@ fn query_tasks(connection: &rusqlite::Connection) -> Result<Vec<TaskRecord>, Str
 pub fn list_tasks(database: State<'_, Database>) -> CommandResult<Vec<TaskRecord>> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match query_tasks(&connection) {
         Ok(tasks) => CommandResult::success(tasks),
@@ -7571,7 +7579,7 @@ pub fn update_task(
     }
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match transition_task(
         &connection,
@@ -7592,7 +7600,7 @@ pub fn update_task(
 pub fn retry_task(id: String, database: State<'_, Database>) -> CommandResult<TaskRecord> {
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match retry_failed_task(&connection, &id) {
         Ok(task) => CommandResult::success(task),
@@ -7614,7 +7622,7 @@ pub async fn upload_archive(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,
@@ -7626,7 +7634,7 @@ pub async fn upload_archive(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -7809,7 +7817,7 @@ pub async fn download_url(
     let (base_url, scope_id) = match database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|connection| server_connection(&connection, &server_id))
     {
         Ok(value) => value,

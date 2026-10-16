@@ -255,7 +255,7 @@ pub fn save_eh_account(
 ) -> CommandResult<EhAccountRecord> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     save_eh_account_record(&mut connection, &SystemEhCookieStore, input)
 }
@@ -264,7 +264,7 @@ pub fn save_eh_account(
 pub fn list_eh_accounts(database: State<'_, Database>) -> CommandResult<Vec<EhAccountRecord>> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let mut statement = match connection.prepare("SELECT id,label,host,username_hint,cookie_ref,is_active,status,created_at,updated_at,gp,credits,hath,exhentai_access FROM eh_accounts ORDER BY label COLLATE NOCASE,id") { Ok(value) => value, Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true) };
     let rows = match statement.query_map([], |row| {
@@ -300,7 +300,7 @@ pub fn read_eh_account_cookie(
 ) -> CommandResult<String> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match read_account_cookie(&connection, &SystemEhCookieReader, &account_id) {
         Ok((cookie, _, _)) => CommandResult::success(cookie),
@@ -312,7 +312,7 @@ pub fn read_eh_account_cookie(
 pub fn remove_eh_account(account_id: String, database: State<'_, Database>) -> CommandResult<()> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let cookie_ref: Option<String> = connection
         .query_row(
@@ -1237,7 +1237,7 @@ pub async fn search_eh_galleries(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -1335,7 +1335,7 @@ pub async fn remove_eh_favorite(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -1511,7 +1511,7 @@ pub async fn vote_eh_comment(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -2223,7 +2223,7 @@ pub async fn get_eh_comments(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -2293,7 +2293,7 @@ pub async fn post_eh_comment(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -2361,7 +2361,7 @@ pub async fn check_eh_login_health(
             Err(_) => {
                 return Ok(CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 ))
             }
@@ -2419,7 +2419,7 @@ pub async fn fetch_eh_forum_username(
     let cookie = {
         let connection = match database.connection.lock() {
             Ok(value) => value,
-            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+            Err(_) => return Ok(CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true)),
         };
         match read_account_cookie(&connection, &SystemEhCookieReader, &account_id) {
             Ok((cookie, _, _)) => cookie,
@@ -2468,7 +2468,7 @@ pub fn set_eh_username_hint(
     }
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match connection.execute(
         "UPDATE eh_accounts SET username_hint=?1, updated_at=CURRENT_TIMESTAMP WHERE id=?2",
@@ -2645,7 +2645,7 @@ pub async fn fetch_eh_my_tags(
     let (cookie, host, _) = {
         let connection = match database.connection.lock() {
             Ok(value) => value,
-            Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+            Err(_) => return Ok(CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true)),
         };
         match read_account_cookie(&connection, &SystemEhCookieReader, &account_id) {
             Ok(value) => value,
@@ -2667,7 +2667,7 @@ pub async fn fetch_eh_my_tags(
     let tags = parse_eh_my_tags(&body);
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return Ok(CommandResult::failure("UNKNOWN", "Database lock failed", true)),
+        Err(_) => return Ok(CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true)),
     };
     match store_eh_my_tags(&mut connection, &account_id, &tags) {
         Ok(()) => Ok(CommandResult::success(tags)),
@@ -2682,7 +2682,7 @@ pub fn list_eh_my_tags(
 ) -> CommandResult<Vec<EhMyTagRecord>> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     match read_eh_my_tags(&connection, &account_id) {
         Ok(tags) => CommandResult::success(tags),

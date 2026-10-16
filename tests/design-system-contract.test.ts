@@ -456,8 +456,19 @@ describe('design system contract', () => {
     const expectedHeight = itemHeight * rows + space1 * 2 + 1 * 2;
     expect(rust).toMatch(new RegExp(`pub const MENU_HEIGHT: f64 = ${expectedHeight}\\.0;`));
     expect(css).toMatch(/\.tray-menu \{[\s\S]*?inset:\s*0/);
-    // 84px 是**窄于**系统菜单的：参考图里两个双字条目的系统菜单约 121px。
-    expect(rust).toMatch(/pub const MENU_WIDTH: f64 = 84\.0;/);
+    // 宽度按同一笔账现算：两个双字标签的墨迹（13px × 2）+ 条目左右各 8px 内边距 + 容器
+    // 左右各 4px 内边距 + 两条 1px 边框 + 两侧各 4px 余量。这样改设计只发生在 CSS/令牌那
+    // 一侧，Rust 那个数不再需要人肉同步。2026-10-16 按这笔账从 84 收到 60：84 里两个双字
+    // 标签左右各空 29px，用户报「左右空隙太大」（工装 debug_outputs/tray-round/probe-tray.mjs
+    // 在 84/72/64/60/56/52 六个宽度下量过，60 两侧各 17px、不裁切）。
+    const space2 = Number(/--space-2:\s*(\d+)px/.exec(read('src/styles/tokens.css'))?.[1]);
+    const textSm = Number(/--text-sm:\s*(\d+)px/.exec(read('src/styles/tokens.css'))?.[1]);
+    expect(space2).toBeGreaterThan(0);
+    expect(textSm).toBeGreaterThan(0);
+    const expectedWidth = textSm * 2 + space2 * 2 + space1 * 2 + 1 * 2 + 4 * 2;
+    expect(rust).toMatch(new RegExp(`pub const MENU_WIDTH: f64 = ${expectedWidth}\\.0;`));
+    // 仍然**窄于**系统菜单：参考图里两个双字条目的系统菜单约 121px。
+    expect(expectedWidth).toBeLessThan(84);
     // 创建时的尺寸会被系统夹到 SM_CXMINTRACK（这台机器 96 DPI 下实测 136×39，150% 缩放下
     // 202×56），而 SetWindowPos 不受这个下限约束——所以建好之后必须再显式设一次，否则菜单
     // 是 136 宽，比系统菜单还宽。
@@ -2426,11 +2437,12 @@ describe('design system contract', () => {
       }
       expect(css, `${path} 的布局高度必须读 --viewport-height`).toMatch(/var\(--viewport-height\)/);
     }
-    // 其余 `N dvh`（限高那一类）不进高度链：丢掉了只是元素少一层上限，不会让整页
-    // 失去滚动容器。这里仍要求一条 `vh` 双写，是给**源码**留的读法；要说明白的是：
-    // 限高那几处（`max-height: min(52dvh, 460px)` 之类，9 处）在产物里会被压缩器删掉
-    // 双写，所以它们在老 WebView 上实际没有兜底——这是已知缺口，记在 docs/163 §11，
-    // 不在这条用例的射程内（滚动链由上面 `--viewport-height` 那一段守）。
+    // 其余 `N dvh` 不进高度链：丢掉了只是元素少一层上限，不会让整页失去滚动容器。
+    // 这里**不再**要求限高那一类写 `vh` 双写：压缩器会把同一选择器里后写的那条当冗余
+    // 删掉，双写根本发不出去，留着只是「看着像兜底」的死声明（2026-10-16 规范注释时
+    // 删掉了 `.dedup-relations-list` 那对 46vh/46dvh，剩下的同类也一并删了）。
+    // 要给旧 WebView 兜底得走 base.css 里 `--viewport-height` 那种 @supports 变量，
+    // 滚动链由上面 `--viewport-height` 那一段守；限高没有兜底是已知缺口，记在 docs/163 §11。
     // 唯一的例外是 base.css 里那份变量升级——它由上面的 `@supports` 守着。
     for (const path of ['src/styles/shell.css', 'src/styles/reader.css', 'src/styles/base.css']) {
       // 先把注释挖成空白（保留换行，行号不变）：注释里提到 `100dvh` 不是声明。
@@ -2441,6 +2453,8 @@ describe('design system contract', () => {
         if (/--viewport-height\s*:/.test(line)) return;
         // `@supports (height: 1dvh) {` 是条件本身，不是声明，它不需要 vh 兜底。
         if (/^\s*@supports\b/.test(line)) return;
+        // 限高（`max-height`）不要求双写：双写发不出去，见上面的说明。
+        if (/max-height\s*:/.test(line)) return;
         expect(lines[index - 1], `${path}:${index + 1} 的 dvh 前面要有 vh 兜底`).toBe(line.replace(/dvh/g, 'vh'));
       });
     }
@@ -2739,6 +2753,14 @@ describe('design system contract', () => {
     );
     expect(ruleBody(reader, '@keyframes reader-loading-drop'), '液态伸缩的 keyframes 必须在').toMatch(/stroke-dasharray/);
     expect(ruleBody(reader, '@keyframes reader-loading-flow'), '流动的 keyframes 必须在').toMatch(/rotate\(360deg\)/);
+    // 2026-10-16 用户要求「中间不要有LOGO啥的，简洁一点」：圈里那枚品牌标拿掉了，运动也
+    // 只剩「匀速转 + 弧长伸缩」——再叠 scale 呼吸就会看着在抖，尺寸也统一收到 44px。
+    const indicator = read('src/components/LoadingIndicator.tsx');
+    expect(indicator, '加载标记里不许再画品牌标').not.toMatch(/YomikaMark|reader-loading-glyph/);
+    expect(reader, '阅读器那套 is-reader 规则应当整段删掉，而不是留着不生效').not.toMatch(/reader-loading-glyph|\.loading-indicator\.is-reader/);
+    expect(ruleBody(reader, '@keyframes reader-loading-flow'), '整枚标记只匀速转，不再叠 scale 呼吸').not.toMatch(/scale\(/);
+    expect(ruleBody(reader, '.reader-page-status .loading-indicator svg'), '两个容器统一收到 44px').toMatch(/width:\s*44px/);
+    expect(ruleBody(reader, '.reader-page-status .loading-indicator-arc'), '笔画 3px，别再回到 2.5').toMatch(/stroke-width:\s*3/);
     // 全应用那一个 M3 指示器不能被顺手改掉：轨道与 dash 那套 keyframes 还在 shell.css 里。
     const shell = read('src/styles/shell.css');
     expect(ruleBody(shell, '.loading-indicator-track'), '全应用的 M3 轨道不能被顺手删掉').toMatch(/stroke:\s*color-mix/);

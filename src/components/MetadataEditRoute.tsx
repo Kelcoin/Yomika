@@ -46,9 +46,8 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
   const editorOwner = useRef({ identity: editorIdentity, version: 0, busy: false });
   if (editorOwner.current.identity !== editorIdentity) editorOwner.current = { identity: editorIdentity, version: 0, busy: false };
 
-  // Both reach the toast as well as the page. This panel is embedded in settings,
-  // where every neighbouring control reports that way, and an error rendered only
-  // at the bottom of a scrolled panel is an error nobody sees.
+  // 错误既进页面也进吐司：这个面板嵌在设置里，旁边的每个控件都这么报，而只写在
+  // 滚动面板最下面的一行错，没人看得见。（同步设置那边同一条规矩，指向这里。）
   useEffect(() => {
     if (error) showToast(error, 'error');
   }, [error, showToast]);

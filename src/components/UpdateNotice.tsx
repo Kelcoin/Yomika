@@ -106,7 +106,7 @@ export function UpdateNotice() {
     setDismissed((current) => (current.includes(item.key) ? current : [...current, item.key]));
   }, []);
 
-  // 返回手势先关这一层；忙的时候拒绝（守卫会自己补回去）。
+  // 返回手势先关这一层（规矩见 lib/overlayBackGuard）；忙的时候拒绝，守卫会自己补回去。
   useOverlayBackGuard(Boolean(prompt), () => {
     if (busy || !prompt) return;
     rememberSkipped(prompt.skipKey, prompt.skipValue);

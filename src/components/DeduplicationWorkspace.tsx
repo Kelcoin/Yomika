@@ -198,12 +198,13 @@ export function DeduplicationWorkspace() {
   const [processedNonDuplicatePairKeys, setProcessedNonDuplicatePairKeys] = useState<Set<string>>(new Set());
   const [processedDeletedArchiveIds, setProcessedDeletedArchiveIds] = useState<Set<string>>(new Set());
   const [smartSelectPending, setSmartSelectPending] = useState(false);
+  // 这个文件里的三处浮层都先吃返回手势（规矩见 lib/overlayBackGuard）：智能选择确认、
+  // 不重复关系面板、扫描结果历史。
   useOverlayBackGuard(smartSelectPending, () => setSmartSelectPending(false));
   const [includeFilenameOnly, setIncludeFilenameOnly] = useState(false);
   const [pageGapWarningCount, setPageGapWarningCount] = useState(0);
   const [deleteSession, setDeleteSession] = useState<{ count: number }>();
   // 不重复关系面板：持久化的对（含历史墓碑）直接列出，可搜索、可撤销标记。
-  // 三处浮层都先吃返回手势（见 overlayBackGuard）：关系、历史、智能选择确认。
   const [relationsOpen, setRelationsOpen] = useState(false);
   useOverlayBackGuard(relationsOpen, () => setRelationsOpen(false));
   const [relations, setRelations] = useState<DedupNonDuplicateRecord[]>([]);

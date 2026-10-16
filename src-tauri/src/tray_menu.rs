@@ -19,9 +19,14 @@ pub const MENU_WINDOW: &str = "tray-menu";
 /// 的条目 + 容器 4px 内边距 + 1px 边框 = 62，所以窗口也是 62 高——多一像素就是底下多一条
 /// 透明边，少一像素就是边框被切掉。
 ///
-/// 这两个数曾经是 96×74（32px 的条目、14px 的字号）：用户 2026-09-30 报「菜单太大」——
-/// 一个双字条目在 13px 字号下只有 26px 宽的文字，其余都是空处，于是整块收到 84×62。
-pub const MENU_WIDTH: f64 = 84.0;
+/// 宽度是「两个双字标签要多宽」算出来的，不是挑一个好看的数：13px 字号下两个汉字是
+/// 26px 墨迹 + 条目左右各 8px 内边距 + 容器左右各 4px 内边距 + 两条 1px 边框 + 两侧各
+/// 4px 余量 = **60**。这两个数曾经是 96×74（32px 的条目、14px 的字号），用户 2026-09-30
+/// 报「菜单太大」收到 84×62；84 里两个双字标签左右各空 29px，用户 2026-10-16 又报
+/// 「左右空隙太大」，于是按上面那笔账收到 60——真像素量出来两侧各 17px（工装
+/// `debug_outputs/tray-round/probe-tray.mjs`，同一个文档在 84/72/64/60/56/52 六个宽度下
+/// 逐个量过）。契约测试按同一笔账现算，改设计时只该动 CSS 里那几个令牌。
+pub const MENU_WIDTH: f64 = 60.0;
 pub const MENU_HEIGHT: f64 = 62.0;
 
 /// 菜单左上角的位置（物理像素）。
@@ -218,7 +223,7 @@ mod tests {
         // 透明边。CSS 那份由 design-system-contract.test.ts 一起盯着。
         let css = include_str!("../../src/styles/tray-menu.css");
         assert!(css.contains("inset: 0"), "菜单容器要铺满窗口：{css}");
-        assert_eq!(MENU_WIDTH, 84.0);
+        assert_eq!(MENU_WIDTH, 60.0);
         assert_eq!(MENU_HEIGHT, 62.0);
     }
 

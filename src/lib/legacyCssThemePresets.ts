@@ -1,4 +1,4 @@
-/** Exact old CSS values, retained only to upgrade unedited saved presets. */
+/** 老预设的原始 CSS 值，只为升级存过的旧预设而留：见 cssThemePresets.ts。 */
 export interface CssThemePreset { id: string; label: string; description: string; css: string; }
 const shared = `button,input,select,textarea{border-radius:6px}.metadata-chip{border-radius:4px}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}`;
 export const CSS_THEME_PRESETS: readonly CssThemePreset[] = [

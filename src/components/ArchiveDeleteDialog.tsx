@@ -59,7 +59,8 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const [loadError, setLoadError] = useState<string>();
   const [reload, setReload] = useState(0);
-  // 挂载即打开；返回手势先关这一层（忙的时候拒绝，守卫会自己补回去）。
+  // 挂载即打开；返回手势先关这一层（规矩见 lib/overlayBackGuard）。忙的时候拒绝，
+  // 守卫会自己补回去。
   useOverlayBackGuard(true, () => { if (!busyRef.current) onClose(); });
   useEffect(() => {
     let active = true;

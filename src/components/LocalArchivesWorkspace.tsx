@@ -234,7 +234,7 @@ export function LocalArchivesWorkspace() {
    * 右键删的那一份才不会顺手动到多选的勾选。 */
   const [deletePaths, setDeletePaths] = useState<readonly string[]>();
   const [menuTarget, setMenuTarget] = useState<LocalArchiveContextMenuTarget>();
-  // 返回手势先关确认框（忙的时候拒绝，守卫会自己补回去）。
+  // 返回手势先关确认框（规矩见 lib/overlayBackGuard）；忙的时候拒绝，守卫会自己补回去。
   useOverlayBackGuard(deletePaths !== undefined, () => { if (!busy) setDeletePaths(undefined); });
   const [busy, setBusy] = useState(false);
   const [pendingTaskId, setPendingTaskId] = useState<string>();

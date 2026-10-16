@@ -12,13 +12,17 @@
  * every route still showed the old one, and two loading marks in one app read as
  * two different kinds of waiting.
  *
+ * 阅读器那两处（整页等待与单页等待）不再有这个 `variant`：2026-10-16 用户要求
+ * 「中间不要有LOGO啥的，简洁一点」——那枚压在弧中间的品牌标拿掉了，形状与
+ * 节奏改由 `styles/reader.css` 里按容器选的两条规则决定（去轨道、只留一段会伸缩的
+ * 弧）。所以这里只画 M3 那一枚，谁要改形状就在自己容器的 CSS 里改。
+ *
  * No caption. `label` is the accessible name only: the text under the animation
  * said what the animation already says, and repeated it in three sizes across
  * every route that loads anything.
  */
-import { YomikaMark } from './YomikaMark';
 
-export function LoadingIndicator({ label = '正在加载', size = 'md', inline = false, variant }: { label?: string; size?: 'sm' | 'md' | 'lg'; inline?: boolean; variant?: 'reader' }) {
+export function LoadingIndicator({ label = '正在加载', size = 'md', inline = false }: { label?: string; size?: 'sm' | 'md' | 'lg'; inline?: boolean }) {
   const mark = (
     <svg viewBox="0 0 48 48" aria-hidden="true" focusable="false">
       {/* 2πr ≈ 125.7 for r=20; the dash cycle trims the arc the way the spec's
@@ -32,9 +36,8 @@ export function LoadingIndicator({ label = '正在加载', size = 'md', inline =
   // announces the same wait twice.
   if (inline) return <span className="loading-mark" aria-hidden="true">{mark}</span>;
   return (
-    <div className={`loading-indicator is-${size}${variant === 'reader' ? ' is-reader' : ''}`} role="status" aria-label={label}>
+    <div className={`loading-indicator is-${size}`} role="status" aria-label={label}>
       {mark}
-      {variant === 'reader' && <YomikaMark size={24} className="reader-loading-glyph" />}
     </div>
   );
 }

@@ -70,10 +70,11 @@ describe('去码这一档已经整条下线', () => {
     for (const tree of TREES) {
       for (const file of sourceFiles(tree)) {
         const text = read(file);
-        // 只看记号本身：中文的「去码」在历史注释里可以留，英文标识符不行——枚举、命令名、
-        // 协议字段、错误码全靠它认路。
-        if (/decensor/i.test(text)) {
-          const line = text.split('\n').findIndex((item) => /decensor/i.test(item)) + 1;
+        // 只看记号本身：中文的「去码」在历史注释里可以留，英文写法不行——枚举、命令名、
+        // 协议字段、错误码全靠它认路。连字符那一版（`de-censor`）也要算：它躲过只认
+        // `decensor` 的正则，上一版就是这么漏掉了两处。
+        if (/de[-\s]?censor/i.test(text)) {
+          const line = text.split('\n').findIndex((item) => /de[-\s]?censor/i.test(item)) + 1;
           offenders.push(`${file}:${line}`);
         }
       }
@@ -82,7 +83,7 @@ describe('去码这一档已经整条下线', () => {
   });
 
   it('前端也再没有哪一处提到去码', () => {
-    const offenders = sourceFiles('src').filter((file) => /decensor/i.test(read(file)));
+    const offenders = sourceFiles('src').filter((file) => /de[-\s]?censor/i.test(read(file)));
     expect(offenders, `这几处还在说去码：\n${offenders.join('\n')}`).toEqual([]);
   });
 
@@ -109,13 +110,18 @@ describe('去码这一档已经整条下线', () => {
 
   it('缓存与统计的那套 kind 名单里不再留着永远不会再产出的那一档', () => {
     const cache = read('src-tauri/src/cache.rs');
-    // 取等号右边那一段：常量声明自带长度标注（`[&str; 5]`），从常量名往后切第一个 `]` 会
-    // 切到标注里那一个。
-    const renditions = cache.split('IMAGE_RENDITIONS')[1]?.split('=')[1]?.split(']')[0] ?? '';
+    // 按**声明**切，不按名字切：常量名在文件头与别处也会被提到（2026-10-16 给 cache.rs
+    // 补文件头时正好撞上——按名字切会切到注释里那一次，右边切出来是空串）。
+    // 声明自带长度标注（`[&str; 5]`），所以从名字往后找到第一个 `=` 再吃到 `;`。
+    const declaration = (name: string): string => {
+      const match = new RegExp(`const ${name}[^=]*=([^;]*)`).exec(cache);
+      return match?.[1] ?? '';
+    };
+    const renditions = declaration('IMAGE_RENDITIONS');
     expect(renditions).toContain('dlssnr');
     expect(renditions).not.toContain('decensored');
     // 阅读会话清理的名单同样是「只清真正还会产出的那几档」。
-    const session = cache.split('READER_SESSION_RENDITIONS')[1]?.split('=')[1]?.split(']')[0] ?? '';
+    const session = declaration('READER_SESSION_RENDITIONS');
     expect(session).toContain('dlssnr');
     expect(session).not.toContain('decensored');
   });

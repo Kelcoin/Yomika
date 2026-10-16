@@ -1373,7 +1373,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   if (pages.length === 0) {
     return (
       <ReaderRouteChromeShell className="reader-screen-loading" title={title} goBack={goBack}>
-        <LoadingIndicator label="正在加载页面" size="lg" variant="reader" />
+        <LoadingIndicator label="正在加载页面" size="lg" />
       </ReaderRouteChromeShell>
     );
   }

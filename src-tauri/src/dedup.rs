@@ -3396,7 +3396,7 @@ pub fn dedup_start_scan(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| start_scan(&mut connection, input)),
     )
 }
@@ -3409,7 +3409,7 @@ pub fn dedup_scan_chunk(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| scan_chunk(&mut connection, input)),
     )
 }
@@ -3422,7 +3422,7 @@ pub fn dedup_cancel_scan(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| cancel_scan(&mut connection, session_id)),
     )
 }
@@ -3435,7 +3435,7 @@ pub fn dedup_resume_scan(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| resume_scan(&mut connection, session_id)),
     )
 }
@@ -3448,7 +3448,7 @@ pub fn dedup_load_result(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|connection| load_result(&connection, &session_id)),
     )
 }
@@ -3461,7 +3461,7 @@ pub fn dedup_save_non_duplicate(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
                 let scope_id = input.scope_id.clone();
                 let (pair_key, left, right) =
@@ -3498,7 +3498,7 @@ pub fn dedup_save_non_duplicates(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
                 let mut outcomes = Vec::with_capacity(input.entries.len());
                 for entry in input.entries {
@@ -3534,7 +3534,7 @@ pub fn dedup_remove_non_duplicate(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
                 let scope_id = input.scope_id.clone();
                 let (pair_key, left, right) =
@@ -3562,7 +3562,7 @@ pub fn dedup_list_non_duplicates(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|connection| list_non_duplicates(&connection, &scope_id)),
     )
 }
@@ -3578,7 +3578,7 @@ async fn dedup_delete_selected_impl(
             Err(_) => {
                 return crate::domain::result::CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 )
             }
@@ -3688,7 +3688,7 @@ async fn dedup_delete_selected_impl(
         let persisted = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|mut connection| {
                 delete_selected(
                     &mut connection,
@@ -3728,7 +3728,7 @@ pub fn dedup_import_readoshi(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".into())
+            .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
                 let scope_id = input.scope_id.clone();
                 let pairs = input.pairs.clone();
@@ -3803,7 +3803,7 @@ async fn dedup_scan_impl(
             Err(_) => {
                 return crate::domain::result::CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 )
             }
@@ -3892,7 +3892,7 @@ async fn dedup_scan_impl(
                 Err(_) => {
                     return crate::domain::result::CommandResult::failure(
                         "UNKNOWN",
-                        "Database lock failed",
+                        crate::cache::LOCK_FAILED,
                         true,
                     )
                 }
@@ -3944,7 +3944,7 @@ async fn dedup_scan_impl(
                 Err(_) => {
                     return crate::domain::result::CommandResult::failure(
                         "UNKNOWN",
-                        "Database lock failed",
+                        crate::cache::LOCK_FAILED,
                         true,
                     )
                 }
@@ -4002,7 +4002,7 @@ async fn dedup_scan_impl(
                 let feature = database
                     .connection
                     .lock()
-                    .map_err(|_| "Database lock failed".to_string())
+                    .map_err(|_| crate::cache::LOCK_FAILED.to_string())
                     .and_then(|connection| {
                         load_or_compute_feature(
                             &connection,
@@ -4036,7 +4036,7 @@ async fn dedup_scan_impl(
         let persisted = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|mut connection| {
                 scan_chunk(
                     &mut connection,
@@ -4060,7 +4060,7 @@ async fn dedup_scan_impl(
         let completed = database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|mut connection| {
                 scan_chunk(
                     &mut connection,
@@ -4088,7 +4088,7 @@ async fn dedup_scan_impl(
             Err(_) => {
                 return crate::domain::result::CommandResult::failure(
                     "UNKNOWN",
-                    "Database lock failed",
+                    crate::cache::LOCK_FAILED,
                     true,
                 )
             }
@@ -4135,7 +4135,7 @@ async fn dedup_scan_impl(
     let persisted = database
         .connection
         .lock()
-        .map_err(|_| "Database lock failed".to_string())
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
         .and_then(|mut connection| replace_pairs(&mut connection, &input.session_id, &pairs));
     if let Err(error) = persisted {
         return crate::domain::result::CommandResult::failure("UNKNOWN", error, true);
@@ -4183,7 +4183,7 @@ pub fn dedup_list_sessions(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|connection| list_sessions(&connection, &scope_id, 50)),
     )
 }
@@ -4198,7 +4198,7 @@ pub fn dedup_save_selection(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|mut connection| {
                 save_selection(&mut connection, &session_id, &selected_archive_ids)
             }),
@@ -4214,7 +4214,7 @@ pub fn dedup_delete_session(
         database
             .connection
             .lock()
-            .map_err(|_| "Database lock failed".to_string())
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())
             .and_then(|connection| delete_session(&connection, &session_id)),
     )
 }
@@ -4297,7 +4297,7 @@ pub fn dedup_save_feature(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }
@@ -4330,7 +4330,7 @@ pub fn dedup_find_exact(
         Err(_) => {
             return crate::domain::result::CommandResult::failure(
                 "UNKNOWN",
-                "Database lock failed",
+                crate::cache::LOCK_FAILED,
                 true,
             )
         }

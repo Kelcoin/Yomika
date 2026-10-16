@@ -1,3 +1,11 @@
+//! 统一的图片缓存：一份字节、多个身份（rendition）。
+//!
+//! 每个身份 = (scope, archive, page, rendition, model, 资源修订号)，所以同一页可以同时
+//! 有原图、超分、DLSSNR 三份产物而不互相覆盖。`IMAGE_KIND_SQL` 与 `IMAGE_RENDITIONS`
+//! 必须永远相等（有契约条款钉着）：漏一个身份，「清空缓存」就删不掉那一类产物——2026-10-13
+//! 的 `dlssnr` 漏项就是这么攒下 2.97 GiB 的。配额与淘汰在这里；租借（lease）只保护
+//! 路径不被删，它不拥有字节（见 `compute/leases.rs`）。
+
 use crate::{db::Database, domain::result::CommandResult};
 use rusqlite::OptionalExtension;
 
@@ -1028,7 +1036,7 @@ fn read_cache_stats(connection: &rusqlite::Connection) -> Result<CacheStats, Str
 pub fn cache_stats(database: tauri::State<'_, Database>) -> CommandResult<CacheStats> {
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", LOCK_FAILED, true),
     };
     match read_cache_stats(&connection) {
         Ok(value) => CommandResult::success(value),
@@ -1430,7 +1438,7 @@ pub fn cache_clear_images(
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", LOCK_FAILED, true),
     };
     match clear_image_cache(&connection, &app_data) {
         Ok(value) => {
@@ -1488,7 +1496,7 @@ pub fn cache_purge_reader_renditions(
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", LOCK_FAILED, true),
     };
     match purge_reader_renditions(&connection, &app_data, &session) {
         Ok(value) => CommandResult::success(value),
@@ -1536,7 +1544,7 @@ pub fn cache_invalidate_archive(
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", LOCK_FAILED, true),
     };
     match invalidate_archive_cache(&connection, &app_data, &scope_id, &archive_id) {
         Ok(value) => {
@@ -1704,7 +1712,7 @@ pub fn cache_evict(
     };
     let connection = match database.connection.lock() {
         Ok(value) => value,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", LOCK_FAILED, true),
     };
     match evict_cache_batch(&connection, &app_data, input.max_bytes, input.batch_limit) {
         Ok(value) => CommandResult::success(value),
@@ -1814,8 +1822,9 @@ mod tests {
     /// 全局锁是偏好、书架、搜索这些轻查询的必经之路，而这里搬的是整整一页图 +
     /// 一次 blake3。锁覆盖了它，就等于每翻一页都把「读偏好」堵一次。
     ///
-    /// 旧形状在这里只做**前提记录**（不设断言，与 `worker/tests/pipe_probe.rs` 的
-    /// A/B 同一手法：平台或实现变了不该让测试崩），断言的只有目标形状。
+    /// 旧形状在这里只做**前提记录**（不设断言，与
+    /// `crates/compute-transport/tests/pipe_probe.rs` 的 A/B 同一手法：平台或实现变了
+    /// 不该让测试崩），断言的只有目标形状。
     #[test]
     fn the_database_lock_is_free_while_a_blob_is_written() {
         let database = online_db();

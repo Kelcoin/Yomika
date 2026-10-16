@@ -373,7 +373,7 @@ pub fn export_data(
     }
     let connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let (mut envelope, skipped) = match collect_bundle(&connection, &items) {
         Ok(collected) => collected,
@@ -436,7 +436,7 @@ pub fn import_data(
 
     let mut connection = match database.connection.lock() {
         Ok(connection) => connection,
-        Err(_) => return CommandResult::failure("UNKNOWN", "Database lock failed", true),
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     let mut report = DataImportReport {
         records: 0,

@@ -1,3 +1,10 @@
+/** 用户可见的 CSS 主题预设：一套是配色方案（`COLOR_SCHEMES`），一套是完整的自定义
+ *  CSS（`CSS_THEME_PRESETS`），两者都能被用户存下来、下次启动时按 id 认回来。
+ *
+ * 升级路径在这里：`legacyCssThemePresets.ts` 只保留**旧值**，存过的预设经
+ * `upgradeCssThemePreset` 对齐到当前令牌，认不出来的才退回默认。上游那份 CSS 的
+ * 出处与逐条映射写在常量旁边，别搬到这里。
+ */
 import { CSS_THEME_PRESETS as legacyPresets } from './legacyCssThemePresets';
 
 export interface CssThemePreset {

@@ -102,10 +102,9 @@ pub const HOSTED_UPSCALE_MODEL_IDS: &[&str] = &[
 /// The hosted upscaler catalog: which models exist, what they cost, and the
 /// digest each file must have.
 ///
-/// The de-censor manifest (`manifest.json`) is a single bundle whose assets are
-/// all downloaded into one directory, so it cannot describe an installable
-/// choice. This one can: one entry per selectable model, its scale, and the
-/// files that make up `models/<id>/<version>/`.
+/// One entry per selectable model — its scale, and the files that make up
+/// `models/<id>/<version>/` — rather than one bundle for everything: the user
+/// picks the model, so the catalog has to describe an installable choice.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct UpscaleCatalogFile {

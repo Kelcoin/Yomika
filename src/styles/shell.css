@@ -38,7 +38,8 @@ body::-webkit-scrollbar,
 /* The app-drawn title bar (Windows): a themed drag surface with the brand
    mark and the three window controls, in the Material 3 top-app-bar shape.
    44px of chrome plus the top safe area, so the mark and the controls never sit
-   under a notch or a system status bar (0 on Windows, where there is neither). */.titlebar {
+   under a notch or a system status bar (0 on Windows, where there is neither). */
+.titlebar {
   grid-area: titlebar;
   display: flex;
   align-items: center;
@@ -115,7 +116,8 @@ body::-webkit-scrollbar,
 }
 
 /* 触屏上没有 Tab 键，这枚跳转链接本来就用不上；而它在 WebKit 里会被点按命中
-   :focus-visible，于是常驻成状态栏那一角的胶囊。触屏直接不画，桌面照旧。 */@media (hover: none) and (pointer: coarse) {
+   :focus-visible，于是常驻成状态栏那一角的胶囊。触屏直接不画，桌面照旧。 */
+@media (hover: none) and (pointer: coarse) {
   .skip-link { display: none; }
 }
 
@@ -305,7 +307,8 @@ body::-webkit-scrollbar,
 /* The spacer is gone, so the button is the footer's only child — but the footer
    is a grid item whose min-content width must not exceed the 45px rail interior,
    or the whole centered strip overflows to the right. Auto margins centre the
-   button inside whatever the footer measures. */.is-sidebar-collapsed .sidebar-toggle {
+   button inside whatever the footer measures. */
+.is-sidebar-collapsed .sidebar-toggle {
   margin-inline: auto;
 }
 
@@ -349,7 +352,8 @@ body::-webkit-scrollbar,
    and with a visible edge, so it still reads as a button when it sits on a panel
    rather than in the chrome. */
 /* Material 3 filled tonal icon button: a circular 40px target with a
-   secondary-container fill and no outline. */.icon-action {
+   secondary-container fill and no outline. */
+.icon-action {
   display: grid;
   place-items: center;
   width: 40px;
@@ -450,7 +454,8 @@ body::-webkit-scrollbar,
    `:not([hidden])` is load-bearing: every visited route stays mounted in its own
    `route-cache-panel`, so a plain `:has(.workspace-home)` also matched after
    leaving home — and clamped every other page to 1680px, left-aligned, with the
-   rest of the window left blank. */.workspace:has(> .route-cache-panel:not([hidden]) .workspace-home) {
+   rest of the window left blank. */
+.workspace:has(> .route-cache-panel:not([hidden]) .workspace-home) {
   width: 100%;
   max-width: none;
   margin: 0;
@@ -543,9 +548,11 @@ body::-webkit-scrollbar,
 /* The inline metadata-loading skeleton mirrors the real column it stands in:
    tag-group rows (a short label over a full chip row) with real gaps — it was
    an unstyled div, so every line collapsed onto the next one. The min-height
-   keeps the page from jumping when the tag groups replace it. */.archive-detail-copy-skeleton { display: grid; align-content: start; gap: var(--space-3); padding-top: var(--space-2); min-height: 320px; }
+   keeps the page from jumping when the tag groups replace it. */
+.archive-detail-copy-skeleton { display: grid; align-content: start; gap: var(--space-3); padding-top: var(--space-2); min-height: 320px; }
 /* Holds a select's footprint while its options load, so the toolbar does not
-   reflow when they arrive. */.select-placeholder { width: 132px; height: var(--control-height); border-radius: var(--radius-control); }
+   reflow when they arrive. */
+.select-placeholder { width: 132px; height: var(--control-height); border-radius: var(--radius-control); }
 @keyframes skeleton-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 
 /* The app's one loading indicator. Routes used to invent their own — a bare
@@ -555,7 +562,8 @@ body::-webkit-scrollbar,
    stroke, round caps) whose head grows while the tail follows, all on a
    container rotating one turn per dash cycle. Drawn in currentColor, so a
    surface that themes itself (the reader's dark canvas) only has to set a colour
-   — there is no second mark to keep in step. */.loading-indicator {
+   — there is no second mark to keep in step. */
+.loading-indicator {
   display: grid;
   place-items: center;
   padding: var(--space-8) 0;
@@ -597,7 +605,8 @@ body::-webkit-scrollbar,
 .loading-indicator.is-sm { padding: var(--space-4) 0; }
 
 /* The same mark, inline: no padding, no centring, sized to sit on the baseline
-   of 13px copy so it reads as part of the sentence it belongs to. */.loading-mark {
+   of 13px copy so it reads as part of the sentence it belongs to. */
+.loading-mark {
   display: inline-grid;
   flex: none;
   place-items: center;
@@ -645,7 +654,8 @@ body::-webkit-scrollbar,
 
 /* One line of status: the inline counterpart to .empty-state, for a list, panel
    or region that has nothing to show. It is a sentence, not a region — the
-   320px centring belongs to the region version alone. */.status-line {
+   320px centring belongs to the region version alone. */
+.status-line {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -693,9 +703,11 @@ body::-webkit-scrollbar,
    text, so a dark theme gets a dark toast and a light theme a light one — no
    inverted white card. The state rides on the icon's shape plus the state role,
    both readable on the container in either theme. A phone redraws it as a pill;
-   see the compact card rules at the end of the toast block. */.toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: 10px var(--space-3) 10px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter var(--motion-standard) both; }
+   see the compact card rules at the end of the toast block. */
+.toast-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-3); min-height: 48px; padding: 10px var(--space-3) 10px var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-highest); color: var(--on-surface); box-shadow: var(--shadow-menu); pointer-events: auto; animation: toast-enter var(--motion-standard) both; }
 .toast-card.is-closing { animation: toast-exit var(--motion-standard) both; }
-/* 图标带一层语义色的圆底：三个标记长得像一组，而不是三个随便挑的图标。 */.toast-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-pill); background: color-mix(in srgb, currentColor 14%, transparent); color: var(--primary); }
+/* 图标带一层语义色的圆底：三个标记长得像一组，而不是三个随便挑的图标。 */
+.toast-icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: var(--radius-pill); background: color-mix(in srgb, currentColor 14%, transparent); color: var(--primary); }
 .toast-card.is-success .toast-icon { color: var(--success); }
 .toast-card.is-error .toast-icon { color: var(--error); }
 .toast-icon svg { width: 18px; height: 18px; }
@@ -773,7 +785,6 @@ body::-webkit-scrollbar,
 /* 记录列表自带一层底：一屏灰底上的长文本比直接摊在面板上更好读。 */
 .error-log-list {
   display: grid;
-  max-height: min(52vh, 460px);
   max-height: min(52dvh, 460px);
   margin: 0;
   padding: 0;
@@ -957,7 +968,8 @@ body::-webkit-scrollbar,
    it is what sticks. As a direct grid item the sidebar's containing block was the
    section's height, and Chromium offsets a sticky element by its `top` inside a
    containing block taller than itself — the nav sat 24px lower on every section
-   whose content was taller than the nav list. */.settings-sidebar-slot {
+   whose content was taller than the nav list. */
+.settings-sidebar-slot {
   align-self: stretch;
   min-width: 0;
 }
@@ -993,7 +1005,8 @@ body::-webkit-scrollbar,
 }
 
 /* Same left indicator as the main navigation, so both active states read as one
-   component. */.settings-nav a::before,
+   component. */
+.settings-nav a::before,
 .settings-nav button::before {
   position: absolute;
   top: 8px;
@@ -1051,7 +1064,8 @@ body::-webkit-scrollbar,
 
 /* Page titles are structural, not decorative. The h1 stays in the accessibility
    tree; pages whose heading held nothing else render a bare .visually-hidden h1
-   instead of this block. */.workspace-heading h1,
+   instead of this block. */
+.workspace-heading h1,
 .metadata-edit-header h1 {
   position: absolute;
   width: 1px;
@@ -1108,7 +1122,8 @@ body::-webkit-scrollbar,
 /* 未配置服务器时各页共用的引导（ServerRequiredPrompt）：形状就是设置项那种容器——
    一个圆角描边卡片，说明居中，两个入口在底部自己的容器里（与设置表单的保存/测试同一
    形状）。首页原来自己画过一版（左文案右按钮），书架与档案库那两版连分割线都没有；
-   同一份提示后来又是上下两条整幅分割线夹一段文案，页面上像两条无关的横线。 */.first-run {
+   同一份提示后来又是上下两条整幅分割线夹一段文案，页面上像两条无关的横线。 */
+.first-run {
   display: grid;
   justify-items: center;
   width: min(100%, 560px);
@@ -1123,7 +1138,8 @@ body::-webkit-scrollbar,
 /* One column, full width. This used to reserve a 240px label column for the
    section title, which the sidebar already shows: it left a blank strip beside
    every control, and any section whose content was its own first child — sync,
-   about — was laid out *inside* that strip at a fraction of the window width. */.settings-section,
+   about — was laid out *inside* that strip at a fraction of the window width. */
+.settings-section,
 .preferences-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1139,7 +1155,8 @@ body::-webkit-scrollbar,
   max-width: 100%;
 }
 
-/* A lone action still shrink-wraps; a row of them shares the width. */.settings-section > .primary-action,
+/* A lone action still shrink-wraps; a row of them shares the width. */
+.settings-section > .primary-action,
 .settings-section > .secondary-action {
   width: fit-content;
   max-width: 100%;
@@ -1194,7 +1211,8 @@ body::-webkit-scrollbar,
 /* One group frame per section, one row shape per setting: an icon, the name and
    its hint on the left, the current value on the right. The row hosts no control
    — it opens the floating menu where the value is actually changed, so every
-   kind of setting keeps the same two-level rhythm. */.settings-group {
+   kind of setting keeps the same two-level rhythm. */
+.settings-group {
   overflow: hidden;
   border: 1px solid var(--outline-variant);
   border-radius: var(--radius-card);
@@ -1293,7 +1311,8 @@ body::-webkit-scrollbar,
 
 /* The whole row is the hit target, and hover fills it edge to edge inside the
    group's rounded corners. No per-row borders: height and the hover fill are
-   what separate rows, so a section still reads as one list. */.settings-row-button {
+   what separate rows, so a section still reads as one list. */
+.settings-row-button {
   border: 0;
   background: transparent;
   color: inherit;
@@ -1357,7 +1376,8 @@ body::-webkit-scrollbar,
 .settings-row-value svg { width: 16px; height: 16px; }
 
 /* A plain switch keeps to its row: the drawn switch is the trailing control
-   and the only hit target, so nothing here opens a second level. */.settings-switch-row .switch-control { flex: none; }
+   and the only hit target, so nothing here opens a second level. */
+.settings-switch-row .switch-control { flex: none; }
 /* 开关左边再多一样东西的那一行（标签数据：版本号 + 刷新按钮 + 开关）：按钮贴开关，
    中间留一个控件间距，整块不吃左边文案的宽度。 */
 .settings-row-action { display: flex; flex: none; align-items: center; gap: var(--space-2); }
@@ -1493,7 +1513,8 @@ body::-webkit-scrollbar,
 }
 
 /* A list that is still loading keeps one row's height, so nothing under it
-   drops when the rows arrive. */.server-region > .status-line:only-child {
+   drops when the rows arrive. */
+.server-region > .status-line:only-child {
   align-content: center;
   min-height: 88px;
 }
@@ -1501,7 +1522,8 @@ body::-webkit-scrollbar,
 /* Everything in the column is the column's width. It used to be
    `justify-items: start`, so a fieldset stretched (it sets its own width), a
    number input stopped at 680px, a select stopped at 320px and a button
-   shrink-wrapped — four widths in one column, none of them chosen. */.preferences-form {
+   shrink-wrapped — four widths in one column, none of them chosen. */
+.preferences-form {
   display: grid;
   gap: var(--space-5);
   justify-items: stretch;
@@ -1564,7 +1586,8 @@ body::-webkit-scrollbar,
 
 /* 圆角跟着卡片那档（12px），不是控件那档（8px）：这个分段控件总是横跨面板宽度、
    正压在同样宽度的卡片上，两档摆在一起就是「这个框比下面那几个方一截」。实测同一张
-   截图里分段控件 8px（第 5 行才到满宽）、下面的卡片 12px（第 8 行）。 */.segmented-control {
+   截图里分段控件 8px（第 5 行才到满宽）、下面的卡片 12px（第 8 行）。 */
+.segmented-control {
   display: flex;
   flex-wrap: wrap;
   gap: 1px;
@@ -1602,7 +1625,8 @@ body::-webkit-scrollbar,
 
 /* The button flavour of the same control (the upload page's tabs): identical
    chrome to the radio flavour, so a segmented group reads as one thing
-   wherever it is rendered. */.segmented-control button {
+   wherever it is rendered. */
+.segmented-control button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1655,7 +1679,8 @@ body::-webkit-scrollbar,
 }
 
 /* Dialogs and standalone pages keep the reading-width cap; the settings column is
-   already narrow, and a second cap inside it only produced a second width. */.server-form, .metadata-form {
+   already narrow, and a second cap inside it only produced a second width. */
+.server-form, .metadata-form {
   width: 100%;
   max-width: 680px;
 }
@@ -1689,7 +1714,8 @@ body::-webkit-scrollbar,
    .is-danger), .archive-action-button (with .archive-action-primary) and a
    .danger-action nothing referenced — each the same box with a different fill.
    The drift showed up as a third button language on a single screen, so the tone
-   is a modifier now and the geometry lives once. */.primary-action,
+   is a modifier now and the geometry lives once. */
+.primary-action,
 .secondary-action {
   display: inline-flex;
   align-items: center;
@@ -1716,7 +1742,8 @@ body::-webkit-scrollbar,
 .secondary-action { background: var(--secondary-container); color: var(--on-secondary-container); }
 
 /* Three labels in a narrow panel need a smaller voice; the box is unchanged, so
-   it still lines up with a full-size button beside it. */.primary-action.is-compact,
+   it still lines up with a full-size button beside it. */
+.primary-action.is-compact,
 .secondary-action.is-compact { padding: 0 var(--space-3); font-size: var(--text-xs); }
 
 .primary-action svg,
@@ -1800,7 +1827,8 @@ body::-webkit-scrollbar,
 
 /* An EmptyState is a region, so its geometry is bound to the region element it
    draws. A one-line message that borrowed the class used to get the same 320px
-   box: those are StatusLine now, and this keeps the door shut. */.empty-state:not(section) {
+   box: those are StatusLine now, and this keeps the door shut. */
+.empty-state:not(section) {
   display: block;
   min-height: 0;
   padding: 0;
@@ -1810,7 +1838,8 @@ body::-webkit-scrollbar,
   text-align: start;
 }
 
-/* The shelves are the list and nothing else: no page title, no control bar. */.shelf-workspace {
+/* The shelves are the list and nothing else: no page title, no control bar. */
+.shelf-workspace {
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   min-height: 0;
@@ -1838,7 +1867,8 @@ body::-webkit-scrollbar,
    scroll". The single pane is now the app's compact width (900px) and below,
    where the split would genuinely not fit; between the two the detail column
    stays resizable down to its 24% floor. Target the panel itself so no empty
-   flex track remains behind it. */@container app-main (max-width: 900px) {
+   flex track remains behind it. */
+@container app-main (max-width: 900px) {
   .library-shell.has-detail { display: block !important; height: 100%; }
   .library-shell.has-detail > [data-panel]:has(.library-shell-list) { display: none !important; }
   .library-shell.has-detail > [data-panel]:has(.library-shell-detail) { display: block !important; width: 100% !important; height: 100% !important; flex: none !important; }
@@ -1846,7 +1876,8 @@ body::-webkit-scrollbar,
 }
 
 /* Six labelled actions need roughly this much room. Below it they keep their
-   icons and lose the words rather than folding onto a second row. */@container app-main (max-width: 700px) {
+   icons and lose the words rather than folding onto a second row. */
+@container app-main (max-width: 700px) {
   .archive-detail-route-actions .archive-action-label { display: none; }
 }
 
@@ -1855,7 +1886,8 @@ body::-webkit-scrollbar,
    as chrome; the library zeroes that padding to run edge to edge, which left the
    last row of cards flush against a dark strip. Give the panels the same air.
    The bar itself is not the canvas colour on purpose — it is a bar — but it does
-   not need the panel's full contrast to say so. */.library-shell-list,
+   not need the panel's full contrast to say so. */
+.library-shell-list,
 .library-shell-detail {
   min-width: 0;
   min-height: 0;
@@ -1949,7 +1981,8 @@ body::-webkit-scrollbar,
    量过（`debug_outputs/flow-tail/probe.mjs`，1280×900、内容 860px、菜单/状态栏等真实
    样式）：容器留白 → 可滚 24px，面板留白 + `min-height: 100%` → 可滚 24px，去掉留白
    → 可滚 0px。真溢出的页面照旧能滚到底（`height: auto` 让溢出尾进得了可滚范围，最后
-   一行完整可见），只是滚到底时它贴着底边、没有多余的一格。 */.route-cache-panel.is-flow {
+   一行完整可见），只是滚到底时它贴着底边、没有多余的一格。 */
+.route-cache-panel.is-flow {
   height: auto;
 }
 
@@ -1976,7 +2009,8 @@ body::-webkit-scrollbar,
 /* A fixed width, not `min(18vw, …)`. Viewport units meant the cover resized
    continuously while the window was dragged — and 18vw does not describe this
    column anyway, since the sidebar and the detail pane both sit between the
-   cover and the viewport edge. */.archive-detail-route-cover img {
+   cover and the viewport edge. */
+.archive-detail-route-cover img {
   display: block;
   width: 210px;
   height: 280px;
@@ -2032,7 +2066,8 @@ body::-webkit-scrollbar,
    to six actions, so grid put the last two on a second row — at every width, not
    only narrow ones. Flex without wrapping keeps them on one line and lets each
    shrink; the labels drop out below the width where six of them fit, and the
-   icon plus its title still names the action. */.archive-detail-route-actions {
+   icon plus its title still names the action. */
+.archive-detail-route-actions {
   display: flex;
   container-type: inline-size;
   container-name: detail-actions;
@@ -2133,9 +2168,11 @@ body::-webkit-scrollbar,
 .eh-comment-meta { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .eh-comment-meta > span { display: inline-flex; align-items: center; min-width: 0; gap: var(--space-2); }
 /* Comment bodies inherit color and drop underlines globally, so a bare URL
-   inside one would be indistinguishable from prose. */.eh-comment-link { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+   inside one would be indistinguishable from prose. */
+.eh-comment-link { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
 /* The score reads as plain signed text in the header's right corner — it used
-   to sit in a boxed chip on the votes row. */.eh-comment-score { color: var(--state-success); font-weight: var(--weight-bold); }
+   to sit in a boxed chip on the votes row. */
+.eh-comment-score { color: var(--state-success); font-weight: var(--weight-bold); }
 .eh-comment-score.is-negative,
 .archive-context-menu-item.is-danger,
 .eh-comment-meta time, .eh-comment-votes time { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2157,7 +2194,8 @@ body::-webkit-scrollbar,
 .eh-comment-votes-actions { display: inline-flex; align-items: center; gap: var(--space-1); }
 /* Both directions keep a persistent tonal circle and identical interactive
    shape. A cast vote fills its circle with the solid primary — loud on purpose,
-   the quiet tonal mixes read as "slightly darker" rather than "voted". */.eh-comment-votes-actions button { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: var(--radius-pill); background: var(--secondary-container); color: var(--on-secondary-container); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast); }
+   the quiet tonal mixes read as "slightly darker" rather than "voted". */
+.eh-comment-votes-actions button { display: grid; place-items: center; width: 32px; height: 32px; border: 0; border-radius: var(--radius-pill); background: var(--secondary-container); color: var(--on-secondary-container); cursor: pointer; transition: background-color var(--motion-fast), color var(--motion-fast); }
 .eh-comment-votes-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 .tag-group-character h2,
 .tag-group-character h3 { background: var(--primary); color: var(--on-primary); }
@@ -2169,7 +2207,8 @@ body::-webkit-scrollbar,
 .eh-comment-votes-actions button[aria-disabled='true'] { cursor: pointer; }
 .eh-comment-votes-actions button:active:not(:disabled) { transform: translateY(1px); }
 /* The arrows stay one colour in every state — the circle's tint is what
-   announces a cast vote, not the glyph changing hue under it. */.eh-comment-votes-actions svg { width: 15px; height: 15px; color: var(--on-secondary-container); }
+   announces a cast vote, not the glyph changing hue under it. */
+.eh-comment-votes-actions svg { width: 15px; height: 15px; color: var(--on-secondary-container); }
 .eh-comment-votes-actions button[aria-pressed='true'] svg { color: var(--on-primary); }
 /* The hairline already separates the composer from the last card, so the inset
    under it is a half step — a full one read as a hole under the last timestamp. */
@@ -2207,7 +2246,8 @@ body::-webkit-scrollbar,
    次只改到其中一条的字号，看代码的人得把三条都读一遍才知道最后是什么。
    `.metadata-edit-heading` 里现在只剩一个 `<h1>`（原来那个 `<p>` 连同它的规则一起
    删了），所以 grid + gap 没有第二个子元素可用，只留 `min-width: 0`——它在这条 flex
-   行里真正承重的是「允许收缩」，不是排版。 */.metadata-edit-heading { min-width: 0; }
+   行里真正承重的是「允许收缩」，不是排版。 */
+.metadata-edit-heading { min-width: 0; }
 .metadata-edit-header h1 {
   margin: 0;
   font-size: var(--text-lg);
@@ -2227,7 +2267,8 @@ body::-webkit-scrollbar,
 .metadata-edit-form select { width: 100%; box-sizing: border-box; }
 /* One editable tag list. There used to be a raw textarea plus a read-only run of
    translated chips underneath, with nothing tying them together. */
-/* The empty tag line sits where the chips would, centred in the field. */.metadata-tags-box > .status-line { align-self: center; color: var(--ink-faint); }
+/* The empty tag line sits where the chips would, centred in the field. */
+.metadata-tags-box > .status-line { align-self: center; color: var(--ink-faint); }
 
 .metadata-tag-field { display: grid; gap: var(--space-2); min-width: 0; }
 .metadata-tag-field-label { color: var(--ink-secondary); font-weight: var(--weight-semibold); }
@@ -2274,7 +2315,8 @@ body::-webkit-scrollbar,
 }
 /* The chip rests at its translation's width and grows to the original's on
    hover/press; the row wrapped on whichever label is wider, so the growth only
-   shoves neighbours inside the row. Unmeasured chips keep their natural size. */.metadata-tag.is-measured .metadata-tag-reveal {
+   shoves neighbours inside the row. Unmeasured chips keep their natural size. */
+.metadata-tag.is-measured .metadata-tag-reveal {
   /* + 10px = 左右内边距（8 + 2），与上面那条 padding 一一对应。 */
   width: calc(var(--tag-width-rest) + 10px);
   transition: width var(--motion-standard);
@@ -2288,7 +2330,8 @@ body::-webkit-scrollbar,
   }
 }
 
-/* Hidden labels do not reserve width. Parent rows retain their original grouping. */.metadata-tag-labels { position: relative; display: grid; min-width: 0; }
+/* Hidden labels do not reserve width. Parent rows retain their original grouping. */
+.metadata-tag-labels { position: relative; display: grid; min-width: 0; }
 .metadata-tag-label {
   grid-area: 1 / 1;
   min-width: 0;
@@ -2374,7 +2417,6 @@ body::-webkit-scrollbar,
 
 .tag-suggest-panel {
   z-index: var(--z-menu);
-  max-height: min(360px, calc(100vh - 24px));
   max-height: min(360px, calc(100dvh - 24px));
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -2447,7 +2489,8 @@ body::-webkit-scrollbar,
 
 /* Matches `.library-toolbar .select-field` exactly. The placeholder used a fixed
    132px while the real control flexes from a 160px floor, so the toolbar jumped
-   sideways the moment the categories arrived. */.library-toolbar .select-placeholder,
+   sideways the moment the categories arrived. */
+.library-toolbar .select-placeholder,
 .library-toolbar .select-field {
   flex: 1 1 0;
   width: 100%;
@@ -2459,7 +2502,8 @@ body::-webkit-scrollbar,
   padding: 0;
 }
 
-/* The refresh action leads the row and keeps its own circular size. */.library-toolbar > .icon-action {
+/* The refresh action leads the row and keeps its own circular size. */
+.library-toolbar > .icon-action {
   flex: 0 0 auto;
 }
 .library-display-cycle,
@@ -2606,14 +2650,16 @@ body::-webkit-scrollbar,
 
 /* Overscroll: past either end of the list the content is dragged by hand and
    springs back on release. Touch tracks the finger exactly, a wheel eases
-   between its notches, and the release always takes the long curve back. */.archive-list-pull { position: relative; transition: transform var(--motion-standard); }
+   between its notches, and the release always takes the long curve back. */
+.archive-list-pull { position: relative; transition: transform var(--motion-standard); }
 .archive-list-pull[data-overscroll='wheel'] { transition: transform 100ms cubic-bezier(.2, .8, .2, 1); }
 .archive-list-pull[data-overscroll='touch'] { transition: none; }
 
 /* The refresh disc, pinned over the list instead of carried by it: it answers
    the pull with its rotation, then stays put, spinning, while the request runs.
    Sticky rather than absolute so scrolling during the request cannot take it
-   away. */.library-pull-indicator {
+   away. */
+.library-pull-indicator {
   position: sticky;
   z-index: var(--z-sticky);
   top: var(--space-2);
@@ -2645,7 +2691,8 @@ body::-webkit-scrollbar,
 .library-pull-disc.is-spinning svg { animation: icon-spin var(--duration-spin) var(--ease-linear) infinite; }
 
 /* A timeline down the left of the list: one time per row, on a rail so a run of
-   rows reads as a sequence. Only the history has a time worth showing. */.archive-list.is-wide .archive-row-wrap:has(.archive-row-timeline) { display: grid; grid-template-columns: 82px minmax(0, 1fr); }
+   rows reads as a sequence. Only the history has a time worth showing. */
+.archive-list.is-wide .archive-row-wrap:has(.archive-row-timeline) { display: grid; grid-template-columns: 82px minmax(0, 1fr); }
 /* The card stays first in the DOM — it is the row's own markup and the click
    target — and is placed in the second column; the rail takes the first. */
 .archive-list.is-wide .archive-row-wrap:not(:has(.archive-row-timeline)),
@@ -2681,7 +2728,8 @@ body::-webkit-scrollbar,
    the bounce — but an absolutely positioned tail extends the scroller's
    scrollable area, which bought ~190px of dead scroll ("the bounce needs two
    flicks") and left the line dangling in mid-air. Painted on the scroller the
-   rail reaches both edges at rest and never moves during a pull or bounce. */.archive-list.has-timeline {
+   rail reaches both edges at rest and never moves during a pull or bounce. */
+.archive-list.has-timeline {
   /* 82px timeline column, node centre 13px from its inner edge, plus the
      scroller's 4px side padding: the rail sits 73px from the padding box's left
      edge — and therefore 72px is where the 2px line is painted. */
@@ -2697,7 +2745,8 @@ body::-webkit-scrollbar,
 
 /* The rail line and the per-row segments are gone: the right column keeps only
    the day/time text and the row node, and the day grouping reads from the
-   dated section bars instead of a running line. */.archive-row-timeline-day { color: var(--on-surface); font-weight: var(--weight-semibold); }
+   dated section bars instead of a running line. */
+.archive-row-timeline-day { color: var(--on-surface); font-weight: var(--weight-semibold); }
 .archive-row-timeline-time { color: var(--on-surface-variant); }
 
 .archive-row-timeline::after {
@@ -2713,13 +2762,15 @@ body::-webkit-scrollbar,
   content: "";
 }
 
-/* The thumbnail grid has no row to hang a rail on, so the time rides the card. */.archive-list.is-thumbnail .archive-row-timeline {
+/* The thumbnail grid has no row to hang a rail on, so the time rides the card. */
+.archive-list.is-thumbnail .archive-row-timeline {
   display: none;
 }
 
 /* Fixed 180px columns (wide covers span exactly two columns plus the gap) keep
    the column count computable in JS, which is what lets the grid virtualize by
-   row instead of mounting every archive. */.archive-thumb-grid-row {
+   row instead of mounting every archive. */
+.archive-thumb-grid-row {
   position: absolute;
   top: 0;
   left: 0;
@@ -2745,7 +2796,8 @@ body::-webkit-scrollbar,
 
 /* The library grid card IS the recommendation rail's card: .archive-thumb-card
    with the same media / body / title / tags / meta children. Only the geometry
-   differs — a fixed 350px cell the virtualizer can place. */.archive-list.is-thumbnail .archive-thumb-card {
+   differs — a fixed 350px cell the virtualizer can place. */
+.archive-list.is-thumbnail .archive-thumb-card {
   box-sizing: border-box;
   width: 100%;
   height: 350px;
@@ -2768,14 +2820,16 @@ body::-webkit-scrollbar,
 }
 
 .archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-media { height: 220px; }
-/* 34 title + 48 tags + 18 meta + 2x4 gap = 108 inside a 130px body. */.archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-body {
+/* 34 title + 48 tags + 18 meta + 2x4 gap = 108 inside a 130px body. */
+.archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-body {
   grid-template-rows: 34px 48px 18px;
   gap: 4px;
   height: 130px;
   padding: var(--space-2);
 }
 /* LazyThumbnail keeps its own wrapper for the blob lifecycle; inside the shared
-   media frame it must not draw a second surface or radius. */.archive-list.is-thumbnail .archive-thumb-card-media .archive-row-thumb {
+   media frame it must not draw a second surface or radius. */
+.archive-list.is-thumbnail .archive-thumb-card-media .archive-row-thumb {
   width: 100%;
   height: 100%;
   border-radius: 0;
@@ -2808,7 +2862,8 @@ body::-webkit-scrollbar,
 
 /* SFW: reveal only the image surface. A moderate blur keeps the silhouette
    unreadable without flattening the cover into a solid block; avoid permanent
-   GPU layers for every virtualized cover. */:root[data-sfw='true'] .archive-row-thumb img,
+   GPU layers for every virtualized cover. */
+:root[data-sfw='true'] .archive-row-thumb img,
 :root[data-sfw='true'] .archive-thumb-card-media img,
 :root[data-sfw='true'] .archive-detail-cover-trigger img,
 :root[data-sfw='true'] .archive-page-thumbnail img {
@@ -2856,13 +2911,15 @@ body::-webkit-scrollbar,
    rows at the normal chip size and a two-line title. Each row is its own card:
    an 8px gap, a full 12px radius and an independent border. Neighbouring rows
    used to share one edge with a -1px margin and square inner corners, which read
-   as a continuous list rather than separate archives. */.archive-list.is-wide .archive-row-wrap {
+   as a continuous list rather than separate archives. */
+.archive-list.is-wide .archive-row-wrap {
   box-sizing: border-box;
   height: 166px;
 }
 
 /* Compact history folds the right-hand rail into a dated section bar above the
-   day's first card. 20px bar + 8px gap = ARCHIVE_DAY_DIVIDER_HEIGHT. */.archive-day-divider { display: none; }
+   day's first card. 20px bar + 8px gap = ARCHIVE_DAY_DIVIDER_HEIGHT. */
+.archive-day-divider { display: none; }
 .archive-list.is-wide .archive-row {
   margin-block: 4px;
   display: grid;
@@ -2943,7 +3000,8 @@ body::-webkit-scrollbar,
 /* Multi-select. The card itself is the checkbox — role, state and the tick all
    live on it — so the mark only has to say which state it is in. The outer
    shadow keeps the disc readable on bright cover art; the ring does the state
-   when unchecked. */.archive-card-check {
+   when unchecked. */
+.archive-card-check {
   position: absolute;
   z-index: var(--z-raised);
   display: grid;
@@ -2960,13 +3018,15 @@ body::-webkit-scrollbar,
 /* A stroke-drawn tick, not a filled dot: the old solid centre read as a black
    blob over cover art. The drop shadow separates the stroke from the fill. */
 /* 选中不再画对勾：实心圆 + 外阴影已经说明状态，勾在同色圆面上几乎看不见，
-   反而像脏点。阴影负责把圆盘从任意封面上托起来。 */.archive-card-check::after { content: none; }
+   反而像脏点。阴影负责把圆盘从任意封面上托起来。 */
+.archive-card-check::after { content: none; }
 
 .archive-row > .archive-card-check { top: 10px; left: 10px; }
 .archive-thumb-card-media > .archive-card-check { top: 10px; right: 10px; }
 
 /* Scoped to the list that draws the card, or the display-mode rule that sets the
-   card's own surface wins on specificity and a selected row looks unselected. */.archive-list.is-wide .archive-row.is-selected,
+   card's own surface wins on specificity and a selected row looks unselected. */
+.archive-list.is-wide .archive-row.is-selected,
 .archive-list.is-wide .archive-row[aria-checked='true'],
 .archive-list.is-thumbnail .archive-thumb-card.is-selected,
 .archive-list.is-thumbnail .archive-thumb-card[aria-checked='true'] {
@@ -2978,7 +3038,8 @@ body::-webkit-scrollbar,
 .archive-row[aria-checked='true'] .archive-card-check,
 .archive-thumb-card.is-selected .archive-card-check,
 .archive-thumb-card[aria-checked='true'] .archive-card-check,
-/* 查重成员卡复用同一个标记：整张卡也是勾选框，勾选态就靠这一条。 */.dedup-member.is-selected .archive-card-check,
+/* 查重成员卡复用同一个标记：整张卡也是勾选框，勾选态就靠这一条。 */
+.dedup-member.is-selected .archive-card-check,
 .dedup-member[aria-checked='true'] .archive-card-check {
   background: var(--primary);
   box-shadow: var(--shadow-check-selected), inset 0 0 0 1.5px var(--primary);
@@ -3101,7 +3162,8 @@ body::-webkit-scrollbar,
   line-height: var(--leading-tight);
 }
 
-/* Three physical rows, filled horizontally from the shortest row. */.archive-list.is-wide .archive-row-tags {
+/* Three physical rows, filled horizontally from the shortest row. */
+.archive-list.is-wide .archive-row-tags {
   flex-wrap: nowrap;
   flex-direction: column;
 }
@@ -3115,7 +3177,8 @@ body::-webkit-scrollbar,
   overflow: hidden;
 }
 
-/* 分组标签（女性/作者/社团…）：中性的组头芯片，让每行读得出归属。 */.metadata-chip-ns {
+/* 分组标签（女性/作者/社团…）：中性的组头芯片，让每行读得出归属。 */
+.metadata-chip-ns {
   flex: none;
   background: var(--surface-container-high);
   color: var(--ink-secondary);
@@ -3135,7 +3198,8 @@ body::-webkit-scrollbar,
 }
 
 /* Fixed footer: category bottom-left, page count and added date bottom-right,
-   the same reading order in both card modes. */.archive-row-footer {
+   the same reading order in both card modes. */
+.archive-row-footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -3200,7 +3264,8 @@ body::-webkit-scrollbar,
 .archive-detail-tag-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
 
 /* Keep page count/size anchored to the right of the final tag row. The tag
-   column may wrap, but the metadata column must never be pushed to a new row. */.archive-detail-tag-row.has-meta {
+   column may wrap, but the metadata column must never be pushed to a new row. */
+.archive-detail-tag-row.has-meta {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -3234,7 +3299,8 @@ body::-webkit-scrollbar,
    jobs, not five: the five implementations between them had five paddings
    (0 6px, 0 7px, 2px 6px, 1px 8px, 2px 8px), three weights and two radii, so
    the same kind of label looked different depending on which screen it was on.
-   A member of either family now carries only its own colour. */.metadata-chip,
+   A member of either family now carries only its own colour. */
+.metadata-chip,
 .archive-row-category,
 .metadata-chip-page,
 .metadata-chip-size {
@@ -3337,7 +3403,8 @@ body::-webkit-scrollbar,
 }
 
 /* Page number under the thumbnail: without it a grid of covers gives no way to
-   tell which page you are about to open. */.archive-page-thumbnail-number {
+   tell which page you are about to open. */
+.archive-page-thumbnail-number {
   position: absolute;
   right: 0;
   bottom: 0;
@@ -3353,7 +3420,8 @@ body::-webkit-scrollbar,
 
 .archive-page-thumbnail-placeholder { font-size: var(--text-xs); }
 
-/* Card context menu (cards only; other elements keep the platform default). */.archive-context-menu {
+/* Card context menu (cards only; other elements keep the platform default). */
+.archive-context-menu {
   z-index: var(--z-menu);
   display: grid;
   gap: 2px;
@@ -3382,7 +3450,8 @@ body::-webkit-scrollbar,
 .archive-context-menu-item svg { width: 16px; height: 16px; }
 .archive-context-menu-separator { height: 1px; margin: 4px 2px; background: var(--hairline); }
 .archive-context-menu-item[data-disabled] { color: var(--on-surface-variant); cursor: default; }
-/* The category group: a label row, then the targets indented under it. */.archive-context-menu-label {
+/* The category group: a label row, then the targets indented under it. */
+.archive-context-menu-label {
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -3400,7 +3469,8 @@ body::-webkit-scrollbar,
    A segmented control rather than loose pills: the two options are one choice.
    The strip reads 推荐 by default and grows a second segment once the archive has
    a creator worth searching by, so it is a grid whose second column animates from
-   nothing — the heading used to be swapped for a different label outright. */.archive-recommendations-tabs {
+   nothing — the heading used to be swapped for a different label outright. */
+.archive-recommendations-tabs {
   display: inline-grid;
   grid-template-columns: auto minmax(0, 0fr);
   gap: 0;
@@ -3479,7 +3549,8 @@ body::-webkit-scrollbar,
 }
 
 /* Same selected treatment as the app's other segmented controls — without it
-   the chosen tab sat indistinguishable from the idle ones until hovered. */.archive-recommendations-tabs button.is-active {
+   the chosen tab sat indistinguishable from the idle ones until hovered. */
+.archive-recommendations-tabs button.is-active {
   background: var(--control-selected-background);
   color: var(--control-selected-text);
 }
@@ -3487,7 +3558,8 @@ body::-webkit-scrollbar,
 /* One loading treatment across every image slot: the library cover shimmer. */
 
 /* Page count and size are one kind of fact — the archive's own numbers — so they
-   share one shape instead of two different container colours. */.metadata-chip-page,
+   share one shape instead of two different container colours. */
+.metadata-chip-page,
 .metadata-chip-size {
   background: var(--surface-container);
   color: var(--on-surface-variant);
@@ -3616,7 +3688,8 @@ body::-webkit-scrollbar,
 }
 
 /* JHenTai's model: the namespace label carries the hue, every tag inside it is
-   the same neutral chip, and neither draws a border — background and text only. */.tag-group-artist { --tag-ns-bg: var(--tag-ns-artist-bg); --tag-ns-ink: var(--tag-ns-artist-ink); }
+   the same neutral chip, and neither draws a border — background and text only. */
+.tag-group-artist { --tag-ns-bg: var(--tag-ns-artist-bg); --tag-ns-ink: var(--tag-ns-artist-ink); }
 .tag-group-group { --tag-ns-bg: var(--tag-ns-group-bg); --tag-ns-ink: var(--tag-ns-group-ink); }
 .tag-group-parody { --tag-ns-bg: var(--tag-ns-parody-bg); --tag-ns-ink: var(--tag-ns-parody-ink); }
 .tag-group-character { --tag-ns-bg: var(--tag-ns-character-bg); --tag-ns-ink: var(--tag-ns-character-ink); }
@@ -3693,7 +3766,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   top: 50%;
   left: 50%;
   width: min(calc(100% - 32px), 520px);
-  max-height: calc(100vh - 32px);
   max-height: calc(100dvh - 32px);
   padding: var(--space-6);
   overflow: auto;
@@ -3769,7 +3841,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* The account panel is the E-Hentai section's one group frame — the same
    container the settings rows sit in, on /settings and on the /eh deep link
-   alike. */.eh-account-panel {
+   alike. */
+.eh-account-panel {
   margin-bottom: 0;
   padding: var(--space-4);
   border: 1px solid var(--outline-variant);
@@ -3818,7 +3891,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* The web sign-in tab is prose plus one button, so it needs the paragraph the
-   other two tabs do not. */.eh-login-hint {
+   other two tabs do not. */
+.eh-login-hint {
   margin: 0;
   max-width: 62ch;
   color: var(--ink-secondary);
@@ -3829,7 +3903,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* 账户列表：`<ul>` 自带 40px 的 padding-inline-start（给列表符号留的），不清掉的话
    整块内容——头像、名字、资产行、动作行——都会比标题多缩进 40px，而右边贴着边缘：
    「四周留空不一致，左侧异常大」。选择器从前掉了开头的点（`eh-account-panel ul`），
-   于是这几条一直没生效。 */.eh-account-panel ul {
+   于是这几条一直没生效。 */
+.eh-account-panel ul {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
@@ -3865,7 +3940,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    account's actions are one row of the standard pill buttons, the same shape
    every other menu action uses. The full selector weight is required: the
    shared `.eh-account-panel li` rule above would flatten this block back into
-   a horizontal flex row otherwise. */.eh-account-panel li.eh-account {
+   a horizontal flex row otherwise. */
+.eh-account-panel li.eh-account {
   display: grid;
   gap: var(--space-2);
   min-width: 0;
@@ -3894,7 +3970,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* EX access rides the name line as a status dot + short label; the full
-   "EXHENTAI 可访问" sentence used to take a whole row of its own. */.eh-access-badge {
+   "EXHENTAI 可访问" sentence used to take a whole row of its own. */
+.eh-access-badge {
   margin-left: var(--space-2);
   vertical-align: 2px;
 }
@@ -3964,7 +4041,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* An account's actions read as one row of the standard pill buttons, shared
-   across the width; the danger one takes the error container tone. */.eh-account-actions {
+   across the width; the danger one takes the error container tone. */
+.eh-account-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
@@ -3980,14 +4058,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    The menu panel is the frame for both, so neither brings group chrome.
    两层折叠互斥（编辑时收动作，否则收表单），各自的间隔挂在折叠层外面并随状态
    开关：网格的行间距不认「零高」，收起的那一层照样占一道缝，按钮下面就多出一块
-   空白；而放进 0fr 那一层里当内边距也压不掉——内边距不能压缩，最小高度压不到零。 */.settings-menu-account > .sync-collapsible {
+   空白；而放进 0fr 那一层里当内边距也压不掉——内边距不能压缩，最小高度压不到零。 */
+.settings-menu-account > .sync-collapsible {
   grid-column: 1 / -1;
 }
 
 .settings-menu-account > .sync-collapsible.is-open { margin-block-start: var(--space-2); }
 .settings-menu-accounts > .sync-collapsible.is-open { margin-block-start: var(--space-3); }
 
-/* 账户块里若还有「先去添服务器」的提示，它与账户行的间隔同样只属于这一块。 */.settings-menu-accounts > .settings-menu-account + .settings-menu-desc {
+/* 账户块里若还有「先去添服务器」的提示，它与账户行的间隔同样只属于这一块。 */
+.settings-menu-accounts > .settings-menu-account + .settings-menu-desc {
   margin-block-start: var(--space-3);
 }
 
@@ -4070,7 +4150,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* 收起/展开：0fr → 1fr 的网格行过渡，让「高度自动」的表单也能动画——按钮的显隐
-   与面板尺寸变化是同一个动作，不会突然跳一截。 */.sync-collapsible {
+   与面板尺寸变化是同一个动作，不会突然跳一截。 */
+.sync-collapsible {
   display: grid;
   grid-template-rows: 0fr;
   opacity: 0;
@@ -4088,13 +4169,15 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   overflow: hidden;
 }
 
-/* 保存、测试与取消各占一份，一起铺满整行。 */.sync-form-actions {
+/* 保存、测试与取消各占一份，一起铺满整行。 */
+.sync-form-actions {
   display: flex;
   gap: var(--space-3);
 }
 
 /* A row of actions divides the width evenly. Declared once for every such row
-   instead of per screen, so two buttons never come out as two different sizes. */.sync-form-actions > button,
+   instead of per screen, so two buttons never come out as two different sizes. */
+.sync-form-actions > button,
 .settings-menu-actions > .primary-action,
 .settings-menu-actions > .secondary-action,
 .archive-detail-actions > .primary-action,
@@ -4106,13 +4189,15 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* 图标按钮不参与平分：它没有文字，铺满一整行只会看着像一个空框。它照旧贴在行尾
-   （对话框原先整体右对齐，留下的就是这个位置）。 */.dialog-actions > .is-icon {
+   （对话框原先整体右对齐，留下的就是这个位置）。 */
+.dialog-actions > .is-icon {
   flex: 0 0 auto;
   margin-inline-start: auto;
 }
 
 /* 同步范围：复用设置菜单的多选行（底栏项目那套），只是外面套一层表单里的字段标题。
-   不再画自己的边框盒子——菜单本身就是框，表单里多一个框反而像第二种控件。 */.sync-scope {
+   不再画自己的边框盒子——菜单本身就是框，表单里多一个框反而像第二种控件。 */
+.sync-scope {
   display: grid;
   gap: var(--space-2);
   margin: 0;
@@ -4138,7 +4223,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   line-height: var(--leading-normal);
 }
 
-/* 账户类型：与「自定义」菜单里 基础/高级 同一套分段按钮，不另造控件。 */.sync-kind {
+/* 账户类型：与「自定义」菜单里 基础/高级 同一套分段按钮，不另造控件。 */
+.sync-kind {
   display: grid;
   gap: var(--space-2);
   margin: 0;
@@ -4153,7 +4239,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   font-weight: var(--weight-semibold);
 }
 
-/* The WebDAV form is one column: it only ever renders inside the 420px menu. */.sync-form {
+/* The WebDAV form is one column: it only ever renders inside the 420px menu. */
+.sync-form {
   display: grid;
   grid-template-columns: 1fr;
   gap: var(--space-3);
@@ -4170,7 +4257,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* 对话框的动作行与二级菜单同一种排法：按钮平分整行，一起铺满。
    从前这里是右对齐，于是单个按钮（比如「保存服务器」）缩在右下角，而同一份设置里
    的按钮都是铺满的——同一个应用里两套位置。平分规则与其它动作行共用（见上面的
-   `.dialog-actions > .primary-action`），图标按钮除外。 */.dialog-actions {
+   `.dialog-actions > .primary-action`），图标按钮除外。 */
+.dialog-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-3);
@@ -4224,7 +4312,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-rail { display: grid; gap: var(--space-3); margin: var(--space-6) 0; min-width: 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 .archive-rail-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .archive-rail-heading h2 { display: flex; align-items: center; gap: var(--space-2); margin: 0; font-size: var(--text-lg); font-weight: var(--weight-bold); letter-spacing: var(--tracking-tight); }
-/* One icon per rail, in the accent the heading already carries. */.archive-rail-heading h2 svg { width: 20px; height: 20px; color: var(--primary); }
+/* One icon per rail, in the accent the heading already carries. */
+.archive-rail-heading h2 svg { width: 20px; height: 20px; color: var(--primary); }
 /* 6px of padding, not 2: the global :focus-visible ring extends outside the card
    and a horizontal scroll container clips anything past its padding box, so a
    keyboard-focused rail card had its ring sliced off.
@@ -4344,14 +4433,17 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-thumb-card-meta span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .archive-thumb-card-tags { display: flex; align-items: flex-start; align-content: flex-start; flex-wrap: wrap; gap: var(--space-1); height: 48px; max-height: 48px; overflow: hidden; }
 /* Two rows at the same compact size the library grid uses: a 150px card cannot
-   carry 12px chips, and running them at full size fitted barely two tags. */.archive-thumb-card-tags .metadata-chip { max-width: 100%; min-height: 20px; line-height: 18px; }
+   carry 12px chips, and running them at full size fitted barely two tags. */
+.archive-thumb-card-tags .metadata-chip { max-width: 100%; min-height: 20px; line-height: 18px; }
 @media (max-width: 640px) { .archive-thumb-card-body { padding: 10px; } }
 @media (max-width: 420px) { .archive-list.is-thumbnail .archive-row-wrap.is-cover-wide { flex-basis: 180px; width: 180px; } }
 
 /* .workspace-stack 本身没有样式，区块之间就会贴在一起：这里把工作区变成
-   带行距的网格，每张卡片之间留出空隙。 */.dedup-workspace { display: grid; align-content: start; gap: var(--space-5); max-width: min(100%, 1680px); margin: 0 auto; }
+   带行距的网格，每张卡片之间留出空隙。 */
+.dedup-workspace { display: grid; align-content: start; gap: var(--space-5); max-width: min(100%, 1680px); margin: 0 auto; }
 /* 顶部三段式：检测范围 → 进度 → 本次扫描统计。每段一张卡，标题行右侧放动作，
-   与 Readoshi 的「范围面板 / 进度面板 / 统计面板」一致；不再有页首小标题。 */.dedup-workspace .dedup-section { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+   与 Readoshi 的「范围面板 / 进度面板 / 统计面板」一致；不再有页首小标题。 */
+.dedup-workspace .dedup-section { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 .dedup-workspace .dedup-section-heading { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .dedup-workspace .dedup-section-heading > div:first-child { display: grid; gap: 4px; min-width: 0; }
 .dedup-workspace .dedup-section-heading strong { font-size: var(--text-lg); }
@@ -4359,26 +4451,32 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-workspace .dedup-section-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .dedup-workspace .dedup-scope-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); align-items: end; gap: var(--space-3); }
 /* 标题留出与控件内文一致的左内边距：控件的圆角让「贴着边框」的标题看起来
-   像在控件左侧外面。 */.dedup-workspace .dedup-scope-grid label { display: grid; gap: 6px; min-width: 0; padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
+   像在控件左侧外面。 */
+.dedup-workspace .dedup-scope-grid label { display: grid; gap: 6px; min-width: 0; padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
 .dedup-workspace .dedup-scope-grid select,
 .dedup-workspace .dedup-scope-grid input { width: 100%; min-width: 0; }
 .dedup-workspace .dedup-progress-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
 .dedup-workspace .dedup-progress-head > div { display: grid; gap: 4px; min-width: 0; }
 .dedup-workspace .dedup-progress-head strong { font-size: var(--text-md); }
 /* 进度明细用项目正文字体：等宽工具字体只给编号用，中文句子在那套字体下
-   字重字形都对不上，看起来像「没使用项目指定字体」。 */.dedup-workspace .dedup-progress-head span { color: var(--ink-secondary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+   字重字形都对不上，看起来像「没使用项目指定字体」。 */
+.dedup-workspace .dedup-progress-head span { color: var(--ink-secondary); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 .dedup-workspace .dedup-progress-value { flex: none; padding: 4px 10px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); color: var(--on-surface); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
 /* MD3 线性进度条：4dp 圆头轨道 + primary 填充；没有总数（枚举阶段）时用
-   不定量扫光条，让人看出它还在动。 */.dedup-workspace .dedup-progress-track { position: relative; height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-container-highest); }
+   不定量扫光条，让人看出它还在动。 */
+.dedup-workspace .dedup-progress-track { position: relative; height: 6px; overflow: hidden; border-radius: var(--radius-pill); background: var(--surface-container-highest); }
 .dedup-workspace .dedup-progress-fill { height: 100%; border-radius: var(--radius-pill); background: var(--primary); transition: width var(--motion-standard); }
 .dedup-workspace .dedup-progress-fill.is-indeterminate { width: 40%; animation: progress-sweep var(--duration-pulse) var(--ease-pulse) infinite; }
 @media (prefers-reduced-motion: reduce) {
   .dedup-workspace .dedup-progress-fill.is-indeterminate { width: 100%; animation: none; opacity: 0.6; }
-  /* 减弱动效时收起/展开直接切换，不做过渡。 */.sync-collapsible { transition: none; }
+  /* 减弱动效时收起/展开直接切换，不做过渡。 */
+.sync-collapsible { transition: none; }
 }
 /* 九格排一行：auto-fit+minmax 在窄一点时会把最后一格挤到第二行，改成等分的
-   单行网格，格子自己收缩。 */.dedup-workspace .dedup-stats { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: var(--space-2); margin: 0; }
-/* 移动端：九格排成 3×3，格与格依然等宽，不再随着宽度一格一格地跳。 */.dedup-workspace .dedup-stat { padding: 10px 12px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); min-width: 0; }
+   单行网格，格子自己收缩。 */
+.dedup-workspace .dedup-stats { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: var(--space-2); margin: 0; }
+/* 移动端：九格排成 3×3，格与格依然等宽，不再随着宽度一格一格地跳。 */
+.dedup-workspace .dedup-stat { padding: 10px 12px; border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-low); min-width: 0; }
 .dedup-workspace .dedup-stat dt { color: var(--ink-secondary); font-size: var(--text-xs); }
 .dedup-workspace .dedup-stat dd { margin: 4px 0 0; color: var(--on-surface); font-size: var(--text-md); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
 .dedup-workspace .progress-line { padding: var(--space-2) 0 0; color: var(--ink-secondary); font-size: var(--text-sm); }
@@ -4388,7 +4486,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* 对话框里的空态比整页的小一号：320px 的整页空态会把「扫描结果」这个弹窗撑成一屏，
    而这里要说的只是一句「还没有」。 */
 .dedup-history-dialog .empty-state { min-height: 180px; padding: var(--space-5) var(--space-4); }
-.dedup-history-list { display: grid; gap: var(--space-2); max-height: 46vh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-history-list { display: grid; gap: var(--space-2); max-height: 46dvh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-history-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-history-list li.is-current { border-color: var(--primary); background: var(--primary-container); }
@@ -4401,7 +4498,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* 组卡片按行排：每行是独立的 flex 行（列数由组件实测后写进 --group-columns），
    放不满的那一行 justify-content: center 整行居中；卡片宽度按「满行列数」算，
    所以不满的行只是两边留白，卡片不会变胖。align-self 钉在 start：默认 stretch
-   会把同一行的卡片撑到最高邻居那么高（一条 3 组的链旁边会变成空壳）。 */.dedup-group-rows { display: grid; align-content: start; gap: var(--space-4); }
+   会把同一行的卡片撑到最高邻居那么高（一条 3 组的链旁边会变成空壳）。 */
+.dedup-group-rows { display: grid; align-content: start; gap: var(--space-4); }
 .dedup-group-row { display: flex; flex-wrap: nowrap; justify-content: center; gap: var(--space-4); margin: 0; padding: 0; list-style: none; }
 .dedup-group-row > .dedup-group { flex: 0 1 calc((100% - (var(--group-columns, 3) - 1) * var(--space-4)) / var(--group-columns, 3)); }
 .dedup-group-row > .dedup-chain { flex: 0 1 100%; }
@@ -4409,7 +4507,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-group { position: relative; min-width: 0; align-self: start; padding: var(--space-3); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
 .dedup-group.is-selected { border-color: var(--state-warning); background: color-mix(in srgb, var(--state-warning) 10%, var(--surface-container-high)); }
 /* 组标题是一个真按钮（点它整组标记为不重复）：序号居中，来源是紧随其后的一个
-   图标（文件名 / 封面相似），悬停走和项目其它控件同一个状态层。 */.dedup-group-heading {
+   图标（文件名 / 封面相似），悬停走和项目其它控件同一个状态层。 */
+.dedup-group-heading {
   display: flex;
   /* 只占文字那么宽（整行宽的胶囊在一张卡里像第二个标题栏，序号本身很短）。 */
   width: fit-content;
@@ -4438,12 +4537,14 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-group-heading[aria-pressed='true'] { border-color: var(--primary); background: var(--primary-container); color: var(--on-primary-container); }
 .dedup-group-source { display: grid; color: var(--ink-secondary); }
 .dedup-group-source svg { width: 15px; height: 15px; }
-/* 组内成员：每张卡都是一行「封面 + 文案」，整张卡就是勾选框。 */.dedup-group > ul { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+/* 组内成员：每张卡都是一行「封面 + 文案」，整张卡就是勾选框。 */
+.dedup-group > ul { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
 .dedup-group > ul > li { min-width: 0; }
 .dedup-group > .icon-button { margin-top: var(--space-3); }
 /* 固定高度 + 更大的封面：卡片等高才好看，标签区也因此有稳定的三行可排。 */
 /* content-visibility: 离屏卡片不参与布局与绘制；固定高度给出内在尺寸，滚动条
-   与卡片间距保持稳定。402 张卡片的长列表靠它把滚动成本压下来。 */.dedup-member {
+   与卡片间距保持稳定。402 张卡片的长列表靠它把滚动成本压下来。 */
+.dedup-member {
   content-visibility: auto;
   contain-intrinsic-size: auto 176px;
   display: grid;
@@ -4476,14 +4577,18 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-member-cover { position: relative; display: block; }
 .dedup-member-cover .archive-thumb-card-media { width: 100px; height: 150px; border-radius: var(--radius-control); }
 .dedup-member-cover .archive-card-check { top: 6px; left: 6px; }
-/* 三行：标题 / 标签（吃掉剩余高度）/ 元信息，元信息因此永远贴着卡片底部。 */.dedup-member-copy { display: grid; grid-template-rows: auto 1fr auto; align-content: start; gap: 8px; min-width: 0; height: 100%; }
+/* 三行：标题 / 标签（吃掉剩余高度）/ 元信息，元信息因此永远贴着卡片底部。 */
+.dedup-member-copy { display: grid; grid-template-rows: auto 1fr auto; align-content: start; gap: 8px; min-width: 0; height: 100%; }
 .dedup-member-title { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-bold); line-height: var(--leading-tight); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-/* 三行标签槽：判定胶囊（渣翻/无修正…）排在标签前面，一起参与行排布。 */.dedup-member-tags { height: auto; max-height: 78px; gap: 6px; }
+/* 三行标签槽：判定胶囊（渣翻/无修正…）排在标签前面，一起参与行排布。 */
+.dedup-member-tags { height: auto; max-height: 78px; gap: 6px; }
 .dedup-member-meta { display: flex; justify-content: space-between; gap: var(--space-2); color: var(--ink-faint); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 /* 与同组档案页数差过大的档案：标记它自己的页数。提醒原来在组标题右上角，
-   但需要人工核对的是这张卡，标在数字上才找得到人。 */.dedup-member-pages.is-flagged { color: var(--state-warning); font-weight: var(--weight-bold); }
+   但需要人工核对的是这张卡，标在数字上才找得到人。 */
+.dedup-member-pages.is-flagged { color: var(--state-warning); font-weight: var(--weight-bold); }
 /* 判定胶囊保留各自颜色，并和普通标签区分开（更实的底、更重的字）。 */
-/* 判定胶囊用实色底 + 高对比文字：之前 26% 的淡色和普通标签几乎没差别。 */.dedup-signal-chip { font-weight: var(--weight-bold); }
+/* 判定胶囊用实色底 + 高对比文字：之前 26% 的淡色和普通标签几乎没差别。 */
+.dedup-signal-chip { font-weight: var(--weight-bold); }
 .dedup-signal-chip.is-warning { background: var(--state-warning); color: var(--on-warning); }
 .dedup-signal-chip.is-positive { background: var(--state-success); color: var(--on-success); }
 .dedup-smart-tag.is-warning { background: color-mix(in srgb, var(--state-warning) 16%, var(--surface-container-high)); color: var(--on-surface); }
@@ -4491,20 +4596,24 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* 关联重复链：一条重复关系链上的多个组围在同一个区块里，标题行说明它是什么、
    并提供「整条链一起标记」的动作。 */
 /* 一条链占满整行、链内多组并排：以前它只是网格里的一个格子，3 组的链会竖成
-   一根又高又窄的柱子，和其它组挤在一起看不出来是一条链。 */.dedup-chain { grid-column: 1 / -1; display: grid; align-content: start; align-self: start; gap: var(--space-3); padding: var(--space-4); border: 1px dashed var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-muted); }
+   一根又高又窄的柱子，和其它组挤在一起看不出来是一条链。 */
+.dedup-chain { grid-column: 1 / -1; display: grid; align-content: start; align-self: start; gap: var(--space-3); padding: var(--space-4); border: 1px dashed var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-muted); }
 /* 链标头只剩一个按钮：序号写在按钮文字里，后面那行「N 组重复 · 整条链一起
-   标记为不重复」是每个链区块都在复述同一件事。 */.dedup-chain-heading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-/* 链内同样是按行排的 .dedup-group-rows。 */.dedup-chains { display: grid; gap: var(--space-4); }
+   标记为不重复」是每个链区块都在复述同一件事。 */
+.dedup-chain-heading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+/* 链内同样是按行排的 .dedup-group-rows。 */
+.dedup-chains { display: grid; gap: var(--space-4); }
 .dedup-confirm { display: grid; gap: var(--space-2); margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); }
 .dedup-confirm label { display: flex; align-items: center; gap: var(--space-2); }
 .dedup-confirm-actions { display: flex; gap: var(--space-2); }
-/* 不重复关系面板：持久化对直接列出，含导入的与手动标记的。 */.dedup-relations { display: grid; gap: var(--space-2); justify-items: start; }
+/* 不重复关系面板：持久化对直接列出，含导入的与手动标记的。 */
+.dedup-relations { display: grid; gap: var(--space-2); justify-items: start; }
 .dedup-relations-dialog { width: min(680px, 94vw); }
 /* 档案概览对话框：阅读器那面面板原样搬过来，外壳让出它的边框与底色（对话框
-   自己已经有了），只把宽度和高度算好。 */.archive-overview-dialog { width: min(960px, 94vw); }
+   自己已经有了），只把宽度和高度算好。 */
+.archive-overview-dialog { width: min(960px, 94vw); }
 .archive-overview-dialog .reader-overview {
   width: 100%;
-  max-height: min(76vh, 720px);
   max-height: min(76dvh, 720px);
   padding: 0;
   border: 0;
@@ -4512,7 +4621,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 /* 搜索框按项目的控件规范来：产品字体、控件高度、控件配色，字号和档案库、设置
    页的输入框一样走继承（16px）。之前它自带 6px padding 和 13px 字号，比全应用
-   的输入框小一号，看着像没套上项目字体的原生控件。 */.dedup-relations-search {
+   的输入框小一号，看着像没套上项目字体的原生控件。 */
+.dedup-relations-search {
   width: 100%;
   min-width: 0;
   min-height: var(--control-height);
@@ -4525,8 +4635,12 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   font-family: var(--font-body);
 }
 .dedup-relations-search:focus { border-color: var(--focus-ring); box-shadow: var(--focus-shadow); outline: none; }
-/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46vh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
-/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。 */.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46dvh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
+/* ul 自带 40px 的 padding-inline-start，不清掉就是对话框左边那一大条空白。
+ *
+ * 没有 `46vh` 的孪生声明：压缩器把同一选择器里后写的那条当冗余删掉，孪生发不出去，
+ * 留着的只是「看着像兜底」的死声明。2026-10-16 规范注释时删掉了原样重复的那一行；
+ * 真要给旧 WebView 兜底得走 base.css 里 `--viewport-height` 那种 @supports 变量。 */
+.dedup-relations-list { display: grid; gap: var(--space-2); width: 100%; max-height: 46dvh; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
 .dedup-relations-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-relation-pair { display: grid; grid-template-columns: 34px 34px minmax(0, 1fr); align-items: center; gap: var(--space-2); min-width: 0; }
 .dedup-relation-cover { display: block; }
@@ -4534,7 +4648,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-relation-titles { display: grid; gap: 2px; min-width: 0; }
 /* 标题是打开档案概览的按钮：悬停按 M3 的做法给一层状态层，不再是「变色 +
    下划线」。状态层跟着标题的长度走——网格项默认拉满整列宽，短标题会得到一整条
-   底色。 */.dedup-relation-title {
+   底色。 */
+.dedup-relation-title {
   display: block;
   justify-self: start;
   max-width: 100%;
@@ -4561,25 +4676,31 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-relation-title:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 1px; }
 .dedup-relation-titles > .is-missing { justify-self: start; max-width: 100%; overflow: hidden; padding: 1px 6px; margin-inline: -6px; font-size: var(--text-sm); color: var(--ink-faint); text-overflow: ellipsis; white-space: nowrap; }
 /* 取消过标记的行退到后面：按钮已经写着「恢复标记」，行本身再长得一样就分不出
-   哪些关系还在生效。 */.dedup-relations-list li.is-tombstoned .dedup-relation-titles { opacity: 0.55; }
+   哪些关系还在生效。 */
+.dedup-relations-list li.is-tombstoned .dedup-relation-titles { opacity: 0.55; }
 .dedup-relations-list .secondary-action { flex: none; }
 .dedup-workspace .progress-line.is-warning { color: var(--state-danger); }
 .dedup-workspace .progress-line .icon-button { vertical-align: middle; }
 /* 查重页只有两套布局：>900px 是桌面（与应用的紧凑模式断点一致），≤900px 是
-   移动。中间宽度不再出现「按钮换行位置不同」这类半吊子排布。 */.dedup-workspace .dedup-section-heading { flex-wrap: nowrap; }
+   移动。中间宽度不再出现「按钮换行位置不同」这类半吊子排布。 */
+.dedup-workspace .dedup-section-heading { flex-wrap: nowrap; }
 /* 动作行在桌面也不换行：按钮自己成一行会让「开始扫描」掉到第二行，正是要消灭
-   的中间态。宽度不够时压缩的是说明文字，不是动作排布。 */.dedup-workspace .dedup-section-actions { flex-wrap: nowrap; }
-/* 按钮文字不换行：压缩的应该是标题旁的说明文字，不是按钮里的两个字。 */.dedup-workspace .dedup-section-actions > button { white-space: nowrap; flex: none; }
+   的中间态。宽度不够时压缩的是说明文字，不是动作排布。 */
+.dedup-workspace .dedup-section-actions { flex-wrap: nowrap; }
+/* 按钮文字不换行：压缩的应该是标题旁的说明文字，不是按钮里的两个字。 */
+.dedup-workspace .dedup-section-actions > button { white-space: nowrap; flex: none; }
 .dedup-workspace .dedup-section-heading > div:first-child { min-width: 0; }
 
 @media (max-width: 900px) {
   /* 标题与动作各占一行。动作区：主按钮（开始扫描）独占一行，次级按钮按内容宽度
      换行铺满——三个一排、有「恢复扫描」时两两一排，不再用固定三列把第四个挤成
-     孤零零的第二行。 */.dedup-workspace .dedup-section-heading { display: grid; gap: var(--space-3); }
+     孤零零的第二行。 */
+.dedup-workspace .dedup-section-heading { display: grid; gap: var(--space-3); }
   .dedup-workspace .dedup-section-actions { display: flex; flex-wrap: wrap; width: 100%; gap: var(--space-2); }
   .dedup-workspace .dedup-section-actions > button { flex: 1 1 auto; min-width: 0; padding: 0 var(--space-3); }
   .dedup-workspace .dedup-section-actions > .primary-action { flex: 1 1 100%; order: -1; }
-  /* 三列两行：封面质量这类诊断数字留给桌面，手机上看的是两份名单本身。 */.dedup-workspace .dedup-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  /* 三列两行：封面质量这类诊断数字留给桌面，手机上看的是两份名单本身。 */
+.dedup-workspace .dedup-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .dedup-workspace .dedup-stat.is-desktop-only { display: none; }
   .dedup-workspace .dedup-filters { grid-template-columns: minmax(0, 1fr); }
   .dedup-workspace .dedup-scope-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -4644,14 +4765,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* Compact layout. 900px, not a phone width: the wide shell needs 248px of
    sidebar plus two library panes, so between 768px and 900px the content used to
    be squeezed narrower than this layout makes it. Keep in step with
-   COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and with reader.css. */@media (max-width: 900px) {
+   COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and with reader.css. */
+@media (max-width: 900px) {
   .workspace.is-library-workspace {
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
   }
   /* Shelves scroll with the page on compact: every wrapper grows with the list
-     so its tail stays reachable instead of being clamped behind the nav. */.shelf-workspace,
+     so its tail stays reachable instead of being clamped behind the nav. */
+.shelf-workspace,
   .shelf-workspace .library-workspace {
     height: auto;
     min-height: 0;
@@ -4661,7 +4784,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .library-shell.has-detail { display: block; height: auto; min-height: 0; }
   /* react-resizable-panels writes flex basis/height inline styles. On a phone
      the route is a single drilled-in surface, so those desktop sizing values
-     must not leave an empty flex track below the visible panel. */.library-shell[data-group] {
+     must not leave an empty flex track below the visible panel. */
+.library-shell[data-group] {
     display: block !important;
     height: auto !important;
     min-height: 0;
@@ -4696,14 +4820,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
      340px→104px）。原先这里在 ≤900px 强行单列居中，中档宽度反而塞不下
      信息——宽度明明够。 */
   /* The toolbar is already a single non-wrapping flex row; on a phone the six
-     icon buttons only need a floor so they stay tappable. */.archive-detail-route-actions > .primary-action,
+     icon buttons only need a floor so they stay tappable. */
+.archive-detail-route-actions > .primary-action,
   .archive-detail-route-actions > .secondary-action,
   .archive-detail-route-actions > a.primary-action,
   .archive-detail-route-actions > a.secondary-action {
     flex: 1 1 44px;
   }
   .scroll-to-top { right: var(--space-4); bottom: calc(76px + var(--safe-bottom)); }
-  /* 30px is a comfortable desktop icon button and a mean touch target. */.icon-action { width: 40px; height: 40px; }
+  /* 30px is a comfortable desktop icon button and a mean touch target. */
+.icon-action { width: 40px; height: 40px; }
   .icon-action svg { width: 18px; height: 18px; }
   .app-shell {
     display: block;
@@ -4752,11 +4878,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   /* 移动端分类列表直接复用 preferences-form > settings-group 的渲染路径，
-     不需要任何专属规则；这里唯一的差异是面板底部的收边。 */.settings-sidebar .settings-group {
+     不需要任何专属规则；这里唯一的差异是面板底部的收边。 */
+.settings-sidebar .settings-group {
     margin-bottom: var(--space-6);
   }
 
-  /* The section's own title, since the sidebar that named it is off screen. */.settings-compact-heading {
+  /* The section's own title, since the sidebar that named it is off screen. */
+.settings-compact-heading {
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -4789,7 +4917,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   /* 引导在手机上不再是「图标 + 文案」两列：居中一列，卡片留白小一号。两个入口仍然
      并排一行——竖排 + 各自满宽会让卡片里多出两条横幅，而它们是同一件事的两个做法。
      `.primary-action` 在这一层是 100% 宽（表单里的提交按钮要的），这里按内容宽度
-     收回来。 */.first-run {
+     收回来。 */
+.first-run {
     justify-items: center;
     width: min(100%, 420px);
     text-align: center;
@@ -4836,7 +4965,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
      group and the panel. Compact scrolls the page instead of a panel, so those
      have to be beaten with !important: left in place, the group clipped the list
      at the viewport height and the page had nothing to scroll, which is why the
-     last card stayed behind the bottom nav. */.library-panels {
+     last card stayed behind the bottom nav. */
+.library-panels {
     display: block !important;
     height: auto !important;
     min-height: 0;
@@ -4871,7 +5001,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
   /* 桌面右侧的轨线是 scroller 背景画的整条竖线；移动端改为日期条分组，这里必须
      显式抹掉，否则那条线会泄漏进手机屏幕。刻度条同理：这一档不渲染它，右侧那条
-     留给它的空档也要还回去。 */.archive-list.has-timeline {
+     留给它的空档也要还回去。 */
+.archive-list.has-timeline {
     background: none;
   }
 
@@ -4890,7 +5021,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     font-weight: var(--weight-semibold);
   }
 
-  /* 只留日期文字：卡片自带描边，再画一条分隔线就是两条平行线，顶部看起来线太多。 */.archive-detail {
+  /* 只留日期文字：卡片自带描边，再画一条分隔线就是两条平行线，顶部看起来线太多。 */
+.archive-detail {
     height: auto;
     padding: var(--space-6) 0;
   }
@@ -4913,7 +5045,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   /* 滚动方向驱动的显隐：向下滚动把整条底栏送出屏幕（含安全区），向上滚动或
-     回到顶部时滑回。visibility 随过渡离散翻转，键盘焦点也随之移出。 */.compact-nav.is-hidden {
+     回到顶部时滑回。visibility 随过渡离散翻转，键盘焦点也随之移出。 */
+.compact-nav.is-hidden {
     transform: translateY(calc(100% + var(--safe-bottom)));
     opacity: 0;
     visibility: hidden;
@@ -4921,7 +5054,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   /* 悬浮底栏：胶囊造型浮在内容之上，不再占一行高度——内容直接通到屏幕底，
-     底栏盖在上面，随滚动让位。激活项照旧用 primary-container 胶囊。 */.app-shell.is-floating-nav .app-main {
+     底栏盖在上面，随滚动让位。激活项照旧用 primary-container 胶囊。 */
+.app-shell.is-floating-nav .app-main {
     height: 100%;
   }
 
@@ -4953,7 +5087,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     border-radius: var(--radius-pill);
   }
 
-  /* 胶囊里激活项本身就是填充，不再需要顶边指示条。 */.compact-nav.is-floating .nav-link::before {
+  /* 胶囊里激活项本身就是填充，不再需要顶边指示条。 */
+.compact-nav.is-floating .nav-link::before {
     display: none;
   }
 
@@ -5001,7 +5136,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   /* 悬浮底栏浮在内容之上，滚动容器得补出它的高度，最后一屏内容才能完整滚出
      （首页、书架、档案库通用）。整条 fixed 的底栏本来就占一行——.app-main 的
      高度里已经减掉了它——再补这 80px 只会在内容下方留一块同色空带，手机上就是
-     底栏之上那一大块「遮挡」。 */.app-shell.is-floating-nav .workspace,
+     底栏之上那一大块「遮挡」。 */
+.app-shell.is-floating-nav .workspace,
   .app-shell.is-floating-nav .workspace.is-library-workspace {
     padding-bottom: calc(var(--safe-bottom) + 80px);
   }
@@ -5022,7 +5158,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   /* ≤900 一切路由都是页面滚动：缓存面板的 height:100% 钳制必须全部放开，
-     否则每个路由的溢出尾都会在面板处被吃掉（同桌面首页丢 44px 的问题）。 */.route-cache-panel {
+     否则每个路由的溢出尾都会在面板处被吃掉（同桌面首页丢 44px 的问题）。 */
+.route-cache-panel {
     height: auto;
   }
 
@@ -5040,7 +5177,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 }
 
-/* Cache proportions: a 10px stacked bar, one slice per rendition. */.cache-bar {
+/* Cache proportions: a 10px stacked bar, one slice per rendition. */
+.cache-bar {
   display: flex;
   gap: 2px;
   height: 10px;
@@ -5116,7 +5254,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    popover anchored in the control row pushed the row around and had to invent
    its own surface; this reuses the dialog's radius, elevation and scroll rules. */
 /* The one floating panel: the preset menu and every settings choice open in the
-   same masked sheet, so the two read as the same kind of thing. */.search-preset-overlay,
+   same masked sheet, so the two read as the same kind of thing. */
+.search-preset-overlay,
 .settings-choice-overlay {
   position: fixed;
   z-index: var(--z-overlay);
@@ -5133,7 +5272,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   display: grid;
   gap: 2px;
   width: min(100%, 420px);
-  max-height: min(70vh, 520px);
   max-height: min(70dvh, 520px);
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -5162,7 +5300,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   flex-direction: column;
   gap: 2px;
   width: min(100%, 420px);
-  max-height: min(85vh, 760px);
   max-height: min(85dvh, 760px);
   overflow: hidden;
   padding: var(--space-4);
@@ -5173,7 +5310,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   animation: settings-panel-in var(--motion-standard) backwards;
 }
 
-/* 标题与说明永远占它们自己的高度：能压缩的只有下面的内容区。 */.settings-choice-panel > .settings-choice-title,
+/* 标题与说明永远占它们自己的高度：能压缩的只有下面的内容区。 */
+.settings-choice-panel > .settings-choice-title,
 .settings-choice-panel > .settings-menu-desc {
   flex: none;
 }
@@ -5501,7 +5639,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   overflow-wrap: anywhere;
 }
 
-/* 多选菜单行（底栏项目）：整行是复选框，尾部图标表达勾选/固定。 */.settings-menu-checks {
+/* 多选菜单行（底栏项目）：整行是复选框，尾部图标表达勾选/固定。 */
+.settings-menu-checks {
   display: grid;
   gap: 2px;
 }
@@ -5543,14 +5682,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .settings-menu-check:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .settings-menu-check svg { flex: none; width: 18px; height: 18px; color: var(--primary); }
 
-/* 固定项（档案库/设置）可读性不打折：保持全不透明，仅以锁形与禁用光标示意。 */.settings-menu-check.is-pinned svg { color: var(--on-surface-variant); }
+/* 固定项（档案库/设置）可读性不打折：保持全不透明，仅以锁形与禁用光标示意。 */
+.settings-menu-check.is-pinned svg { color: var(--on-surface-variant); }
 .settings-menu-check:disabled { cursor: default; opacity: 1; }
 
 @media (hover: hover) {
   .settings-menu-check:disabled:hover { background: transparent; }
 }
 
-/* 自定义菜单的层级切换（基础/高级）：M3 分段按钮。 */.settings-menu-mode {
+/* 自定义菜单的层级切换（基础/高级）：M3 分段按钮。 */
+.settings-menu-mode {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-2);
@@ -5574,7 +5715,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   color: var(--on-secondary-container);
 }
 
-/* 基础配色卡片：三色预览条 + 名称，点选即套用。 */.custom-scheme-grid {
+/* 基础配色卡片：三色预览条 + 名称，点选即套用。 */
+.custom-scheme-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
@@ -5614,7 +5756,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .custom-scheme-swatch i { flex: 1 1 0; }
 
 /* The E-Hentai workspace loses its own group frame inside the menu — the menu
-   panel is the frame there. */.settings-choice-panel .eh-account-panel {
+   panel is the frame there. */
+.settings-choice-panel .eh-account-panel {
   padding: 0;
   border: 0;
   border-radius: 0;
@@ -5699,7 +5842,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 .search-preset-add svg { width: 16px; height: 16px; }
 /* Matches the search input's height exactly: the button was 30px against a 44px
-   field, so it floated in the middle of the row. */.search-preset-save {
+   field, so it floated in the middle of the row. */
+.search-preset-save {
   flex: none;
   width: var(--control-height);
   height: var(--control-height);
@@ -5740,7 +5884,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    打不开，所以核对与掩藏同等重要——按钮把两个需求摆在一起。 */
 /* 口令对话框：标题居中（与二级菜单同一个家族），眼睛在输入框**里面**的右端。
    一个框只有一只眼睛，两个框一模一样——按钮在框外时，浏览器自己的那个会和它凑成
-   一里一外两个（见 PassphraseDialog 的注释）。 */.passphrase-dialog > h2 {
+   一里一外两个（见 PassphraseDialog 的注释）。 */
+.passphrase-dialog > h2 {
   text-align: center;
 }
 
@@ -5805,7 +5950,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* Custom CSS editor: preset cards, a monospace box, and a length readout, opened
-   from the 自定义 CSS row's floating menu. */.custom-css-presets {
+   from the 自定义 CSS row's floating menu. */
+.custom-css-presets {
   display: flex;
   align-items: stretch;
   gap: var(--space-2);
@@ -5874,7 +6020,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    travels. Growing the handle on check made the two states read as different
    sizes and left it flush right while sitting 4px off the left edge; the
    handle now keeps its size and rests 4px from either end, so both states
-   look like the same control with equal margins. */.switch-control[role="switch"] {
+   look like the same control with equal margins. */
+.switch-control[role="switch"] {
   position: relative;
   flex: 0 0 52px;
   width: 52px;
@@ -5921,7 +6068,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 .model-import-glyph { width: 16px; height: 16px; }
 
-/* Archive intake: two ways in, one queue. */.upload-panel {
+/* Archive intake: two ways in, one queue. */
+.upload-panel {
   display: grid;
   gap: var(--space-5);
   min-width: 0;
@@ -5930,7 +6078,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* The two ways in share the panel width equally — the same full-width thirds
-   rhythm the login tabs use, instead of a chip floating on the left. */.upload-mode-tabs {
+   rhythm the login tabs use, instead of a chip floating on the left. */
+.upload-mode-tabs {
   width: 100%;
   justify-self: stretch;
 }
@@ -5951,7 +6100,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* Drops are handled by the webview, so the whole window is the target; this is
    the affordance for it rather than a hit area of its own. A large dashed tonal
-   target — the outline used to be flattened by the shared card rule below it. */.upload-dropzone {
+   target — the outline used to be flattened by the shared card rule below it. */
+.upload-dropzone {
   display: grid;
   justify-items: center;
   gap: var(--space-2);
@@ -6020,7 +6170,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .upload-url-summary .secondary-action { margin-left: auto; }
 
 /* The queue reads as one M3 list: borderless tonal rows with a status dot,
-   instead of a box inside the card inside the panel. */.upload-queue {
+   instead of a box inside the card inside the panel. */
+.upload-queue {
   display: grid;
   gap: var(--space-2);
 }
@@ -6084,7 +6235,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* MD3 dialog anatomy. Radix renders a bare Title/Description pair in dialogs
    without a .dialog-heading wrapper — give those children the headline and
-   supporting-text roles directly, without UA default margins. */.dialog-content > h2 {
+   supporting-text roles directly, without UA default margins. */
+.dialog-content > h2 {
   margin: 0 0 var(--space-2);
   font-size: var(--text-lg);
   font-weight: var(--weight-bold);
@@ -6117,7 +6269,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dialog-actions.is-balanced > .secondary-action { justify-content: center; }
 /* The sync option reads as an MD3 switch list item: its own tonal row between
    the supporting text and the trailing actions, not a loose control floating
-   beside them. */.archive-delete-dialog .preference-toggle {
+   beside them. */
+.archive-delete-dialog .preference-toggle {
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -6136,7 +6289,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* 服务器行的启用控件：一次只允许启用一台。当前标记是一枚跟在服务器名字
    后的小徽章；行尾只留未启用行的「启用」按钮（停用最后一台会让应用没有
-   数据源，所以已启用的行没有开关可关）。 */.settings-item.server-row {
+   数据源，所以已启用的行没有开关可关）。 */
+.settings-item.server-row {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -6148,7 +6302,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* 名字旁的一盏亮点：没有底、没有框，只有主色的圆点与一圈光晕——行首的服务器
-   图标已经说明了「这是服务器」，这里只补一句「这台在用」。 */.server-current-badge {
+   图标已经说明了「这是服务器」，这里只补一句「这台在用」。 */
+.server-current-badge {
   display: inline-grid;
   place-items: center;
   width: 14px;
@@ -6181,14 +6336,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 }
 
-/* Horizontal waterfall rows share a left edge; each chip keeps its measured width. */.card-tag-waterfall { position: relative; display: flex; flex-direction: column; flex-wrap: nowrap; align-items: stretch; justify-content: flex-start; gap: 4px; }
+/* Horizontal waterfall rows share a left edge; each chip keeps its measured width. */
+.card-tag-waterfall { position: relative; display: flex; flex-direction: column; flex-wrap: nowrap; align-items: stretch; justify-content: flex-start; gap: 4px; }
 .card-tag-waterfall .archive-row-tag-line { flex: none; justify-content: flex-start; }
 .card-tag-waterfall .metadata-chip { flex: none; }
 .card-tag-measures { position: absolute; visibility: hidden; pointer-events: none; height: 0; overflow: hidden; white-space: nowrap; }
 .card-tag-waterfall .card-tag-measure { display: inline-block; }
 /* Two lines, no more: the fit hook steps the font down a notch at a time when
    the text still overflows, and the clamp cuts whatever remains to an
-   ellipsis — the fallback only fires when even the smallest size cannot fit. */.archive-detail-route-title {
+   ellipsis — the fallback only fires when even the smallest size cannot fit. */
+.archive-detail-route-title {
   margin: 0;
   min-width: 0;
   font-size: var(--text-lg);
@@ -6207,7 +6364,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .route-cache-panel[hidden] * { animation-play-state: paused !important; }
 
 /* Panel v4 puts the scroll wrapper inside data-panel. Compact pages scroll in
-   the workspace instead of creating a second vertical scrollport. */@media (max-width: 900px) {
+   the workspace instead of creating a second vertical scrollport. */
+@media (max-width: 900px) {
   .library-shell-panel-content, .library-list-panel-content { height: auto !important; overflow: visible !important; }
 }
 
