@@ -1827,6 +1827,8 @@ it('saves the selected detail actions from the appearance settings container', a
   expect(within(panel).getByRole('checkbox', { name: '详情页显示编辑' })).toHaveAttribute('aria-checked', 'false');
   await user.click(within(panel).getByRole('checkbox', { name: '详情页显示编辑' }));
   await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ detailActions: ['read', 'readingList', 'favorites', 'download', 'edit'] }) }));
+  await user.click(within(panel).getByRole('checkbox', { name: '详情页显示清除阅读进度' }));
+  await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ detailActions: ['read', 'readingList', 'favorites', 'download', 'edit', 'clearProgress'] }) }));
 });
 
 it('defaults the detail time fact to the publish date and saves the added-date choice', async () => {

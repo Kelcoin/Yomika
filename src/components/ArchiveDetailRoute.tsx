@@ -1,3 +1,4 @@
+import { useArchiveReadingProgress } from './useArchiveReadingProgress';
 import { usePageActive } from '../app/RetainedPage';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
@@ -234,11 +235,6 @@ detailBasePath?: string | undefined }) {
         } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });
-      const readingGeneration = readingOwner.current.generation;
-      void repository.listReadingList(server.scopeId).then((result) => {
-        if (!active || !result.ok || readingOwner.current.generation !== readingGeneration) return;
-        setInReadingList(result.value.some((item) => item.archiveId === archiveId && !item.deleted));
-      });
       void ehRepository.listAccounts().then((result) => {
         if (!active || !result.ok) return;
         setEhAccountId(result.value.find((item) => item.isActive && item.status === 'verified')?.id);
@@ -261,12 +257,34 @@ detailBasePath?: string | undefined }) {
       });
     };
     const invalidate = (event: Event) => {
-      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix === 'favorites:') refresh();
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix || prefix === 'favorites:') refresh();
     };
     if (favoritePageActive) refresh();
     window.addEventListener('yomika:route-cache-invalidated', invalidate);
     return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
   }, [serverId, archiveId, favoritePageActive]);
+  // Sync and other local mutations must update retained detail membership too.
+  useEffect(() => {
+    if (!scopeId) return;
+    let active = true;
+    let request = 0;
+    const refresh = () => {
+      const token = ++request;
+      const generation = readingOwner.current.generation;
+      void repository.archiveMembership(scopeId, archiveId).then(result => {
+        if (!active || token !== request || !result.ok || readingOwner.current.generation !== generation) return;
+        setInReadingList(result.value.reading);
+      });
+    };
+    const invalidate = (event: Event) => {
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix || prefix === 'state:') refresh();
+    };
+    if (favoritePageActive) refresh();
+    window.addEventListener('yomika:route-cache-invalidated', invalidate);
+    return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
+  }, [scopeId, archiveId, favoritePageActive]);
   // A retained detail does not remount after saving metadata in the editor.
   // Refresh only its metadata on explicit invalidation, never on tab changes.
   useEffect(() => {
@@ -275,7 +293,7 @@ detailBasePath?: string | undefined }) {
     let request = 0;
     const refresh = (event: Event) => {
       const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
-      if (prefix !== 'archive-detail:') return;
+      if (prefix && prefix !== 'archive-detail:') return;
       const current = ++request;
       void repository.loadArchiveMetadata(serverId, archiveId).then((result) => {
         if (!active || request !== current || !result.ok) return;
@@ -298,6 +316,7 @@ detailBasePath?: string | undefined }) {
 
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
+  const progress = useArchiveReadingProgress(scopeId, archiveId);
   const [downloading, setDownloading] = useState(false);
   const downloadOwner = useRef({ identity: readingIdentity, busy: false, active: true });
   if (downloadOwner.current.identity !== readingIdentity) downloadOwner.current = { identity: readingIdentity, busy: false, active: true };
@@ -308,6 +327,7 @@ detailBasePath?: string | undefined }) {
     return () => { currentDownloadOwner.active = false; };
   }, [currentDownloadOwner]);
   const { open: openMenu, menu } = useArchiveContextMenu({
+    hiddenActions: detailActions.filter(action => action !== 'clearProgress' || progress.hasProgress),
     onMembershipChange: (id, list, next) => {
       if (id !== archiveId || favoriteOwner.current.identity !== favoriteIdentity || favoriteOwner.current.generation !== favoriteGeneration) return;
       if (list === 'reading') { readingOwner.current.generation++; readingOwner.current.busy = false; setReadingBusy(false); setInReadingList(next); } else { favoriteOwner.current.generation++; setFavorite(next); }
@@ -432,6 +452,7 @@ detailBasePath?: string | undefined }) {
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
         {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
+        {detailActions.includes('clearProgress') && progress.hasProgress && <button className="secondary-action" type="button" aria-label="清除阅读进度" title="清除阅读进度" disabled={progress.busy} aria-busy={progress.busy} onClick={() => { void progress.clear(); }}><RotateCcw aria-hidden="true" /><span className="archive-action-label">清除进度</span></button>}
         {serverId && detailActions.includes('delete') && (
           <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
           {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate(shelfBase, { replace: true })} />}</>

@@ -1,3 +1,5 @@
+import { useArchiveReadingProgress } from './useArchiveReadingProgress';
+import type { DETAIL_ACTIONS } from '../repositories/nativeSettingsRepository';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -25,6 +27,7 @@ const repository = new NativeLibraryRepository();
  * already tracks.
  */
 export function useArchiveContextMenu(options: {
+  hiddenActions?: readonly (typeof DETAIL_ACTIONS)[number][] | undefined;
   inReadingList?: ((archiveId: string) => boolean) | undefined;
   onToggleReadingList?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
   /** Renames that menu item, for a shelf that is not the reading list. */
@@ -52,21 +55,34 @@ export function useArchiveContextMenu(options: {
   }, [location.pathname, location.search, pageActive]);
   const [membershipState, setMembership] = useState<{ scopeId: string; serverId: string; archiveId: string; reading: boolean | undefined; favorites: boolean | undefined }>();
   const membership = membershipState?.serverId === target?.archive.serverId && membershipState?.archiveId === target?.archive.archiveId ? membershipState : undefined;
+  const progress = useArchiveReadingProgress(membership?.scopeId, target?.archive.archiveId);
   const membershipRequest = useRef(0);
   useEffect(() => {
-    const request = ++membershipRequest.current;
     setMembership(undefined);
     if (!target) return;
-    void (async () => {
-      const servers = await repository.listServers();
-      const server = servers.ok ? servers.value.find((server) => server.id === target.archive.serverId) : undefined;
-      if (!server) return;
-      const [status, favorites] = await Promise.all([repository.archiveMembership(server.scopeId, target.archive.archiveId), repository.readFavoritesCategory(server.id)]);
-      if (request !== membershipRequest.current) return;
-      if (!status.ok || !favorites.ok) showToast('待看或收藏状态读取失败', 'error');
-      setMembership({ scopeId: server.scopeId, serverId: target.archive.serverId, archiveId: target.archive.archiveId, reading: status.ok ? status.value.reading : undefined, favorites: favorites.ok ? (favorites.value?.archives.includes(target.archive.archiveId) ?? false) : undefined });
-    })();
-    return () => { membershipRequest.current += 1; };
+    const refresh = () => {
+      const request = ++membershipRequest.current;
+      void (async () => {
+        const servers = await repository.listServers();
+        const server = servers.ok ? servers.value.find((server) => server.id === target.archive.serverId) : undefined;
+        if (!server || request !== membershipRequest.current) return;
+        // Progress is local and remains available while the remote favorites lookup is pending.
+        setMembership(current => current?.scopeId === server.scopeId && current.archiveId === target.archive.archiveId
+          ? current
+          : { scopeId: server.scopeId, serverId: target.archive.serverId, archiveId: target.archive.archiveId, reading: undefined, favorites: undefined });
+        const [status, favorites] = await Promise.all([repository.archiveMembership(server.scopeId, target.archive.archiveId), repository.readFavoritesCategory(server.id)]);
+        if (request !== membershipRequest.current) return;
+        if (!status.ok || !favorites.ok) showToast('待看或收藏状态读取失败', 'error');
+        setMembership({ scopeId: server.scopeId, serverId: target.archive.serverId, archiveId: target.archive.archiveId, reading: status.ok ? status.value.reading : undefined, favorites: favorites.ok ? (favorites.value?.archives.includes(target.archive.archiveId) ?? false) : undefined });
+      })();
+    };
+    const invalidate = (event: Event) => {
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix || prefix === 'state:' || prefix === 'favorites:') refresh();
+    };
+    refresh();
+    window.addEventListener('yomika:route-cache-invalidated', invalidate);
+    return () => { membershipRequest.current += 1; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
   }, [target, showToast]);
   const toggleMembership = (archive: ArchiveRecord, list: 'reading' | 'favorites', next: boolean) => {
     if (!membership) return;
@@ -92,6 +108,8 @@ export function useArchiveContextMenu(options: {
   const menu = (<>
     <ArchiveContextMenu
       target={target}
+      hiddenActions={options.hiddenActions}
+      onClearProgress={progress.hasProgress && !progress.busy ? () => { void progress.clear(); } : undefined}
       onClose={() => setTarget(undefined)}
       onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)}
       onDelete={setDeleteTarget}

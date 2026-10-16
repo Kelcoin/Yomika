@@ -1,13 +1,5 @@
-/** 自动同步：什么时候自己去同步一次。
- *
- * 触发点参考 Readoshi 的做法（`src/lib/history.js`、`src/lib/historyMaintenance.js`、
- * `PwaStatus`）：写入后合并成一次（不是每翻一页推一次）、启动后巡检、回到前台补一次、
- * 切到后台立刻送一次、网络恢复、失败两分钟后重试、外加一个长间隔的定时巡检。手动按钮
- * 仍然走设置页那一份，这里只管没人盯着的时候。
- *
- * 频率上比 Readoshi 保守：远端是一份完整文档（GET + 条件 PUT 都是整份），所以写入后
- * 的合并窗口是 30 秒、两次自动同步之间至少隔 60 秒——翻页风暴不该变成每秒一次的传输。
- */
+/** Local-first synchronization: debounce bursts, bound continuous writes, and poll
+ * visible clients sparingly. All automatic triggers share throttling and backoff. */
 import { pickServer } from '../domain/server';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
@@ -16,14 +8,19 @@ import { invalidateRouteCache } from './routeCache';
 
 /** 写入之后：这段时间没有新写入才动身，把一串连续写入合并成一次。 */
 export const WRITE_DEBOUNCE_MS = 30_000;
+/** Continuous reading must not postpone the upload indefinitely. */
+export const WRITE_MAX_WAIT_MS = 2 * 60_000;
 /** 启动之后：先让界面就绪，再补一次。 */
 export const STARTUP_DELAY_MS = 5_000;
 /** 回到前台：距上次同步超过这个时间才补。 */
-export const RESUME_STALE_MS = 5 * 60_000;
+export const RESUME_STALE_MS = 60_000;
 /** 定时巡检：只在应用可见时走。 */
-export const PERIODIC_MS = 30 * 60_000;
+export const PERIODIC_MS = 5 * 60_000;
 /** 失败之后的第一次重试（Readoshi 的 HISTORY_SYNC_RETRY_MS）。 */
 export const RETRY_MS = 2 * 60_000;
+export const MAX_RETRY_MS = 10 * 60_000;
+/** Background flushes are urgent, but quick app switching must not cause a storm. */
+export const HIDDEN_MIN_INTERVAL_MS = 15_000;
 /** 任何两次自动同步之间的下限，写入触发和巡检一起受它约束。 */
 export const MIN_INTERVAL_MS = 60_000;
 
@@ -48,6 +45,13 @@ let enabled = false;
 let running = false;
 let started = false;
 let dirty = false;
+let writeVersion = 0;
+let dirtySince: number | undefined;
+let lastWriteAt: number | undefined;
+let lastAttemptAt: number | undefined;
+let retryNotBefore = 0;
+let failures = 0;
+let pendingHidden = false;
 let lastAt: number | undefined;
 let status: AutoSyncStatus = { running: false };
 const listeners = new Set<(status: AutoSyncStatus) => void>();
@@ -74,7 +78,15 @@ export function autoSyncStatus(): AutoSyncStatus {
 
 /** 由偏好喂进来；关掉之后所有定时触发都不再动身（手动按钮不受影响）。 */
 export function setAutoSyncEnabled(value: boolean): void {
+  if (enabled === value) return;
   enabled = value;
+  if (!value) {
+    writeTimer = clearTimer(writeTimer);
+    retryTimer = clearTimer(retryTimer);
+    startupTimer = clearTimer(startupTimer);
+  } else if (started) {
+    schedule(STARTUP_DELAY_MS, 'startup');
+  }
 }
 
 function clearTimer(timer: number | undefined): undefined {
@@ -84,63 +96,98 @@ function clearTimer(timer: number | undefined): undefined {
 
 function schedule(delay: number, reason: AutoSyncReason): void {
   if (!enabled) return;
-  if (reason === 'write') {
-    writeTimer = clearTimer(writeTimer);
-    writeTimer = window.setTimeout(() => { writeTimer = undefined; void syncNow('write'); }, delay);
-    return;
-  }
   startupTimer = clearTimer(startupTimer);
   startupTimer = window.setTimeout(() => { startupTimer = undefined; void syncNow(reason); }, delay);
 }
 
-/** 本地写入了会被同步的数据：合并成一次推送，不跟着每一次写入跑。 */
+/** Schedule exactly one trailing write, capped by the oldest outstanding write. */
+function scheduleWrite(): void {
+  if (!started || !enabled || !dirty) return;
+  const now = Date.now();
+  const due = pendingHidden ? now : Math.min((lastWriteAt ?? now) + WRITE_DEBOUNCE_MS, (dirtySince ?? now) + WRITE_MAX_WAIT_MS);
+  const interval = pendingHidden ? HIDDEN_MIN_INTERVAL_MS : MIN_INTERVAL_MS;
+  const lastRequest = Math.max(lastAttemptAt ?? -Infinity, lastAt ?? -Infinity);
+  const at = Math.max(due, lastRequest + interval, retryNotBefore);
+  writeTimer = clearTimer(writeTimer);
+  writeTimer = window.setTimeout(() => {
+    writeTimer = undefined;
+    void syncNow(pendingHidden ? 'hidden' : 'write');
+  }, Math.max(0, at - now));
+}
+
 function onWrite(): void {
   if (!started) return;
   dirty = true;
-  schedule(WRITE_DEBOUNCE_MS, 'write');
+  writeVersion++;
+  dirtySince ??= Date.now();
+  lastWriteAt = Date.now();
+  scheduleWrite();
 }
 
-function throttled(reason: AutoSyncReason): boolean {
-  // 切到后台与手动同步不受限：一个是不想丢掉刚读到的位置，一个是用户明确按了。
-  if (reason === 'hidden' || reason === 'manual') return false;
-  return lastAt !== undefined && Date.now() - lastAt < MIN_INTERVAL_MS;
+function retryLater(message: string): void {
+  publish({ error: message });
+  failures++;
+  retryNotBefore = Date.now() + Math.min(MAX_RETRY_MS, RETRY_MS * 2 ** Math.min(failures - 1, 4));
+  retryTimer = clearTimer(retryTimer);
+  if (started && enabled) retryTimer = window.setTimeout(() => {
+    retryTimer = undefined;
+    void syncNow('write');
+  }, retryNotBefore - Date.now());
 }
 
-/** 同步一次（如果账户与服务器都在、开关开着、又没被节流挡住）。 */
+/** A completed request only acknowledges writes that existed when it began. */
 export async function syncNow(reason: AutoSyncReason = 'manual'): Promise<number | undefined> {
-  if (running || !enabled) return undefined;
-  if (throttled(reason)) {
-    // 被挡下时把「有东西要推」留到下一次巡检，别把它弄丢。
-    if (dirty) schedule(WRITE_DEBOUNCE_MS, 'write');
-    return undefined;
+  if (!enabled) return undefined;
+  if (reason === 'hidden') pendingHidden = dirty;
+  if (running) return undefined;
+  if (reason !== 'manual') {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return undefined;
+    const interval = reason === 'hidden' ? HIDDEN_MIN_INTERVAL_MS : MIN_INTERVAL_MS;
+    const allowedAt = Math.max(Math.max(lastAttemptAt ?? -Infinity, lastAt ?? -Infinity) + interval, retryNotBefore);
+    if (Date.now() < allowedAt) {
+      if (dirty) scheduleWrite();
+      return undefined;
+    }
   }
   running = true;
+  lastAttemptAt = Date.now();
+  const version = writeVersion;
+  pendingHidden = false;
+  writeTimer = clearTimer(writeTimer);
+  startupTimer = clearTimer(startupTimer);
+  retryTimer = clearTimer(retryTimer);
   publish({ running: true, lastReason: reason });
   try {
     const [accountResult, serverResult] = await Promise.all([
       syncRepository.listAccounts(),
       libraryRepository.listServers(),
     ]);
-    if (!accountResult.ok || !serverResult.ok) return undefined;
-    // 两套账户只生效一套：自动同步跟着生效的那套走。
+    if (!accountResult.ok || !serverResult.ok) {
+      retryLater(!accountResult.ok ? accountResult.error.message : !serverResult.ok ? serverResult.error.message : '同步配置读取失败');
+      return undefined;
+    }
     const account = accountResult.value.find((entry) => entry.active) ?? accountResult.value[0];
     const server = pickServer(serverResult.value, null);
     if (!account || !server) return undefined;
     const result = await syncRepository.syncRemoteScope(account.id, server.scopeId);
     if (!result.ok) {
-      publish({ error: result.error.message });
-      retryTimer = clearTimer(retryTimer);
-      retryTimer = window.setTimeout(() => { retryTimer = undefined; void syncNow('write'); }, RETRY_MS);
+      retryLater(result.error.message);
       return undefined;
     }
     lastAt = Date.now();
-    dirty = false;
+    dirty = writeVersion !== version;
+    if (!dirty) { dirtySince = undefined; lastWriteAt = undefined; pendingHidden = false; }
+    failures = 0;
+    retryNotBefore = 0;
+    retryTimer = clearTimer(retryTimer);
     publish({ error: undefined, lastAt });
     publishSyncApplied(reason, result.value);
     return result.value;
   } finally {
     running = false;
     publish({ running: false });
+    // A write timer may have fired while the request was running. Always re-arm it.
+    scheduleWrite();
   }
 }
 
@@ -154,10 +201,12 @@ export function publishSyncApplied(reason: AutoSyncReason, changes: number): voi
 
 function onVisibilityChange(): void {
   if (document.visibilityState === 'hidden') {
-    // 离开/最小化：把刚读到的位置尽快送出去，这一下不等节流。
-    void syncNow('hidden');
+    // Only flush outstanding changes; the shorter cooldown still limits rapid app switching.
+    if (dirty) void syncNow('hidden');
     return;
   }
+  pendingHidden = false;
+  if (dirty) scheduleWrite();
   const stale = lastAt === undefined || Date.now() - lastAt >= RESUME_STALE_MS;
   if (stale) void syncNow('resume');
 }
@@ -201,6 +250,13 @@ export function resetAutoSyncForTests(): void {
   enabled = false;
   running = false;
   dirty = false;
+  writeVersion = 0;
+  dirtySince = undefined;
+  lastWriteAt = undefined;
+  lastAttemptAt = undefined;
+  retryNotBefore = 0;
+  failures = 0;
+  pendingHidden = false;
   lastAt = undefined;
   status = { running: false };
   listeners.clear();

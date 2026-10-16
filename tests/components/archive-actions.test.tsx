@@ -8,6 +8,7 @@ import { ToastProvider } from '../../src/components/Toast';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { RetainedPage } from '../../src/app/RetainedPage';
+import { invalidateRouteCache } from '../../src/lib/routeCache';
 
 afterEach(resetInvokeAdapterForTests);
 const archive = { archiveId: 'a', serverId: 's', title: 'Archive', pageCount: 10, updatedAt: 'now' };
@@ -17,6 +18,50 @@ function Menu() {
 }
 
 describe('archive actions', () => {
+  it('refreshes an already open menu when synchronization changes membership', async () => {
+    let reading = false;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'S', baseUrl: 'https://lrr.test' }] };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading, favorites: false } };
+      return { ok: true, value: null };
+    });
+    render(<MemoryRouter><Menu /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: '加入待看' })).not.toHaveAttribute('aria-disabled'));
+    reading = true;
+    act(() => invalidateRouteCache());
+    expect(await screen.findByRole('menuitem', { name: '移出待看' })).toBeInTheDocument();
+  });
+  it('offers local progress reset while the remote favorites service is still pending', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'S', baseUrl: 'https://lrr.test' }] };
+      if (command === 'read_favorites_category') return new Promise(() => {});
+      if (command === 'load_reading_progress') return { ok: true, value: { scopeId: 'scope', archiveId: 'a', pageIndex: 0, pageCount: 259, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } };
+      return { ok: true, value: { reading: false, favorites: false } };
+    });
+    render(<MemoryRouter><Menu /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
+    expect(await screen.findByRole('menuitem', { name: '清除阅读进度' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: '加入收藏夹' })).toHaveAttribute('aria-disabled', 'true');
+  });
+  it('clears progress and history together only for a previously read archive', async () => {
+    let read = true;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'S', baseUrl: 'https://lrr.test' }] };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: false } };
+      if (command === 'load_reading_progress') return { ok: true, value: read ? { scopeId: 'scope', archiveId: 'a', pageIndex: 0, pageCount: 259, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } : null };
+      if (command === 'clear_reading_progress') { read = false; return { ok: true, value: null }; }
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter><ToastProvider><Menu /></ToastProvider></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '清除阅读进度' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('clear_reading_progress', { scopeId: 'scope', archiveId: 'a' }));
+    fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
+    await waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'load_reading_progress').length).toBeGreaterThanOrEqual(2));
+    expect(screen.queryByRole('menuitem', { name: '清除阅读进度' })).not.toBeInTheDocument();
+  });
   it('closes a context menu when its retained page hides without a local route change', async () => {
     setInvokeAdapterForTests(async () => ({ ok: true, value: [] }));
     const content = <MemoryRouter><Menu /></MemoryRouter>;

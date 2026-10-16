@@ -6766,6 +6766,10 @@ fn persist_reading_progress(
     ) {
         return Err(error.to_string());
     }
+    transaction.execute(
+        "UPDATE reading_progress SET revision = MAX(revision, COALESCE((SELECT MAX(logical_clock) + 1 FROM sync_journal WHERE scope_id=?1 AND object_id=?1 || '/' || ?2 AND object_type='reading_progress'), 1)) WHERE scope_id=?1 AND archive_id=?2",
+        params![progress.scope_id, progress.archive_id],
+    ).map_err(|error| error.to_string())?;
     let record = transaction.query_row(
         "SELECT scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, updated_at, revision
          FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
@@ -6826,6 +6830,10 @@ fn persist_reading_progress(
             ],
         )
         .map_err(|error| error.to_string())?;
+    transaction.execute(
+        "UPDATE reading_history SET revision = MAX(revision, COALESCE((SELECT MAX(logical_clock) + 1 FROM sync_journal WHERE scope_id=?1 AND object_id=?1 || '/' || ?2 AND object_type='history'), 1)) WHERE scope_id=?1 AND archive_id=?2",
+        params![record.scope_id, record.archive_id],
+    ).map_err(|error| error.to_string())?;
     let history: (i64, String, i64) = transaction
         .query_row(
             "SELECT page_index, visited_at, revision FROM reading_history
@@ -7530,6 +7538,59 @@ pub fn delete_history_records(
     };
     match delete_history_records_in(&mut connection, &scope_id, &archive_ids) {
         Ok(removed) => CommandResult::success(removed),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
+}
+
+/// Explicit reading reset; history-only deletion intentionally keeps progress.
+pub(crate) fn clear_reading_progress_in(
+    connection: &mut Connection,
+    scope_id: &str,
+    archive_id: &str,
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let object_id = format!("{scope_id}/{archive_id}");
+    // Both tombstones belong to this one transaction, including progress-only records.
+    for (table, kind) in [
+        ("reading_progress", "reading_progress"),
+        ("reading_history", "history"),
+    ] {
+        let clock: i64 = transaction.query_row(
+            &format!("SELECT MAX(COALESCE((SELECT MAX(logical_clock) FROM sync_journal WHERE scope_id=?1 AND object_id=?2), 0), COALESCE((SELECT revision FROM {table} WHERE scope_id=?1 AND archive_id=?3), 0)) + 1"),
+            params![scope_id, object_id, archive_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                &format!("DELETE FROM {table} WHERE scope_id=?1 AND archive_id=?2"),
+                params![scope_id, archive_id],
+            )
+            .map_err(|error| error.to_string())?;
+        super::sync::journal_object(
+            &transaction,
+            scope_id,
+            kind,
+            &object_id,
+            clock,
+            serde_json::json!({ "archiveId": archive_id, "deleted": true, "clearProgress": true }),
+        )?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+#[tauri::command(async)]
+pub fn clear_reading_progress(
+    scope_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<()> {
+    let mut connection = match database.connection.lock() {
+        Ok(connection) => connection,
+        Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
+    };
+    match clear_reading_progress_in(&mut connection, &scope_id, &archive_id) {
+        Ok(()) => CommandResult::success(()),
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
     }
 }
@@ -8411,6 +8472,84 @@ mod tests {
                 .push((scope_id.to_string(), api_key.to_string()));
             Ok(())
         }
+    }
+
+    #[test]
+    fn explicit_reading_reset_is_scoped_atomic_and_reading_can_restart() {
+        let mut connection = migrated_connection();
+        for scope in ["scope-a", "scope-b"] {
+            persist_reading_progress(
+                &mut connection,
+                ReadingProgressInput {
+                    scope_id: scope.into(),
+                    archive_id: "archive-a".into(),
+                    page_index: 8,
+                    page_count: 10,
+                    layout: "paged".into(),
+                    direction: "ltr".into(),
+                    cover_alone: None,
+                    allow_progress_regression: true,
+                },
+            )
+            .unwrap();
+        }
+        // The existing history delete keeps progress, including a first-page record.
+        delete_history_records_in(&mut connection, "scope-a", &["archive-a".into()]).unwrap();
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM reading_progress WHERE scope_id='scope-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        clear_reading_progress_in(&mut connection, "scope-a", "archive-a").unwrap();
+        for table in ["reading_progress", "reading_history"] {
+            let count: i64 = connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE scope_id='scope-a'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+            let other: i64 = connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE scope_id='scope-b'"),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(other, 1);
+        }
+        let reset_clock: i64 = connection.query_row("SELECT MAX(logical_clock) FROM sync_journal WHERE scope_id='scope-a' AND object_type='reading_progress'", [], |row| row.get(0)).unwrap();
+        let restarted = persist_reading_progress(
+            &mut connection,
+            ReadingProgressInput {
+                scope_id: "scope-a".into(),
+                archive_id: "archive-a".into(),
+                page_index: 0,
+                page_count: 10,
+                layout: "paged".into(),
+                direction: "ltr".into(),
+                cover_alone: None,
+                allow_progress_regression: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(restarted.page_index, 0);
+        assert!(restarted.revision > reset_clock);
+        // A failing journal write rolls back both deletions.
+        connection.execute_batch("CREATE TRIGGER fail_reset BEFORE INSERT ON sync_journal BEGIN SELECT RAISE(ABORT, 'test rollback'); END;").unwrap();
+        assert!(clear_reading_progress_in(&mut connection, "scope-a", "archive-a").is_err());
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM reading_progress WHERE scope_id='scope-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     fn migrated_connection() -> Connection {

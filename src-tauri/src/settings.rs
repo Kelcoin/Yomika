@@ -390,8 +390,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
             )
         })
         || value.bottom_nav_items.len() > 7
-        || value.detail_actions.len() > 6
-        || value.detail_actions.iter().any(|item| !matches!(item.as_str(), "read" | "readingList" | "favorites" | "download" | "edit" | "delete"))
+        || value.detail_actions.len() > 7
+        || value.detail_actions.iter().any(|item| !matches!(item.as_str(), "read" | "readingList" | "favorites" | "download" | "edit" | "clearProgress" | "delete"))
         || !matches!(value.detail_date_kind.as_str(), "added" | "published")
         // 导入导出范围：条目数与长度都设上限，避免一行手改的配置把界面撑坏。
 
@@ -401,7 +401,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
     // The two load-bearing entries survive even a hand-edited settings row.
     let normalized = normalize_bottom_nav_items(&value.bottom_nav_items);
     Ok(PreferenceSnapshot {
-        detail_actions: ["read", "readingList", "favorites", "download", "edit", "delete"].into_iter().filter(|item| value.detail_actions.iter().any(|value| value == item)).map(String::from).collect(),
+        detail_actions: ["read", "readingList", "favorites", "download", "edit", "clearProgress", "delete"].into_iter().filter(|item| value.detail_actions.iter().any(|value| value == item)).map(String::from).collect(),
         bottom_nav_items: normalized,
         ..value.clone()
     })
@@ -1082,6 +1082,12 @@ mod tests {
         }).expect("save actions");
         assert_eq!(saved.detail_actions, vec!["read", "download"]);
         assert_eq!(load_preferences_from(&connection).unwrap().detail_actions, saved.detail_actions);
+        let saved = save_preferences_to(&mut connection, PreferenceSnapshot {
+            detail_actions: ["read", "readingList", "favorites", "download", "edit", "clearProgress", "delete"].into_iter().map(String::from).collect(),
+            ..PreferenceSnapshot::default()
+        }).expect("save all seven actions including progress reset");
+        assert_eq!(saved.detail_actions.len(), 7);
+        assert!(load_preferences_from(&connection).unwrap().detail_actions.contains(&"clearProgress".into()));
         save_preferences_to(&mut connection, PreferenceSnapshot {
             detail_actions: vec![], ..PreferenceSnapshot::default()
         }).expect("hide all actions");

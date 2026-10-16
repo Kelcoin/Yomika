@@ -11,6 +11,12 @@ vi.mock('../../src/lib/nativeImageCache', () => ({
 
 import { ArchiveProgressBar, ArchiveThumbnailCard } from '../../src/components/ArchiveThumbnailCard';
 
+it('keeps one read page out of 259 visible without rounding it to zero', () => {
+  const { container } = render(<ArchiveProgressBar page={1} pageCount={259} visibility="all" />);
+  expect(Number(screen.getByRole('progressbar').getAttribute('aria-valuenow'))).toBeGreaterThan(0);
+  expect(container.querySelector<HTMLElement>('.archive-card-progress-fill')?.style.width).toContain('6px');
+});
+
 /** jsdom 不做布局：轨道宽度只能由测试自己报给组件。观察谁、报多少，都由测试决定。 */
 function installTrackResizeFake() {
   const original = window.ResizeObserver;

@@ -639,7 +639,8 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
       });
     };
     const invalidate = (event: Event) => {
-      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix === 'favorites:') refresh();
+      const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
+      if (!prefix || prefix === 'favorites:') refresh();
     };
     if (pageActive) refresh();
     window.addEventListener('yomika:route-cache-invalidated', invalidate);

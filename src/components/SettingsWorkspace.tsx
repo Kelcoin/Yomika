@@ -1541,7 +1541,7 @@ export function SettingsWorkspace() {
                 <SettingsPanel icon={<ListChecks />} label="详情页功能按钮" hint="选择详情页显示的操作；其他操作仍可从右上角菜单打开" ariaLabel="详情页功能按钮" value={`${preferenceDraft.detailActions.length} 项`}>
                   <CheckRowGroup label="详情页功能按钮">
                     {DETAIL_ACTIONS.map((action) => {
-                      const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', delete: '删除' };
+                      const labels = { read: '阅读', readingList: '待看', favorites: '收藏夹', download: '下载', edit: '编辑', clearProgress: '清除阅读进度', delete: '删除' };
                       const included = preferenceDraft.detailActions.includes(action);
                       const locked = action === 'read';
                       return (

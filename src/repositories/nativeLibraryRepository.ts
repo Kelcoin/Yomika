@@ -237,6 +237,11 @@ export class NativeLibraryRepository {
       return result;
     });
   }
+  /** Explicitly reset reading; deleting history alone deliberately keeps progress. */
+  clearReadingProgress(scopeId: string, archiveId: string): Promise<CommandResult<void>> {
+    return queuedWrite(progressKey(scopeId, archiveId), () =>
+      invokeCommand('clear_reading_progress', { scopeId, archiveId }, VoidResponseSchema).then(invalidateShelves));
+  }
   /** LANraragi 的 🔖 Favorites 这一条分类（`null` = 服务器上没有这条）。
    *
    * 书架、详情页的心、右键菜单与多选都只问它，所以它有一条自己的快路：只读

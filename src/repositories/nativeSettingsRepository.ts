@@ -7,7 +7,7 @@ import type { CommandResult } from '../domain/result';
 /** Keep in step with `MAX_PREFETCH_PAGES` in src-tauri/src/settings.rs. */
 export const MAX_PREFETCH_PAGES = 10;
 
-export const DETAIL_ACTIONS = ['read', 'readingList', 'favorites', 'download', 'edit', 'delete'] as const;
+export const DETAIL_ACTIONS = ['read', 'readingList', 'favorites', 'download', 'edit', 'clearProgress', 'delete'] as const;
 export const DEFAULT_DETAIL_ACTIONS: (typeof DETAIL_ACTIONS)[number][] = ['read', 'readingList', 'favorites', 'download'];
 
 export const PreferenceSnapshotSchema = z.object({
@@ -54,7 +54,7 @@ export const PreferenceSnapshotSchema = z.object({
   ehMyTagsPriority: z.boolean().default(false),
   /** SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。 */
   sfwMode: z.boolean().default(false),
-  detailActions: z.array(z.enum(DETAIL_ACTIONS)).max(6).default(DEFAULT_DETAIL_ACTIONS),
+  detailActions: z.array(z.enum(DETAIL_ACTIONS)).max(7).default(DEFAULT_DETAIL_ACTIONS),
   /** Which time the detail overview prints as its fourth fact: the archive's
    * own publish date (default) or the moment this library added it. */
   detailDateKind: z.enum(['added', 'published']).default('published'),

@@ -216,6 +216,13 @@ describe('native library repository bridge', () => {
     expect(adapter).toHaveBeenCalledWith('delete_history_records', { scopeId: 'scope-a', archiveIds: ['a1', 'a2'] });
   });
 
+  it('clears progress with its own command, leaving history-only deletion independent', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: null }));
+    setInvokeAdapterForTests(adapter);
+    expect(await new NativeLibraryRepository().clearReadingProgress('scope-a', 'a1')).toEqual({ ok: true, value: undefined });
+    expect(adapter).toHaveBeenCalledWith('clear_reading_progress', { scopeId: 'scope-a', archiveId: 'a1' });
+  });
+
   it('adds an archive to a category through the native command', async () => {
     const value = { operation: 'add_to_category', success: 1 };
     const adapter = vi.fn(async () => ({ ok: true, value }));

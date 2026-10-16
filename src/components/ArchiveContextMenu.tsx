@@ -1,5 +1,6 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2, Download, Heart, HeartOff, ExternalLink } from 'lucide-react';
+import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2, Download, Heart, HeartOff, ExternalLink, RotateCcw } from 'lucide-react';
+import type { DETAIL_ACTIONS } from '../repositories/nativeSettingsRepository';
 import { archiveSourceUrl } from '../lib/archiveSource';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { useToast } from './Toast';
@@ -36,6 +37,8 @@ interface ArchiveContextMenuProps {
   categories?: Category[] | undefined;
   onAddCategory?: ((archive: ArchiveRecord, categoryId: string) => void) | undefined;
   onDelete?: ((archive: ArchiveRecord) => void) | undefined;
+  onClearProgress?: (() => void) | undefined;
+  hiddenActions?: readonly (typeof DETAIL_ACTIONS)[number][] | undefined;
 }
 
 /** Card-only context menu, anchored at the pointer.
@@ -61,6 +64,8 @@ export function ArchiveContextMenu({
   categories,
   onAddCategory,
   onDelete,
+  onClearProgress,
+  hiddenActions = [],
 }: ArchiveContextMenuProps) {
   const { showToast } = useToast();
   if (!target) return null;
@@ -76,33 +81,36 @@ export function ArchiveContextMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label={`${archive.title} 操作`}>
-          <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onRead(archive)}>
+          {!hiddenActions.includes('read') && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onRead(archive)}>
             <BookOpen aria-hidden="true" />阅读
-          </DropdownMenu.Item>
+          </DropdownMenu.Item>}
           <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onReadIncognito(archive)}>
             <EyeOff aria-hidden="true" />无痕阅读
           </DropdownMenu.Item>
-          {onToggleReadingList && (
+          {!hiddenActions.includes('readingList') && onToggleReadingList && (
             <DropdownMenu.Item className="archive-context-menu-item" disabled={membershipLoading} onSelect={() => onToggleReadingList(archive, !inReadingList)}>
               {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
               {inReadingList ? readingListLabels.remove : readingListLabels.add}
             </DropdownMenu.Item>
           )}
-          {onToggleFavorite && <DropdownMenu.Item className="archive-context-menu-item" disabled={favoriteLoading} onSelect={() => onToggleFavorite(archive, !inFavorites)}>
+          {!hiddenActions.includes('favorites') && onToggleFavorite && <DropdownMenu.Item className="archive-context-menu-item" disabled={favoriteLoading} onSelect={() => onToggleFavorite(archive, !inFavorites)}>
             {inFavorites ? <HeartOff aria-hidden="true" /> : <Heart aria-hidden="true" />}
             {inFavorites ? '移出收藏夹' : '加入收藏夹'}
           </DropdownMenu.Item>}
-          {onDownload && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onDownload(archive)}>
+          {!hiddenActions.includes('download') && onDownload && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onDownload(archive)}>
             <Download aria-hidden="true" />下载档案
           </DropdownMenu.Item>}
           {galleryUrl && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => {
             void openExternalUrl(galleryUrl).then((result) => { if (!result.ok) showToast(result.error.message, 'error'); });
           }}><ExternalLink aria-hidden="true" />跳转画廊</DropdownMenu.Item>}
-          {onEditMetadata && (
+          {!hiddenActions.includes('edit') && onEditMetadata && (
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onEditMetadata(archive)}>
               <Pencil aria-hidden="true" />编辑元数据
             </DropdownMenu.Item>
           )}
+          {!hiddenActions.includes('clearProgress') && onClearProgress && <DropdownMenu.Item className="archive-context-menu-item" onSelect={onClearProgress}>
+            <RotateCcw aria-hidden="true" />清除阅读进度
+          </DropdownMenu.Item>}
           {onCopyId && (
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onCopyId(archive)}>
               <Clipboard aria-hidden="true" />复制档案 ID
@@ -131,7 +139,7 @@ export function ArchiveContextMenu({
               ))}
             </>
           )}
-          {onDelete && (
+          {!hiddenActions.includes('delete') && onDelete && (
             <>
               <DropdownMenu.Separator className="archive-context-menu-separator" />
               <DropdownMenu.Item className="archive-context-menu-item is-danger" onSelect={() => onDelete(archive)}>

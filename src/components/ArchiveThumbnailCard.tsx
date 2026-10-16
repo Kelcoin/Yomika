@@ -36,7 +36,7 @@ export function ArchiveProgressBar({ page, pageCount, visibility, scope = 'elsew
   const allowed = mode === 'all' || (mode === 'history' && scope === 'history');
   const visible = allowed && read;
   if (!visible) return null;
-  const percent = pageCount > 0 ? Math.min(100, Math.max(0, Math.round((page / pageCount) * 100))) : 0;
+  const percent = pageCount > 0 ? Math.min(100, (page / pageCount) * 100) : 1;
   return <CardProgressBar percent={percent} label="阅读进度" cornerAware={cornerAware} />;
 }
 

@@ -7,6 +7,8 @@ import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
 import { ToastProvider } from '../../src/components/Toast';
 import { RetainedPage } from '../../src/app/RetainedPage';
+import { PreferencesProvider } from '../../src/app/preferences';
+import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { invalidateRouteCache, readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 
 afterEach(() => {
@@ -39,6 +41,61 @@ function renderDetail(detailBasePath?: string) {
 }
 
 describe('archive detail route', () => {
+  it('refreshes retained progress, reading-list membership and metadata after synchronization', async () => {
+    let pulled = false;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, title: pulled ? 'Updated detail' : metadata.title, pageCount: 0 } };
+      if (command === 'list_reading_list') return { ok: true, value: pulled ? [{ scopeId: server.scopeId, archiveId: metadata.archiveId, addedAt: 'now', updatedAt: 'now', deviceId: 'device', revision: 1, deleted: false }] : [] };
+      if (command === 'load_reading_progress') return { ok: true, value: pulled ? { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 0, pageCount: 259, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } : null };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: pulled, favorites: false } };
+      if (command === 'read_favorites_category') return { ok: true, value: null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await screen.findByRole('heading', { name: metadata.title });
+    expect(screen.getByRole('button', { name: '加入待看' })).toBeInTheDocument();
+    pulled = true;
+    act(() => invalidateRouteCache());
+    await screen.findByRole('heading', { name: 'Updated detail' });
+    await screen.findByRole('button', { name: '移出待看' });
+    fireEvent.click(screen.getByRole('button', { name: '档案菜单' }));
+    expect(await screen.findByRole('menuitem', { name: '清除阅读进度' })).toBeInTheDocument();
+  });
+  it.each([false, true])('places reset in the configured surface and removes duplicated menu actions (toolbar=%s)', async toolbar => {
+    let hasProgress = true;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, detailActions: ['read', 'readingList', 'favorites', 'download', 'edit', 'delete', ...(toolbar ? ['clearProgress'] : [])] } };
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 0 } };
+      if (command === 'load_reading_progress') return { ok: true, value: hasProgress ? { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 0, pageCount: 259, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } : null };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: false } };
+      if (command === 'read_favorites_category') return { ok: true, value: null };
+      if (command === 'clear_reading_progress') { hasProgress = false; return { ok: true, value: null }; }
+      if (command === 'list_reading_list' || command === 'list_eh_accounts' || command === 'list_reading_history') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter><ToastProvider><PreferencesProvider><ArchiveDetailRoute archiveId={metadata.archiveId} /></PreferencesProvider></ToastProvider></MemoryRouter>);
+    await screen.findByRole('heading', { name: metadata.title });
+    if (toolbar) await screen.findByRole('button', { name: '清除阅读进度' });
+    fireEvent.click(screen.getByRole('button', { name: '档案菜单' }));
+    await screen.findByRole('menuitem', { name: '无痕阅读' });
+    for (const name of ['阅读', '加入待看', '加入收藏夹', '下载档案', '编辑元数据', '删除档案']) {
+      expect(screen.queryByRole('menuitem', { name })).not.toBeInTheDocument();
+    }
+    if (toolbar) {
+      expect(screen.queryByRole('menuitem', { name: '清除阅读进度' })).not.toBeInTheDocument();
+      fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+      fireEvent.click(screen.getByRole('button', { name: '清除阅读进度' }));
+    } else {
+      fireEvent.click(await screen.findByRole('menuitem', { name: '清除阅读进度' }));
+    }
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('clear_reading_progress', { scopeId: server.scopeId, archiveId: metadata.archiveId }));
+    await screen.findByText('已清除阅读进度和历史记录');
+    expect(screen.queryByRole('button', { name: '清除阅读进度' })).not.toBeInTheDocument();
+  });
   it.each([false, true])('retires an incognito press or prompt when its page hides (open=%s)', async open => {
     setInvokeAdapterForTests(async command => {
       if (command === 'list_servers') return { ok: true, value: [server] };

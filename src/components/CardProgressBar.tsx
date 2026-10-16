@@ -16,6 +16,11 @@ import { useEffect, useRef, useState } from 'react';
  * 楔形，最底那 0.5px 完全没有填充（用户说的「1% 时看不出进度」）。画满时前端已经
  * 顶到边缘，不再需要让位给圆角——`is-complete` 把圆头收成直角。 */
 export function cardProgressWidth(percent: number, trackWidth: number, cornerAware: boolean): string {
+  // A positive reading position must survive subpixel rounding, even before measurement.
+  if (percent > 0 && percent < 100 && !cornerAware) {
+    if (trackWidth > 0) return `${Math.min(trackWidth, Math.max(6, percent / 100 * trackWidth))}px`;
+    return `min(100%, max(6px, ${percent}%))`;
+  }
   const straight = cornerAware && percent > 0 && percent < 100;
   if (trackWidth > 0) {
     return straight

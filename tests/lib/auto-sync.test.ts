@@ -8,6 +8,9 @@ import {
   RETRY_MS,
   STARTUP_DELAY_MS,
   WRITE_DEBOUNCE_MS,
+  WRITE_MAX_WAIT_MS,
+  MAX_RETRY_MS,
+  HIDDEN_MIN_INTERVAL_MS,
   autoSyncStatus,
   resetAutoSyncForTests,
   setAutoSyncEnabled,
@@ -88,14 +91,14 @@ describe('auto sync triggers', () => {
     expect(syncCalls).toBe(afterStartup + 1);
   });
 
-  it('sends immediately when the app goes to the background, throttling or not', async () => {
+  it('does not send an unchanged document each time the app goes to the background', async () => {
     startAutoSync();
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS + 50);
     const afterStartup = syncCalls;
 
     setVisibility('hidden');
     await vi.advanceTimersByTimeAsync(0);
-    expect(syncCalls).toBe(afterStartup + 1);
+    expect(syncCalls).toBe(afterStartup);
   });
 
   it('only catches up on return when the last sync is stale', async () => {
@@ -203,5 +206,111 @@ describe('auto sync triggers', () => {
     await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS + PERIODIC_MS + 100);
     expect(syncCalls).toBe(0);
     stopAutoSync();
+  });
+
+  it('bounds the wait during continuous reading without syncing on every page', async () => {
+    startAutoSync();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    const before = syncCalls;
+    notifyLocalWrite();
+    for (let elapsed = 0; elapsed < WRITE_MAX_WAIT_MS; elapsed += 10_000) {
+      await vi.advanceTimersByTimeAsync(10_000);
+      notifyLocalWrite();
+    }
+    expect(syncCalls).toBe(before + 1);
+  });
+
+  it('reschedules a write whose timer fired during an in-flight sync', async () => {
+    startAutoSync();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    let finish!: (value: unknown) => void;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_sync_accounts') return { ok: true, value: accounts };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'S', baseUrl: 'https://lrr.test', scopeId: 'scope-a' }] };
+      if (command === 'sync_remote_scope') { syncCalls++; return new Promise(resolve => { finish = resolve; }); }
+      throw new Error(command);
+    });
+    const pending = syncNow('manual');
+    await vi.advanceTimersByTimeAsync(0);
+    notifyLocalWrite();
+    await vi.advanceTimersByTimeAsync(WRITE_DEBOUNCE_MS + 1);
+    finish({ ok: true, value: 0 });
+    await pending;
+    const before = syncCalls;
+    await vi.advanceTimersByTimeAsync(MIN_INTERVAL_MS + 1);
+    expect(syncCalls).toBe(before + 1);
+    finish({ ok: true, value: 0 });
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it('starts after preferences finish enabling auto sync', async () => {
+    setAutoSyncEnabled(false);
+    startAutoSync();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS + 1);
+    setAutoSyncEnabled(true);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS + 1);
+    expect(syncCalls).toBe(1);
+  });
+
+  it('backs off repeated failures even if writes and online events keep arriving', async () => {
+    syncResult = { ok: false, error: { code: 'NETWORK', message: '断网', retryable: true } };
+    startAutoSync();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(syncCalls).toBe(2);
+    for (let elapsed = 0; elapsed < RETRY_MS; elapsed += 10_000) {
+      notifyLocalWrite();
+      window.dispatchEvent(new Event('online'));
+      await vi.advanceTimersByTimeAsync(10_000);
+    }
+    expect(syncCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(RETRY_MS);
+    expect(syncCalls).toBe(3);
+    expect(MAX_RETRY_MS).toBeGreaterThanOrEqual(RETRY_MS * 2);
+  });
+
+  it('flushes dirty background state once after the short cooldown', async () => {
+    startAutoSync();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    notifyLocalWrite();
+    setVisibility('hidden');
+    await vi.advanceTimersByTimeAsync(HIDDEN_MIN_INTERVAL_MS - 1);
+    expect(syncCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(syncCalls).toBe(2);
+    for (let index = 0; index < 5; index++) {
+      setVisibility('visible');
+      setVisibility('hidden');
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(syncCalls).toBe(2);
+  });
+
+  it('does not send while offline and catches outstanding changes on reconnection', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: false });
+    try {
+      startAutoSync();
+      notifyLocalWrite();
+      await vi.advanceTimersByTimeAsync(WRITE_MAX_WAIT_MS);
+      expect(syncCalls).toBe(0);
+      Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+      window.dispatchEvent(new Event('online'));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(syncCalls).toBe(1);
+    } finally {
+      delete (navigator as unknown as { onLine?: boolean }).onLine;
+    }
+  });
+
+  it('cancels scheduled uploads when automatic synchronization is disabled', async () => {
+    startAutoSync();
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    notifyLocalWrite();
+    setAutoSyncEnabled(false);
+    await vi.advanceTimersByTimeAsync(WRITE_MAX_WAIT_MS);
+    expect(syncCalls).toBe(1);
+    setAutoSyncEnabled(true);
+    await vi.advanceTimersByTimeAsync(STARTUP_DELAY_MS);
+    expect(syncCalls).toBe(2);
   });
 });

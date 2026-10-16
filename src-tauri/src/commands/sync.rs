@@ -1478,6 +1478,89 @@ fn local_row_state(
         .map_err(|error| error.to_string())
 }
 
+// A reset has no remaining row, so retain its version in the journal to reject stale restores.
+fn apply_reading_reset(
+    transaction: &rusqlite::Transaction<'_>,
+    scope_id: &str,
+    object: &SyncStateObject,
+    payload: &serde_json::Value,
+    restore: bool,
+) -> Result<Option<bool>, String> {
+    let archive_id = payload_text(payload, "archiveId")?;
+    let deleted = object.operation == "delete" || payload_bool(payload, "deleted").unwrap_or(false);
+    let latest: Option<(i64, String, String, String)> = transaction.query_row(
+        "SELECT logical_clock, wall_clock, device_id, payload_json FROM sync_journal WHERE scope_id=?1 AND object_id=?2 AND object_type=?3 ORDER BY logical_clock DESC, sequence DESC LIMIT 1",
+        params![scope_id, object.object_id, object.object_type],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    if !restore {
+        if let Some((clock, wall, device, json)) = latest {
+            let was_deleted = serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|v| v.get("deleted").and_then(|v| v.as_bool()))
+                .unwrap_or(false);
+            if (deleted || was_deleted)
+                && !remote_change_wins(
+                    clock,
+                    &wall,
+                    &device,
+                    object.logical_clock,
+                    &object.wall_clock,
+                    &object.device_id,
+                )
+            {
+                return Ok(Some(false));
+            }
+        }
+    }
+    if !deleted {
+        return Ok(None);
+    }
+    let table = if object.object_type == "history" {
+        "reading_history"
+    } else {
+        "reading_progress"
+    };
+    let time_column = if table == "reading_history" {
+        "visited_at"
+    } else {
+        "updated_at"
+    };
+    let local: Option<(i64, String, String)> = transaction.query_row(
+        &format!("SELECT revision, {time_column}, COALESCE(device_id, '') FROM {table} WHERE scope_id=?1 AND archive_id=?2"),
+        params![scope_id, archive_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    if !restore
+        && local.is_some_and(|(clock, wall, device)| {
+            !remote_change_wins(
+                clock,
+                &wall,
+                &device,
+                object.logical_clock,
+                &object.wall_clock,
+                &object.device_id,
+            )
+        })
+    {
+        return Ok(Some(false));
+    }
+    transaction
+        .execute(
+            &format!("DELETE FROM {table} WHERE scope_id=?1 AND archive_id=?2"),
+            params![scope_id, archive_id],
+        )
+        .map_err(|error| error.to_string())?;
+    journal_object(
+        transaction,
+        scope_id,
+        &object.object_type,
+        &object.object_id,
+        object.logical_clock,
+        payload.clone(),
+    )?;
+    Ok(Some(true))
+}
+
 fn apply_remote_progress(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
@@ -1485,6 +1568,7 @@ fn apply_remote_progress(
     payload: &serde_json::Value,
     restore: bool,
 ) -> Result<bool, String> {
+    if let Some(applied) = apply_reading_reset(transaction, scope_id, object, payload, restore)? { return Ok(applied); }
     let archive_id = payload_text(payload, "archiveId")?;
     let page_index = payload
         .get("pageIndex")
@@ -1585,6 +1669,10 @@ fn apply_remote_history(
     payload: &serde_json::Value,
     restore: bool,
 ) -> Result<bool, String> {
+    if payload.get("clearProgress").and_then(|value| value.as_bool()).unwrap_or(false)
+        || !(object.operation == "delete" || payload_bool(payload, "deleted").unwrap_or(false)) {
+        if let Some(applied) = apply_reading_reset(transaction, scope_id, object, payload, restore)? { return Ok(applied); }
+    }
     let archive_id = payload_text(payload, "archiveId")?;
     // 历史清理写下的墓碑：远端已经把这条记录清掉了，本地跟着删，否则下一次同步
     // 又会把它带回来（本地没有行时任何远端版本都算赢）。
@@ -3767,6 +3855,67 @@ mod tests {
     }
 
     /// 文档里的对象都带着自己的 scope（原来这个字段挂在段信封上），测试里补上。
+    #[test]
+    fn reading_reset_sync_removes_both_rows_and_rejects_old_progress() {
+        let mut connection = migrated_connection();
+        let progress = remote_object(
+            "reading_progress",
+            "scope-a/archive-a",
+            5,
+            "2026-10-16 10:00:00",
+            serde_json::json!({"archiveId":"archive-a", "pageIndex":8, "pageCount":10, "layout":"paged", "direction":"ltr"}),
+        );
+        let history = remote_object(
+            "history",
+            "scope-a/archive-a",
+            5,
+            "2026-10-16 10:00:00",
+            serde_json::json!({"archiveId":"archive-a", "pageIndex":8, "visitedAt":"2026-10-16 10:00:00"}),
+        );
+        apply_remote_objects(
+            &mut connection,
+            &remote_objects("scope-a", vec![progress.clone(), history.clone()]),
+        )
+        .unwrap();
+        let resets = ["reading_progress", "history"].map(|kind| {
+            remote_object(
+                kind,
+                "scope-a/archive-a",
+                6,
+                "2026-10-16 11:00:00",
+                serde_json::json!({"archiveId":"archive-a", "deleted":true, "clearProgress":true}),
+            )
+        });
+        assert_eq!(
+            apply_remote_objects(&mut connection, &remote_objects("scope-a", resets.to_vec())).unwrap(),
+            2
+        );
+        assert_eq!(
+            apply_remote_objects(
+                &mut connection,
+                &remote_objects("scope-a", vec![progress.clone(), history.clone()])
+            )
+            .unwrap(),
+            0
+        );
+        for table in ["reading_progress", "reading_history"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        let mut newer = progress;
+        newer.logical_clock = 7;
+        newer.wall_clock = "2026-10-16 12:00:00".into();
+        newer.payload["pageIndex"] = serde_json::json!(0);
+        assert_eq!(
+            apply_remote_objects(&mut connection, &remote_objects("scope-a", vec![newer])).unwrap(),
+            1
+        );
+    }
+
     fn remote_objects(scope_id: &str, objects: Vec<SyncStateObject>) -> Vec<SyncStateObject> {
         objects
             .into_iter()

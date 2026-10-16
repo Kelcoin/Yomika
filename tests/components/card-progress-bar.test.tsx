@@ -46,13 +46,19 @@ afterEach(() => {
 });
 
 describe('card progress bar', () => {
+  it('gives positive progress a visible minimum without filling an unread card or overflowing a narrow track', () => {
+    expect(cardProgressWidth(100 / 259, 150, false)).toBe('6px');
+    expect(cardProgressWidth(0.01, 3, false)).toBe('3px');
+    expect(cardProgressWidth(0, 150, false)).toBe('0px');
+    expect(cardProgressWidth(100, 150, false)).toBe('150px');
+  });
   it('turns the measured track into an absolute length, and follows the card corners', () => {
     // 量到宽度：填充写绝对长度（百分比的计算值在列宽变化时一模一样，过渡会跳过）。
     expect(cardProgressWidth(20, 300, false)).toBe('60px');
     // 宽行/设置行：只算两段圆角之间的直边，1% 才不会整段落在圆角弧里被裁掉。
     expect(cardProgressWidth(20, 300, true)).toBe('calc(var(--radius-card) + (300px - 2 * var(--radius-card)) * 0.2)');
     // 还没量到就先按百分比画，首帧不会空着。
-    expect(cardProgressWidth(20, 0, false)).toBe('20%');
+    expect(cardProgressWidth(20, 0, false)).toBe('min(100%, max(6px, 20%))');
     expect(cardProgressWidth(20, 0, true)).toBe('calc(var(--radius-card) + (100% - 2 * var(--radius-card)) * 0.2)');
     // 画满时前端已经顶到边缘，不再让位给圆角。
     expect(cardProgressWidth(100, 300, true)).toBe('300px');
