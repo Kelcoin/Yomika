@@ -260,5 +260,11 @@ export function useHorizontalScroller() {
   }, []);
   const onDragStart = useCallback((event: React.DragEvent<HTMLElement>) => { if (event.cancelable) event.preventDefault(); }, []);
 
-  return { ref: setRef, elementRef, onMouseDown, onClickCapture, onDragStart };
+  const resetScroll = useCallback(() => {
+    stopCoast();
+    finishDrag();
+    const element = elementRef.current;
+    if (element) element.scrollLeft = 0;
+  }, [stopCoast, finishDrag]);
+  return { ref: setRef, elementRef, resetScroll, onMouseDown, onClickCapture, onDragStart };
 }

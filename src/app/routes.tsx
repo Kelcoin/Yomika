@@ -164,9 +164,37 @@ function HomeWorkspace() {
   const randomRequestRef = useRef(0);
   const randomOwnerRef = useRef(snapshot?.servers.ok ? pickServer(snapshot.servers.value, null)?.id : undefined);
   useEffect(() => () => { randomRequestRef.current += 1; }, []);
-  /** Re-reads the shelves. Bumping the attempt re-runs the load effect, which is
-   * also how the snapshot gets refreshed on demand. */
-  const reloadShelves = useCallback(() => setServerLoadAttempt((attempt) => attempt + 1), []);
+  // Manual refresh belongs to one shelf; route invalidation still reloads both.
+  const [refreshingShelf, setRefreshingShelf] = useState({ history: false, reading: false });
+  const shelfRequests = useRef({ history: 0, reading: 0 });
+  const shelfBusy = useRef({ history: false, reading: false });
+  const refreshShelf = async (kind: 'history' | 'reading') => {
+    const server = servers?.ok ? pickServer(servers.value, null) : undefined;
+    if (!server || shelfBusy.current[kind]) return;
+    shelfBusy.current[kind] = true;
+    const request = ++shelfRequests.current[kind];
+    const owns = () => shelfRequests.current[kind] === request && randomOwnerRef.current === server.id;
+    setRefreshingShelf(current => ({ ...current, [kind]: true }));
+    setRecentError(undefined);
+    try {
+      const result = kind === 'history' ? await repository.listHistory(server.scopeId) : await repository.listReadingList(server.scopeId);
+      if (!owns()) return;
+      if (!result.ok) { setRecentError(result.error.message); return; }
+      const ids = result.value.filter(item => !('deleted' in item) || !item.deleted).map(item => item.archiveId);
+      const resolved = await repository.listArchivesByIds(server.id, kind === 'history' ? ids : ids.slice(0, 24));
+      if (!owns()) return;
+      if (!resolved.ok) { setRecentError(resolved.error.message); return; }
+      // Commit the membership and its resolved cards together; the other shelf keeps its data.
+      setArchives(current => [...new Map([...current, ...resolved.value].map(archive => [archive.archiveId, archive])).values()]);
+      if (kind === 'history') setHistory(result.value as ReadingHistoryRecord[]);
+      else setReadingList(result.value as WatchlistRecord[]);
+    } finally {
+      if (owns()) {
+        shelfBusy.current[kind] = false;
+        setRefreshingShelf(current => ({ ...current, [kind]: false }));
+      }
+    }
+  };
   // LANraragi picks the random set. Behind a callback so the rail's refresh
   // button can ask for another draw without reloading the whole page.
   // The draw keeps going until the rail's width is full: the caller says how
@@ -220,6 +248,10 @@ function HomeWorkspace() {
     if (!pageActive) return;
     restoredFromSnapshot.current = false;
     let active = true;
+    shelfRequests.current.history++;
+    shelfRequests.current.reading++;
+    shelfBusy.current = { history: false, reading: false };
+    setRefreshingShelf({ history: false, reading: false });
     void (async () => {
       setRecentLoading(true);
       setRecentError(undefined);
@@ -293,7 +325,7 @@ function HomeWorkspace() {
       setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
       setRandomArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
     })();
-    return () => { active = false; };
+    return () => { active = false; shelfRequests.current.history++; shelfRequests.current.reading++; };
   }, [loadRandom, serverLoadAttempt, pageActive]);
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
@@ -392,8 +424,8 @@ function HomeWorkspace() {
         <ServerRequiredPrompt />
       )}
       {(servers === undefined || connected) && <>
-      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} progressScope="history" loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading} onRefresh={reloadShelves} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} progressScope="history" loading={recentLoading} skeletonCount={4} refreshing={recentLoading || refreshingShelf.history} onRefresh={() => { void refreshShelf('history'); }} resetScrollKey={`${homeServer?.id ?? ''}:${continueReading[0]?.archiveId ?? ''}`} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading || refreshingShelf.reading} onRefresh={() => { void refreshShelf('reading'); }} onArchiveContextMenu={openContextMenu} />
       <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={homeServer ? () => { void loadRandom(homeServer.id, { showFinished: preferences.randomRoamShowFinished, progress: progressByArchiveId }); } : undefined} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
       </>}

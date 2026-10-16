@@ -24,6 +24,80 @@ const comment = {
 };
 
 describe('E-Hentai comments', () => {
+  it('preloads EH suffix matches, deduplicates hosts and offers an anchored archive choice', async () => {
+    const archive = { serverId: 's', archiveId: 'matched', title: 'Matched archive', pageCount: 10, updatedAt: 'now' };
+    const onOpenArchive = vi.fn();
+    let finishSearch!: (value: unknown) => void;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'get_eh_comments') return { ok: true, value: [{ ...comment, body: 'https://e-hentai.org/g/4256859/531b16d2ae https://exhentai.org/g/4256859/531b16d2ae/' }] };
+      if (command === 'search_archives_page') return new Promise(resolve => { finishSearch = resolve; });
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" serverId="s" onOpenArchive={onOpenArchive} />);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('search_archives_page', { input: expect.objectContaining({ serverId: 's', query: '/g/4256859/531b16d2ae' }) }));
+    expect(adapter.mock.calls.filter(([command]) => command === 'search_archives_page')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('link', { name: 'https://exhentai.org/g/4256859/531b16d2ae/' }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    await act(async () => finishSearch({ ok: true, value: { items: [archive], total: 1, hasMore: false } }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '打开档案详情' }));
+    expect(onOpenArchive).toHaveBeenCalledWith(expect.objectContaining({ archiveId: 'matched' }));
+    expect(adapter.mock.calls.some(([command]) => command === 'open_external_url')).toBe(false);
+    fireEvent.click(screen.getByRole('link', { name: 'https://e-hentai.org/g/4256859/531b16d2ae' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '打开链接' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://e-hentai.org/g/4256859/531b16d2ae' }));
+    expect(adapter.mock.calls.filter(([command]) => command === 'search_archives_page')).toHaveLength(1);
+  });
+
+  it.each([false, true])('opens unmatched or failed EH lookups externally (failure=%s)', async failure => {
+    const url = 'https://e-hentai.org/g/4256859/531b16d2ae';
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'get_eh_comments') return { ok: true, value: [{ ...comment, body: url }] };
+      if (command === 'search_archives_page') return failure
+        ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'Offline', retryable: true } }
+        : { ok: true, value: { items: [], total: 0, hasMore: false } };
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" serverId="s" onOpenArchive={vi.fn()} />);
+    fireEvent.click(await screen.findByRole('link', { name: url }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('open_external_url', { url }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('discards a pending link choice when the gallery changes', async () => {
+    const url = 'https://exhentai.org/g/4256859/531b16d2ae';
+    let finishSearch!: (value: unknown) => void;
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'get_eh_comments') return { ok: true, value: args?.galleryId === '12345' ? [{ ...comment, body: url }] : [] };
+      if (command === 'search_archives_page') return new Promise(resolve => { finishSearch = resolve; });
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    const { rerender } = render(<EhComments accountId="eh-a" galleryId="12345" token="abc" serverId="s" onOpenArchive={vi.fn()} />);
+    const link = await screen.findByRole('link', { name: url });
+    await vi.waitFor(() => expect(finishSearch).toBeTypeOf('function'));
+    fireEvent.click(link);
+    rerender(<EhComments accountId="eh-a" galleryId="other" token="abc" serverId="s" onOpenArchive={vi.fn()} />);
+    await act(async () => finishSearch({ ok: true, value: { items: [{ serverId: 's', archiveId: 'old', title: 'Old archive', pageCount: 1, updatedAt: 'now' }], total: 1, hasMore: false } }));
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(adapter.mock.calls.some(([command]) => command === 'open_external_url')).toBe(false);
+  });
+
+  it('opens comment links externally without navigating the app and aligns time and voting in separate rows', async () => {
+    const adapter = vi.fn(async (command: string) => ({ ok: true, value: command === 'get_eh_comments' ? [{ ...comment, body: 'See https://example.com/gallery?id=1' }] : null }));
+    setInvokeAdapterForTests(adapter);
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    const link = await screen.findByRole('link', { name: 'https://example.com/gallery?id=1' });
+    expect(fireEvent.click(link)).toBe(false);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://example.com/gallery?id=1' }));
+    const card = link.closest('li')!;
+    expect(card.querySelector('.eh-comment-meta time')).not.toBeNull();
+    expect(card.querySelector('.eh-comment-votes .eh-comment-score')).not.toBeNull();
+    expect(card.querySelector('.eh-comment-votes time')).toBeNull();
+    expect(fireEvent(link, new MouseEvent('auxclick', { button: 1, bubbles: true, cancelable: true }))).toBe(false);
+    await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'open_external_url')).toHaveLength(2));
+  });
   it('ignores malformed persisted comments and loads the current gallery', async () => {
     localStorage.setItem('yomika.eh.comments.v1:eh-a\u000012345\u0000abc', JSON.stringify({
       comments: [null], cachedAt: Date.now(),

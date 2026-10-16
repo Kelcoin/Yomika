@@ -1919,7 +1919,7 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.app-shell\.is-floating-nav \.workspace,\s*\n\s*\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{\s*padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\);\s*\}/);
   });
 
-  it('reads the comment author above the body, with the timestamp footing the card', () => {
+  it('reads the comment author above the body, with the timestamp in its own column', () => {
     const shell = read('src/styles/shell.css');
     // user report（图4）：用户 ID 应该比正文大一点；时间下方的空白区域太大。
     // 两处根因都在字号与行高上：正文 `<p>` 一直没写字号，吃的是浏览器默认 16px，
@@ -1931,7 +1931,11 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.eh-comment-meta strong'), '作者名比正文大一档').toMatch(/font-size: var\(--text-base\)/);
     expect(ruleBody(shell, '.eh-comments-list p'), '正文自己写清字号').toMatch(/font-size: var\(--text-md\)/);
     const votes = ruleBody(shell, '.eh-comment-votes');
-    expect(votes, '投票行贴内容底').toMatch(/align-items: flex-end/);
+    // 2026-10-16：评论 meta 改成两列网格（作者/正文一列、时间一列），投票行落到正文
+    // 下面自成一行，于是这条判据从「贴内容底」改成「自成一行、与内容同排」——
+    // 它仍然守着同一件事：时间下面不再留一条空带。
+    expect(ruleBody(shell, '.eh-comment-meta'), '作者/正文与时间分成两列').toMatch(/grid-template-columns: minmax\(0, 1fr\) minmax\(0, auto\)/);
+    expect(votes, '投票行自成一行、与内容同排').toMatch(/align-items: center/);
     expect(votes, '不再靠 min-height 撑出空带').not.toMatch(/min-height/);
     expect(ruleBody(shell, '.eh-comments-list li'), '卡片底部只留半步').toMatch(/padding: var\(--space-3\) var\(--space-3\) var\(--space-2\)/);
     expect(ruleBody(shell, '.eh-comment-composer'), '输入框上方只留半步').toMatch(/padding-top: var\(--space-2\)/);

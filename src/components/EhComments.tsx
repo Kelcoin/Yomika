@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { MessageCircle, RefreshCw, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { BookOpen, ExternalLink, MessageCircle, RefreshCw, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
 import { z } from 'zod';
 import type { EhComment } from '../services/ehClient';
 import { EhCommentSchema, NativeEhRepository } from '../repositories/nativeEhRepository';
@@ -7,8 +8,12 @@ import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { presentEhError } from '../services/ehClient';
 import { useToast } from './Toast';
 import { StatusLine } from './StatusLine';
+import { openExternalUrl } from '../bridge/externalUrl';
+import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import type { ArchiveRecord } from '../domain/library';
 
 const repository = new NativeEhRepository();
+const libraryRepository = new NativeLibraryRepository();
 const COMMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const COMMENT_CACHE_STORAGE_PREFIX = 'yomika.eh.comments.v1:';
 type CommentsResult = Awaited<ReturnType<NativeEhRepository['getComments']>>;
@@ -75,22 +80,30 @@ export function clearEhCommentsCacheForTests(): void {
   } catch { /* storage unavailable */ }
 }
 
-function renderCommentBody(body: string) {
-  const parts = body.split(/(https?:\/\/[^\s]+)/g);
+function galleryPath(raw: string): string | undefined {
+  try {
+    const url = new URL(raw);
+    if (!['e-hentai.org', 'exhentai.org', 'www.e-hentai.org', 'www.exhentai.org'].includes(url.hostname.toLowerCase())) return undefined;
+    return url.pathname.match(/^\/g\/\d+\/[a-z0-9]+(?=\/|$)/i)?.[0];
+  } catch { return undefined; }
+}
+
+function renderCommentBody(body: string, openLink: (url: string, event: ReactMouseEvent<HTMLAnchorElement>) => void) {
+  const parts = body.split(/(https?:\/\/[^\s]+)/gi);
   return parts.map((part, index) => /^https?:\/\//i.test(part)
-    ? <a key={index} href={part} target="_blank" rel="noreferrer" className="eh-comment-link">{part}</a>
+    ? <a key={index} href={part} className="eh-comment-link" onClick={(event) => { event.preventDefault(); openLink(part, event); }} onAuxClick={(event) => { event.preventDefault(); if (event.button === 1) openLink(part, event); }}>{part}</a>
     : <span key={index}>{part}</span>);
 }
 
-type EhCommentsProps = { accountId: string; galleryId: string; token: string; prefetch?: boolean };
+type EhCommentsProps = { accountId: string; galleryId: string; token: string; prefetch?: boolean; serverId?: string | undefined; onOpenArchive?: ((archive: ArchiveRecord) => void) | undefined };
 
 export function EhComments(props: EhCommentsProps) {
   // Archive routes can reuse this component for another gallery. Drafts and
   // pending mutations belong to the original gallery, never the next one.
-  return <EhCommentsPanel key={commentsCacheKey(props.accountId, props.galleryId, props.token)} {...props} />;
+  return <EhCommentsPanel key={`${props.serverId ?? ''}:${commentsCacheKey(props.accountId, props.galleryId, props.token)}`} {...props} />;
 }
 
-function EhCommentsPanel({ accountId, galleryId, token, prefetch = false }: EhCommentsProps) {
+function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, serverId, onOpenArchive }: EhCommentsProps) {
   const { showToast } = useToast();
   const [comments, setComments] = useState<EhComment[]>([]);
   const [loading, setLoading] = useState(true);
@@ -101,6 +114,54 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false }: EhCo
   const [votingIds, setVotingIds] = useState<ReadonlySet<string>>(new Set());
   const pendingVotes = useRef(new Set<string>());
   const refresh = useCallback(() => setReload((value) => value + 1), []);
+  const [linkMenu, setLinkMenu] = useState<{ url: string; archives: ArchiveRecord[]; x: number; y: number }>();
+  const lookups = useRef(new Map<string, Promise<ArchiveRecord[]>>());
+  const linkClick = useRef(0);
+  const openExternal = (url: string) => {
+    void openExternalUrl(url).then((result) => {
+      if (!result.ok) showToast(result.error.message, 'error');
+    });
+  };
+  const openLink = (url: string, event: ReactMouseEvent<HTMLAnchorElement>) => {
+    const path = galleryPath(url);
+    const lookup = path && onOpenArchive ? lookups.current.get(path) : undefined;
+    const click = ++linkClick.current;
+    setLinkMenu(undefined);
+    if (!lookup) { openExternal(url); return; }
+    // Keyboard activation has no pointer position: anchor the menu to the link.
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.detail === 0 ? rect.left : event.clientX;
+    const y = event.detail === 0 ? rect.bottom : event.clientY;
+    void lookup.then((archives) => {
+      if (click !== linkClick.current) return;
+      if (archives.length > 0) setLinkMenu({ url, archives, x, y });
+      else openExternal(url);
+    });
+  };
+
+  const linkedPaths = [...new Set(comments.flatMap((comment) =>
+    (comment.body.match(/https?:\/\/[^\s]+/gi) ?? []).flatMap((url) => galleryPath(url) ?? []),
+  ))].sort().join('\n');
+  useEffect(() => {
+    let active = true;
+    const pending = new Map<string, Promise<ArchiveRecord[]>>();
+    lookups.current = pending;
+    setLinkMenu(undefined);
+    linkClick.current++;
+    // Two queues bound server load while unrelated links can resolve concurrently.
+    const queues: Promise<unknown>[] = [Promise.resolve(), Promise.resolve()];
+    if (serverId && linkedPaths) linkedPaths.split('\n').forEach((path, index) => {
+      const slot = index % queues.length;
+      const request = queues[slot]!.then(async () => {
+        if (!active) return [];
+        const result = await libraryRepository.searchArchivesPage(serverId, 0, { query: path });
+        return result.ok ? result.value.items.filter((archive) => !archive.isDeleted) : [];
+      });
+      pending.set(path, request);
+      queues[slot] = request;
+    });
+    return () => { active = false; linkClick.current++; };
+  }, [serverId, linkedPaths, reload]);
 
   useEffect(() => {
     let active = true;
@@ -180,27 +241,32 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false }: EhCo
         <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>
           <div className="eh-comment-meta">
             <span><strong>{comment.author || '匿名用户'}</strong>{comment.isUploader && <small>上传者</small>}</span>
-            {!comment.isUploader && <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>}
-          </div>
-          <p>{renderCommentBody(comment.body)}</p>
-          <div className="eh-comment-votes">
             <time dateTime={comment.postedAt ? comment.postedAt.replace(' ', 'T') : undefined}>{comment.postedAt || '时间未知'}</time>
-            {!comment.isUploader && (
+          </div>
+          <p>{renderCommentBody(comment.body, openLink)}</p>
+          {!comment.isUploader && <div className="eh-comment-votes">
+            <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>
               <span className="eh-comment-votes-actions" role="group" aria-label={`${comment.author || '匿名用户'} 的评论投票`}>
-                {/* The paired controls share one frame; the selected
-                    direction is announced by the theme fill and aria-pressed,
-                    and clicking it again cancels the vote. */}
+                {/* Colour and aria-pressed identify the selected direction. */}
                 <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ThumbsUp aria-hidden="true" /></button>
                 <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ThumbsDown aria-hidden="true" /></button>
               </span>
-            )}
-          </div>
+          </div>}
         </li>
       ))}</ul>}
       <div className="eh-comment-composer">
         <textarea value={body} onChange={(event) => setBody(event.target.value)} aria-label="发表评论" placeholder="发表评论…" rows={3} />
         <button className="primary-action" type="button" disabled={posting || !body.trim()} onClick={() => void post()} aria-label="发送评论"><Send aria-hidden="true" />{posting ? '发送中…' : '发送'}</button>
       </div>
+      {linkMenu && <DropdownMenu.Root open onOpenChange={(open) => { if (!open) setLinkMenu(undefined); }}>
+        <DropdownMenu.Trigger asChild><span aria-hidden="true" style={{ position: 'fixed', left: linkMenu.x, top: linkMenu.y, width: 0, height: 0 }} /></DropdownMenu.Trigger>
+        <DropdownMenu.Portal>
+          <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label="评论链接操作">
+            <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => openExternal(linkMenu.url)}><ExternalLink aria-hidden="true" />打开链接</DropdownMenu.Item>
+            {linkMenu.archives.map((archive) => <DropdownMenu.Item key={archive.archiveId} className="archive-context-menu-item" onSelect={() => onOpenArchive?.(archive)}><BookOpen aria-hidden="true" />{linkMenu.archives.length === 1 ? '打开档案详情' : `打开档案详情：${archive.title}`}</DropdownMenu.Item>)}
+          </DropdownMenu.Content>
+        </DropdownMenu.Portal>
+      </DropdownMenu.Root>}
     </section>
   );
 }

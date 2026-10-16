@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
@@ -639,6 +639,10 @@ describe('archive detail route', () => {
     // Out of the accessibility tree as well as out of the tab order, so the name
     // is not even computable — assert the DOM state directly.
     const creatorTab = rail.querySelector('.archive-recommendations-tab-creator');
+    const initialTabs = rail.querySelector('[role="tablist"]');
+    const initialGrid = rail.querySelector('.archive-rail-grid');
+    const initialRefresh = within(rail).getByRole('button', { name: '刷新推荐' });
+    expect(initialRefresh).toBeDisabled();
     expect(creatorTab).toBeDisabled();
     expect(creatorTab).toHaveAttribute('aria-hidden', 'true');
     expect(creatorTab).toHaveAttribute('tabindex', '-1');
@@ -647,6 +651,11 @@ describe('archive detail route', () => {
     await vi.waitFor(() => expect(within(rail).getByRole('tab', { name: '同作者' })).toBeEnabled());
     // The strip carries the class the width animation keys off.
     expect(document.querySelector('.archive-recommendations-tabs.has-creator')).not.toBeNull();
+    expect(screen.getByRole('region', { name: '推荐' })).toBe(rail);
+    expect(rail.querySelector('[role="tablist"]')).toBe(initialTabs);
+    expect(rail.querySelector('.archive-rail-grid')).toBe(initialGrid);
+    expect(within(rail).getByRole('button', { name: '刷新推荐' })).toBe(initialRefresh);
+    expect(initialRefresh).toBeEnabled();
     // tablist 的直接子节点只能是自己就是 tab 的、或者标了 presentation/none 的纯包装：
     // 中间夹一个没有角色的通用节点，读屏就可能不再把创建者那个 tab 算作这条 tablist 的
     // 页签（testing-library 不看归属，所以光靠 getByRole 发现不了）。宽度动画那个 span
@@ -709,15 +718,24 @@ describe('archive detail route', () => {
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'source:https://e-hentai.org/g/12345/abc/, artist:sample' } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'list_eh_accounts') return { ok: true, value: [{ id: 'eh-a', label: 'EH', host: 'e-hentai.org', cookieRef: 'ref', isActive: true, status: 'verified', createdAt: '', updatedAt: '' }] };
-      if (command === 'get_eh_comments') return { ok: true, value: [] };
+      if (command === 'get_eh_comments') return { ok: true, value: [{ id: 'comment-link', author: 'Reader', body: 'https://exhentai.org/g/4256859/531b16d2ae/', score: 1, postedAt: '', isUploader: false, isEditable: false, myVote: 0 }] };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
-      if (command === 'search_archives_page' || command === 'list_archives_page') return { ok: true, value: { items: [], total: 0, hasMore: false } };
+      if (command === 'search_archives_page' || command === 'list_archives_page') return { ok: true, value: { items: [{ serverId: server.id, archiveId: 'matched', title: 'Matched archive', pageCount: 1, updatedAt: 'now' }], total: 1, hasMore: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderDetail();
+    function Target() {
+      const location = useLocation();
+      return <p>{`Linked archive ${location.pathname}${location.search}`}</p>;
+    }
+    render(<MemoryRouter initialEntries={['/home/archive-a?server=server-a']}><Routes>
+      <Route path="/home/archive-a" element={<ArchiveDetailRoute archiveId="archive-a" detailBasePath="/home" />} />
+      <Route path="/home/matched" element={<Target />} />
+    </Routes></MemoryRouter>);
     await vi.waitFor(() => expect(adapter.mock.calls.some(([command]) => command === 'get_eh_comments')).toBe(true));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('search_archives_page', { input: expect.objectContaining({ serverId: server.id, query: '/g/4256859/531b16d2ae' }) }));
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
     fireEvent.click(await screen.findByRole('tab', { name: '评论' }));
     expect(await screen.findByRole('region', { name: 'E-Hentai 评论' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: '页面缩略图' })).not.toBeInTheDocument();
@@ -726,6 +744,9 @@ describe('archive detail route', () => {
     fireEvent.click(screen.getByRole('tab', { name: '评论' }));
     expect(screen.getByRole('region', { name: 'E-Hentai 评论' })).toBe(comments);
     expect(adapter.mock.calls.filter(([command]) => command === 'get_eh_comments')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('link', { name: 'https://exhentai.org/g/4256859/531b16d2ae/' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '打开档案详情' }));
+    expect(await screen.findByText('Linked archive /home/matched?server=server-a')).toBeInTheDocument();
   });
 
   it('keeps both detail tabs available when the E-Hentai account is not verified', async () => {

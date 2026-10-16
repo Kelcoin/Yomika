@@ -1,6 +1,6 @@
 import { CardTagRows, ArchiveCardTags } from './CardTagRows';
 import { CardProgressBar } from './CardProgressBar';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
 import { Heart, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
@@ -156,19 +156,22 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined }) {
+export function ArchiveThumbnailRail({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined; resetScrollKey?: string | undefined }) {
   // A rail that will have content shows its shape while loading. One that has
   // finished with nothing to show is not a rail at all.
   if (!archives.length && !loading) return null;
-  return <ArchiveThumbnailRailContent title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} progressScope={progressScope} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
+  return <ArchiveThumbnailRailContent resetScrollKey={resetScrollKey} title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} progressScope={progressScope} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
  * for callers that already label the rail. `headingContent` replaces the title
  * with arbitrary controls — the recommendation tabs used to sit in a sibling
  * above the rail, which put them visually outside the panel they belong to. */
-function ArchiveThumbnailRailContent({ title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; progressScope: 'history' | 'elsewhere' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string }) {
+function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; progressScope: 'history' | 'elsewhere' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string; resetScrollKey: string | undefined }) {
   const scroller = useHorizontalScroller();
+  useLayoutEffect(() => {
+    if (resetScrollKey !== undefined) scroller.resetScroll();
+  }, [resetScrollKey, scroller.resetScroll]);
   const [railWidth, setRailWidth] = useState(0);
   useEffect(() => {
     const element = scroller.elementRef.current;

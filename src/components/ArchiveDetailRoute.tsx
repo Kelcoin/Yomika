@@ -507,7 +507,7 @@ detailBasePath?: string | undefined }) {
       </div>
       <div role="tabpanel" aria-label="评论" hidden={detailPanel !== 'comments'}>
       {ehGallery && ehAccountId
-        ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} />
+        ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} serverId={serverId} onOpenArchive={(archive) => navigate(`${detailBasePath}/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)} />
         : <p className="archive-comments-unavailable">此档案没有可读取的 E-Hentai 评论。</p>}
       </div>
       {menu}
@@ -760,18 +760,18 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     </div>
   );
 
-  // A skeleton while the searches run, rather than nothing at all: the section
-  // used to pop into existence and shove the page thumbnails down.
-  if (loading && !hasSimilar && !hasCreator) {
-    return <ArchiveThumbnailRail title="推荐" archives={[]} scopeId={scopeId} serverId={serverId} loading skeletonCount={6} headingContent={tabs} detailBasePath={detailBasePath} />;
-  }
-  if (!hasSimilar && !hasCreator) return null;
+  // Keep the same rail, header and tab nodes mounted while its data arrives.
+  // Replacing the loading root used to discard the CSS transition's starting state.
+  if (!loading && !hasSimilar && !hasCreator) return null;
 
   return (
     <>
     <ArchiveThumbnailRail
       title="推荐"
       archives={visible}
+      loading={loading}
+      refreshing={loading}
+      skeletonCount={6}
       scopeId={scopeId}
       serverId={serverId}
       headingContent={tabs}
