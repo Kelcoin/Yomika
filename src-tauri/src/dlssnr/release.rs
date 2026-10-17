@@ -3,7 +3,7 @@
 //! 片段（`nvngx_dlssnr.dll`）按名字固定地住在数据目录的 `dlssnr/` 下，同一时刻
 //! 只有一种，所以「能选哪些」这件事必须由清单来说：仓库正文的
 //! `dlssnr-manifest.json` 一条变体一条，各自记着自己的字节数与 SHA-256。官方原版
-//! 与社区兼容版因此可以分开维护——谁也不覆盖谁，用户点哪一条就装哪一条。
+//! 与Lecram 版因此可以分开维护——谁也不覆盖谁，用户点哪一条就装哪一条。
 //!
 //! 和超分模型那套走同一条路：`raw.githubusercontent.com` 上的本体文件 → 镜像前缀
 //! → Release 资产，逐条回退；下载完先校验再改名就位。
@@ -490,7 +490,7 @@ mod tests {
         let catalog =
             fetch_catalog_with_fallback(MODEL_RELEASE_REPO).expect("线上清单取得到");
         // 三条都一样大，挑 SF-v2（最小的一条）验一遍即可。
-        let variant = catalog.variant("sf-v2").expect("清单里有 FP16 兼容版").clone();
+        let variant = catalog.variant("sf-v2").expect("清单里有 SF 版").clone();
 
         let data = tempfile::tempdir().expect("临时目录");
         let mut reported = 0u64;

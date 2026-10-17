@@ -203,7 +203,7 @@ impl Workspace {
             //
             // 核心在 `CreateFeature` 之前会调 `nvLoadSignedLibraryW()` 验签，改过一个
             // 字节的片段一律加载不起来（0xBAD0000B，见 `mod.rs` 的 `SignatureVerdict`
-            // 与 docs/144）。社区兼容版（签名对不上）与 FP16 版（根本没签名）都死在
+            // 与 docs/144）。Lecram 版（签名对不上）与 FP16 版（根本没签名）都死在
             // 那一步。片段自己的导出不做这道校验，Magpie / Veyra 就是这么跑它们的。
             let handle = context.runtime.create(context.list.as_raw(), &parameters)?;
             self.features.push(FeatureSlot { handle, parameters });

@@ -50,7 +50,7 @@ pub struct GpuContext {
     /// 为什么不走核心那三个同名调用：核心在 `CreateFeature` 之前调
     /// `nvLoadSignedLibraryW()` 验签，改过一个字节的片段一律 0xBAD0000B（见 `mod.rs`
     /// 的 [`SignatureVerdict`](super::SignatureVerdict) 与 `docs/144`）。片段自己的导出
-    /// 没有这道校验——Magpie / Veyra 就是靠这条跑社区兼容版与 FP16 版的。
+    /// 没有这道校验——Magpie / Veyra 就是靠这条跑Lecram 版与 FP16 版的。
     pub runtime: super::ngx::DlssnrRuntime,
 
     pub device: ID3D12Device,

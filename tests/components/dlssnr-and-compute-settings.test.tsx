@@ -27,12 +27,12 @@ function dlssnrStatus(overrides: Record<string, unknown> = {}) {
   return {
     dllPresent: true,
     variant: 'community',
-    variantLabel: '社区兼容版（RTX 40 / 50 系）',
+    variantLabel: 'Lecram 版',
     dllBytes: 165_840_496,
     gpu: { name: 'NVIDIA GeForce RTX 4070', recommendedVariant: 'community' },
     gpuName: 'NVIDIA GeForce RTX 4070',
     recommendedVariant: 'community',
-    recommendedLabel: '社区兼容版（RTX 40 / 50 系）',
+    recommendedLabel: 'Lecram 版',
     coreAvailable: true,
     installable: true,
     available: true,
@@ -50,8 +50,8 @@ const DLSSNR_CATALOG = {
   license: { name: 'NVIDIA DLSS SDK License', asset: 'nvidia-dlss-license.txt', size: 26_620, sha256: 'd4'.repeat(32) },
   variants: [
     { id: 'official', label: 'NVIDIA 官方原版（RTX 50 系原生）', note: '只在 RTX 50 系上原生支持。', series: [50], asset: 'nvngx_dlssnr--official.dll', size: 165_840_496, sha256: 'e1'.repeat(32) },
-    { id: 'community', label: '社区兼容版（RTX 40 / 50 系）', note: 'RTX 40 / 50 系都能跑。', series: [40, 50], asset: 'nvngx_dlssnr--community-rtx40-50.dll', size: 165_840_496, sha256: '98'.repeat(32) },
-    { id: 'sf-v2', label: 'FP16 兼容版（RTX 20 / 30 系，性能较低）', note: '走 FP16。', series: [20, 30], asset: 'nvngx_dlssnr--sf-v2.dll', size: 165_830_144, sha256: '6e'.repeat(32) },
+    { id: 'community', label: 'Lecram 版', note: 'RTX 40 / 50 系都能跑。', series: [40, 50], asset: 'nvngx_dlssnr--community-rtx40-50.dll', size: 165_840_496, sha256: '98'.repeat(32) },
+    { id: 'sf-v2', label: 'SF 版', note: '走 FP16。', series: [20, 30, 40, 50], asset: 'nvngx_dlssnr--sf-v2.dll', size: 165_830_144, sha256: '6e'.repeat(32) },
   ],
 };
 
@@ -203,9 +203,9 @@ describe('DLSS5 settings group', () => {
     }));
     renderDlssnr();
     // 组件那一行的值：变体名后面跟版本号。
-    expect(await screen.findByText('社区兼容版（RTX 40 / 50 系） · 310.8.0.0')).toBeInTheDocument();
+    expect(await screen.findByText('Lecram 版 · 310.8.0.0')).toBeInTheDocument();
     // 开关那一行的说明也跟着带上，用户不用打开菜单就知道装的是哪一版。
-    expect(screen.getByText('社区兼容版（RTX 40 / 50 系） · 310.8.0.0 · NVIDIA GeForce RTX 4070')).toBeInTheDocument();
+    expect(screen.getByText('Lecram 版 · 310.8.0.0 · NVIDIA GeForce RTX 4070')).toBeInTheDocument();
   });
 
   it('says nothing about a version it cannot read', async () => {
@@ -214,7 +214,7 @@ describe('DLSS5 settings group', () => {
       dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ dllVersion: null }) }),
     }));
     renderDlssnr();
-    expect(await screen.findByText('社区兼容版（RTX 40 / 50 系）')).toBeInTheDocument();
+    expect(await screen.findByText('Lecram 版')).toBeInTheDocument();
     expect(screen.queryByText(/未知/)).toBeNull();
   });
 
@@ -281,8 +281,8 @@ describe('DLSS5 settings group', () => {
     const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
     // 三条都在：官方版与社区版各占一行，装的是哪一条由后端认哈希回答。
     expect(within(snippets).getByText('NVIDIA 官方原版（RTX 50 系原生）')).toBeTruthy();
-    expect(within(snippets).getByText('社区兼容版（RTX 40 / 50 系）（推荐）')).toBeTruthy();
-    expect(within(snippets).getByText('FP16 兼容版（RTX 20 / 30 系，性能较低）')).toBeTruthy();
+    expect(within(snippets).getByText('Lecram 版（推荐）')).toBeTruthy();
+    expect(within(snippets).getByText('SF 版')).toBeTruthy();
     expect(within(snippets).queryByText(/NVIDIA DLSS SDK License/)).toBeNull();
 
     const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
@@ -315,7 +315,7 @@ describe('DLSS5 settings group', () => {
 
   it('marks the component row when the catalog carries other bytes than the one on disk', async () => {
     const user = userEvent.setup();
-    // 官方原版与社区兼容版**字节数完全相同**（165,840,496）：换过资产只能看哈希。盘上那份
+    // 官方原版与Lecram 版**字节数完全相同**（165,840,496）：换过资产只能看哈希。盘上那份
     // 是老哈希（内置表还认得出这是 community），清单里那条已经是别的字节 —— 该说「有更新」。
     setInvokeAdapterForTests(adapterFor({
       dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ variant: 'community', dllSha256: 'ff'.repeat(32) }) }),
@@ -351,7 +351,7 @@ describe('DLSS5 settings group', () => {
     const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
     const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
     const active = rows.find((item) => item.classList.contains('is-active'))!;
-    expect(active.textContent).toContain('社区兼容版');
+    expect(active.textContent).toContain('Lecram 版');
     expect(active.querySelector('button.select-option-download')).toBeNull();
     expect(within(snippets).queryByRole('button', { name: /^更新/ })).toBeNull();
   });
@@ -367,13 +367,13 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     const row = within(group).getByRole('button', { name: 'DLSSNR 组件' });
-    expect(row.textContent).toContain('社区兼容版');
+    expect(row.textContent).toContain('Lecram 版');
     expect(row.textContent).not.toContain('认不出的片段');
 
     await user.click(row);
     const snippets = await screen.findByRole('group', { name: 'DLSSNR 组件' });
     const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
-    expect(rows.find((item) => item.classList.contains('is-active'))!.textContent).toContain('社区兼容版');
+    expect(rows.find((item) => item.classList.contains('is-active'))!.textContent).toContain('Lecram 版');
   });
 
   it('says the snippet is unrecognised instead of claiming nothing is installed', async () => {

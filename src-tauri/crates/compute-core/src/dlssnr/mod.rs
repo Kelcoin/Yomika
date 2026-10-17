@@ -155,8 +155,8 @@ pub struct GpuInfo {
 }
 
 impl GpuInfo {
-    /// 这一代卡**推荐**用哪一种片段（README 的对应关系）：50 系官方原版即可，40 系社区兼容
-    /// 版，20/30 系 FP16 兼容版。
+    /// 这一代卡**推荐**用哪一种片段（README 的对应关系）：50 系官方原版即可，40 系 Lecram
+    /// 版，20/30 系 SF 版（SF 版在 40/50 系上也能跑，只是那两代另有更合适的档）。
     ///
     /// 这是推荐，**不是门槛**（2026-10-17 起 `runtime_gate_with` 不再拿它拦人）：跑不跑得起来
     /// 由片段与驱动在 `CreateFeature` 时回答，装哪一版由用户自己挑。
@@ -210,7 +210,7 @@ pub struct DlssnrStatus {
     ///
     /// 这是给「有没有更新」用的：目录里那条同名资产带着自己的 `sha256`/`size`，
     /// 两边一比才知道这一条社区版是不是换过一版。三种变体里有两条**字节数完全相同**
-    /// （官方原版与社区兼容版都是 165,840,496 字节），只有哈希分得开——所以这里报的
+    /// （官方原版与Lecram 版都是 165,840,496 字节），只有哈希分得开——所以这里报的
     /// 必须是真哈希，不能退成字节数。
     pub dll_sha256: Option<String>,
     /// 显卡（第一块 NVIDIA 卡；没有就是 `None`，此时 `gpu_name` 会是别的厂商的卡）。
@@ -458,7 +458,7 @@ pub fn dll_identity(data_dir: &std::path::Path) -> String {
 /// `310.8.SF.0`）。
 ///
 /// 为什么去问系统的版本资源而不是从文件名或清单里编一个：名字叫 `nvngx_dlssnr.dll`
-/// 的字节有几十种来源（官方原版、社区兼容版、用户自己导入的），清单顶多知道**下载**
+/// 的字节有几十种来源（官方原版、Lecram 版、用户自己导入的），清单顶多知道**下载**
 /// 那一份是谁；用户问「我装的是哪一版」时唯一可信的答案是文件自己身上的版本资源。
 /// 这也是一句纯元数据（读 PE 资源、不建设备、不碰 NGX），所以设置页打开就能读。
 ///
@@ -560,9 +560,10 @@ fn format_fixed_version(ms: u32, ls: u32) -> String {
 pub enum Variant {
     /// NVIDIA 官方原版：310.8.0.0，50 系原生支持，签名有效。
     Official,
-    /// 社区兼容版：Lecram 310.8.3.0，40/50 系（签名哈希对不上，属改过的片段）。
+    /// Lecram 版：社区改出的 Lecram 构建，310.8.3.0，40/50 系（签名哈希对不上，属改过的片段）。
     Community40,
-    /// FP16 兼容版：社区 compat-fp16 310.9.16.0，20/30 系可运行（未签名，主要适合图片与视频）。
+    /// SF 版：社区 compat-fp16 构建，310.9.16.0，20–50 系都可运行（作者声明 SM75/86/89 + SM120；
+    /// 未签名，主要适合图片与视频）。
     SfV2,
 }
 
@@ -584,8 +585,8 @@ impl Variant {
     pub fn label(self) -> &'static str {
         match self {
             Variant::Official => "官方原版",
-            Variant::Community40 => "社区兼容版",
-            Variant::SfV2 => "FP16 兼容版",
+            Variant::Community40 => "Lecram 版",
+            Variant::SfV2 => "SF 版",
         }
     }
 }
@@ -698,7 +699,7 @@ fn cached_variant(path: &std::path::Path) -> Option<Variant> {
 pub enum SignatureVerdict {
     /// 签名有效（`WinVerifyTrust` 返回 0）：驱动会认它。
     Trusted,
-    /// 签过名，但内容与签名对不上（Authenticode 的 HashMismatch）：社区兼容版在这里。
+    /// 签过名，但内容与签名对不上（Authenticode 的 HashMismatch）：Lecram 版在这里。
     Modified,
     /// 没签名、读不到、或者根本不是 PE：都不该进产品目录。
     ///
@@ -790,7 +791,7 @@ pub fn signature_verdict(path: &std::path::Path) -> SignatureVerdict {
 /// 旧的那道「签名不过不许就位」的门（`docs/144` 时代的规则）。
 ///
 /// 2026-10-17 起产品路径走的是 [`require_valid_snippet`]（结构 + 导出），**不再**拿签名拦：
-/// 旧卡只有社区兼容版/FP16 版能用 NR，而签名门本来就在 NVIDIA 核心 `CreateFeature` 那一步。
+/// 旧卡只有Lecram 版/FP16 版能用 NR，而签名门本来就在 NVIDIA 核心 `CreateFeature` 那一步。
 /// 这一支留着是因为它是「签名到底怎么判」的参考实现与回退开关（`docs/186` 的退路），
 /// 但它已经**没有调用点**——真要退回去，把安装路径改回调用它即可。
 #[cfg(windows)]
@@ -821,7 +822,7 @@ const REQUIRED_SNIPPET_EXPORTS: [&str; 5] = [
 
 /// 装片段之前的那道门：**结构 + 导出**，不再要求签名。
 ///
-/// 2026-10-17 起产品路径收下签名对不上（社区兼容版）与没签名（FP16 版）的片段：旧卡
+/// 2026-10-17 起产品路径收下签名对不上（Lecram 版）与没签名（FP16 版）的片段：旧卡
 /// 只有那两版能用 NR，而签名门是 NVIDIA 核心在 `CreateFeature` 之前做的（见
 /// [`SignatureVerdict`]），我们自己的门槛再拦一道只会让用户「下得到、装不上」。
 ///
@@ -984,7 +985,7 @@ pub fn install_dll_with(
     // 尺寸与 PE 都像了，还要查导出齐不齐。这一句排在前面那几句**之后**：用户最容易犯
     // 的错是选错文件（说明文档、压缩包），那几句才是对那种错的回答。
     //
-    // 签名从 2026-10-17 起不再拦：社区兼容版与 FP16 版是旧卡唯一能用的 NR，而签名门
+    // 签名从 2026-10-17 起不再拦：Lecram 版与 FP16 版是旧卡唯一能用的 NR，而签名门
     // 本来就在 NVIDIA 核心那一步（见 [`require_valid_snippet`] 与 `docs/186`）。
     if trust == SnippetTrust::Required {
         require_valid_snippet(source)?;
@@ -1427,7 +1428,7 @@ mod tests {
     /// 装之前拦一道：**装上去也用不了**的那种不许顶掉盘上那份能用的。
     ///
     /// 2026-10-17 起门槛从「签名」改成「结构 + 导出」（见 [`require_valid_snippet`]）：签过名
-    /// 再被改过的社区兼容版**装得进去**（签名门在 NVIDIA 核心那一步），签名结论照旧报得出来；
+    /// 再被改过的Lecram 版**装得进去**（签名门在 NVIDIA 核心那一步），签名结论照旧报得出来；
     /// 仍然拦的是不是 PE、缺导出这一类。
     #[cfg(windows)]
     #[test]
@@ -1438,7 +1439,7 @@ mod tests {
         let official = root.join("NVIDIA-Original").join("nvngx_dlssnr.dll");
         let community = root.join("Community-RTX40-RTX50").join("nvngx_dlssnr.dll");
         if !official.is_file() || !community.is_file() {
-            panic!("跳过：官方原版或社区兼容版不在（这条路要两份真片段）");
+            panic!("跳过：官方原版或Lecram 版不在（这条路要两份真片段）");
         }
         let dir = tempfile::tempdir().expect("临时目录");
         let installed = super::install_dll(&official, dir.path()).expect("官方原版该装得进去");

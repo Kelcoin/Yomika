@@ -371,7 +371,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
@@ -413,7 +413,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'a1', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/a1']}><App /></MemoryRouter>);
@@ -469,7 +469,7 @@ describe('reader route', () => {
       if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_reader_page') return { ok: true, value: [255, 216, 255, 224] };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
 
@@ -502,7 +502,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'raw-owner', title: 'Reader', pages: Array.from({ length: 6 }, (_, i) => `${i}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/raw-owner']}><App /></MemoryRouter>);
@@ -541,7 +541,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'source-window', title: 'Reader', pages: Array.from({ length: 6 }, (_, i) => `${i}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     const view = render(<MemoryRouter initialEntries={['/reader/source-window']}><App /></MemoryRouter>);
@@ -575,7 +575,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'sweep', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/sweep']}><App /></MemoryRouter>);
@@ -619,7 +619,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'budget', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/budget']}><App /></MemoryRouter>);
@@ -665,7 +665,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'promote', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/promote']}><App /></MemoryRouter>);
@@ -712,7 +712,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'resident', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/resident']}><App /></MemoryRouter>);
@@ -752,7 +752,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'lost-source', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg'] } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/lost-source']}><App /></MemoryRouter>);
@@ -843,7 +843,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'priority', title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/priority']}><App /></MemoryRouter>);
@@ -1615,9 +1615,9 @@ describe('reader route', () => {
         return {
           ok: true,
           value: {
-            dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 165_840_496,
+            dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 165_840_496,
             gpu: { name: 'NVIDIA GeForce RTX 4070', recommendedVariant: 'community' },
-            gpuName: 'NVIDIA GeForce RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版',
+            gpuName: 'NVIDIA GeForce RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版',
             coreAvailable: true, installable: true, available: true,
             probe: { supported: true, width: 96, height: 96, elapsedMs: 1200, difference: 12.5, error: null },
             probeValid: true, error: null,
@@ -1846,7 +1846,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: String(args?.archiveId ?? 'left'), title: 'Reader', pages: Array.from({ length: pageCount }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: '社区兼容版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: '社区兼容版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
+      if (command === 'dlssnr_status') return { ok: true, value: { dllPresent: true, variant: 'community', variantLabel: 'Lecram 版', dllBytes: 100, gpu: { name: 'RTX 4070', recommendedVariant: 'community' }, gpuName: 'RTX 4070', recommendedVariant: 'community', recommendedLabel: 'Lecram 版', coreAvailable: true, installable: true, available: true, probe: null, probeValid: false, error: null } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     render(<MemoryRouter initialEntries={['/reader/left']}><ReaderNavigation /><App /></MemoryRouter>);

@@ -19,7 +19,7 @@ export const DlssnrStatusSchema = z.object({
   /** 这份 DLL 自己报的版本号（`310.8.0.0`）。读不出来（不是 PE、被截断）就是 null，
    * 老版本后端没有这个字段，所以是可选的。 */
   dllVersion: z.string().nullable().optional(),
-  /** 盘上这份片段的 SHA-256。**不能拿字节数代替**：官方原版与社区兼容版都是
+  /** 盘上这份片段的 SHA-256。**不能拿字节数代替**：官方原版与Lecram 版都是
    * 165,840,496 字节，只有哈希分得开。老版本后端没有这个字段，所以是可选的。 */
   dllSha256: z.string().nullable().optional(),
   gpu: DlssnrGpuSchema.nullable().optional(),

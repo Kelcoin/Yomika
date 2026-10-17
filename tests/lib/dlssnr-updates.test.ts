@@ -53,8 +53,8 @@ function catalog(variants: DlssnrVariant[]): DlssnrCatalog {
 function published(): DlssnrCatalog {
   return catalog([
     variant({ id: 'official', label: 'NVIDIA 官方原版（RTX 50 系原生）', series: [50], size: 165_840_496, sha256: OFFICIAL }),
-    variant({ id: 'community', label: '社区兼容版（RTX 40 / 50 系）', series: [40, 50], size: 165_840_496, sha256: COMMUNITY }),
-    variant({ id: 'sf-v2', label: 'FP16 兼容版（RTX 20 / 30 系，性能较低）', series: [20, 30], size: 165_830_144, sha256: SF_V2 }),
+    variant({ id: 'community', label: 'Lecram 版', series: [40, 50], size: 165_840_496, sha256: COMMUNITY }),
+    variant({ id: 'sf-v2', label: 'SF 版', series: [20, 30, 40, 50], size: 165_830_144, sha256: SF_V2 }),
   ]);
 }
 
@@ -79,12 +79,12 @@ describe('available snippet updates', () => {
     // 盘上是老的那一份 community（内置表按老哈希认出来），清单里那条已经换了资产：
     // 这一条该显示「有更新」，而且报的就是**这一条**——不是别的变体。
     const updates = availableVariantUpdates(
-      status({ variant: 'community', variantLabel: '社区兼容版（RTX 40 / 50 系）', dllSha256: STRANGER, dllBytes: 165_840_496 }),
+      status({ variant: 'community', variantLabel: 'Lecram 版', dllSha256: STRANGER, dllBytes: 165_840_496 }),
       published(),
     );
     expect(updates).toEqual([{
       id: 'community',
-      label: '社区兼容版（RTX 40 / 50 系）',
+      label: 'Lecram 版',
       asset: 'nvngx_dlssnr--community.dll',
       size: 165_840_496,
       sha256: COMMUNITY,

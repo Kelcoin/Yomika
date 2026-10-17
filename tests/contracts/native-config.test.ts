@@ -2098,7 +2098,7 @@ describe('native shell configuration', () => {
     const group = read('../../src/components/DlssnrSettingsGroup.tsx');
     const row = read('../../src/components/SettingsRow.tsx');
 
-    // 官方原版与社区兼容版都是 165,840,496 字节——**只有哈希分得开**。所以「装的是哪一版」
+    // 官方原版与Lecram 版都是 165,840,496 字节——**只有哈希分得开**。所以「装的是哪一版」
     // 这件事，后端得把哈希说出来，前端只能拿哈希去比。
     expect(core, '盘上那份的哈希要有一栏说得出').toContain('pub dll_sha256: Option<String>,');
     expect(core, '认变体与报哈希共用同一遍读，别把那 165 MB 读两遍').toContain(

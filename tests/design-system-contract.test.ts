@@ -3295,7 +3295,7 @@ describe('the 2026-10-17 UI batch', () => {
       variants: { label: string }[];
     };
     for (const variant of manifest.variants) {
-      // 最长的合法名字是「FP16 兼容版」（8 字）；原先那一串带括号的说明会折行。
+      // 最长的合法名字是「Lecram 版」（8 字）；原先那一串带括号的说明会折行。
       expect(variant.label.length, `变体名要短到不换行：${variant.label}`).toBeLessThanOrEqual(8);
     }
   });
