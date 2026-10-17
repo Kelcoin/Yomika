@@ -3,6 +3,19 @@ import { createContext, useContext, useLayoutEffect, useRef, type ReactNode } fr
 const PageActiveContext = createContext(true);
 export const usePageActive = () => useContext(PageActiveContext);
 
+/** 把 scrollTop 直接写到位，而不是让它滚过去。
+ *
+ * 样式表给 `.workspace` 与滚动区加了 `scroll-behavior: smooth`（视觉优化那一批），
+ * 于是「回到这一页」不再是瞬间复位，而是从顶部一路滚到记住的位置——用户报的
+ * 「首页不在顶部时，从其他页面切到首页会从顶部滚过去而不是直接显示在原先位置」。
+ * 写之前把平滑关掉、写完立刻还原：用户自己滚仍然是平滑的。 */
+function writeInstantScroll(region: HTMLElement, write: () => void) {
+  const previous = region.style.scrollBehavior;
+  region.style.scrollBehavior = 'auto';
+  write();
+  region.style.scrollBehavior = previous;
+}
+
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
 export function RetainedPage({ active, flow = false, motionSurface = false, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; children: ReactNode }) {
@@ -16,9 +29,9 @@ export function RetainedPage({ active, flow = false, motionSurface = false, chil
     const workspace = panel.closest<HTMLElement>('.workspace');
     const restore = () => positions.current.forEach((top, region) => {
       if (!region.isConnected) { positions.current.delete(region); return; }
-      if (region.isConnected && !region.closest('[hidden]')) region.scrollTop = top;
+      if (region.isConnected && !region.closest('[hidden]')) writeInstantScroll(region, () => { region.scrollTop = top; });
     });
-    if (workspace) workspace.scrollTop = positions.current.get(workspace) ?? 0;
+    if (workspace) writeInstantScroll(workspace, () => { workspace.scrollTop = positions.current.get(workspace) ?? 0; });
     restore();
     const frame = requestAnimationFrame(restore);
     const save = (event: Event) => {

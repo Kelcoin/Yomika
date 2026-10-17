@@ -1311,15 +1311,6 @@ export function SettingsWorkspace() {
               </SettingsPanel>
             )}
             {selectedSettingsSection === 'settings-sync' && (
-              <SettingsSwitch
-                icon={<RefreshCw />}
-                label="自动同步"
-                hint="写入后、回前台、联网后与每 30 分钟"
-                checked={preferenceDraft.autoSync}
-                onToggle={() => editPreferences({ autoSync: !preferenceDraft.autoSync })}
-              />
-            )}
-            {selectedSettingsSection === 'settings-sync' && (
               <SettingsPanel
                 icon={<Waypoints />}
                 label="同步账户"

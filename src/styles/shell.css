@@ -550,7 +550,10 @@ body::-webkit-scrollbar,
   animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite;
 }
 .skeleton-line { width: 100%; height: 22px; border-radius: var(--radius-control); }
-.skeleton-line-title { width: 72%; height: 34px; }
+/* 标题骨架必须落在标题那一行的盒子里：`.archive-detail-route-title` 的高度是
+   `--text-lg × --leading-tight`（约 22px）且 `overflow: hidden`，而这里原先写死
+   34px ⇒ 骨架的下缘被切掉一截（用户报「详情页标题的加载态底部被截断」）。 */
+.skeleton-line-title { width: 72%; height: 100%; }
 .skeleton-line-short { width: 46%; }
 .skeleton-line.is-chip { width: 52px; height: 20px; border-radius: var(--radius-control); }
 /* 事实网格里四条占位条都一样长会读成一段话；真实的值都很短（「27 页」
@@ -1472,6 +1475,17 @@ body::-webkit-scrollbar,
   cursor: pointer;
 }
 
+/* 一行一个选项：名字不换行。这条行式的主尺寸是 44px（`min-height`），名字一换行整行就
+   撑成两行、把行尾的动作槽（下载 / 更新）挤到下一行去——用户报「FP16 版 DLSSNR 的选项内
+   的文字会换行」。装不下的名字走省略号，完整名字仍然挂在 `title` 上（见
+   `DlssnrSettingsGroup` 那一行）。设备行例外：它的正文本来就是「名字 + 地址」两行。 */
+.settings-choice-option-main:not(.settings-device-option) > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .settings-choice-option-main.settings-device-option {
   justify-content: flex-start;
   text-align: left;
@@ -2202,7 +2216,9 @@ body::-webkit-scrollbar,
 /* Comment bodies inherit color and drop underlines globally, so a bare URL
    inside one would be indistinguishable from prose. */
 .eh-comment-link { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
-/* Votes precede the score, unboxed and aligned with the timestamp's right edge. */
+/* Votes and the score share one row: the score sits in the meta grid's first
+   column (right-aligned), the buttons in the second (left-aligned), so the
+   buttons' left edge is the timestamp column's left edge. */
 .eh-comment-score { color: var(--state-success); font-weight: var(--weight-bold); }
 .eh-comment-score.is-negative,
 .archive-context-menu-item.is-danger { color: var(--state-danger); }
@@ -2215,8 +2231,13 @@ body::-webkit-scrollbar,
 /* Pinned to a token: with none declared the body fell back to the UA default
    16px — off the scale, and larger than the name that is meant to lead the card. */
 .eh-comments-list p { margin: 0; font-size: var(--text-md); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-relaxed); }
-.eh-comment-votes { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); font-size: var(--text-xs); }
-.eh-comment-votes-actions { display: inline-flex; flex-shrink: 0; align-items: center; gap: 2px; }
+/* 投票行与上面那行共用同一条两列网格（作者 | 时间）：分数落在左列、贴右边缘，两枚按钮
+   落在右列、贴左列。于是按钮的左边缘就是时间那一列的左边缘（用户要「令其左侧对齐上面
+   的时间的左侧」），而分数的宽窄再也推不动按钮（用户要「点赞按钮的位置不要受评分的
+   影响」）。 */
+.eh-comment-votes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); align-items: center; gap: var(--space-3); font-size: var(--text-xs); }
+.eh-comment-votes-actions { grid-area: 1 / 2; justify-self: start; display: inline-flex; flex-shrink: 0; align-items: center; gap: 2px; }
+.eh-comment-votes .eh-comment-score { grid-area: 1 / 1; justify-self: end; }
 .eh-comment-votes-actions button {
   display: grid;
   place-items: center;

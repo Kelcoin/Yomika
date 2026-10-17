@@ -240,8 +240,7 @@
     --shadow-overlay: 0 16px 48px rgb(26 28 26 / 0.24);
     --shadow-tooltip: 0 6px 16px rgb(26 28 26 / 0.14);
     --shadow-card: 0 4px 12px rgb(26 28 26 / 0.1);
-    --shadow-card-hover: 0 8px 24px rgb(26 28 26 / 0.14),
-                         0 2px 8px rgb(26 28 26 / 0.08);
+    --shadow-card-hover: 0 4px 12px rgb(26 28 26 / 0.14), 0 1px 4px rgb(26 28 26 / 0.08);
     --shadow-card-lifted: 0 12px 32px rgb(26 28 26 / 0.16),
                           0 4px 12px rgb(26 28 26 / 0.1);
     /* The multi-select disc floats over cover art of any brightness; the disc
@@ -602,8 +601,7 @@
       --selection-ink: #e4e3df;
       --primary-gradient: linear-gradient(180deg, #ffb4a9 0%, #ff9e91 100%);
       --primary-gradient-hover: linear-gradient(180deg, #ffc7be 0%, #ffb4a9 100%);
-      --shadow-card-hover: 0 8px 24px rgb(0 0 0 / 0.52),
-                           0 2px 8px rgb(0 0 0 / 0.42);
+      --shadow-card-hover: 0 4px 12px rgb(0 0 0 / 0.52), 0 1px 4px rgb(0 0 0 / 0.42);
       --shadow-card-lifted: 0 12px 32px rgb(0 0 0 / 0.58),
                             0 4px 12px rgb(0 0 0 / 0.48);
       --control-background: #1a1d1b;
@@ -736,8 +734,7 @@
     --selection-ink: #e4e3df;
     --primary-gradient: linear-gradient(180deg, #ffb4a9 0%, #ff9e91 100%);
     --primary-gradient-hover: linear-gradient(180deg, #ffc7be 0%, #ffb4a9 100%);
-    --shadow-card-hover: 0 8px 24px rgb(0 0 0 / 0.52),
-                         0 2px 8px rgb(0 0 0 / 0.42);
+    --shadow-card-hover: 0 4px 12px rgb(0 0 0 / 0.52), 0 1px 4px rgb(0 0 0 / 0.42);
     --shadow-card-lifted: 0 12px 32px rgb(0 0 0 / 0.58),
                           0 4px 12px rgb(0 0 0 / 0.48);
     --control-background: #1a1d1b;

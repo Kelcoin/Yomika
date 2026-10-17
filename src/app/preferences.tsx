@@ -178,7 +178,11 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     };
   }, [reload]);
 
-  useEffect(() => { setAutoSyncEnabled(preferences.autoSync); }, [preferences.autoSync]);
+  // 自动同步没有开关了：它是这一档的既定行为，用户要求「去掉同步的自动同步开关，就应该
+  // 是自动同步的」。偏好里那个 `autoSync` 字段仍然照旧存着（存储 schema 不动，旧库读得
+  // 出来），但界面与这里都不再拿它当闸门——从前它一关，`startAutoSync` 装的触发点全成
+  // 空转，而设置页上那条开关又和「立即同步」摆在一起，看起来像同一件事的两种强度。
+  useEffect(() => { setAutoSyncEnabled(true); }, []);
 
   function save(input: PreferenceSnapshot): Promise<CommandResult<PreferenceSnapshot>> {
     const operation = saveQueueRef.current.then(async () => {

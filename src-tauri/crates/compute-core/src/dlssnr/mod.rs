@@ -572,11 +572,16 @@ impl Variant {
     }
 
     /// 给设置页看的一句话：这一种是谁用的。
+    ///
+    /// 只写名字，括号里那串适用机型交给清单的 `note`（设置页会一起画）：名字要与
+    /// `dlssnr-manifest.json` 逐字相同（`the_published_catalog_agrees_with_the_built_in_variant_table`
+    /// 钉着这一条），而带括号的长名字在 420px 的面板里会折成两行——用户报的
+    /// 「FP16 版 DLSSNR 的选项内的文字会换行」。
     pub fn label(self) -> &'static str {
         match self {
-            Variant::Official => "NVIDIA 官方原版（RTX 50 系原生）",
-            Variant::Community40 => "社区兼容版（RTX 40 / 50 系）",
-            Variant::SfV2 => "FP16 兼容版（RTX 20 / 30 系，性能较低）",
+            Variant::Official => "官方原版",
+            Variant::Community40 => "社区兼容版",
+            Variant::SfV2 => "FP16 兼容版",
         }
     }
 }
@@ -1614,6 +1619,19 @@ mod tests {
         assert_eq!(first.rgba, again.rgba, "1->2->1 must not preserve the second layer's settings/output");
     }
 
+    /// 这些计数只有在机器**留得住**备用工作区时才成立：内存策略（提交量超过物理内存
+    /// 四分之一）会把刚交回的那一份直接丢掉，于是每页各建一次。那是策略按自己的规矩
+    /// 办事，不是回归——留不住就如实跳过，别把内存状态当成代码缺陷。
+    #[cfg(feature = "dlssnr")]
+    fn spare_workspaces_possible() -> bool {
+        super::workspace::spare_allocation_fits(
+            super::gpu::video_memory(),
+            crate::resources::system_memory(),
+            0,
+            0,
+        )
+    }
+
     /// 提交期失败（`Signal` 失败、栅栏超时…）之后，那份上下文**不能**留在缓存里：
     /// 报错的那一次就要把坏上下文摘掉，下一次请求重建一份，再往后回到复用。
     ///
@@ -1623,6 +1641,10 @@ mod tests {
     #[test]
     fn a_failed_submit_drops_the_context_instead_of_poisoning_every_page() {
         let _gpu = gpu_test_lock();
+        if !spare_workspaces_possible() {
+            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
+            return;
+        }
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;
@@ -1848,6 +1870,10 @@ mod tests {
     #[test]
     fn serial_layers_share_one_feature_and_match_individual_passes() {
         let _gpu = gpu_test_lock();
+        if !spare_workspaces_possible() {
+            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
+            return;
+        }
         let dll = test_dll().expect("requires the real DLL");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1957,6 +1983,10 @@ mod tests {
     #[test]
     fn a_cancelled_page_keeps_the_context_and_its_workspace() {
         let _gpu = gpu_test_lock();
+        if !spare_workspaces_possible() {
+            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
+            return;
+        }
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;
@@ -2016,6 +2046,10 @@ mod tests {
     #[test]
     fn releasing_the_cached_workspaces_gives_the_textures_back() {
         let _gpu = gpu_test_lock();
+        if !spare_workspaces_possible() {
+            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
+            return;
+        }
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;

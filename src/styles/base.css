@@ -409,6 +409,17 @@ a:active {
   transform: translateY(1px) scale(0.98);
 }
 
+/* 档案卡片、列表行与设置行不参与上面那条几何按压：它们按下去只换颜色（`.is-pressed`
+   那批规则），因为那个 2% 的缩放有两个副作用——
+   · 缩略图卡片由虚拟列表按矩形量尺寸，缩放会被量进去，于是整列表重排、别的卡片跟着
+     动（用户报「点击缩略图档案卡片的缩小效果会导致其他卡片位置同步移动」）；
+   · 设置行按下去时连它自己的悬停底色一起缩小（用户报图 3「点击时 hover 效果也会变小」）。 */
+.archive-thumb-card:active,
+.archive-row:active,
+.settings-row-button:active {
+  transform: none;
+}
+
 button:disabled,
 input:disabled,
 select:disabled,

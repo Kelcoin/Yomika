@@ -9,7 +9,7 @@
   "variants": [
     {
       "id": "official",
-      "label": "NVIDIA 官方原版（RTX 50 系原生）",
+      "label": "官方原版",
       "note": "NVIDIA 自己发布的这一份，文件版本 310.8.0.0。只在 RTX 50 系上原生支持。",
       "series": [50],
       "asset": "nvngx_dlssnr--official.dll",
@@ -18,7 +18,7 @@
     },
     {
       "id": "community",
-      "label": "社区兼容版（RTX 40 / 50 系）",
+      "label": "社区兼容版",
       "note": "社区改出的兼容版，文件版本 310.8.0.0，RTX 40 / 50 系都能跑。",
       "series": [40, 50],
       "asset": "nvngx_dlssnr--community-rtx40-50.dll",
@@ -27,7 +27,7 @@
     },
     {
       "id": "sf-v2",
-      "label": "FP16 兼容版（RTX 20 / 30 系，性能较低）",
+      "label": "FP16 兼容版",
       "note": "文件版本 310.8.SF.0，走 FP16。RTX 20 / 30 系可运行，性能较低，主要适合图片与视频。",
       "series": [20, 30],
       "asset": "nvngx_dlssnr--sf-v2.dll",

@@ -233,6 +233,14 @@ export const COLOR_SCHEMES: readonly ColorScheme[] = [
     ),
     swatch: ['#2d7050', '#e9f2eb', '#6fc598'],
   },
+  {
+    id: 'sky-cyan', label: '天青', description: '天青蓝主色与薄雾纸面，清透疏朗。',
+    css: colorSchemeCss(
+      { canvas: '#dbe7ed', panel: '#e7f1f6', elevated: '#f2f8fb', muted: '#ccdde5', ink: '#18262e', secondary: '#3d5763', faint: '#4f6b78', accent: '#1f6b86', accentHover: '#17556b', cyan: '#2f8ba3' },
+      { canvas: '#0f181d', panel: '#17252b', elevated: '#21333a', muted: '#2a3f48', ink: '#e0edf2', secondary: '#b0c8d2', faint: '#93aeb9', accent: '#6cc0dd', accentHover: '#8bd3ea', cyan: '#5fb3cc' },
+    ),
+    swatch: ['#1f6b86', '#e7f1f6', '#6cc0dd'],
+  },
 ];
 
 export const CSS_THEME_PRESETS: readonly CssThemePreset[] = [

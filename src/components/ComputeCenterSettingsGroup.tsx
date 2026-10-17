@@ -119,6 +119,12 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
    *  手机上没有本机那一档可争，status 取不到（网页调试、命令失败）也得留着——不然手机
    *  用户就一个入口都没有了。 */
   const showRemote = mobile || (Boolean(status) && !status?.running);
+  /** 开关画的是「这一台在不在对外提供算力」。**初值取偏好，不取瞬时的 status**：status 要
+   *  等一次 IPC 回来（挂载时先读上一次写下的缓存快照，那份很可能还是关着的时候写的），
+   *  于是开关先画成关、再跳成开——用户报「每次进高级页面都默认关闭再变成开启；开着就一直
+   *  开着，不要每次都从关闭再变成开的」。偏好是用户自己的意图，先按它画；`refresh()` 回来
+   *  之后以 status 为准（真关了也就跟着画成关）。 */
+  const serving = status?.running ?? preferences.computeCenterEnabled;
   /** 自动搜到的、**还没配对过**的设备：已经配好的在上面「已配对设备」那一条里，搜出来
    *  再列一遍只会让人分不清点哪个。 */
   const unpairedDevices = useMemo(
@@ -320,11 +326,11 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
           icon={<Server />}
           label="开启本机远程后处理服务"
           hint={
-            status?.running ? '这台设备正在为局域网内的其他设备处理图片' : '允许其他设备连接这台设备处理图片'
+            serving ? '这台设备正在为局域网内的其他设备处理图片' : '允许其他设备连接这台设备处理图片'
           }
           disabled={busy || !verified}
-          checked={status?.running ?? false}
-          onToggle={() => void toggleServing(!(status?.running ?? false))}
+          checked={serving}
+          onToggle={() => void toggleServing(!serving)}
         />
         {status?.running && <SettingsRow
           icon={<Server />}

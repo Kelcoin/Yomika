@@ -3206,3 +3206,84 @@ it('keeps 仅历史记录 scoped to the two places the setting means', () => {
   expect(workspace, '档案库列表里两处进度条都要带上位置').toMatch(/scope=\{progressScope\} cornerAware/);
   expect(workspace).toMatch(/progressScope=\{progressScope\}/);
 });
+
+describe('the 2026-10-17 UI batch', () => {
+  it('keeps the card hover shadow inside the list padding, and smaller than it was', () => {
+    const tokens = read('src/styles/tokens.css');
+    const shadows = [...tokens.matchAll(/--shadow-card-hover:\s*([^;]+);/g)].map((match) => match[1] ?? '');
+    expect(shadows.length, '亮/暗两档都要有这张卡片阴影').toBeGreaterThanOrEqual(2);
+    for (const shadow of shadows) {
+      expect(shadow, '横向模糊要收进列表两侧的内边距（12px）里，否则两侧被 overflow 裁掉').toContain('12px');
+      expect(shadow, '24px 那一版就是用户看到的「阴影左右被切」').not.toContain('24px');
+    }
+  });
+
+  it('keeps the detail title skeleton inside the title line box', () => {
+    const shell = read('src/styles/shell.css');
+    expect(shell, '标题骨架不能写死高度：标题那一行只有 --text-lg × --leading-tight 那么高').toMatch(
+      /\.skeleton-line-title \{[^}]*height: 100%;/,
+    );
+    expect(shell, '写死 34px 就是下缘被切掉的那一版').not.toMatch(/\.skeleton-line-title \{[^}]*height: 34px;/);
+  });
+
+  it('cannot wrap a DLSSNR variant label', () => {
+    const shell = read('src/styles/shell.css');
+    expect(shell, '变体名要单行省略，不能换行').toMatch(
+      /\.settings-choice-option-main:not\(\.settings-device-option\) > span \{[^}]*white-space: nowrap;/,
+    );
+    const manifest = JSON.parse(read('src-tauri/resources/dlssnr/dlssnr-manifest.json')) as {
+      variants: { label: string }[];
+    };
+    for (const variant of manifest.variants) {
+      // 最长的合法名字是「FP16 兼容版」（8 字）；原先那一串带括号的说明会折行。
+      expect(variant.label.length, `变体名要短到不换行：${variant.label}`).toBeLessThanOrEqual(8);
+    }
+  });
+
+  it('takes the press scale off the archive cards and the settings rows', () => {
+    const base = read('src/styles/base.css');
+    expect(base, '全局按压会给 button/a 加 2% 缩小').toMatch(/button:active,[\s\S]{0,80}scale\(0\.98\)/);
+    expect(base, '卡片与设置行必须例外：虚拟列表按实测尺寸排版，缩放会让整列跟着动').toMatch(
+      /\.archive-thumb-card:active,[\s\S]*?\.settings-row-button:active \{[^}]*transform: none;/,
+    );
+  });
+
+  it('restores a retained page without animating the scroll', () => {
+    const retained = read('src/app/RetainedPage.tsx');
+    expect(retained, '恢复位置要临时关掉平滑滚动：视觉优化那批给 .workspace 与滚动区开了 scroll-behavior: smooth').toMatch(
+      /function writeInstantScroll\(region: HTMLElement, write: \(\) => void\) \{[\s\S]{0,140}region\.style\.scrollBehavior = 'auto';/,
+    );
+    expect(retained, '工作区那一处要走它').toContain(
+      'writeInstantScroll(workspace, () => { workspace.scrollTop = positions.current.get(workspace) ?? 0; })',
+    );
+    expect(retained, '滚动区那一处也要走它').toContain(
+      'writeInstantScroll(region, () => { region.scrollTop = top; })',
+    );
+  });
+
+  it('keeps automatic sync on, with no switch to turn it off', () => {
+    const preferences = read('src/app/preferences.tsx');
+    expect(preferences, '自动同步就该一直开着：进门强制打开，不再跟着偏好走').toMatch(
+      /useEffect\(\(\) => \{\s*setAutoSyncEnabled\(true\);\s*\}, \[\]\);/,
+    );
+    const settings = read('src/components/SettingsWorkspace.tsx');
+    expect(settings, '设置里不该再有自动同步开关').not.toMatch(/label="自动同步"/);
+  });
+
+  it('draws the vote glyph as the Material thumb and parks it in the time column', () => {
+    const comments = read('src/components/EhComments.tsx');
+    expect(comments, '投票用实心 Material 拇指（用户图 4 的形状）').toContain(
+      'M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11z',
+    );
+    expect(comments, '向下那一枚是同一路径转 180°，两枚永远同形').toContain('rotate(180 12 12)');
+    expect(comments, '不再用 Lucide 的描边拇指').not.toMatch(/ThumbsUp|ThumbsDown/);
+
+    const shell = read('src/styles/shell.css');
+    expect(shell, '投票行与「作者 | 时间」共用同一套两列').toMatch(
+      /\.eh-comment-votes \{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, auto\);/,
+    );
+    expect(shell, '按钮从第二列开头排起，不再被评分推着走').toMatch(
+      /\.eh-comment-votes-actions \{[^}]*justify-self: start;/,
+    );
+  });
+});

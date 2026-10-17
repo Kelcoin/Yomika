@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
-import { LibraryWorkspace, RAIL_MAX_TICKS, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
+import { LibraryWorkspace, RAIL_MAX_TICKS, WHEEL_IDLE_MS, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
 import { ArchiveThumbnailCard } from '../../src/components/ArchiveThumbnailCard';
 import { rememberWideCoverMark, resetWideCoverMarksForTests, isWideCoverMarked } from '../../src/lib/archiveCardPresentation';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -540,7 +540,7 @@ describe('library workspace', () => {
     expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(40, 104)}px)` });
     expect(list.querySelector('.library-pull-indicator')).toHaveClass('is-visible');
     // Short of the threshold, so letting go springs the list back.
-    await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, WHEEL_IDLE_MS + 40)));
     expect(onRefresh).not.toHaveBeenCalled();
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
     expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
@@ -590,7 +590,35 @@ describe('library workspace', () => {
     expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(-100, 72)}px)` });
     // The end of the list is not a refresh, and the disc never shows for it.
     expect(list.querySelector('.library-pull-indicator')).not.toHaveClass('is-visible');
-    await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, WHEEL_IDLE_MS + 40)));
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  it('keeps a wheel burst as one gesture instead of springing back between notches', async () => {
+    // 滚轮有刻度：连滚时相邻两格只隔几十毫秒。收势窗口要是按触摸那条 140ms 算，每一格
+    // 都会先被拉出去、再弹回原位，下一格又从零开始——用户看到的就是过滚内容疯狂颤动。
+    // 判据：两格之间的间隔短于窗口时，第二格必须接着第一格累积，而不是回到零。
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 0, clientHeight: 800, scrollHeight: 4000 });
+    // 先让档位那一档媒体查询落地：它一变，绑定手势的 effect 会重绑并顺手收势一次，
+    // 那不是滚轮收势，量进这一段就成了假红。
+    await act(() => new Promise((resolve) => setTimeout(resolve, 60)));
+
+    fireEvent.wheel(list, { deltaY: -40 });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(40, 104)}px)` });
+    // 160ms 是滚轮连滚的真实间隔量级。这里**故意写死**：触摸那条 140ms 的收势窗口在
+    // 这个间隔下会把第一格弹回去，判据要是跟着常量缩放就永远抓不到「常量被改小」。
+    await act(() => new Promise((resolve) => setTimeout(resolve, 160)));
+    // 还在同一串刻度里：没有收势，位置仍是第一格拉出来的那一份。
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(40, 104)}px)` });
+    fireEvent.wheel(list, { deltaY: -40 });
+    // 第二格接着累积，而不是从零再拉一次。
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(80, 104)}px)` });
+    await act(() => new Promise((resolve) => setTimeout(resolve, WHEEL_IDLE_MS + 40)));
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
     expect(onRefresh).not.toHaveBeenCalled();
   });
@@ -611,7 +639,7 @@ describe('library workspace', () => {
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
     fireEvent.wheel(list, { deltaY: -200 });
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
-    await act(() => new Promise((resolve) => setTimeout(resolve, 260)));
+    await act(() => new Promise((resolve) => setTimeout(resolve, WHEEL_IDLE_MS + 40)));
     expect(onRefresh).not.toHaveBeenCalled();
   });
 

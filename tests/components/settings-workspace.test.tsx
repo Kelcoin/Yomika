@@ -298,11 +298,8 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('sync');
 
-    // 默认开着：关掉它只剩「立即同步」按钮。
-    const autoSync = await screen.findByRole('switch', { name: '自动同步' });
-    expect(autoSync).toBeChecked();
-    await user.click(autoSync);
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, autoSync: false } }));
+    // 自动同步没有开关：它就该一直开着（用户 2026-10-17 的要求），设置里只留账户行。
+    expect(screen.queryByRole('switch', { name: '自动同步' })).toBeNull();
 
     // 账户行报出上次同步的时刻（原生给的是 SQLite 的 UTC 串）。
     await user.click(await screen.findByRole('button', { name: '同步账户' }));

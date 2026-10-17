@@ -83,6 +83,10 @@ const PULL_MAX = 104;
 const BOUNCE_MAX = 72;
 /** A wheel has no release event, so the gesture is over once it stops. */
 const PULL_SETTLE_MS = 140;
+/** 滚轮是**有刻度**的：一格一格之间隔着几十毫秒，按触摸那条 140ms 的收势窗口算，
+ * 每格都会先被拉出去、再被收势弹回原位，然后下一格又拉一次——用户看到的是过滚内容
+ * 疯狂颤动。滚轮的窗口按「这一串刻度结束了」来定：连滚时只在停手之后收一次势。 */
+export const WHEEL_IDLE_MS = 280;
 
 /** 刻度数上限：再多每个刻度就窄到点不准了。超了就把每一行的桶级整体升一级重建
  * （最大到「年」），到顶还超上限就等距抽稀。
@@ -558,7 +562,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       overscrollSettleTimer.current = window.setTimeout(() => {
         overscrollSettleTimer.current = undefined;
         releaseOverscroll();
-      }, PULL_SETTLE_MS);
+      }, WHEEL_IDLE_MS);
     };
 
     const touchStart = (event: TouchEvent) => {

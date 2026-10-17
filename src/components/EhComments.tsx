@@ -2,7 +2,7 @@ import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
-import { BookOpen, ExternalLink, MessageCircle, Send, ThumbsDown, ThumbsUp } from 'lucide-react';
+import { BookOpen, ExternalLink, MessageCircle, Send } from 'lucide-react';
 import { z } from 'zod';
 import type { EhComment } from '../services/ehClient';
 import { EhCommentSchema, NativeEhRepository } from '../repositories/nativeEhRepository';
@@ -13,6 +13,17 @@ import { StatusLine } from './StatusLine';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
+
+/** 投票用的实心拇指：Material 的 `thumb_up` 那条路径（用户给的图 4 就是这个形状），
+ *  不是 Lucide 那套描边字形——描边在 16px 下只剩一圈轮廓，投票方向读不出来。向下那
+ *  一枚把同一条路径转 180°，两枚因此永远同形。 */
+function ThumbGlyph({ down = false }: { down?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor" transform={down ? 'rotate(180 12 12)' : undefined}>
+      <path d="M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11zm19.83-7.12c.11-.25.17-.52.17-.8V11c0-1.1-.9-2-2-2h-5.5l.92-4.65c.05-.22.02-.46-.08-.66-.23-.45-.52-.86-.88-1.22L14 2 7.59 8.41C7.21 8.79 7 9.3 7 9.83v7.84C7 18.95 8.05 20 9.34 20h8.11c.7 0 1.36-.37 1.72-.97l2.66-6.15z" />
+    </svg>
+  );
+}
 
 const repository = new NativeEhRepository();
 const libraryRepository = new NativeLibraryRepository();
@@ -249,8 +260,8 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
           {!comment.isUploader && <div className="eh-comment-votes">
               <span className="eh-comment-votes-actions" role="group" aria-label={`${comment.author || '匿名用户'} 的评论投票`}>
                 {/* Colour and aria-pressed identify the selected direction. */}
-                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ThumbsUp aria-hidden="true" fill="currentColor" /></button>
-                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ThumbsDown aria-hidden="true" fill="currentColor" /></button>
+                <button type="button" className="is-up" disabled={votingIds.has(comment.id)} aria-label={`赞同 ${comment.author} 的评论`} aria-pressed={comment.myVote === 1} onClick={() => void vote(comment, 1)}><ThumbGlyph /></button>
+                <button type="button" className="is-down" disabled={votingIds.has(comment.id)} aria-label={`反对 ${comment.author} 的评论`} aria-pressed={comment.myVote === -1} onClick={() => void vote(comment, -1)}><ThumbGlyph down /></button>
               </span>
             <span className={`eh-comment-score${comment.score < 0 ? ' is-negative' : ''}`} aria-label={`评论分数 ${comment.score}`}>{comment.score > 0 ? `+${comment.score}` : comment.score}</span>
           </div>}
