@@ -331,7 +331,7 @@ fn evaluate(
                 return Err(reset);
             }
             if workspace.partial_submission {
-                workspace.release(&context.core);
+                workspace.release(&context.runtime);
             } else {
                 context.release_workspace(workspace);
             }
@@ -347,7 +347,7 @@ fn evaluate(
         if context.poisoned.is_some() {
             drop(workspace);
         } else {
-            workspace.release(&context.core);
+            workspace.release(&context.runtime);
         }
         return Err(error);
     }
@@ -460,9 +460,11 @@ fn record_page(
             height,
             pass,
         );
+        // 评估同样走**片段自己**的导出：句柄是它发出来的，核心垫片那条路在
+        // `CreateFeature` 就已经被签名门挡住了（见 `workspace::ensure_features`）。
         context
-            .core
-            .evaluate_feature(context.list.as_raw(), workspace.features[0].handle, parameters)?;
+            .runtime
+            .evaluate(context.list.as_raw(), workspace.features[0].handle, parameters)?;
         if !last {
             // NGX's internal scratch/history belong to the feature. Complete
             // this pass before resetting and reusing it for the next layer.

@@ -784,6 +784,11 @@ const NGX_CORE_MISSING: &str =
 const SHIM_NAME: &str = "yomika_ngx.dll";
 
 /// 片段的三个导出（核心已经把它加载好了）。
+///
+/// **这一路现在没有调用点**（2026-10-17 起产品路径直连片段自己的导出，见 `workspace.rs`）：
+/// 留着是因为它是「交给核心建 feature」的参考实现与回退开关（`docs/186` 的退路），要退回去
+/// 只需让 `workspace.rs` 改回调用 `NgxCore::feature_module()` 那一路。
+#[allow(dead_code)]
 pub(super) struct FeatureModule {
     create: ShimCreateFeatureFn,
     evaluate: ShimEvaluateFeatureFn,
@@ -792,6 +797,7 @@ pub(super) struct FeatureModule {
     populate: Option<unsafe extern "system" fn(*mut c_void) -> NgxResult>,
 }
 
+#[allow(dead_code)] // 与 `FeatureModule` 同一条回退路：核心替我们建 feature 的那三个调用
 impl FeatureModule {
     pub(super) fn create(
         &self,
@@ -856,6 +862,7 @@ type ShimDestroyFn = unsafe extern "system" fn(*mut c_void) -> NgxResult;
 /// 垫片里那三个函数的地址。模块活到进程结束（和 NGX 一样不许卸载），句柄留在
 /// 结构里只是为了不让它被优化掉。
 #[cfg(ngx_core)]
+#[allow(dead_code)] // `create/evaluate/release_feature` 三个字段现在没有读点：同 `FeatureModule` 那条回退路
 struct Shim {
     module: HMODULE,
     init: ShimInitFn,
@@ -1150,6 +1157,7 @@ impl NgxCore {
     /// 核心在初始化时会自己去搜索路径里把片段加载起来（日志里 `nvngxFeatureVersion
     /// = 310.8.0` 就是它），加载完模块就在进程里了——按名字取回来即可，不用我们再
     /// `LoadLibraryExW` 一遍（那样还要自己补「调用者叫 nvngx.dll」那一层）。
+    #[allow(dead_code)] // 回退路：交给核心建 feature（`FeatureModule` 那条，见 docs/186）
     pub(super) fn feature_module(&self) -> Result<FeatureModule, String> {
         let handle = unsafe { GetModuleHandleW(windows::core::w!("nvngx_dlssnr.dll")) }
             .map_err(|error| format!("核心没有把 nvngx_dlssnr.dll 载进来：{error}"))?;
@@ -1173,6 +1181,7 @@ impl NgxCore {
     /// 建一个特性句柄。**这一步会把 `nvngx_dlssnr.dll` 交给核心去加载并调用**——
     /// 我们自己不碰片段的导出（那是当初走偏的那条路：直接调片段要自己补调用者
     /// 兼容层、自己管初始化，核心这条路才是 SDK 文档里的流程）。
+    #[allow(dead_code)] // 回退路：核心替我们调片段的 CreateFeature（见 docs/186）
     pub(super) fn create_feature(
         &self,
         command_list: *mut c_void,
@@ -1201,6 +1210,7 @@ impl NgxCore {
     }
 
     /// 跑一次（命令表要处于录制状态）。
+    #[allow(dead_code)] // 回退路：核心替我们调片段的 EvaluateFeature（见 docs/186）
     pub(super) fn evaluate_feature(
         &self,
         command_list: *mut c_void,
@@ -1225,6 +1235,7 @@ impl NgxCore {
         }
     }
 
+    #[allow(dead_code)] // 回退路：核心替我们调片段的 ReleaseFeature（见 docs/186）
     pub(super) fn release_feature(&self, feature: *mut c_void) {
         if feature.is_null() {
             return;
@@ -1421,9 +1432,14 @@ impl DlssnrRuntime {
     }
 
     pub(super) fn release(&self, feature: *mut c_void) {
-        if !feature.is_null() {
-            let _ = unsafe { (self.release_feature)(feature) };
+        if feature.is_null() {
+            return;
         }
+        // 与核心那一路同一个计数器：判据量的是「有没有真的还回 NGX」，不该因为换了哪条
+        // 路就失去读数（2026-10-17 直连片段之后，产品路径走的就是这一条）。
+        #[cfg(test)]
+        FEATURES_RELEASED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = unsafe { (self.release_feature)(feature) };
     }
 
     pub fn module(&self) -> HMODULE {

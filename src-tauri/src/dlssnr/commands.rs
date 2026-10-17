@@ -1147,7 +1147,11 @@ mod tests {
         assert!(error.contains("nvngx_dlssnr.dll"), "{error}");
     }
 
-    /// 没卡、或这一代不在支持范围：同一份报告、同一栏 `error`（探针的结论不是命令失败）。
+    /// 没卡才是「这台机器跑不了」；哪一代**不再**当门槛（2026-10-17）。
+    ///
+    /// 旧卡只剩社区版/FP16 版能用 NR，把代际当门槛会把它们连装带跑一起否掉。这条钉住
+    /// 「老卡照样往下走」：拿一份假片段（1 KB，结构就不对）时，报出来的是「计算进程没起来」，
+    /// 而不是「不在支持范围」。
     #[test]
     fn a_probe_reports_a_machine_it_cannot_run_on() {
         let dir = tempfile::tempdir().expect("临时目录");
@@ -1155,10 +1159,9 @@ mod tests {
         let no_card = probe_with_gpu(None, dir.path(), None);
         assert!(no_card.error.expect("没卡").contains("NVIDIA 显卡"));
         let old_card = probe_with_gpu(None, dir.path(), Some(gpu_with_series(Some(10))));
-        assert!(old_card
-            .error
-            .expect("这一代不支持")
-            .contains("支持范围"));
+        let error = old_card.error.expect("假片段跑不起来");
+        assert!(!error.contains("支持范围"), "代际不再是门槛：{error}");
+        assert!(error.contains("计算进程"), "{error}");
     }
 
     /// 产物与合成图比出来的结论：原样交回是**明确的**结论（差值恰好 0），挪过就是支持。

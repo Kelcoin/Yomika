@@ -15,7 +15,7 @@ use crate::model_release::{
     MODEL_RELEASE_REPO,
 };
 
-use super::{dll_path, file_sha256, installed_variant, require_trusted_snippet, InstalledDll, SnippetTrust};
+use super::{dll_path, file_sha256, installed_variant, require_valid_snippet, InstalledDll, SnippetTrust};
 
 /// 仓库正文里这份清单的文件名（与 `manifest.json` / `upscale-manifest.json` 同规矩）。
 pub const CATALOG_FILE: &str = "dlssnr-manifest.json";
@@ -193,22 +193,23 @@ fn put_in_place(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<
 
 /// 把已经校验过的暂存文件装进数据目录，并报出装的是哪一种。
 ///
-/// 「校验过」说的是字节数与 SHA-256 对得上清单；**签名**是另一件事，而且更靠前：清单里
-/// 那两条社区变体是签过名再被改过的，驱动拒它们（`docs/144`），所以这里还要再问一次
-/// ——装下去的唯一后果是用户开开合合却什么也没变。
+/// 「校验过」说的是字节数与 SHA-256 对得上清单；**签名**从 2026-10-17 起不再拦——清单
+/// 里那两条社区变体是签过名再被改过的（`docs/144`），旧卡只有它们能用 NR，而签名门本来
+/// 就在 NVIDIA 核心那一步。现在拦的是「装上去也用不了」：结构不对、缺导出（见
+/// `require_valid_snippet`）。签名结论照旧由 [`signature_verdict`] 报给设置页。
 fn install_staged(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<InstalledDll, String> {
     install_staged_with(staged, data_dir, SnippetTrust::Required)
 }
 
 /// 带策略的那一支：产品的下载路径走 [`SnippetTrust::Required`]，下面那几个拿合成字节
-/// 当夹具的用例显式跳过（它们问的是「就位与认变体」那条路径，不问签名）。
+/// 当夹具的用例显式跳过（它们问的是「就位与认变体」那条路径，不问结构与导出）。
 fn install_staged_with(
     staged: &std::path::Path,
     data_dir: &std::path::Path,
     trust: SnippetTrust,
 ) -> Result<InstalledDll, String> {
     if trust == SnippetTrust::Required {
-        require_trusted_snippet(staged)?;
+        require_valid_snippet(staged)?;
     }
     put_in_place(staged, data_dir)?;
     // 文件名没变、内容变了：进程内记住的那份指纹（产物身份与探针结论都看它）要作废。
@@ -372,6 +373,10 @@ mod tests {
     /// 本地社区包里那三个 DLL 的字节数要和清单里写的一致（只比字节数，不算哈希：
     /// 发布出去的那份字节由下面的下载测试验）。改了 docs 里的包却忘了更新清单，
     /// 这条会先说话。
+    ///
+    /// 2026-10-17 换过一轮：清单的社区槽变成 Lecram 310.8.3、FP16 槽变成社区
+    /// compat-fp16 310.9.16，所以这两条指到新目录；`Community-RTX40-RTX50` 与 `SF-v2`
+    /// 两个目录留着当**退役原件**（README.txt 记着它们的身世），不再对着清单比。
     #[test]
     fn the_local_pack_matches_the_published_sizes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -379,8 +384,8 @@ mod tests {
         let catalog = published_catalog();
         let directories = [
             ("official", "NVIDIA-Original"),
-            ("community", "Community-RTX40-RTX50"),
-            ("sf-v2", "SF-v2"),
+            ("community", "Community-Lecram-310.8.3"),
+            ("sf-v2", "Compat-FP16-310.9.16"),
         ];
         let mut seen = 0;
         for (id, directory) in directories {
@@ -414,12 +419,14 @@ mod tests {
         assert!(install_staged(&staged, dir.path()).is_err());
     }
 
-    /// 装之前拦一道：签名不过的片段不许就位（`docs/144`）。
+    /// 签过名又被改过的片段**装得下去**，而且签名结论照旧报得出来（2026-10-17 起）。
     ///
-    /// 这条用**真片段**：签名这种事问的是文件自己，合成字节答不了。社区包是本地夹具
-    /// （`docs/` 不进仓库），没有就跳过。
+    /// 旧卡只有社区版/FP16 版能用 NR，而签名门本来就在 NVIDIA 核心那一步（`docs/144`），
+    /// 所以安装这一关拦的改成「装上去也用不了」：结构不对、缺导出。这条用**真片段**钉住
+    /// 「改过的也装，而且 `signature_verdict` 还是说得出它是 Modified」——签名这种事问的是
+    /// 文件自己，合成字节答不了。社区包是本地夹具（`docs/` 不进仓库），没有就跳过。
     #[test]
-    fn a_snippet_whose_signature_does_not_check_out_is_not_put_in_place() {
+    fn a_signed_then_modified_snippet_is_installed_and_still_reports_its_verdict() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../docs/DLSSNR-DLL-Options-310.8.0.0");
         let community = root.join("Community-RTX40-RTX50").join("nvngx_dlssnr.dll");
@@ -432,8 +439,26 @@ mod tests {
         std::fs::create_dir_all(staged.parent().expect("父目录")).expect("建目录");
         std::fs::copy(&community, &staged).expect("摆一份社区片段当暂存");
 
-        let refused = install_staged(&staged, dir.path()).expect_err("改过的片段不该就位");
-        assert!(refused.contains("签名"), "{refused}");
+        let installed = install_staged(&staged, dir.path()).expect("改过的片段现在装得下去");
+        assert!(dll_path(dir.path()).is_file(), "装成功就要落在数据目录");
+        assert_eq!(installed.variant.as_deref(), Some("community"), "认得出是哪一种");
+        assert_eq!(
+            yomika_compute_core::dlssnr::signature_verdict(&community),
+            yomika_compute_core::dlssnr::SignatureVerdict::Modified,
+            "签名结论照旧报得出「改过」"
+        );
+    }
+
+    /// 结构不对的字节仍然进不来：这一关拦的是「装上去也用不了」。
+    #[test]
+    fn a_file_that_is_not_a_snippet_is_not_put_in_place() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let staged = dir.path().join("dlssnr").join("nvngx_dlssnr--junk.dll");
+        std::fs::create_dir_all(staged.parent().expect("父目录")).expect("建目录");
+        std::fs::write(&staged, vec![0u8; 4096]).expect("写一份垃圾当暂存");
+
+        let refused = install_staged(&staged, dir.path()).expect_err("不是 PE 的字节不该就位");
+        assert!(!refused.is_empty(), "拒了要说清为什么");
         assert!(!dll_path(dir.path()).is_file(), "拒了就不许落下东西");
     }
 

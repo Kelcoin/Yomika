@@ -256,7 +256,8 @@ fn gpu_with_series(series: Option<u32>) -> GpuInfo {
 
 #[test]
 fn the_runtime_gate_refuses_a_machine_it_cannot_run_on() {
-    // 门控的判据是**这台机器此刻的事实**：片段在不在、有没有卡、这一代支不支持。
+    // 门控的判据是**这台机器此刻的事实**：片段在不在、有没有卡。哪一代只影响「推荐装
+    // 哪一版」，不再当门槛——社区版与 FP16 版本来就是给旧代做的（见 docs/186）。
     // 手动检测的结论只活在进程内存里，不参与门控——拿它当门的话，每次重开应用都得先去
     // 设置页点一遍「检测」，否则 DLSSNR 静悄悄地不再生效。这条**不带 feature** 跑，
     // 所以「这台机器有什么卡」是调用方递进来的（宿主问 worker 握手 + DXGI 枚举）。
@@ -275,13 +276,15 @@ fn the_runtime_gate_refuses_a_machine_it_cannot_run_on() {
     let error = runtime_gate_with(dir.path(), None).expect_err("没卡时不该放行");
     assert!(error.contains("NVIDIA 显卡"), "{error}");
 
-    // 有卡，但这一代不在 DLSSNR 的支持范围（README 的对应关系只覆盖 20/30/40/50）。
-    let unsupported = gpu_with_series(Some(10));
-    let error = runtime_gate_with(dir.path(), Some(unsupported))
-        .expect_err("代次不支持时不该放行");
-    assert!(error.contains("支持范围"), "{error}");
+    // 有卡就放行，不看是哪一代：旧代以前被「支持范围」挡在这里，而片段能不能真跑是
+    // 片段自己的事（社区版 / FP16 版就是给旧代做的）。代际只用来推荐装哪一版。
+    let older = gpu_with_series(Some(10));
+    assert!(
+        runtime_gate_with(dir.path(), Some(older)).is_ok(),
+        "有卡就不该再拿代次拦人"
+    );
 
-    // 片段、卡、代次都对：放行。核心那一条（NGX 垫片在不在）不在这里问——宿主没有
+    // 片段、卡都对：放行。核心那一条（NGX 垫片在不在）不在这里问——宿主没有
     // 资格问自己，答案在 worker 那一侧（它的 `BuildInfo.engines` 里写着 dlssnr）。
     assert!(runtime_gate_with(dir.path(), Some(supported)).is_ok());
 }

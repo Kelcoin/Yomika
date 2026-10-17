@@ -45,6 +45,14 @@ pub struct GpuContext {
     /// NGX 核心（DLSS SDK 的静态库，经垫片 DLL）：初始化、参数对象、特性模块都由它管。
     pub core: NgxCore,
 
+    /// 片段自己（`nvngx_dlssnr.dll` 的导出）：feature 的建 / 跑 / 还全走它。
+    ///
+    /// 为什么不走核心那三个同名调用：核心在 `CreateFeature` 之前调
+    /// `nvLoadSignedLibraryW()` 验签，改过一个字节的片段一律 0xBAD0000B（见 `mod.rs`
+    /// 的 [`SignatureVerdict`](super::SignatureVerdict) 与 `docs/144`）。片段自己的导出
+    /// 没有这道校验——Magpie / Veyra 就是靠这条跑社区兼容版与 FP16 版的。
+    pub runtime: super::ngx::DlssnrRuntime,
+
     pub device: ID3D12Device,
     pub queue: ID3D12CommandQueue,
     pub allocator: ID3D12CommandAllocator,
@@ -414,9 +422,9 @@ pub fn release_cached_workspaces() -> usize {
         return 0;
     };
     let dropped = context.workspaces.len();
-    let core = &context.core;
+    let runtime = &context.runtime;
     for mut workspace in context.workspaces.drain(..) {
-        workspace.release(core);
+        workspace.release(runtime);
     }
     dropped
 }
@@ -441,11 +449,15 @@ impl GpuContext {
         let core = NgxCore::new();
 
         let device = create_device()?;
-        // 片段交给核心：它按搜索路径找到 `nvngx_dlssnr.dll`、自己加载并在每次调用前
-        // 把客户端设的参数喂给特性（`PopulateParameters_Impl`）——直接调片段的评估
-        // 读不到任何参数（实测）。
+        // 片段交给核心加载一次：核心初始化时按搜索路径找到 `nvngx_dlssnr.dll` 并把它
+        // 载进进程——片段的 `Init_Ext` **依赖这个会话**（没有它不是报错，是崩）。
         let feature_dir = dll.parent().unwrap_or(data_dir).to_path_buf();
         core.initialize(&device, data_dir, &feature_dir)?;
+        // 再按我们自己的路把它加载一遍：`LoadLibraryExW` 命中同一个模块（引用计数 +1），
+        // 拿到可以直接调的那五个导出，并装上「调用者叫 nvngx.dll」的兼容层。建 / 跑 / 还
+        // feature 之后全走这一份——见 `GpuContext::runtime` 的注释。
+        let runtime = super::ngx::DlssnrRuntime::load(dll)?;
+        runtime.ensure_initialized(&device, data_dir)?;
         let queue: ID3D12CommandQueue = unsafe {
             device.CreateCommandQueue(&D3D12_COMMAND_QUEUE_DESC {
                 Type: D3D12_COMMAND_LIST_TYPE_COMPUTE,
@@ -470,6 +482,7 @@ impl GpuContext {
 
         Ok(Self {
             core,
+            runtime,
             device,
             queue,
             allocator,
@@ -608,7 +621,7 @@ impl GpuContext {
                 if let Err(error) = existing.ensure_features(self, passes) {
                     if self.poisoned.is_none() {
                         self.discard_recorded()?;
-                        existing.release(&self.core);
+                        existing.release(&self.runtime);
                     }
                     return Err(error);
                 }
@@ -624,7 +637,7 @@ impl GpuContext {
                 while !self.workspaces.is_empty() && (!workspace::spare_allocation_fits(
                     self.video_memory(), crate::resources::system_memory(), predicted_gpu, predicted_commit,
                 ) || self.workspaces.len() >= workspace::MAX_WORKSPACES) {
-                    if let Some(mut old) = self.workspaces.pop() { old.release(&self.core); }
+                    if let Some(mut old) = self.workspaces.pop() { old.release(&self.runtime); }
                 }
                 let gpu_before = self.video_memory();
                 let commit_before = crate::resources::system_memory();
@@ -634,7 +647,7 @@ impl GpuContext {
                 }) {
                     // A model may exceed the learned estimate. Release all
                     // spares and make exactly one clean allocation attempt.
-                    for mut old in self.workspaces.drain(..) { old.release(&self.core); }
+                    for mut old in self.workspaces.drain(..) { old.release(&self.runtime); }
                     result = self.create_clean_workspace(size, passes);
                 }
                 if result.is_ok() {
@@ -658,16 +671,16 @@ impl GpuContext {
         if let Some(index) = self.workspaces.iter().position(|item| item.size == workspace.size) {
             // 同尺寸不该有两份（取的时候是移出去的，这条只是兜底）。
             let mut stale = self.workspaces.remove(index);
-            stale.release(&self.core);
+            stale.release(&self.runtime);
         }
         self.workspaces.insert(0, workspace);
         let gpu = self.video_memory();
         let system = crate::resources::system_memory();
-        let keep_spares = workspace::spare_allocation_fits(gpu, system, 0, 0);
+        let keep_spares = keep_spare_workspaces(gpu, system);
         let limit = if keep_spares { workspace::MAX_WORKSPACES } else if gpu.is_some() && system.is_some() { 0 } else { 1 };
         while self.workspaces.len() > limit {
             if let Some(mut dropped) = self.workspaces.pop() {
-                dropped.release(&self.core);
+                dropped.release(&self.runtime);
             }
         }
     }
@@ -999,7 +1012,7 @@ impl Drop for GpuContext {
         }
         // feature 句柄要还给 NGX；纹理靠 D3D12 自己的引用计数。
         for workspace in self.workspaces.iter_mut() {
-            workspace.release(&self.core);
+            workspace.release(&self.runtime);
         }
     }
 }
@@ -1105,6 +1118,45 @@ fn info_queue_messages(device: &ID3D12Device) -> Vec<String> {
     }
     messages
 }
+
+/// 这台机器愿不愿意留备用工作区（`GpuContext::release_workspace` 的那条判据）。
+///
+/// 产品路径就是内存策略：提交量超过物理内存四分之一时，刚交回的那一份会被立刻丢掉，
+/// 于是每页各建一次工作区。那是策略按自己的规矩办事，不是回归——但测试里量「同尺寸
+/// 复用」的那几条判据会因此忽绿忽红（跑测试时提交量本来就高）。测试可以用
+/// [`force_spare_workspaces`] 把这条钉成确定值，判据就只量复用本身。
+fn keep_spare_workspaces(
+    gpu: Option<super::gpu::VideoMemory>,
+    system: Option<crate::resources::SystemMemory>,
+) -> bool {
+    #[cfg(test)]
+    match SPARE_WORKSPACES_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => return true,
+        0 => return false,
+        _ => {}
+    }
+    workspace::spare_allocation_fits(gpu, system, 0, 0)
+}
+
+/// 测试用：把「留不留备用工作区」钉死（`None` 恢复按内存策略），返回之前的值。
+#[cfg(test)]
+pub(crate) fn force_spare_workspaces(force: Option<bool>) -> Option<bool> {
+    let next = match force {
+        None => -1i8,
+        Some(false) => 0,
+        Some(true) => 1,
+    };
+    let previous = SPARE_WORKSPACES_OVERRIDE.swap(next, std::sync::atomic::Ordering::Relaxed);
+    match previous {
+        -1 => None,
+        0 => Some(false),
+        _ => Some(true),
+    }
+}
+
+#[cfg(test)]
+static SPARE_WORKSPACES_OVERRIDE: std::sync::atomic::AtomicI8 =
+    std::sync::atomic::AtomicI8::new(-1);
 
 #[cfg(all(test, windows))]
 mod tests {

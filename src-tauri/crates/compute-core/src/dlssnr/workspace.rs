@@ -41,7 +41,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 
 use super::device::GpuContext;
-use super::ngx::{NgxCore, Parameters};
+use super::ngx::Parameters;
 
 /// 尺寸量化的步子：向上取整到它的倍数。
 ///
@@ -148,7 +148,7 @@ impl Workspace {
         if let Err(error) = workspace.ensure_features(context, passes) {
             if context.poisoned.is_none() {
                 context.discard_recorded()?;
-                workspace.release(&context.core);
+                workspace.release(&context.runtime);
             }
             return Err(error);
         }
@@ -164,7 +164,7 @@ impl Workspace {
         let passes = passes.clamp(1, super::settings::MAX_PASS_COUNT as usize);
         // Layer fences and Reset=1 let one feature serve all passes.
         for slot in self.features.drain(1.min(self.features.len())..) {
-            context.core.release_feature(slot.handle);
+            context.runtime.release(slot.handle);
         }
         self.intermediates.truncate(passes.saturating_sub(1));
         if self.intermediates.len() + 1 < passes {
@@ -194,7 +194,18 @@ impl Workspace {
             // 创建参数一个都不能少（尺寸、缩放比、回调、质量档……），少一个片段就
             // 回「参数缺失或类型不对」。
             let parameters = create_parameters(context, self.size.0, self.size.1)?;
-            let handle = context.core.create_feature(context.list.as_raw(), &parameters)?;
+            // SDK 的流程：建 feature 之前先让**片段自己**把客户端设的值读进它的状态
+            // （`PopulateParameters_Impl`）。交给核心那一路时是核心替我们调的；直连这一路
+            // 不调的话，评估阶段再读参数表就晚了（`ngx.rs` 的 `populate_parameters` 那条
+            // 注释记着实测）。尺寸/缩放/质量档就是从这里进网络的。
+            context.runtime.populate_parameters(&parameters)?;
+            // 走**片段自己**的 `CreateFeature`（`DlssnrRuntime`），不走核心垫片那一路。
+            //
+            // 核心在 `CreateFeature` 之前会调 `nvLoadSignedLibraryW()` 验签，改过一个
+            // 字节的片段一律加载不起来（0xBAD0000B，见 `mod.rs` 的 `SignatureVerdict`
+            // 与 docs/144）。社区兼容版（签名对不上）与 FP16 版（根本没签名）都死在
+            // 那一步。片段自己的导出不做这道校验，Magpie / Veyra 就是这么跑它们的。
+            let handle = context.runtime.create(context.list.as_raw(), &parameters)?;
             self.features.push(FeatureSlot { handle, parameters });
         }
         context.feature_builds += 1;
@@ -202,9 +213,11 @@ impl Workspace {
     }
 
     /// 把句柄还给 NGX（纹理靠 D3D12 的引用计数，drop 就行）。
-    pub fn release(&mut self, core: &NgxCore) {
+    ///
+    /// 还给**片段**（而不是核心垫片）：句柄本来就是片段发出来的，两边的释放必须成对。
+    pub fn release(&mut self, runtime: &super::ngx::DlssnrRuntime) {
         for slot in self.features.drain(..) {
-            core.release_feature(slot.handle);
+            runtime.release(slot.handle);
         }
     }
 

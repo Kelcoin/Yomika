@@ -155,8 +155,11 @@ pub struct GpuInfo {
 }
 
 impl GpuInfo {
-    /// 这一代卡用社区包里哪一种 DLL（README 的对应关系）：
-    /// 50 系官方原版即可，40 系要社区兼容版，20/30 系要 FP16 兼容版。
+    /// 这一代卡**推荐**用哪一种片段（README 的对应关系）：50 系官方原版即可，40 系社区兼容
+    /// 版，20/30 系 FP16 兼容版。
+    ///
+    /// 这是推荐，**不是门槛**（2026-10-17 起 `runtime_gate_with` 不再拿它拦人）：跑不跑得起来
+    /// 由片段与驱动在 `CreateFeature` 时回答，装哪一版由用户自己挑。
     pub fn recommended_variant(&self) -> Option<Variant> {
         match self.series {
             Some(50) => Some(Variant::Official),
@@ -551,14 +554,15 @@ fn format_fixed_version(ms: u32, ls: u32) -> String {
     format!("{}.{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16, ls & 0xffff)
 }
 
-/// 社区包里的三种变体（docs/DLSSNR-DLL-Options-310.8.0.0/README.txt）。
+/// 社区包里的三种变体（`resources/dlssnr/dlssnr-manifest.json`；最初的来源说明在
+/// `docs/DLSSNR-DLL-Options-310.8.0.0/README.txt`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
-    /// NVIDIA 官方原版：50 系原生支持。
+    /// NVIDIA 官方原版：310.8.0.0，50 系原生支持，签名有效。
     Official,
-    /// 社区兼容版：40/50 系。
+    /// 社区兼容版：Lecram 310.8.3.0，40/50 系（签名哈希对不上，属改过的片段）。
     Community40,
-    /// FP16 兼容版：20/30 系可运行，性能较低（主要适合图片与视频）。
+    /// FP16 兼容版：社区 compat-fp16 310.9.16.0，20/30 系可运行（未签名，主要适合图片与视频）。
     SfV2,
 }
 
@@ -594,6 +598,15 @@ pub fn variant_of(bytes: usize, sha256_hex: &str) -> Option<Variant> {
     match (bytes, hash.as_str()) {
         (165_840_496, "e16bcf15e16e13f527491cdf7845b2fe6521a738d8f7c9c721866a8496e1fc8e") => {
             Some(Variant::Official)
+        }
+        // 现在发的是这两份（2026-10-17 换的：社区槽 Lecram 310.8.3.0、FP16 槽社区
+        // compat-fp16 310.9.16.0）。旧的两组留着——已经装过旧片段的那台机器还得被认出来，
+        // 而认不出来只是设置页不显示名字，不影响能不能跑。
+        (165_840_496, "f95feb54137ea11979f9b4ec4f00afd84b5c98a5624d3388fbf6a87714a39fcc") => {
+            Some(Variant::Community40)
+        }
+        (276_162_560, "cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed") => {
+            Some(Variant::SfV2)
         }
         (165_840_496, "984bee0f775c277d5829b8fd6775d53a7b0f75396c852b3aaf06a18375f81014") => {
             Some(Variant::Community40)
@@ -774,8 +787,12 @@ pub fn signature_verdict(path: &std::path::Path) -> SignatureVerdict {
     }
 }
 
-/// 「装之前拦一道」的那一道：签名不过的片段不进产品目录，而且要说清楚是哪一种不过
-/// ——用户拿到的那句话得能解释「为什么我下的这一份装不上」。
+/// 旧的那道「签名不过不许就位」的门（`docs/144` 时代的规则）。
+///
+/// 2026-10-17 起产品路径走的是 [`require_valid_snippet`]（结构 + 导出），**不再**拿签名拦：
+/// 旧卡只有社区兼容版/FP16 版能用 NR，而签名门本来就在 NVIDIA 核心 `CreateFeature` 那一步。
+/// 这一支留着是因为它是「签名到底怎么判」的参考实现与回退开关（`docs/186` 的退路），
+/// 但它已经**没有调用点**——真要退回去，把安装路径改回调用它即可。
 #[cfg(windows)]
 pub fn require_trusted_snippet(path: &std::path::Path) -> Result<(), String> {
     match signature_verdict(path) {
@@ -792,7 +809,122 @@ pub fn require_trusted_snippet(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// 导入一份用户给的 `nvngx_dlssnr.dll`：查它是 PE、查签名、拷到数据目录、认清是哪一种变体。
+/// 片段必须带的导出：`DlssnrRuntime::load` 按同一批名字取，两边必须一致。
+#[cfg(windows)]
+const REQUIRED_SNIPPET_EXPORTS: [&str; 5] = [
+    "NVSDK_NGX_D3D12_Init_Ext",
+    "NVSDK_NGX_D3D12_CreateFeature",
+    "NVSDK_NGX_D3D12_EvaluateFeature",
+    "NVSDK_NGX_D3D12_ReleaseFeature",
+    "NVSDK_NGX_D3D12_Shutdown1",
+];
+
+/// 装片段之前的那道门：**结构 + 导出**，不再要求签名。
+///
+/// 2026-10-17 起产品路径收下签名对不上（社区兼容版）与没签名（FP16 版）的片段：旧卡
+/// 只有那两版能用 NR，而签名门是 NVIDIA 核心在 `CreateFeature` 之前做的（见
+/// [`SignatureVerdict`]），我们自己的门槛再拦一道只会让用户「下得到、装不上」。
+///
+/// **代价写在明处**：这一层不再替用户判断「这份二进制是谁做的、有没有被改过」。签名
+/// 结论仍然由 [`signature_verdict`] 给出、设置页照旧显示它是哪一版，但**不再拦**。
+/// 仍然拦的是「装上去也用不了」的那几类：不是 PE、不是 x64、不是 DLL、缺导出。
+#[cfg(windows)]
+pub fn require_valid_snippet(path: &std::path::Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("读不到这个文件：{error}"))?;
+    let names = pe_export_names(&bytes).map_err(|error| format!("{}：{error}", path.display()))?;
+    for required in REQUIRED_SNIPPET_EXPORTS {
+        if !names.iter().any(|name| name == required) {
+            return Err(format!(
+                "{} 缺少必需的导出 {required}——这份片段装上去也用不了",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 按 PE 规范从**文件字节**里读导出名表：不加载、不执行、不打补丁。
+///
+/// 为什么不走 `LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE)` + `GetProcAddress`：本机实测
+/// 那条路对任何模块都回 NULL（`GetProcAddress` 只认真加载起来的模块——系统
+/// `version.dll` 与官方片段都一样），拿它当门槛会把好片段也拒掉。而为了查一次导出
+/// 就把没验过的第三方 DLL 加载起来跑它的 `DllMain`，比读文件更糟。所以这里直接读。
+#[cfg(windows)]
+fn pe_export_names(bytes: &[u8]) -> Result<Vec<String>, String> {
+    fn take(bytes: &[u8], offset: usize, len: usize) -> Result<&[u8], String> {
+        bytes
+            .get(offset..offset.saturating_add(len))
+            .ok_or_else(|| "文件太短，PE 头读不全".to_string())
+    }
+    fn u16_at(bytes: &[u8], offset: usize) -> Result<u16, String> {
+        let slice = take(bytes, offset, 2)?;
+        Ok(u16::from_le_bytes([slice[0], slice[1]]))
+    }
+    fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, String> {
+        let slice = take(bytes, offset, 4)?;
+        Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    }
+
+    if !take(bytes, 0, 2)?.starts_with(b"MZ") {
+        return Err("这个文件不是 Windows 的 DLL（没有 MZ 头）".to_string());
+    }
+    let pe = u32_at(bytes, 0x3c)? as usize;
+    if !take(bytes, pe, 4)?.starts_with(b"PE\0\0") {
+        return Err("这个文件没有有效的 PE 签名".to_string());
+    }
+    if u16_at(bytes, pe + 4)? != 0x8664 || u16_at(bytes, pe + 22)? & 0x2000 == 0 {
+        return Err("DLSSNR 需要 Windows x64 的 DLL（PE32+）".to_string());
+    }
+    let sections = u16_at(bytes, pe + 6)? as usize;
+    let optional_size = u16_at(bytes, pe + 20)? as usize;
+    let optional = pe + 24;
+    if u16_at(bytes, optional)? != 0x20b {
+        return Err("DLSSNR 需要 Windows x64 的 DLL（PE32+）".to_string());
+    }
+    // 可选头里 data directory 的条数在 +108；第一条就是导出表。
+    if u32_at(bytes, optional + 108)? < 1 {
+        return Err("这个 DLL 没有导出表".to_string());
+    }
+    let export_rva = u32_at(bytes, optional + 112)?;
+    if export_rva == 0 || u32_at(bytes, optional + 116)? == 0 {
+        return Err("这个 DLL 没有导出表".to_string());
+    }
+    // 段表：把 RVA 换成文件偏移。
+    let table = optional + optional_size;
+    let to_offset = |rva: u32| -> Result<usize, String> {
+        for index in 0..sections {
+            let base = table + index * 40;
+            let span = u32_at(bytes, base + 8)?.max(u32_at(bytes, base + 16)?);
+            let virtual_address = u32_at(bytes, base + 12)?;
+            if rva >= virtual_address && rva < virtual_address.saturating_add(span) {
+                return Ok((u32_at(bytes, base + 20)? + (rva - virtual_address)) as usize);
+            }
+        }
+        Err("导出表指向了段外，文件可能不完整".to_string())
+    };
+
+    let directory = to_offset(export_rva)?;
+    let names = u32_at(bytes, directory + 24)? as usize;
+    if names == 0 || names > 4096 {
+        return Err("这个 DLL 的导出名字表不合理".to_string());
+    }
+    let names_table = to_offset(u32_at(bytes, directory + 32)?)?;
+    let mut collected = Vec::with_capacity(names);
+    for index in 0..names {
+        let start = to_offset(u32_at(bytes, names_table + index * 4)?)?;
+        take(bytes, start, 1)?; // 越界的名字指针在这里就被挡下
+        let end = bytes[start..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or_else(|| "导出名没有结束符".to_string())?;
+        let name = std::str::from_utf8(&bytes[start..start + end])
+            .map_err(|_| "导出名不是 UTF-8".to_string())?;
+        collected.push(name.to_string());
+    }
+    Ok(collected)
+}
+
+/// 导入一份用户给的 `nvngx_dlssnr.dll`：查它是 PE、查导出、拷到数据目录、认清是哪一种变体。
 ///
 /// 认不出变体不算错——README 里那三种之外还能有别的（社区还在放新的），只是设置
 /// 页说不出它是哪一代卡用的。
@@ -849,10 +981,13 @@ pub fn install_dll_with(
         }
     }
 
-    // 尺寸与 PE 都像了，还要问一次签名。这一句排在前面那几句**之后**：用户最容易犯的
-    // 错是选错文件（说明文档、压缩包），那两句才是对那种错的回答。
+    // 尺寸与 PE 都像了，还要查导出齐不齐。这一句排在前面那几句**之后**：用户最容易犯
+    // 的错是选错文件（说明文档、压缩包），那几句才是对那种错的回答。
+    //
+    // 签名从 2026-10-17 起不再拦：社区兼容版与 FP16 版是旧卡唯一能用的 NR，而签名门
+    // 本来就在 NVIDIA 核心那一步（见 [`require_valid_snippet`] 与 `docs/186`）。
     if trust == SnippetTrust::Required {
-        require_trusted_snippet(source)?;
+        require_valid_snippet(source)?;
     }
 
     let target = dll_path(data_dir);
@@ -1019,10 +1154,10 @@ pub fn runtime_gate_with(
     if !dll_path(data_dir).is_file() {
         return Err("还没有导入 nvngx_dlssnr.dll".to_string());
     }
-    let gpu = gpu.ok_or_else(|| "这台机器没有可用的 NVIDIA 显卡".to_string())?;
-    if gpu.recommended_variant().is_none() {
-        return Err(format!("{} 这一代不在 DLSSNR 的支持范围", gpu.name));
-    }
+    // 卡是不是 NVIDIA 还是要问（片段只认 N 卡），但**不再**拿「这一代配哪一版片段」
+    // 去拦：那是推荐关系，不是能不能跑的关系。用户装的是官方、社区兼容还是 FP16 版，
+    // 跑不跑得起来由片段与驱动在 `CreateFeature` 时回答（见 [`require_valid_snippet`]）。
+    gpu.ok_or_else(|| "这台机器没有可用的 NVIDIA 显卡".to_string())?;
     Ok(())
 }
 
@@ -1091,7 +1226,14 @@ mod tests {
             return path.is_file().then_some(path);
         }
         let root = docs_dlssnr_dlls()?;
-        for variant in ["NVIDIA-Original", "Community-RTX40-RTX50", "SF-v2"] {
+        // 清单现在发的那三份排前面（新装一份社区片段之后，量到的就是它），退役的两份垫后。
+        for variant in [
+            "NVIDIA-Original",
+            "Community-Lecram-310.8.3",
+            "Compat-FP16-310.9.16",
+            "Community-RTX40-RTX50",
+            "SF-v2",
+        ] {
             let candidate = root.join(variant).join("nvngx_dlssnr.dll");
             if candidate.is_file() {
                 return Some(candidate);
@@ -1125,9 +1267,10 @@ mod tests {
         }
     }
 
-    /// 片段报的版本号得是 Windows 属性页里那一串：这三份真片段的版本资源各不相同
-    /// （官方原版 `310,8,0,0`、SF-v2 `310.8.SF.0`），所以它同时钉住了「读的是文件
-    /// 自己的版本资源」而不是某条我们自己编的规则。
+    /// 片段报的版本号得是 Windows 属性页里那一串：这几份真片段的版本资源各不相同
+    /// （官方原版 `310,8,0,0`、Lecram `310,8,3,0`、compat-fp16 `310,9,16,0`、
+    /// 退役的 SF-v2 `310.8.SF.0`），所以它同时钉住了「读的是文件自己的版本资源」而不是
+    /// 某条我们自己编的规则，也钉住了**清单里 now 发的那两份**到底是不是那两版。
     ///
     /// 一份都没找到时**不是通过**：打印跳过之后 assert 掉，免得干净检出把这条读成绿的。
     #[cfg(windows)]
@@ -1137,7 +1280,12 @@ mod tests {
             panic!("跳过：docs/DLSSNR-DLL-Options-310.8.0.0 不在（这条测试要真片段当夹具）");
         };
         let mut checked = 0;
-        for (folder, expected) in [("NVIDIA-Original", "310.8.0.0"), ("SF-v2", "310.8.SF.0")] {
+        for (folder, expected) in [
+            ("NVIDIA-Original", "310.8.0.0"),
+            ("Community-Lecram-310.8.3", "310.8.3.0"),
+            ("Compat-FP16-310.9.16", "310.9.16.0"),
+            ("SF-v2", "310.8.SF.0"),
+        ] {
             let path = root.join(folder).join("nvngx_dlssnr.dll");
             if !path.is_file() {
                 println!("跳过 {folder}：那份 DLL 不在");
@@ -1251,11 +1399,13 @@ mod tests {
             "翻一个填充字节就不再是同一份文件：签名说的就是这件事"
         );
 
-        // 社区那两版：**两种不同的过不了**——兼容版是 NVIDIA 签过名再被改过（内容与签名
-        // 对不上），SF-v2 连签名都没有。这正是「自己问一次」比「按名单猜」强的地方：
-        // 拒的理由不一样，说给用户的话也就不一样。
+        // 社区那几版：**两种不同的过不了**——兼容版是 NVIDIA 签过名再被改过（内容与签名
+        // 对不上），FP16 那两版连签名都没有。这正是「自己问一次」比「按名单猜」强的地方：
+        // 拒的理由不一样，说给用户的话也就不一样。前两条是清单现在发的，后两条是退役原件。
         let mut measured = 0;
         for (folder, expected) in [
+            ("Community-Lecram-310.8.3", super::SignatureVerdict::Modified),
+            ("Compat-FP16-310.9.16", super::SignatureVerdict::Untrusted),
             ("Community-RTX40-RTX50", super::SignatureVerdict::Modified),
             ("SF-v2", super::SignatureVerdict::Untrusted),
         ] {
@@ -1274,10 +1424,14 @@ mod tests {
         assert!(measured > 0, "一份社区片段都没量到，这条测试只证了一半");
     }
 
-    /// 装之前拦一道：签名不过的片段**不许顶掉**盘上那份能用的，而且要说清楚为什么。
+    /// 装之前拦一道：**装上去也用不了**的那种不许顶掉盘上那份能用的。
+    ///
+    /// 2026-10-17 起门槛从「签名」改成「结构 + 导出」（见 [`require_valid_snippet`]）：签过名
+    /// 再被改过的社区兼容版**装得进去**（签名门在 NVIDIA 核心那一步），签名结论照旧报得出来；
+    /// 仍然拦的是不是 PE、缺导出这一类。
     #[cfg(windows)]
     #[test]
-    fn a_snippet_the_driver_would_refuse_never_replaces_the_one_on_disk() {
+    fn a_file_that_cannot_run_never_replaces_the_one_on_disk() {
         let Some(root) = docs_dir() else {
             panic!("跳过：docs/DLSSNR-DLL-Options-310.8.0.0 不在（这条测试要真片段当夹具）");
         };
@@ -1289,30 +1443,34 @@ mod tests {
         let dir = tempfile::tempdir().expect("临时目录");
         let installed = super::install_dll(&official, dir.path()).expect("官方原版该装得进去");
         assert_eq!(installed.variant.as_deref(), Some("official"));
+
+        // 签了名再被改过的那一份：现在换得进去，盘上就是它，签名结论照旧说得出「改过」。
+        let swapped = super::install_dll(&community, dir.path()).expect("改过的片段现在装得进去");
+        assert_eq!(swapped.variant.as_deref(), Some("community"));
+        assert_eq!(
+            super::signature_verdict(&dll_path(dir.path())),
+            super::SignatureVerdict::Modified,
+            "换上去的这一份，签名结论照旧是「改过」"
+        );
         let before = super::file_sha256(&dll_path(dir.path())).expect("哈希");
 
-        // 签了名再被改过的那一份：驱动拒它，所以这里也不许换。
-        let refused = super::install_dll(&community, dir.path()).expect_err("改过的片段不该装进去");
-        assert!(refused.contains("签名"), "{refused}");
-        assert_eq!(
-            super::file_sha256(&dll_path(dir.path())).as_deref(),
-            Some(before.as_str()),
-            "拒了之后盘上还是原来那份能用的"
-        );
-
-        // 没签名的假 PE：同样拒，同样不许留下东西。
+        // 不是 PE、缺导出：这一类仍然拒，而且不许留下东西。
         let fake_dir = tempfile::tempdir().expect("临时目录");
         let fake = fake_dir.path().join("unsigned.dll");
         unsigned_pe(&fake, 1_000_001);
-        let refused = super::install_dll(&fake, dir.path()).expect_err("没签名的片段不该装进去");
-        assert!(refused.contains("签名"), "{refused}");
+        let refused = super::install_dll(&fake, dir.path()).expect_err("结构不对的片段不该装进去");
+        assert!(!refused.contains("签名"), "这一层不再拿签名拦：{refused}");
+        assert!(
+            refused.contains("导出") || refused.contains("PE") || refused.contains("x64"),
+            "{refused}"
+        );
         assert_eq!(
             super::file_sha256(&dll_path(dir.path())).as_deref(),
             Some(before.as_str()),
-            "两次拒绝都没换掉能用的那一份"
+            "拒了之后盘上还是原来那份"
         );
 
-        // 显式跳过验签的那一支照样装得进去：元数据那一半的用例走的就是它。
+        // 显式跳过校验的那一支照样装得进去：元数据那一半的用例走的就是它。
         super::install_dll_with(&fake, dir.path(), super::SnippetTrust::Skipped)
             .expect("显式跳过时该装得进去");
         assert_ne!(
@@ -1322,6 +1480,54 @@ mod tests {
         );
     }
 
+    /// 导出表是从**文件字节**里读出来的（不加载、不执行）：真片段上那五个必需的导出都找得到，
+    /// 随手写的字节连 MZ 都过不去。
+    ///
+    /// 为什么不用 `LoadLibraryExW` + `GetProcAddress`：本机实测那条路对任何模块都回 NULL
+    /// （`version.dll` 与官方片段都一样），拿它当门槛会把好片段也拒掉——`pe_export_names`
+    /// 的注释记着这件事。
+    #[cfg(windows)]
+    #[test]
+    fn the_export_reader_finds_the_five_snippet_exports_in_a_real_snippet() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let junk = dir.path().join("junk.dll");
+        std::fs::write(&junk, vec![0u8; 4096]).expect("写一份垃圾");
+        let refused = super::require_valid_snippet(&junk).expect_err("不是 PE 的字节不该过");
+        assert!(refused.contains("MZ") || refused.contains("PE"), "{refused}");
+
+        let Some(root) = docs_dir() else {
+            println!("跳过：本地没有真片段当夹具");
+            return;
+        };
+        let mut measured = 0;
+        // 先量清单现在发的那三份，再量退役的两份原件——新品要过，旧品也得继续认得出。
+        for folder in [
+            "NVIDIA-Original",
+            "Community-Lecram-310.8.3",
+            "Compat-FP16-310.9.16",
+            "Community-RTX40-RTX50",
+            "SF-v2",
+        ] {
+            let path = root.join(folder).join("nvngx_dlssnr.dll");
+            if !path.is_file() {
+                println!("跳过 {folder}：那份 DLL 不在");
+                continue;
+            }
+            measured += 1;
+            super::require_valid_snippet(&path)
+                .unwrap_or_else(|error| panic!("{folder} 的导出该认得出来：{error}"));
+            let names =
+                super::pe_export_names(&std::fs::read(&path).expect("读片段")).expect("读导出表");
+            for required in super::REQUIRED_SNIPPET_EXPORTS {
+                assert!(
+                    names.iter().any(|name| name == required),
+                    "{folder} 少了必需的导出 {required}"
+                );
+            }
+        }
+        assert!(measured > 0, "一份真片段都没量到，这条测试只证了一半");
+    }
+
     #[test]
     fn variant_hashes_match_the_shipped_readme() {
         // 三种变体的哈希来自 docs 里的 README；认变体靠它，错一个字符就等于把
@@ -1329,6 +1535,16 @@ mod tests {
         assert_eq!(
             variant_of(165_840_496, "E16BCF15E16E13F527491CDF7845B2FE6521A738D8F7C9C721866A8496E1FC8E"),
             Some(Variant::Official)
+        );
+        // 清单 2026-10-17 换过去的那两份：认不出它们，设置页就会把刚装好的新版说成
+        // 「自定义 DLL」。
+        assert_eq!(
+            variant_of(165_840_496, "f95feb54137ea11979f9b4ec4f00afd84b5c98a5624d3388fbf6a87714a39fcc"),
+            Some(Variant::Community40)
+        );
+        assert_eq!(
+            variant_of(276_162_560, "cdfa6c1ec784867182164c7836f324f087b5c9f374d0c9fe46f54999feabf3ed"),
+            Some(Variant::SfV2)
         );
         assert_eq!(
             variant_of(165_840_496, "984bee0f775c277d5829b8fd6775d53a7b0f75396c852b3aaf06a18375f81014"),
@@ -1525,23 +1741,11 @@ mod tests {
         };
         // 下面量的是「交回的工作区有没有被留下」，而留不留由**内存预算**决定：
         // `GpuContext::release_workspace` 只在 `spare_allocation_fits(…, 0, 0)` 为真时保留
-        // 备用档，那条判据要求本机提交量不超过物理内存的四分之一。构建与测试把提交量顶上去
-        // 之后（2026-10-17 实测提交 58.6 GiB / 物理 63.4 GiB，远超四分之一），策略会**立刻**
-        // 丢掉刚交回的那一份——于是三页各建一次。那是策略在按自己的规矩办事，不是回归：
-        // 前提不成立就如实跳过，并把这台机器的两个数打出来。
-        if !super::workspace::spare_allocation_fits(
-            super::gpu::video_memory(),
-            crate::resources::system_memory(),
-            0,
-            0,
-        ) {
-            let commit = crate::resources::system_memory().map_or(0, |memory| memory.private_commit_bytes);
-            let physical = crate::resources::system_memory().map_or(0, |memory| memory.physical_bytes);
-            println!(
-                "跳过：这台机器现在留不住备用工作区（提交 {commit} / 物理 {physical} 超过四分之一），量不到复用"
-            );
-            return;
-        }
+        // 备用档，那条判据要求本机提交量不超过物理内存的四分之一。构建与测试会把提交量顶上去
+        // （2026-10-17 实测提交 58.6 GiB / 物理 63.4 GiB），策略于是**立刻**丢掉刚交回的那一份
+        // ——三页各建一次。那是策略在按自己的规矩办事，不是回归：把这条策略钉成确定值再量，
+        // 判据就只量复用本身。
+        pin_spare_workspaces();
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
         std::fs::create_dir_all(&dir).expect("数据目录");
         let settings = DlssnrSettings::default();
@@ -1619,17 +1823,14 @@ mod tests {
         assert_eq!(first.rgba, again.rgba, "1->2->1 must not preserve the second layer's settings/output");
     }
 
-    /// 这些计数只有在机器**留得住**备用工作区时才成立：内存策略（提交量超过物理内存
-    /// 四分之一）会把刚交回的那一份直接丢掉，于是每页各建一次。那是策略按自己的规矩
-    /// 办事，不是回归——留不住就如实跳过，别把内存状态当成代码缺陷。
+    /// 量「同尺寸复用」之前先把「留不留备用工作区」钉死。
+    ///
+    /// 产品路径按内存策略办（提交量超过物理内存四分之一，刚交回的那一份就被直接丢掉，
+    /// 于是每页各建一次），而跑测试时提交量本来就高——不钉死的话，这条判据会随机器
+    /// 状态忽绿忽红，量到的也就不是复用本身了。见 `device::force_spare_workspaces`。
     #[cfg(feature = "dlssnr")]
-    fn spare_workspaces_possible() -> bool {
-        super::workspace::spare_allocation_fits(
-            super::gpu::video_memory(),
-            crate::resources::system_memory(),
-            0,
-            0,
-        )
+    fn pin_spare_workspaces() {
+        super::device::force_spare_workspaces(Some(true));
     }
 
     /// 提交期失败（`Signal` 失败、栅栏超时…）之后，那份上下文**不能**留在缓存里：
@@ -1641,10 +1842,7 @@ mod tests {
     #[test]
     fn a_failed_submit_drops_the_context_instead_of_poisoning_every_page() {
         let _gpu = gpu_test_lock();
-        if !spare_workspaces_possible() {
-            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
-            return;
-        }
+        pin_spare_workspaces();
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;
@@ -1870,10 +2068,7 @@ mod tests {
     #[test]
     fn serial_layers_share_one_feature_and_match_individual_passes() {
         let _gpu = gpu_test_lock();
-        if !spare_workspaces_possible() {
-            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
-            return;
-        }
+        pin_spare_workspaces();
         let dll = test_dll().expect("requires the real DLL");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1983,10 +2178,7 @@ mod tests {
     #[test]
     fn a_cancelled_page_keeps_the_context_and_its_workspace() {
         let _gpu = gpu_test_lock();
-        if !spare_workspaces_possible() {
-            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
-            return;
-        }
+        pin_spare_workspaces();
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;
@@ -2046,10 +2238,7 @@ mod tests {
     #[test]
     fn releasing_the_cached_workspaces_gives_the_textures_back() {
         let _gpu = gpu_test_lock();
-        if !spare_workspaces_possible() {
-            println!("跳过：这台机器现在留不住备用工作区，量不到复用");
-            return;
-        }
+        pin_spare_workspaces();
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;

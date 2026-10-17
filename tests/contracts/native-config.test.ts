@@ -2134,7 +2134,7 @@ describe('native shell configuration', () => {
     expect(row, '画的还是那一枚 pill（一处定义）').toContain('<span className="settings-row-mark">{mark}</span>');
   });
 
-  it('asks the driver’s question before a snippet replaces the one that works', () => {
+  it('asks the structure-and-exports question before a snippet replaces the one that works', () => {
     const core = read('../../src-tauri/crates/compute-core/src/dlssnr/mod.rs');
     const cargo = read('../../src-tauri/crates/compute-core/Cargo.toml');
     const metadata = read('../../src-tauri/crates/compute-core/tests/dlssnr_metadata.rs');
@@ -2150,13 +2150,23 @@ describe('native shell configuration', () => {
     expect(cargo, 'WinTrust 那一节要开').toContain('"Win32_Security_WinTrust"');
     expect(cargo, 'WINTRUST_DATA / _FILE_INFO 在 Cryptography 那一节').toContain('"Win32_Security_Cryptography"');
 
-    // 「装之前拦一道」：带策略的入口 + 产品路径要签名 + 两句话各说各的拒绝理由。
+    // 「装之前拦一道」：带策略的入口 + 产品路径问的是「这份字节能不能当片段用」。
+    // 2026-10-17 起这一道**不再拿签名拦**（docs/186）：签名结论照旧算、照旧报给设置页，
+    // 而「驱动认不认它」由驱动自己在 CreateFeature 那一步回答——社区版与 FP16 版走的
+    // 就是这条路。
     expect(core, '策略是个有名字的参数，不是一个秘密开关').toContain('pub enum SnippetTrust {');
-    expect(core, '产品的导入路径就是「要签名」那一支').toContain(
+    expect(core, '产品的导入路径还是要过一道').toContain(
       '    install_dll_with(source, data_dir, SnippetTrust::Required)',
     );
     expect(core, '拦的位置在尺寸与 PE 之后、落盘之前').toContain('    if trust == SnippetTrust::Required {');
-    expect(core, '拒绝的那句话要说得出是哪一种不过').toContain(
+    expect(core, '这一道问的是结构 + 导出').toContain(
+      'pub fn require_valid_snippet(path: &std::path::Path) -> Result<(), String> {',
+    );
+    expect(core, '五个导出名写在一处，装之前就对一遍').toContain('const REQUIRED_SNIPPET_EXPORTS: [&str; 5] = [');
+    expect(core, '导出表从文件字节里读，不加载也不执行').toContain(
+      'fn pe_export_names(bytes: &[u8]) -> Result<Vec<String>, String> {',
+    );
+    expect(core, '旧政策留在原地当回退开关').toContain(
       'pub fn require_trusted_snippet(path: &std::path::Path) -> Result<(), String> {',
     );
     expect(core, '改过的那种：驱动只加载签名对得上的').toContain('驱动只加载签名对得上的片段');
@@ -2168,15 +2178,18 @@ describe('native shell configuration', () => {
       '            ("SF-v2", super::SignatureVerdict::Untrusted),',
     );
 
-    // 宿主那一条下载路径同样要问；而仓库里拿假 PE 当夹具的用例必须**显式**跳过。
-    expect(release, '下载路径也走「要签名」那一支').toContain(
+    // 宿主那一条下载路径同样要过；而仓库里拿假 PE 当夹具的用例必须**显式**跳过。
+    expect(release, '下载路径也走「要过一道」那一支').toContain(
       '    install_staged_with(staged, data_dir, SnippetTrust::Required)',
     );
-    expect(release, '就位之前先问').toContain('        require_trusted_snippet(staged)?;');
-    expect(release, '这一条用真片段，因为签名问的是文件自己').toContain(
-      'fn a_snippet_whose_signature_does_not_check_out_is_not_put_in_place()',
+    expect(release, '就位之前先问').toContain('        require_valid_snippet(staged)?;');
+    expect(release, '改过的真片段装得进去，而且报得出它是哪一版').toContain(
+      'fn a_signed_then_modified_snippet_is_installed_and_still_reports_its_verdict() {',
     );
-    expect(metadata, '假 PE 没有签名，所以那三个用例显式跳过').toContain(
+    expect(release, '结构不对的字节仍然拦在门外').toContain(
+      'fn a_file_that_is_not_a_snippet_is_not_put_in_place() {',
+    );
+    expect(metadata, '假 PE 没有真导出，所以那三个用例显式跳过').toContain(
       'install_dll_with(&source, dir.path(), SnippetTrust::Skipped)',
     );
     expect(commands, '宿主的假夹具也一样显式跳过').toContain('crate::dlssnr::SnippetTrust::Skipped,');
