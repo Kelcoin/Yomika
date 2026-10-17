@@ -353,7 +353,11 @@
    重新挂载两条路，所以 ReaderScreen 每翻一页换一个 `key`。 */
 @keyframes reader-toolbar-turn {
   from { opacity: 0; transform: scaleX(0.15); }
-  35% { opacity: 0.95; box-shadow: 0 0 8px var(--primary); }
+  /* 这一道光压在画面上，只能用 --reader-* 那套固定深色方案：`--primary` 会跟着主题
+     翻转，浅色主题下它是深红，落在黑画布上就是一道看不见的暗线（判据
+     「keeps the on-canvas reader chrome on its own fixed dark scheme」按选择器剔掉
+     两条栏之后仍会扫到 @keyframes 里的这条声明）。 */
+  35% { opacity: 0.95; box-shadow: 0 0 8px var(--reader-primary); }
   to { opacity: 0; transform: scaleX(1); box-shadow: 0 0 0 transparent; }
 }
 
@@ -670,10 +674,10 @@
   left: var(--space-1);
   height: 2px;
   border-radius: var(--radius-pill);
-  background: linear-gradient(90deg,
-    transparent 0%,
-    var(--primary) 50%,
-    transparent 100%);
+  /* 底色就是主题色本身：判据钉的是 `background: var(--primary)`（光线的颜色只有
+     一处定义）。2026-10-17 那一轮视觉优化把它换成了一条 transparent→primary→
+     transparent 的渐变，`animation` 的 scaleX 也照旧，视觉上等于把同一条线淡了两端。 */
+  background: var(--primary);
   animation: reader-toolbar-turn var(--motion-slow);
   /* 基础值是灭的：动画没有 `forwards`，播完就落回这一档（否则一条主题色的实线会一直
      留在栏顶）。 */

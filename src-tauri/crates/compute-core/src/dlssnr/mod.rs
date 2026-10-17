@@ -1496,10 +1496,47 @@ mod tests {
     #[test]
     fn similar_pages_share_one_workspace() {
         let _gpu = gpu_test_lock();
+        // 先钉**决策**：三页尺寸必须量化到同一档，缓存里有那一档时 `choose` 必须说
+        // 「复用」。这一段不碰 GPU、不读内存，任何机器上都跑得到——它才是这条判据里
+        // 真正承重的那一半（把 `bucket_size` 的步子或 `choose` 的浪费判据改坏，它立刻红）。
+        let shapes = [(1300u32, 1900u32), (1310, 1900), (1290, 1890)];
+        let buckets: Vec<(u32, u32)> = shapes
+            .iter()
+            .map(|(width, height)| super::workspace::bucket_size(*width, *height))
+            .collect();
+        assert!(
+            buckets.windows(2).all(|pair| pair[0] == pair[1]),
+            "三页尺寸只差十几像素，量化之后必须是同一档：{buckets:?}"
+        );
+        assert_eq!(
+            super::workspace::choose(&buckets[..1], shapes[2]),
+            super::workspace::Choice::Reuse(0),
+            "缓存里已经有这一档时，第三页必须复用而不是新建"
+        );
+
         let Some(dll) = test_dll() else {
             println!("跳过：没有找到 nvngx_dlssnr.dll");
             return;
         };
+        // 下面量的是「交回的工作区有没有被留下」，而留不留由**内存预算**决定：
+        // `GpuContext::release_workspace` 只在 `spare_allocation_fits(…, 0, 0)` 为真时保留
+        // 备用档，那条判据要求本机提交量不超过物理内存的四分之一。构建与测试把提交量顶上去
+        // 之后（2026-10-17 实测提交 58.6 GiB / 物理 63.4 GiB，远超四分之一），策略会**立刻**
+        // 丢掉刚交回的那一份——于是三页各建一次。那是策略在按自己的规矩办事，不是回归：
+        // 前提不成立就如实跳过，并把这台机器的两个数打出来。
+        if !super::workspace::spare_allocation_fits(
+            super::gpu::video_memory(),
+            crate::resources::system_memory(),
+            0,
+            0,
+        ) {
+            let commit = crate::resources::system_memory().map_or(0, |memory| memory.private_commit_bytes);
+            let physical = crate::resources::system_memory().map_or(0, |memory| memory.physical_bytes);
+            println!(
+                "跳过：这台机器现在留不住备用工作区（提交 {commit} / 物理 {physical} 超过四分之一），量不到复用"
+            );
+            return;
+        }
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ngx-data");
         std::fs::create_dir_all(&dir).expect("数据目录");
         let settings = DlssnrSettings::default();

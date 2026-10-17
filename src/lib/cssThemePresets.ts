@@ -180,7 +180,7 @@ export const COLOR_SCHEMES: readonly ColorScheme[] = [
   {
     id: 'celadon', label: '青瓷', description: '青瓷绿主色与灰青纸面，静谧清雅。',
     css: colorSchemeCss(
-      { canvas: '#e1ebe4', panel: '#ecf4ee', elevated: '#f5faf7', muted: '#d4e0d8', ink: '#1f2d26', secondary: '#4a6556', faint: '#5a7668', accent: '#2a7556', accentHover: '#225e45', cyan: '#3d8a82' },
+      { canvas: '#e1ebe4', panel: '#ecf4ee', elevated: '#f5faf7', muted: '#d4e0d8', ink: '#1f2d26', secondary: '#4a6556', faint: '#587466', accent: '#2a7556', accentHover: '#225e45', cyan: '#3d8a82' },
       { canvas: '#141f1a', panel: '#1c2a24', elevated: '#26362f', muted: '#2e413a', ink: '#e3ede7', secondary: '#b5cabf', faint: '#99b0a3', accent: '#7fd1b0', accentHover: '#99ddc2', cyan: '#6ec0b8' },
     ),
     swatch: ['#2a7556', '#ecf4ee', '#7fd1b0'],
@@ -212,10 +212,10 @@ export const COLOR_SCHEMES: readonly ColorScheme[] = [
   {
     id: 'amber', label: '琥珀', description: '琥珀金主色与米黄纸面，温润厚重。',
     css: colorSchemeCss(
-      { canvas: '#ede3c8', panel: '#f7f0de', elevated: '#fefaef', muted: '#e3d6b8', ink: '#2d2614', secondary: '#665937', faint: '#786a48', accent: '#9d6e1c', accentHover: '#825915', cyan: '#758240' },
+      { canvas: '#ede3c8', panel: '#f7f0de', elevated: '#fdf8ec', muted: '#e3d6b8', ink: '#2d2614', secondary: '#665937', faint: '#786a48', accent: '#9c6d1b', accentHover: '#825915', cyan: '#758240' },
       { canvas: '#211d13', panel: '#2d2819', elevated: '#393320', muted: '#433c28', ink: '#f1ead6', secondary: '#d3c5a2', faint: '#b6a982', accent: '#e8c36e', accentHover: '#f4d68a', cyan: '#b0bf72' },
     ),
-    swatch: ['#9d6e1c', '#f7f0de', '#e8c36e'],
+    swatch: ['#9c6d1b', '#f7f0de', '#e8c36e'],
   },
   {
     id: 'midnight', label: '子夜', description: '深蓝纸面与冰蓝点睛，神秘高冷。',

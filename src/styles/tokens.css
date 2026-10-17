@@ -329,23 +329,34 @@
                     "Consolas", ui-monospace, monospace;
 
     /* ---- Font sizes: Reading-optimized scale ---------------------------- */
-    --text-xs: 12px;            /* 标注、辅助信息 */
-    --text-sm: 13px;            /* 次要文字 */
-    --text-md: 14px;            /* 控件、说明 */
-    --text-base: 15px;          /* 正文基准 */
-    --text-lg: 17px;            /* 小标题 */
-    --text-heading: 20px;       /* 区块标题 */
-    --text-title: 28px;         /* 页面标题 */
-    --text-page-title: 36px;    /* 主标题 */
-    --text-display: 48px;       /* 特大标题（封面、引导页）*/
+    /* 标注、辅助信息 */
+    --text-xs: 12px;
+    /* 次要文字 */
+    --text-sm: 13px;
+    /* 控件、说明 */
+    --text-md: 14px;
+    /* 正文基准 */
+    --text-base: 15px;
+    /* 小标题 */
+    --text-lg: 17px;
+    /* 区块标题 */
+    --text-heading: 24px;
+    /* 页面标题 */
+    --text-title: 28px;
+    /* 主标题 */
+    --text-page-title: 36px;
+    /* 特大标题（封面、引导页） */
+    --text-display: 48px;
 
     /* Four weights + two extras for refined hierarchy */
-    --weight-light: 300;        /* 次要信息（谨慎使用）*/
+    /* 次要信息（谨慎使用） */
+    --weight-light: 300;
     --weight-regular: 400;
     --weight-medium: 500;
     --weight-semibold: 600;
     --weight-bold: 700;
-    --weight-heavy: 800;        /* 特殊强调（极少使用）*/
+    /* 特殊强调（极少使用） */
+    --weight-heavy: 800;
 
     /* Leading is split by role, not by element: one line of control text has
        none to give, prose that wraps needs enough. */
@@ -355,10 +366,12 @@
     --leading-snug: 1.45;
     --leading-normal: 1.5;
     --leading-relaxed: 1.65;
-    --leading-loose: 1.8;       /* 长文本（新增）*/
+    /* 长文本（新增） */
+    --leading-loose: 1.8;
 
     /* Tracking: Inter 在大字号时略微收紧，小字号保持正常 */
-    --tracking-tighter: -0.02em;  /* 大标题收紧（新增）*/
+    /* 大标题收紧（新增） */
+    --tracking-tighter: -0.02em;
     --tracking-tight: -0.01em;
     --tracking-normal: 0;
     --tracking-wide: 0.04em;
