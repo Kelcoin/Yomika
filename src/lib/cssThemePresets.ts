@@ -176,46 +176,62 @@ ${rules}`;
  * 由 tests/design-system-contract.test.ts 里那条「浅色配色不该靠近纯白」钉住。
  */
 export const COLOR_SCHEMES: readonly ColorScheme[] = [
-  { id: 'default', label: '默认', description: '回到应用默认主题。', css: '', swatch: ['#a83b32', '#4b635d', '#f5f2ed'] },
+  { id: 'default', label: '默认', description: '朱砂×青瓷×琥珀的品牌色系，温暖平衡。', css: '', swatch: ['#a83b32', '#4b635d', '#f5f2ed'] },
   {
-    id: 'celadon', label: '青瓷', description: '青瓷绿主色与灰青纸面，安静耐看。',
+    id: 'celadon', label: '青瓷', description: '青瓷绿主色与灰青纸面，静谧清雅。',
     css: colorSchemeCss(
-      { canvas: '#dcebe0', panel: '#e9f3ec', elevated: '#f3f9f5', muted: '#cfe2d5', ink: '#22312a', secondary: '#4e6d5d', faint: '#587263', accent: '#2c6b52', accentHover: '#245643', cyan: '#3b7a73' },
-      { canvas: '#131f1a', panel: '#1b2923', elevated: '#24342d', muted: '#2b3f35', ink: '#dfece4', secondary: '#b2c9bb', faint: '#96ac9f', accent: '#82c6a6', accentHover: '#9bd8ba', cyan: '#6fb5ae' },
+      { canvas: '#e1ebe4', panel: '#ecf4ee', elevated: '#f5faf7', muted: '#d4e0d8', ink: '#1f2d26', secondary: '#4a6556', faint: '#5a7668', accent: '#2a7556', accentHover: '#225e45', cyan: '#3d8a82' },
+      { canvas: '#141f1a', panel: '#1c2a24', elevated: '#26362f', muted: '#2e413a', ink: '#e3ede7', secondary: '#b5cabf', faint: '#99b0a3', accent: '#7fd1b0', accentHover: '#99ddc2', cyan: '#6ec0b8' },
     ),
-    swatch: ['#2c6b52', '#e9f3ec', '#82c6a6'],
+    swatch: ['#2a7556', '#ecf4ee', '#7fd1b0'],
   },
   {
-    id: 'indigo-ink', label: '黛蓝', description: '墨蓝主色与冷调纸面，层级分明。',
+    id: 'indigo-ink', label: '黛蓝', description: '墨蓝主色与冷灰纸面，沉稳专业。',
     css: colorSchemeCss(
-      { canvas: '#dbe3f1', panel: '#e8eefa', elevated: '#f3f7ff', muted: '#cbd9ee', ink: '#1f2a3d', secondary: '#455878', faint: '#556784', accent: '#3a5aa4', accentHover: '#2f4986', cyan: '#3d7f8f' },
-      { canvas: '#131a28', panel: '#1b2537', elevated: '#243147', muted: '#2b3a52', ink: '#e2e9f6', secondary: '#b7c3dc', faint: '#93a3c0', accent: '#93b2ec', accentHover: '#acc6f4', cyan: '#6cb7c6' },
+      { canvas: '#dee6f2', panel: '#eaf1fa', elevated: '#f5f9ff', muted: '#d0dff0', ink: '#1b2638', secondary: '#3f5370', faint: '#526688', accent: '#3660aa', accentHover: '#2d4d8a', cyan: '#3e8599' },
+      { canvas: '#131b29', panel: '#1c263a', elevated: '#26334a', muted: '#2f3e58', ink: '#e5ecf7', secondary: '#bac8de', faint: '#98a9c5', accent: '#90b5f0', accentHover: '#a9c9f6', cyan: '#6fc2d0' },
     ),
-    swatch: ['#3a5aa4', '#e8eefa', '#93b2ec'],
+    swatch: ['#3660aa', '#eaf1fa', '#90b5f0'],
   },
   {
-    id: 'rosewood', label: '紫檀', description: '紫檀褐紫与暖灰纸面，沉稳内敛。',
+    id: 'rosewood', label: '紫檀', description: '紫檀褐紫与暖灰纸面，典雅内敛。',
     css: colorSchemeCss(
-      { canvas: '#e9e0ec', panel: '#f2ebf5', elevated: '#faf6fc', muted: '#dccde1', ink: '#2d2333', secondary: '#5b4967', faint: '#6a5976', accent: '#7a4a73', accentHover: '#63395d', cyan: '#7a6390' },
-      { canvas: '#1e1822', panel: '#291f2e', elevated: '#34283b', muted: '#3c2f45', ink: '#ece2f0', secondary: '#c6b3cf', faint: '#a995b4', accent: '#d5a3cd', accentHover: '#e3badb', cyan: '#ab96c4' },
+      { canvas: '#ebe3ed', panel: '#f4eef7', elevated: '#fbf8fc', muted: '#dfd2e4', ink: '#2a2030', secondary: '#574562', faint: '#695975', accent: '#824f7a', accentHover: '#6a3f64', cyan: '#826b98' },
+      { canvas: '#1d1721', panel: '#29202f', elevated: '#352b3d', muted: '#3e324a', ink: '#ede5f1', secondary: '#c9b7d2', faint: '#ad98b8', accent: '#dba8d5', accentHover: '#e8c0e1', cyan: '#b29fcb' },
     ),
-    swatch: ['#7a4a73', '#f2ebf5', '#d5a3cd'],
+    swatch: ['#824f7a', '#f4eef7', '#dba8d5'],
   },
   {
-    id: 'sakura', label: '绯樱', description: '樱粉纸面与玫红点睛，柔和明亮。',
+    id: 'sakura', label: '绯樱', description: '樱粉纸面与玫红点睛，温柔明媚。',
     css: colorSchemeCss(
-      { canvas: '#eedcdf', panel: '#f7e9eb', elevated: '#fdf5f6', muted: '#e3cbcf', ink: '#33242a', secondary: '#6d4c56', faint: '#7d5b66', accent: '#a3495d', accentHover: '#88394c', cyan: '#8f6470' },
-      { canvas: '#221a1d', panel: '#2d2226', elevated: '#382a2f', muted: '#403136', ink: '#f2e6e9', secondary: '#d1b6bd', faint: '#b39aa2', accent: '#e6a6b4', accentHover: '#f1bcc8', cyan: '#c298a4' },
+      { canvas: '#f0dfe2', panel: '#f8ecee', elevated: '#fef7f8', muted: '#e6d0d4', ink: '#301f25', secondary: '#694853', faint: '#7a5a65', accent: '#ab4a5f', accentHover: '#913d4f', cyan: '#966270' },
+      { canvas: '#221a1d', panel: '#2e2327', elevated: '#3b2d32', muted: '#44353b', ink: '#f3e8eb', secondary: '#d4b9c0', faint: '#b79da5', accent: '#eaa9b8', accentHover: '#f4c1cd', cyan: '#ca9ba7' },
     ),
-    swatch: ['#a3495d', '#f7e9eb', '#e6a6b4'],
+    swatch: ['#ab4a5f', '#f8ecee', '#eaa9b8'],
   },
   {
-    id: 'amber', label: '琥珀', description: '琥珀金主色与米黄纸面，温暖厚重。',
+    id: 'amber', label: '琥珀', description: '琥珀金主色与米黄纸面，温润厚重。',
     css: colorSchemeCss(
-      { canvas: '#ece0c4', panel: '#f6eddb', elevated: '#fdf8ec', muted: '#e0d2b2', ink: '#2f2818', secondary: '#6a5b3a', faint: '#796a49', accent: '#96691e', accentHover: '#7c5517', cyan: '#6f7d3f' },
-      { canvas: '#211d13', panel: '#2c2718', elevated: '#373120', muted: '#3f3926', ink: '#f0e8d2', secondary: '#d0c39e', faint: '#b3a67f', accent: '#e5bc6c', accentHover: '#f1d088', cyan: '#a9b96e' },
+      { canvas: '#ede3c8', panel: '#f7f0de', elevated: '#fefaef', muted: '#e3d6b8', ink: '#2d2614', secondary: '#665937', faint: '#786a48', accent: '#9d6e1c', accentHover: '#825915', cyan: '#758240' },
+      { canvas: '#211d13', panel: '#2d2819', elevated: '#393320', muted: '#433c28', ink: '#f1ead6', secondary: '#d3c5a2', faint: '#b6a982', accent: '#e8c36e', accentHover: '#f4d68a', cyan: '#b0bf72' },
     ),
-    swatch: ['#96691e', '#f6eddb', '#e5bc6c'],
+    swatch: ['#9d6e1c', '#f7f0de', '#e8c36e'],
+  },
+  {
+    id: 'midnight', label: '子夜', description: '深蓝纸面与冰蓝点睛，神秘高冷。',
+    css: colorSchemeCss(
+      { canvas: '#d8e0eb', panel: '#e6edf6', elevated: '#f3f7fc', muted: '#cbd8e7', ink: '#1a2433', secondary: '#3d4d65', faint: '#516280', accent: '#2d5ea8', accentHover: '#254b8a', cyan: '#3580a0' },
+      { canvas: '#0f1419', panel: '#171e28', elevated: '#202a38', muted: '#283548', ink: '#e0e8f2', secondary: '#b0c0d8', faint: '#8fa4c0', accent: '#70a8f0', accentHover: '#8bc0f8', cyan: '#5daad0' },
+    ),
+    swatch: ['#2d5ea8', '#e6edf6', '#70a8f0'],
+  },
+  {
+    id: 'forest', label: '深林', description: '墨绿纸面与翠绿点睛，清新沉稳。',
+    css: colorSchemeCss(
+      { canvas: '#dce8de', panel: '#e9f2eb', elevated: '#f4f9f5', muted: '#d0e0d4', ink: '#1c2a20', secondary: '#3e5645', faint: '#526a58', accent: '#2d7050', accentHover: '#245b40', cyan: '#3d8570' },
+      { canvas: '#121a16', panel: '#1a251f', elevated: '#24312a', muted: '#2d3e36', ink: '#e2ede5', secondary: '#b2c9b8', faint: '#94ad9c', accent: '#6fc598', accentHover: '#8ad8ac', cyan: '#65b598' },
+    ),
+    swatch: ['#2d7050', '#e9f2eb', '#6fc598'],
   },
 ];
 

@@ -25,7 +25,7 @@ body::-webkit-scrollbar,
   grid-template-areas:
     "titlebar titlebar"
     "sidebar main";
-  grid-template-columns: 248px minmax(0, 1fr);
+  grid-template-columns: 220px minmax(0, 1fr);
   /* 只写变量：`100vh` 兜底与 `dvh` 的取舍都在 base.css 的 `--viewport-height` 里
      （直接并排写两行会被 CSS 压缩器当成「后一行覆盖前一行」删掉兜底）。 */
   height: var(--viewport-height);
@@ -1155,9 +1155,9 @@ body::-webkit-scrollbar,
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-content: start;
-  gap: var(--space-6);
+  gap: var(--space-8);
   min-width: 0;
-  padding: var(--space-8) 0;
+  padding: var(--space-10) 0;
 }
 
 .settings-section > *,
@@ -1250,10 +1250,10 @@ body::-webkit-scrollbar,
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-5);
   width: 100%;
-  min-height: 60px;
-  padding: var(--space-2) var(--space-4);
+  min-height: 64px;
+  padding: var(--space-3) var(--space-5);
 }
 
 .settings-row-icon {
@@ -1519,9 +1519,10 @@ body::-webkit-scrollbar,
 .first-run h2,
 .settings-section h2,
 .empty-state h2 {
-  margin-bottom: var(--space-2);
-  font-size: var(--text-lg);
+  margin-bottom: var(--space-3);
+  font-size: var(--text-heading);
   font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-tight);
 }
 
 .first-run p:not(.eyebrow),
