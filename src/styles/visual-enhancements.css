@@ -3,6 +3,8 @@
  */
 
 /* ---- Enhanced Card Interactions ----------------------------------------- */
+.archive-list.is-thumbnail .archive-thumb-card,
+.archive-row,
 .archive-list.is-thumbnail .archive-thumb-card-media,
 .archive-row-thumb {
   transition: transform var(--motion-crisp), filter var(--motion-standard);
@@ -15,13 +17,17 @@
   }
 }
 
-/* 按下去缩的是**内容**，不是卡片盒子。盒子缩放会被虚拟列表按矩形量进去，于是整列表
-   重排、别的卡片跟着动（用户 2026-10-17 报「点击缩略图档案卡片的缩小效果会导致其他卡片
-   位置同步移动」），而且悬停底色会跟着一起缩。缩内容只影响绘制：没按下时悬停那 1.02
-   照旧，别的卡片一个像素都不动。放在悬停块之后——两者特异度相同，靠先后决定谁说话。 */
-.archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active) .archive-thumb-card-media,
-.archive-row:is(.is-pressed, :active) .archive-row-thumb {
-  transform: scale(0.96);
+/* 按下去缩的是**卡片自己**（用户 2026-10-18 再报：缩略图卡点了没反应、列表卡只有封面在缩）。
+   缩盒子不会带动别的卡片，也不会让悬停面跟着变形：
+   · 虚拟列表的每一行都是绝对定位、高度来自 `estimateSize`，从不回量卡片自己的矩形；
+   · `transform` 只影响绘制，不进 `clientWidth` —— 卡片上那条进度条的量法（`CardProgressBar`
+     观察轨道宽度）读到的还是原值。
+
+   放在悬停块之后：两者都是 `transform`，同特异度时靠先后决定谁说话。悬停那 1.02 落在
+   封面/缩略图层，按压这 0.97 落在盒子上，两者可以同时成立（净效果是轻微缩小）。 */
+.archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active),
+.archive-row:is(.is-pressed, :active) {
+  transform: scale(0.97);
 }
 
 /* ---- Gradient Button Enhancement --------------------------------------- */
@@ -169,8 +175,12 @@ h1, h2, h3 {
 }
 
 /* ---- Enhanced Progress Indicators -------------------------------------- */
+/* 填充的颜色**不在这里写**：它是 `shell.css` 里的 `var(--primary)`，跟着主题走。
+   这里曾经覆写成 `var(--primary-gradient)`（一条写死的两段竖直渐变，见 tokens.css），
+   于是换了配色（青瓷/黛蓝/紫檀/绯樱/琥珀/子夜/深林/天青）之后进度条还是默认那支红——
+   用户 2026-10-18 报「部分元素比如进度条似乎没有接入主题」；同一条报里的「锯齿」也是
+   它：4–6px 高的条上，两段竖直渐变就是两条硬边色带，再叠上圆头收口，看着像锯齿。 */
 .archive-card-progress-fill {
-  background: var(--primary-gradient);
   transition: width var(--motion-standard);
 }
 

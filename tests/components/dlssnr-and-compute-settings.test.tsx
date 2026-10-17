@@ -466,7 +466,7 @@ describe('DLSS5 settings group', () => {
     expect(within(snippets).queryByText(/MB/)).toBeNull();
   });
 
-  it('lays every variant out as one line, the way the model menus do', async () => {
+  it('lays every variant out as a name line plus a supported-series line', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
     renderDlssnr();
@@ -480,11 +480,15 @@ describe('DLSS5 settings group', () => {
     rows.forEach((row, index) => {
       const variant = DLSSNR_CATALOG.variants[index]!;
       const main = row.querySelector('.settings-choice-option-main');
-      // 选项名只占一行：骨架里那一个 span，没有第二行说明。
-      expect(main?.querySelectorAll('span')).toHaveLength(1);
-      const label = main?.querySelector('span')?.textContent ?? '';
-      expect(label).toBe(variant.id === 'community' ? `${variant.label}（推荐）` : variant.label);
-      // 那一长句兼容性说明改成悬停可见（title），不再占一行。
+      // 2026-10-18 用户要求「把各 DLSSNR 的适配显卡系列补回来」：名字一行、系列一行。
+      const spans = [...(main?.querySelectorAll('span') ?? [])];
+      expect(spans).toHaveLength(2);
+      expect(spans[0]?.textContent ?? '').toBe(variant.id === 'community' ? `${variant.label}（推荐）` : variant.label);
+      expect(spans[1]?.className).toBe('settings-choice-option-series');
+      for (const generation of variant.series) {
+        expect(spans[1]?.textContent ?? '').toContain(String(generation));
+      }
+      // 那一长句兼容性说明仍然悬停可见（title），不占行。
       expect(main?.getAttribute('title')).toBe(variant.note);
     });
     // 行尾换成模型菜单那一套：没装上的挂下载按钮，装上的不挂；
@@ -492,8 +496,11 @@ describe('DLSS5 settings group', () => {
     expect(rows[0]!.querySelector('button.select-option-download')).not.toBeNull();
     expect(rows[1]!.querySelector('button.select-option-download')).toBeNull();
     expect(rows[2]!.querySelector('button.select-option-download')).not.toBeNull();
-    // 没有一条在下载：进度槽不该常驻挂在行里。
-    expect(snippets.querySelector('.model-download-slot')).toBeNull();
+    // 没有一条在下载：进度槽**常驻**（关着时 opacity 0 + 绝对定位，不占位），但一条都不该是打开的。
+    // 2026-10-18 之前它按需挂载，于是「页面出现任何更新」就把正在长出来的那条重挂一次，
+    // 用户看到的是进度条一闪就没。
+    expect(snippets.querySelectorAll('.model-download-slot')).toHaveLength(DLSSNR_CATALOG.variants.length);
+    expect(snippets.querySelectorAll('.model-download-slot.is-open')).toHaveLength(0);
   });
 
   it('grows the download progress slot on the variant that is coming down', async () => {
@@ -511,9 +518,10 @@ describe('DLSS5 settings group', () => {
     const rows = [...snippets.querySelectorAll<HTMLElement>('.settings-choice-option')];
     await user.click(within(rows[0]!).getByRole('button', { name: /^下载/ }));
 
-    // 进度槽挂在正在下载的那一条下面，和模型菜单一样靠 is-open 长出来。
+    // 进度槽常驻在每一条下面（关着时不占位），只有正在下载的那一条是打开的。
     await waitFor(() => expect(snippets.querySelector('.model-download-slot.is-open')).not.toBeNull());
-    expect(snippets.querySelectorAll('.model-download-slot')).toHaveLength(1);
+    expect(snippets.querySelectorAll('.model-download-slot')).toHaveLength(DLSSNR_CATALOG.variants.length);
+    expect(snippets.querySelectorAll('.model-download-slot.is-open')).toHaveLength(1);
     const bar = within(snippets).getByRole('progressbar', { name: /下载进度/ });
     expect(bar).toBeTruthy();
     // 下载中不再往那一行写字。

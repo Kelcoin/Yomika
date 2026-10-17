@@ -213,6 +213,10 @@ svg.lucide {
 .model-download-slot {
   position: absolute;
   inset: 0;
+  /* 抬到行内容之上：这一层画的横条贴在选项行的底边上，而选项行悬停/按下时会给自己换一层
+     底色（`.settings-choice-option:hover`）。不加这一句时，行内后画的兄弟（比如行尾的下载
+     按钮那一层）有可能把这条 4px 的横条盖掉。 */
+  z-index: 1;
   opacity: 0;
   transition: opacity var(--motion-standard);
   pointer-events: none;
@@ -409,15 +413,14 @@ a:active {
   transform: translateY(1px) scale(0.98);
 }
 
-/* 档案卡片、列表行与设置行的**盒子**不参与上面那条几何按压：那个 2% 的缩放有两个副作用——
-   · 缩略图卡片由虚拟列表按矩形量尺寸，盒子缩放会被量进去，于是整列表重排、别的卡片跟着
-     动（用户报「点击缩略图档案卡片的缩小效果会导致其他卡片位置同步移动」）；
-   · 设置行按下去时连它自己的悬停底色一起缩小（用户报图 3「点击时 hover 效果也会变小」）。
-   但「按下去缩一下」这个反馈本身要留着（用户 2026-10-17 报「缩小效果消失了」），所以它
-   改落在**内容**上：卡片缩的是封面那层（见 visual-enhancements.css），设置行缩的是行里
-   那几块内容——只影响绘制，悬停面与别的卡片都不动。 */
-.archive-thumb-card:active,
-.archive-row:active,
+/* 设置行的**盒子**不参与上面那条几何按压：它按下去时连自己的悬停底色一起缩小，用户报的
+   是「点击时 hover 效果也会变小」。这一行的反馈改落在**内容**上（下面那三条）：只影响绘制，
+   悬停面一动不动。
+
+   档案卡与列表行不在这条例外里：它们缩的是**卡片自己**（见 visual-enhancements.css）。
+   缩盒子是纯视觉的，不会带动别的卡片——虚拟列表的每一行都是绝对定位、高度来自
+   `estimateSize`，从不回量卡片自己的矩形；`transform` 也不进 `clientWidth`，
+   所以那条进度条的量法（`CardProgressBar` 观察轨道宽度）读到的还是原值。 */
 .settings-row-button:active {
   transform: none;
 }

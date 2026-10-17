@@ -20,3 +20,15 @@ export function installedDllLabel(
 ): string {
   return `${variantLabel ?? fallback}${dllVersionSuffix(version)}`;
 }
+
+/** 清单里的适配显卡系列（`[40, 50]`）→ 选项行第二行那句（`RTX 40 / 50 系`）。
+ *
+ * 系列是清单里的**结构化字段**，不在变体名里：名字只留「官方原版 / 社区兼容版 / FP16 兼容版」
+ * 这三个词，系列由这一行说。挤进同一行时 420px 宽的面板放不下，会退化成换行——用户先报
+ * 「选项内的文字会换行」，把系列去掉之后又报「把适配显卡系列补回来」，所以拆成两行画。
+ *
+ * 空数组（清单没写系列）返回 `undefined`：那时不画第二行，行式退回一行一个名字。 */
+export function formatSeries(series: readonly number[] | undefined): string | undefined {
+  if (!series || series.length === 0) return undefined;
+  return `RTX ${[...series].sort((left, right) => left - right).join(' / ')} 系`;
+}

@@ -40,6 +40,11 @@ function paletteCss(p: Palette, dark: boolean): string {
   --primary: ${p.accent};
   --on-primary: ${onBrand};
   --primary-hover: ${p.accentHover};
+  /* 主色渐变也要跟着配色走。它原先只写在 tokens.css 里（一支写死的红、夜档一支写死的粉），
+     换配色之后主按钮与进度条还是那支红——用户 2026-10-18 报「部分元素比如进度条似乎没有
+     接入主题」。这里由本套配色的 accent/accentHover 派生，两档的明暗关系与默认配色一致。 */
+  --primary-gradient: linear-gradient(180deg, ${p.accent} 0%, ${p.accentHover} 100%);
+  --primary-gradient-hover: linear-gradient(180deg, ${p.accentHover} 0%, ${p.accent} 100%);
   --primary-container: color-mix(in srgb, ${p.accent} 24%, ${p.panel});
   --on-primary-container: ${p.ink};
   --secondary: ${p.cyan};

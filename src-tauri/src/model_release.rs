@@ -285,6 +285,77 @@ pub const MIRROR_PRESETS: &[(&str, &str)] = &[
     ("ghproxy", "https://ghproxy.net/"),
 ];
 
+/// 测速窗口：只取前 64 KiB。下的是 5 MB 的 onnx 或 165 MB 的片段，这一点字节足够看出
+/// 「谁先吐字节」，又不必为了测速把整份东西拉下来。
+const SPEED_PROBE_RANGE: &str = "bytes=0-65535";
+
+/// 一个候选地址的测速预算。四个候选是**并发**量的，所以最坏也就等这么久，不是四倍。
+const SPEED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 量一个地址的首字节耗时；连不上、超时、状态码不是 2xx、或者一个字节都没吐出来就是 `None`。
+fn probe_source_speed(url: &str) -> Option<std::time::Duration> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(SPEED_PROBE_TIMEOUT)
+        .build()
+        .ok()?;
+    let started = std::time::Instant::now();
+    let mut response = client
+        .get(url)
+        .header(reqwest::header::RANGE, SPEED_PROBE_RANGE)
+        .send()
+        .ok()?;
+    if !(200..300).contains(&response.status().as_u16()) {
+        return None;
+    }
+    let mut first = [0u8; 1024];
+    let read = std::io::Read::read(&mut response, &mut first).ok()?;
+    (read > 0).then(|| started.elapsed())
+}
+
+/// 把候选地址按**实测快慢**排队：快的先上，量不通的按原顺序排在最后。
+///
+/// 内置的加速地址原来是按固定顺序试的（direct → gh-proxy → ghfast → ghproxy），而哪一条快
+/// 完全看当时的网络。用户 2026-10-18 要求「下载模型前对几个地址（包括原始地址）进行测速，
+/// 选择最快的下载」。
+///
+/// 测速只决定**顺序**，不决定可用性：真下载仍然逐个回退，所以量失败的那条照样有机会被试到；
+/// 一个地址都没量通时顺序退回原样，行为与从前完全一致。
+pub fn order_sources_by_speed(urls: Vec<String>) -> Vec<String> {
+    order_sources_by(urls, probe_source_speed)
+}
+
+/// 排序本身（测速函数由调用方给）：抽出来是为了让判据能**确定性地**钉住顺序规则——
+/// 真去量网络会把「谁快」变成环境噪声，那样这条判据迟早变成偶发红。
+fn order_sources_by(
+    urls: Vec<String>,
+    probe: fn(&str) -> Option<std::time::Duration>,
+) -> Vec<String> {
+    if urls.len() < 2 {
+        return urls;
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    for (index, url) in urls.iter().enumerate() {
+        let url = url.clone();
+        let sender = sender.clone();
+        // 每个候选一个线程：串行量四个会把「等测速」的时间叠成四倍，用户看到的是下载迟迟不开始。
+        std::thread::spawn(move || {
+            let _ = sender.send((index, probe(&url)));
+        });
+    }
+    drop(sender);
+    let mut measured: Vec<(usize, Option<std::time::Duration>)> =
+        (0..urls.len()).map(|index| (index, None)).collect();
+    for (index, latency) in receiver {
+        measured[index] = (index, latency);
+    }
+    // 先按「量到没有」分档，再按耗时，最后按原下标——同一档内保持稳定顺序。
+    measured.sort_by_key(|(index, latency)| (latency.is_none(), *latency, *index));
+    measured
+        .into_iter()
+        .map(|(index, _)| urls[index].clone())
+        .collect()
+}
+
 fn candidate_urls(owner_repo: &str, tag: &str, path: &str) -> Vec<String> {
     MIRROR_PRESETS
         .iter()
@@ -339,6 +410,9 @@ fn download_asset_with_fallback_progress<F: FnMut(u64, Option<u64>)>(
         urls.push(url.to_string());
     }
     urls.extend(candidate_urls(owner_repo, tag, asset.remote_name()));
+    // 下之前先量一遍：谁快谁先上（见 `order_sources_by_speed`）。量不通的排在最后，
+    // 逐个回退的老行为一点没变。
+    let urls = order_sources_by_speed(urls);
     for url in urls {
         match download_asset_with_progress(&url, asset, destination, &mut progress) {
             Ok(()) => return Ok(()),
@@ -1049,6 +1123,59 @@ mod tests {
             direct_url: None,
         }
     }
+    /// 一条假测速：按地址里写死的数字当耗时，`None` 表示量不通。判据要钉的是**顺序规则**，
+    /// 真去量网络只会把「谁快」变成环境噪声。
+    fn fake_latency(url: &str) -> Option<std::time::Duration> {
+        let millis: u64 = url
+            .rsplit('/')
+            .next()
+            .and_then(|tail| tail.parse().ok())
+            .unwrap_or(u64::MAX);
+        (millis != u64::MAX).then(|| std::time::Duration::from_millis(millis))
+    }
+
+    /// 下模型之前要先量一遍：谁先吐字节谁先上。这条判据钉的是**顺序**——把测速拿掉
+    /// （直接返回入参）时它必须转红。
+    #[test]
+    fn the_fastest_source_is_asked_first() {
+        // 入参顺序故意是「慢、不通、快」：只有真按耗时排过，才会变成「快、慢、不通」。
+        let ordered = order_sources_by(
+            vec![
+                "http://mirror.test/400".to_string(),
+                "http://mirror.test/dead".to_string(),
+                "http://mirror.test/5".to_string(),
+            ],
+            fake_latency,
+        );
+        assert_eq!(
+            ordered,
+            vec![
+                "http://mirror.test/5".to_string(),
+                "http://mirror.test/400".to_string(),
+                "http://mirror.test/dead".to_string(),
+            ],
+            "快的先上，量不通的排最后"
+        );
+    }
+
+    /// 一条都量不通时保持原顺序：顺序退回原样，行为与从前完全一致（真下载仍然逐个回退）。
+    #[test]
+    fn when_nothing_can_be_measured_the_order_is_unchanged() {
+        let urls = vec![
+            "http://mirror.test/dead".to_string(),
+            "http://mirror.test/also-dead".to_string(),
+        ];
+        assert_eq!(order_sources_by(urls.clone(), fake_latency), urls);
+    }
+
+    /// 只有一个候选（或者一个都没有）时不必量：原样返回，别为一次没得选的测速多等三秒。
+    #[test]
+    fn a_single_source_is_returned_untouched() {
+        let only = "http://127.0.0.1:1/asset".to_string();
+        assert_eq!(order_sources_by_speed(vec![only.clone()]), vec![only]);
+        assert!(order_sources_by_speed(Vec::new()).is_empty());
+    }
+
     #[test]
     fn rejects_absolute_and_non_normal_asset_and_companion_paths() {
         for path in [

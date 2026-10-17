@@ -253,8 +253,15 @@ pub fn download_variant<F: FnMut(u64, Option<u64>)>(
     let staged = directory.join(&variant.asset);
 
     let mut errors = Vec::new();
-    for (_, prefix) in MIRROR_PRESETS.iter() {
-        let url = asset_url(prefix, MODEL_RELEASE_REPO, &catalog.tag, &asset.path);
+    // 165 MB 的片段，下之前先量一遍谁快：顺序只影响先后，逐镜像回退照旧
+    // （见 `model_release::order_sources_by_speed`）。
+    let sources = crate::model_release::order_sources_by_speed(
+        MIRROR_PRESETS
+            .iter()
+            .map(|(_, prefix)| asset_url(prefix, MODEL_RELEASE_REPO, &catalog.tag, &asset.path))
+            .collect(),
+    );
+    for url in sources {
         match download_asset_with_progress(&url, &asset, &staged, &mut progress) {
             Ok(()) => {
                 // 下载器按清单校验过一遍；这里再核对一次落盘结果，两处都用同一份事实。

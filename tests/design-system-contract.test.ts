@@ -2222,36 +2222,58 @@ describe('design system contract', () => {
     expect(card).toMatch(/headingIcon/);
   });
 
-  it('shrinks a pressed card and settings row on their contents, never on the box', () => {
+  it('shrinks a pressed card on its own box, and the settings row on its contents', () => {
     const base = read('src/styles/base.css');
     const polish = read('src/styles/visual-enhancements.css');
-    // 用户 2026-10-17 报「点击设置项、档案卡片的缩小效果消失了」——但直接缩盒子会把两个
-    // 老毛病一起带回来：卡片由虚拟列表按矩形量尺寸（整列表重排、别的卡片跟着动），设置行
-    // 连自己的悬停底色一起缩（用户报「点击时 hover 效果也会变小」）。所以缩放落在**内容**上。
-    expect(base).toMatch(/\.archive-thumb-card:active,\s*\.archive-row:active,\s*\.settings-row-button:active \{\s*transform: none;/);
-    // 卡片缩的是封面那层，而且必须排在悬停那条**之后**——两者特异度相同，靠先后说话。
-    const hover = polish.indexOf('.archive-thumb-card:hover .archive-thumb-card-media');
-    const pressed = polish.indexOf('.archive-thumb-card:is(.is-pressed, :active) .archive-thumb-card-media');
-    expect(hover).toBeGreaterThan(-1);
-    expect(pressed).toBeGreaterThan(hover);
-    expect(polish).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \.archive-row-thumb \{\s*transform: scale\(0\.96\);/);
+    const workspace = read('src/components/LibraryWorkspace.tsx');
+    // 用户 2026-10-17 报「点击设置项、档案卡片的缩小效果消失了」，2026-10-18 又报「缩略图卡片
+    // 点击还是没有缩小效果 / 列表卡片只有封面缩小 / 缩小不要使其他卡片位移」。卡片这一档改成
+    // 缩**盒子**：虚拟列表的每行绝对定位、高度来自 `estimateSize`，从不回量卡片自己的矩形，
+    // 所以纯 transform 不会让别的卡片动；设置行仍然缩内容——它连着悬停底色，缩盒子会让用户
+    // 看到「点击时 hover 效果也变小」。
+    expect(base).toMatch(/\.settings-row-button:active \{\s*transform: none;/);
+    expect(polish).toMatch(/\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\),\s*\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/);
+    // 行高由虚拟列表给死，且没有把卡片重新量一遍的钩子——这是「别的卡片不会跟着动」的依据。
+    expect(workspace).toMatch(/className="archive-thumb-grid-row"[\s\S]{0,320}?height: virtualRow\.size/);
+    expect(workspace).not.toMatch(/measureElement/);
+    // 封面那层只剩悬停的放大：按下的缩放已经移到盒子上。
+    expect(polish).not.toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \.archive-thumb-card-media/);
+    expect(polish).toMatch(/\.archive-thumb-card:hover \.archive-thumb-card-media,\s*\.archive-row:hover \.archive-row-thumb \{\s*transform: scale\(1\.02\);/);
     // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-copy \{\s*transform-origin: left center;/);
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
   });
 
-  it('keeps every DLSSNR variant label inside the option row', () => {
-    // 用户 2026-10-17 报「FP16 版的文字溢出了，去掉 30 系后面的文字」：选项行只有一行，
-    // 超出就被省略号吃掉，所以标签本身必须短——机型与性能说明留在 note 里（挂在 title 上）。
-    // 这一条守的是**随包那份**兜底清单；线上那份在模型仓库里（Kelcoin/Yomika-Models），
-    // 是另一个仓库，改它要单独提交。
+  it('keeps the DLSSNR labels short and puts the supported series on its own line', () => {
+    // 用户 2026-10-17 报「FP16 版的文字溢出了，去掉 30 系后面的文字」⇒ 标签收短；2026-10-18
+    // 又要「把各 DLSSNR 的适配显卡系列补回来」⇒ 系列另起一行，不挤在标签里。这一条守的是
+    // **随包那份**兜底清单；线上那份在模型仓库（Kelcoin/Yomika-Models），改它要单独提交。
     const manifest = JSON.parse(read('src-tauri/resources/dlssnr/dlssnr-manifest.json')) as {
-      variants: Array<{ id: string; label: string }>;
+      variants: Array<{ id: string; label: string; note?: string }>;
     };
     expect(manifest.variants.length).toBeGreaterThan(0);
     for (const variant of manifest.variants) {
       expect(`${variant.id}:${variant.label}`).toMatch(/^[a-z0-9-]+:.{2,12}$/);
+      // 系列写在 note 里，选项行把它单独渲染成一行。
+      expect(variant.note ?? '').toMatch(/RTX\s*\d{2}/);
     }
+    const group = read('src/components/DlssnrSettingsGroup.tsx');
+    expect(group).toMatch(/formatSeries/);
+    expect(group).toMatch(/className="settings-choice-option-series"/);
+    expect(read('src/styles/shell.css')).toMatch(/\.settings-choice-option-series \{[^}]*font-size: var\(--text-xs\)/);
+  });
+
+  it('paints the progress bar with the theme, never a fixed gradient', () => {
+    // 用户 2026-10-18 报「部分元素比如进度条似乎没有接入主题」，同一条报里的「锯齿」也是它：
+    // 填充曾经被覆写成写死的 `--primary-gradient`（tokens.css 里那条两段竖直红），换配色不跟
+    // 着变，而且在 4–6px 高的条上就是两条硬边色带。现在填充走主题的 `--primary`，渐变由调色
+    // 板自己从 accent 派生。
+    const polish = read('src/styles/visual-enhancements.css');
+    const shell = read('src/styles/shell.css');
+    const presets = read('src/lib/cssThemePresets.ts');
+    expect(polish).not.toMatch(/\.archive-card-progress-fill \{\s*background: var\(--primary-gradient\)/);
+    expect(shell).toMatch(/\.archive-card-progress-fill \{[^}]*background: var\(--primary\)/);
+    expect(presets).toMatch(/--primary-gradient: linear-gradient\(180deg, \$\{p\.accent\} 0%, \$\{p\.accentHover\} 100%\);/);
   });
 
   it('answers overscroll by moving the list, and pins the refresh disc over it', () => {
@@ -3278,11 +3300,17 @@ describe('the 2026-10-17 UI batch', () => {
     }
   });
 
-  it('takes the press scale off the archive cards and the settings rows', () => {
+  it('takes the press scale off the settings rows, and puts the cards’ press scale on the card box', () => {
     const base = read('src/styles/base.css');
+    const polish = read('src/styles/visual-enhancements.css');
     expect(base, '全局按压会给 button/a 加 2% 缩小').toMatch(/button:active,[\s\S]{0,80}scale\(0\.98\)/);
-    expect(base, '卡片与设置行必须例外：虚拟列表按实测尺寸排版，缩放会让整列跟着动').toMatch(
-      /\.archive-thumb-card:active,[\s\S]*?\.settings-row-button:active \{[^}]*transform: none;/,
+    // 设置行必须例外：它连着悬停底色，缩盒子会让用户看到「点击时 hover 效果也变小」。
+    expect(base, '设置行必须例外：缩盒子会把悬停底色一起缩掉').toMatch(
+      /\.settings-row-button:active \{[^}]*transform: none;/,
+    );
+    // 卡片反过来：2026-10-18 用户要求「点击要有缩小效果、别让其他卡片动」，缩放落在卡片盒子上。
+    expect(polish, '卡片按下去要缩自己').toMatch(
+      /\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\),\s*\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/,
     );
   });
 

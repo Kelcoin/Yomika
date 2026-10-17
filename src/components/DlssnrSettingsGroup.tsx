@@ -12,7 +12,7 @@ import { DlssnrIcon } from './DlssnrIcon';
 import { useToast } from './Toast';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import { DLSSNR_PRESETS, presetOf } from '../domain/dlssnrPresets';
-import { installedDllLabel } from '../domain/dlssnrVersion';
+import { installedDllLabel, formatSeries } from '../domain/dlssnrVersion';
 import { availableVariantUpdates, installedVariantId } from '../lib/dlssnrUpdates';
 import {
   DEFAULT_DLSSNR_PASS,
@@ -427,6 +427,11 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           const recommended = status.recommendedVariant === variant.id;
           const busy = downloading === variant.id;
           const label = `${variant.label}${recommended ? '（推荐）' : ''}`;
+          // 适配的显卡系列单独占一行（用户 2026-10-18 报「把各 DLSSNR 的适配显卡系列补回来」）。
+          // 系列本来就在清单的结构化字段里（`series: [40, 50]`），不在名字里：名字只留那三个词，
+          // 系列由这一行说。挤进同一行时 420px 的面板放不下，会退化成换行——用户上一轮报的正是
+          // 「选项内的文字会换行」。
+          const series = formatSeries(variant.series);
           return <div className={`settings-choice-option${active ? ' is-active' : ''}`} key={variant.id}>
             {/* 兼容性那句话不占第二行：行里只留变体名，说明挂在这一行的 title 上，
                 鼠标停一下还是看得到——和模型菜单那种「一行一个选项」是同一套行式。 */}
@@ -446,7 +451,8 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
               // 再下一遍。换了资产的那一条要能点——点它就是更新。
               onClick={() => { if (active) return; void downloadVariant(variant.id); }}
             >
-              <span>{label}</span>
+              <span className="settings-choice-option-name">{label}</span>
+              {series && <span className="settings-choice-option-series">{series}</span>}
             </button>
             {/* 行尾走模型菜单那一套动作槽：还没装上的那条挂下载按钮，已装上的那条
                 （按钮自己不画）右侧就是空的。装的是哪一条由 is-active 与 aria-pressed
@@ -460,8 +466,10 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
               className="select-option-download"
               onDownload={() => void downloadVariant(variant.id)}
             />
-            {/* 进度只挂在正在下载的那一条下面：和其它模型菜单同一个槽，靠 is-open 长出条。 */}
-            {busy && <ModelDownloadSlot open label={variant.label} progress={download} />}
+            {/* 进度槽**常驻挂载**，用 `open` 开关（和超分模型菜单那一处同一个槽、同一套写法）：
+                条件渲染会在下载结束/重渲染那一刻摘掉节点，卸载的节点没有过渡可放，「消失」就只能
+                是啪一下不见——用户 2026-10-18 报「页面出现任何更新就会消失」。 */}
+            <ModelDownloadSlot open={busy} label={variant.label} progress={download} />
           </div>;
         })}
       </div>

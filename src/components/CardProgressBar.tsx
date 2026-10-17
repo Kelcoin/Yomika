@@ -51,7 +51,10 @@ export function CardProgressBar({ percent, label, cornerAware = false, indetermi
   useEffect(() => {
     const element = trackRef.current;
     if (!element || typeof ResizeObserver === 'undefined') return undefined;
-    const measure = () => setTrackWidth(element.clientWidth);
+    // 只在真的变了才写回状态：`ResizeObserver` 每次布局都会回调一次，而每一次写回都会让
+    // 这条横条带着 `transition: width` 重画一遍——4px 高的条上看得见闪（用户报「进度条发生
+    // 变化时会出现锯齿」）。宽度没变就保持原值，React 不会重渲染，过渡也就不会重播。
+    const measure = () => setTrackWidth((current) => (current === element.clientWidth ? current : element.clientWidth));
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);

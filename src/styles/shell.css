@@ -1465,6 +1465,9 @@ body::-webkit-scrollbar,
   justify-content: center;
   min-width: 0;
   min-height: 44px;
+  /* 允许换行：DLSSNR 的选项行是「名字 + 适配系列」两行（见下面 `.settings-choice-option-series`）。
+     不换行时那两段会被挤成一行再各自省略号，用户报的「适配的显卡系列」就看不见了。 */
+  flex-wrap: wrap;
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-control);
@@ -1484,6 +1487,16 @@ body::-webkit-scrollbar,
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+
+/* 适配的显卡系列：占满一整行（`flex-basis: 100%`），小一号、淡一档，居中排在名字下面。
+   它和名字是同一条选项的两个字段，所以不写 `title`——用户要的是**看得见**。 */
+.settings-choice-option-series {
+  flex: 0 0 100%;
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-tight);
 }
 
 .settings-choice-option-main.settings-device-option {
@@ -4455,7 +4468,11 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    取整上会贴着媒体下沿越出一线，正好落在进度条下沿——用户报的「鼠标移上去时
    进度条底部闪出一丝封面」。多盖 1px 与抬 z-index 各挡一个方向：正文给不出这块
    遮挡（块级背景画在内联替换内容之下）。宽行档把 height 覆写成 4px，不受影响。 */
-.archive-card-progress { position: absolute; inset: -5px 0 auto; z-index: 1; display: block; height: 6px; overflow: hidden; background: var(--surface-container-highest); box-shadow: var(--shadow-progress); pointer-events: none; }
+.archive-card-progress { position: absolute; inset: -5px 0 auto; z-index: 1; display: block; height: 6px; overflow: hidden; background: color-mix(in srgb, var(--on-surface) 12%, transparent); box-shadow: var(--shadow-progress); pointer-events: none; }
+/* 轨道底色不能用 `--surface-container-highest`：设置菜单里的选项行悬停时**正是**填这个色
+   （`.settings-choice-option:hover`），于是鼠标一移上去，轨道与行的悬停底融成一片、只剩
+   填充那一段——用户 2026-10-18 报「鼠标移上去就会消失」。改成一层由正文色兑出来的半透明
+   灰：压在任何底色上都还看得见，亮暗两档各自成立。 */
 .archive-card-progress-fill { display: block; height: 100%; border-radius: 0 var(--radius-pill) var(--radius-pill) 0; background: var(--primary); transition: width var(--motion-standard); }
 .archive-card-progress.is-complete .archive-card-progress-fill { border-radius: 0; }
 .archive-row-copy { position: relative; }
