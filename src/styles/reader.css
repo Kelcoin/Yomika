@@ -353,8 +353,8 @@
    重新挂载两条路，所以 ReaderScreen 每翻一页换一个 `key`。 */
 @keyframes reader-toolbar-turn {
   from { opacity: 0; transform: scaleX(0.15); }
-  35% { opacity: 0.85; }
-  to { opacity: 0; transform: scaleX(1); }
+  35% { opacity: 0.95; box-shadow: 0 0 8px var(--primary); }
+  to { opacity: 0; transform: scaleX(1); box-shadow: 0 0 0 transparent; }
 }
 
 /* M3 small top app bar: a 64dp container (plus the safe area), 4dp of inline
@@ -670,7 +670,10 @@
   left: var(--space-1);
   height: 2px;
   border-radius: var(--radius-pill);
-  background: var(--primary);
+  background: linear-gradient(90deg,
+    transparent 0%,
+    var(--primary) 50%,
+    transparent 100%);
   animation: reader-toolbar-turn var(--motion-slow);
   /* 基础值是灭的：动画没有 `forwards`，播完就落回这一档（否则一条主题色的实线会一直
      留在栏顶）。 */

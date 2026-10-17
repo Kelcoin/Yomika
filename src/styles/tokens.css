@@ -38,6 +38,9 @@
     --on-primary-container: #410003;
     /* Pressed/hover shade of primary. Interaction only, never a resting fill. */
     --primary-hover: #8f2f27;
+    /* Gradient enhancement for primary buttons */
+    --primary-gradient: linear-gradient(180deg, #a83b32 0%, #8f2f27 100%);
+    --primary-gradient-hover: linear-gradient(180deg, #b84a41 0%, #a83b32 100%);
 
     /* ---- M3 color roles: 青瓷 (secondary) -------------------------------- */
     --secondary: #4b635d;
@@ -165,6 +168,8 @@
     --hairline-strong: #757a76;
     --focus-ring: #a83b32;
     --focus-shadow: 0 0 0 3px color-mix(in srgb, #a83b32 30%, transparent);
+    --focus-glow: 0 0 0 3px color-mix(in srgb, #a83b32 20%, transparent),
+                  0 0 12px color-mix(in srgb, #a83b32 15%, transparent);
     --selection-background: color-mix(in srgb, #a83b32 24%, transparent);
     --selection-ink: #1a1c1a;
 
@@ -235,6 +240,10 @@
     --shadow-overlay: 0 16px 48px rgb(26 28 26 / 0.24);
     --shadow-tooltip: 0 6px 16px rgb(26 28 26 / 0.14);
     --shadow-card: 0 4px 12px rgb(26 28 26 / 0.1);
+    --shadow-card-hover: 0 8px 24px rgb(26 28 26 / 0.14),
+                         0 2px 8px rgb(26 28 26 / 0.08);
+    --shadow-card-lifted: 0 12px 32px rgb(26 28 26 / 0.16),
+                          0 4px 12px rgb(26 28 26 / 0.1);
     /* The multi-select disc floats over cover art of any brightness; the disc
        and its tick each get one shadow so the mark reads on both. */
     --shadow-check: 0 1px 3px rgb(0 0 0 / 0.4);
@@ -404,12 +413,17 @@
        element animating both ways gets one token, or the two ends read as
        different speeds (the multi-select bar did exactly that). */
     --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
+    /* Refined motion curves for elevated interactions */
+    --ease-elastic: cubic-bezier(0.16, 1.1, 0.3, 1);
+    --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+    --ease-spring: cubic-bezier(0.26, 1.2, 0.48, 1);
     --motion-fast: 140ms var(--ease-standard);
+    --motion-crisp: 180ms var(--ease-smooth);
     --duration-reader-indicator: 280ms;
-    --motion-toast-enter: 280ms cubic-bezier(.2,.8,.2,1);
+    --motion-toast-enter: 320ms var(--ease-spring);
     --motion-toast-exit: 280ms cubic-bezier(.4,0,1,1);
     --motion-dock: 280ms cubic-bezier(.22, 1, .36, 1);
-    --motion-bounce: 360ms cubic-bezier(.22, 1, .36, 1);
+    --motion-bounce: 400ms var(--ease-elastic);
     --motion-page: 180ms cubic-bezier(.2, .8, .2, 1);
     --motion-standard: var(--duration-standard) var(--ease-standard);
     --motion-slow: 480ms var(--ease-standard);
@@ -551,8 +565,16 @@
       --hairline-strong: #89938c;
       --focus-ring: #ffb4a9;
       --focus-shadow: 0 0 0 3px color-mix(in srgb, #ffb4a9 34%, transparent);
+      --focus-glow: 0 0 0 3px color-mix(in srgb, #ffb4a9 25%, transparent),
+                    0 0 12px color-mix(in srgb, #ffb4a9 20%, transparent);
       --selection-background: color-mix(in srgb, #ffb4a9 26%, transparent);
       --selection-ink: #e4e3df;
+      --primary-gradient: linear-gradient(180deg, #ffb4a9 0%, #ff9e91 100%);
+      --primary-gradient-hover: linear-gradient(180deg, #ffc7be 0%, #ffb4a9 100%);
+      --shadow-card-hover: 0 8px 24px rgb(0 0 0 / 0.52),
+                           0 2px 8px rgb(0 0 0 / 0.42);
+      --shadow-card-lifted: 0 12px 32px rgb(0 0 0 / 0.58),
+                            0 4px 12px rgb(0 0 0 / 0.48);
       --control-background: #1a1d1b;
       --control-background-hover: #202421;
       --control-border: #89938c;
@@ -677,8 +699,16 @@
     --hairline-strong: #89938c;
     --focus-ring: #ffb4a9;
     --focus-shadow: 0 0 0 3px color-mix(in srgb, #ffb4a9 34%, transparent);
+    --focus-glow: 0 0 0 3px color-mix(in srgb, #ffb4a9 25%, transparent),
+                  0 0 12px color-mix(in srgb, #ffb4a9 20%, transparent);
     --selection-background: color-mix(in srgb, #ffb4a9 26%, transparent);
     --selection-ink: #e4e3df;
+    --primary-gradient: linear-gradient(180deg, #ffb4a9 0%, #ff9e91 100%);
+    --primary-gradient-hover: linear-gradient(180deg, #ffc7be 0%, #ffb4a9 100%);
+    --shadow-card-hover: 0 8px 24px rgb(0 0 0 / 0.52),
+                         0 2px 8px rgb(0 0 0 / 0.42);
+    --shadow-card-lifted: 0 12px 32px rgb(0 0 0 / 0.58),
+                          0 4px 12px rgb(0 0 0 / 0.48);
     --control-background: #1a1d1b;
     --control-background-hover: #202421;
     --control-border: #89938c;

@@ -406,7 +406,7 @@ textarea:focus {
 
 button:active,
 a:active {
-  transform: translateY(1px);
+  transform: translateY(1px) scale(0.98);
 }
 
 button:disabled,
@@ -425,7 +425,7 @@ select option {
 :focus-visible {
   outline: 2px solid var(--surface-canvas);
   outline-offset: 2px;
-  box-shadow: 0 0 0 4px var(--focus-ring);
+  box-shadow: var(--focus-glow);
 }
 
 h1,
