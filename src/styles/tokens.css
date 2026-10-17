@@ -309,51 +309,43 @@
     --yomika-mark-plate: var(--surface-container-highest);
     --yomika-mark-ink-accent: var(--on-surface-variant);
 
-    /* ---- Typography: Refined system font stack -------------------------- */
-    /* 主字体：优先使用系统现代字体，中文使用微软雅黑 UI（比标准雅黑更精致），
-       日文使用游ゴシック体，拉丁文使用 Segoe UI Variable（Windows 11）。
-       macOS 上自动回退到苹方、Hiragino Sans 和 San Francisco。 */
-    --font-body: "Segoe UI Variable Text", "Microsoft YaHei UI", "微软雅黑",
-                 "Yu Gothic UI", "游ゴシック体", "YuGothic",
-                 "PingFang SC", "苹方-简", "Hiragino Sans GB",
-                 "Hiragino Kaku Gothic Pro", "ヒラギノ角ゴ Pro",
+    /* ---- Typography: Inter + Noto Sans SC/JP Variable ------------------- */
+    /* 字体编译进包体，跨平台视觉一致，现代几何感 + 人文风格。
+       Inter: 拉丁文，现代几何无衬线，略带人文感，专为屏幕优化。
+       Noto Sans SC/JP: 中日文，完整 CJK 支持，与 Inter 风格协调。 */
+
+    /* 主字体：Inter 优先，中日文回退到 Noto Sans */
+    --font-body: "Inter Variable", "Noto Sans SC Variable", "Noto Sans JP Variable",
                  -apple-system, BlinkMacSystemFont, "Segoe UI",
                  system-ui, sans-serif;
 
-    /* 展示字体：标题和强调内容，字重更丰富 */
-    --font-display: "Segoe UI Variable Display", "Microsoft YaHei UI", "微软雅黑",
-                    "Yu Gothic UI", "游ゴシック体", "YuGothic",
-                    "PingFang SC", "苹方-简", "Hiragino Sans GB",
-                    "Hiragino Kaku Gothic Pro", "ヒラギノ角ゴ Pro",
+    /* 展示字体：标题和强调内容，同主字体 */
+    --font-display: "Inter Variable", "Noto Sans SC Variable", "Noto Sans JP Variable",
                     -apple-system, BlinkMacSystemFont, "Segoe UI",
                     system-ui, sans-serif;
 
     /* 等宽字体：用于代码、路径和技术信息 */
-    --font-utility: "Cascadia Mono", "Cascadia Code",
-                    "SF Mono", "Monaco", "Menlo",
-                    "Consolas", "Liberation Mono",
-                    ui-monospace, monospace;
+    --font-utility: "JetBrains Mono Variable", "Cascadia Mono", "SF Mono",
+                    "Consolas", ui-monospace, monospace;
 
     /* ---- Font sizes: Reading-optimized scale ---------------------------- */
     --text-xs: 12px;            /* 标注、辅助信息 */
     --text-sm: 13px;            /* 次要文字 */
     --text-md: 14px;            /* 控件、说明 */
     --text-base: 15px;          /* 正文基准 */
-    --text-lg: 17px;            /* 小标题（调整：原 20px 过大）*/
-    --text-heading: 20px;       /* 区块标题（调整：原 24px）*/
-    --text-title: 28px;         /* 页面标题（调整：原 32px）*/
-    --text-page-title: 36px;    /* 主标题（调整：原 40px）*/
-    --text-display: 48px;       /* 特大标题（新增：封面、引导页）*/
+    --text-lg: 17px;            /* 小标题 */
+    --text-heading: 20px;       /* 区块标题 */
+    --text-title: 28px;         /* 页面标题 */
+    --text-page-title: 36px;    /* 主标题 */
+    --text-display: 48px;       /* 特大标题（封面、引导页）*/
 
-    /* Four weights, each with one job. Anything that says "this is a control"
-       is semibold; anything that says "this is a heading" is bold; prose and
-       meta text stay regular so the two above keep their contrast. */
-    --weight-light: 300;        /* 次要信息（新增）*/
+    /* Four weights + two extras for refined hierarchy */
+    --weight-light: 300;        /* 次要信息（谨慎使用）*/
     --weight-regular: 400;
     --weight-medium: 500;
     --weight-semibold: 600;
     --weight-bold: 700;
-    --weight-heavy: 800;        /* 特殊强调（新增，极少使用）*/
+    --weight-heavy: 800;        /* 特殊强调（极少使用）*/
 
     /* Leading is split by role, not by element: one line of control text has
        none to give, prose that wraps needs enough. */
@@ -365,8 +357,7 @@
     --leading-relaxed: 1.65;
     --leading-loose: 1.8;       /* 长文本（新增）*/
 
-    /* Tracking. Latin display text tightens slightly at size; the only place
-       the app letterspaces outward is the all-caps micro-label. */
+    /* Tracking: Inter 在大字号时略微收紧，小字号保持正常 */
     --tracking-tighter: -0.02em;  /* 大标题收紧（新增）*/
     --tracking-tight: -0.01em;
     --tracking-normal: 0;
