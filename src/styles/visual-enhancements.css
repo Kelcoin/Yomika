@@ -15,6 +15,15 @@
   }
 }
 
+/* 按下去缩的是**内容**，不是卡片盒子。盒子缩放会被虚拟列表按矩形量进去，于是整列表
+   重排、别的卡片跟着动（用户 2026-10-17 报「点击缩略图档案卡片的缩小效果会导致其他卡片
+   位置同步移动」），而且悬停底色会跟着一起缩。缩内容只影响绘制：没按下时悬停那 1.02
+   照旧，别的卡片一个像素都不动。放在悬停块之后——两者特异度相同，靠先后决定谁说话。 */
+.archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active) .archive-thumb-card-media,
+.archive-row:is(.is-pressed, :active) .archive-row-thumb {
+  transform: scale(0.96);
+}
+
 /* ---- Gradient Button Enhancement --------------------------------------- */
 button[data-variant="primary"],
 .primary-action,

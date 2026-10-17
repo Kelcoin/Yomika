@@ -393,6 +393,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   /** Which gesture is driving it: touch follows the finger exactly, a wheel
    * eases between notches, and null is the spring back after a release. */
   const [overscrollGesture, setOverscrollGesture] = useState<'touch' | 'wheel' | null>(null);
+  /** 松手后那一趟回弹：只有 `data-overscroll='settle'` 那一档带过渡（见 shell.css）。
+   * 手势期间不过渡是刻意的——每格滚轮都拖一条 100ms 的尾巴，就是用户 2026-10-17 报的
+   * 「过滚效果还是非常卡」；而回弹那一档不打开，写回 0 就是瞬移。 */
+  const [overscrollSettle, setOverscrollSettle] = useState(false);
   const overscrollRef = useRef(0);
   /** Gesture travel before damping, signed like the offset. */
   const overscrollTravel = useRef(0);
@@ -451,6 +455,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollClaimedScrollTop.current = undefined;
     paintPull(0);
     setOverscroll(0);
+    // 先把回弹那一档打开，再让位置归零：顺序反了就没有动画（见 shell.css）。
+    setOverscrollSettle(true);
     setOverscrollGesture(null);
   }, [paintPull]);
 
@@ -467,6 +473,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
    *
    * 位置写 DOM，state 只在「从静止跨进这一档」时变一次——下拉指示器靠它露出来。 */
   const applyOverscroll = useCallback((travel: number) => {
+    // 手一搭上就把回弹那一档收掉：跟手期间不许有过渡。
+    setOverscrollSettle(false);
     overscrollTravel.current = travel;
     const offset = rubberBand(travel, travel < 0 ? BOUNCE_MAX : PULL_MAX);
     const previous = overscrollRef.current;
@@ -1261,7 +1269,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             <div
               className="archive-list-pull"
               ref={pullRef}
-              data-overscroll={overscrollGesture ?? undefined}
+              data-overscroll={overscrollSettle ? 'settle' : (overscrollGesture ?? undefined)}
               style={{ transform: 'translateY(0px)' }}
             >
               {/* An in-flight request is not an empty library. These shared one

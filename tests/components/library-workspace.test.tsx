@@ -610,6 +610,9 @@ describe('library workspace', () => {
 
     fireEvent.wheel(list, { deltaY: -40 });
     expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(40, 104)}px)` });
+    // 跟手那一档是 `wheel`：对应的规则不过渡，每格滚轮才不拖一条 100ms 的尾巴（用户报
+    // 「过滚非常卡」就是这个尾巴）。这三档的 CSS 由设计系统契约逐条钉住。
+    expect(pull.getAttribute('data-overscroll')).toBe('wheel');
     // 160ms 是滚轮连滚的真实间隔量级。这里**故意写死**：触摸那条 140ms 的收势窗口在
     // 这个间隔下会把第一格弹回去，判据要是跟着常量缩放就永远抓不到「常量被改小」。
     await act(() => new Promise((resolve) => setTimeout(resolve, 160)));
@@ -620,7 +623,14 @@ describe('library workspace', () => {
     expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(80, 104)}px)` });
     await act(() => new Promise((resolve) => setTimeout(resolve, WHEEL_IDLE_MS + 40)));
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    // 收势那一档换成 `settle`：只有它带过渡，回弹才有动画。原来触摸那档一直挂着
+    // `transition: none`，用户看到的就是「松手后直接瞬移回原位」。
+    expect(pull.getAttribute('data-overscroll')).toBe('settle');
     expect(onRefresh).not.toHaveBeenCalled();
+    // 收势那一档不能一直挂着：下一格滚轮一落，它就得回到「跟手」那一档，否则新的一串
+    // 刻度会拖着上一串的 240ms 尾巴（这条是 `applyOverscroll` 里清 settle 的承重判据）。
+    fireEvent.wheel(list, { deltaY: -40 });
+    expect(pull.getAttribute('data-overscroll')).toBe('wheel');
   });
 
   it('judges the gesture against the element that will actually scroll', async () => {

@@ -409,15 +409,32 @@ a:active {
   transform: translateY(1px) scale(0.98);
 }
 
-/* 档案卡片、列表行与设置行不参与上面那条几何按压：它们按下去只换颜色（`.is-pressed`
-   那批规则），因为那个 2% 的缩放有两个副作用——
-   · 缩略图卡片由虚拟列表按矩形量尺寸，缩放会被量进去，于是整列表重排、别的卡片跟着
+/* 档案卡片、列表行与设置行的**盒子**不参与上面那条几何按压：那个 2% 的缩放有两个副作用——
+   · 缩略图卡片由虚拟列表按矩形量尺寸，盒子缩放会被量进去，于是整列表重排、别的卡片跟着
      动（用户报「点击缩略图档案卡片的缩小效果会导致其他卡片位置同步移动」）；
-   · 设置行按下去时连它自己的悬停底色一起缩小（用户报图 3「点击时 hover 效果也会变小」）。 */
+   · 设置行按下去时连它自己的悬停底色一起缩小（用户报图 3「点击时 hover 效果也会变小」）。
+   但「按下去缩一下」这个反馈本身要留着（用户 2026-10-17 报「缩小效果消失了」），所以它
+   改落在**内容**上：卡片缩的是封面那层（见 visual-enhancements.css），设置行缩的是行里
+   那几块内容——只影响绘制，悬停面与别的卡片都不动。 */
 .archive-thumb-card:active,
 .archive-row:active,
 .settings-row-button:active {
   transform: none;
+}
+
+/* 行里三块内容各缩各的，所以原点要错开：图标向右缩、正文向左缩、值向右缩，
+   它们之间的间距看起来才是整体缩小，而不是各自往中间挤出一堆缝。 */
+.settings-row-button:is(.is-pressed, :active) > .settings-row-icon,
+.settings-row-button:is(.is-pressed, :active) > .settings-row-copy,
+.settings-row-button:is(.is-pressed, :active) > .settings-row-value {
+  transform: scale(0.98);
+}
+.settings-row-button:is(.is-pressed, :active) > .settings-row-icon,
+.settings-row-button:is(.is-pressed, :active) > .settings-row-value {
+  transform-origin: right center;
+}
+.settings-row-button:is(.is-pressed, :active) > .settings-row-copy {
+  transform-origin: left center;
 }
 
 button:disabled,

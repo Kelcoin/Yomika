@@ -2222,6 +2222,38 @@ describe('design system contract', () => {
     expect(card).toMatch(/headingIcon/);
   });
 
+  it('shrinks a pressed card and settings row on their contents, never on the box', () => {
+    const base = read('src/styles/base.css');
+    const polish = read('src/styles/visual-enhancements.css');
+    // 用户 2026-10-17 报「点击设置项、档案卡片的缩小效果消失了」——但直接缩盒子会把两个
+    // 老毛病一起带回来：卡片由虚拟列表按矩形量尺寸（整列表重排、别的卡片跟着动），设置行
+    // 连自己的悬停底色一起缩（用户报「点击时 hover 效果也会变小」）。所以缩放落在**内容**上。
+    expect(base).toMatch(/\.archive-thumb-card:active,\s*\.archive-row:active,\s*\.settings-row-button:active \{\s*transform: none;/);
+    // 卡片缩的是封面那层，而且必须排在悬停那条**之后**——两者特异度相同，靠先后说话。
+    const hover = polish.indexOf('.archive-thumb-card:hover .archive-thumb-card-media');
+    const pressed = polish.indexOf('.archive-thumb-card:is(.is-pressed, :active) .archive-thumb-card-media');
+    expect(hover).toBeGreaterThan(-1);
+    expect(pressed).toBeGreaterThan(hover);
+    expect(polish).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \.archive-row-thumb \{\s*transform: scale\(0\.96\);/);
+    // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
+    expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-copy \{\s*transform-origin: left center;/);
+    expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
+  });
+
+  it('keeps every DLSSNR variant label inside the option row', () => {
+    // 用户 2026-10-17 报「FP16 版的文字溢出了，去掉 30 系后面的文字」：选项行只有一行，
+    // 超出就被省略号吃掉，所以标签本身必须短——机型与性能说明留在 note 里（挂在 title 上）。
+    // 这一条守的是**随包那份**兜底清单；线上那份在模型仓库里（Kelcoin/Yomika-Models），
+    // 是另一个仓库，改它要单独提交。
+    const manifest = JSON.parse(read('src-tauri/resources/dlssnr/dlssnr-manifest.json')) as {
+      variants: Array<{ id: string; label: string }>;
+    };
+    expect(manifest.variants.length).toBeGreaterThan(0);
+    for (const variant of manifest.variants) {
+      expect(`${variant.id}:${variant.label}`).toMatch(/^[a-z0-9-]+:.{2,12}$/);
+    }
+  });
+
   it('answers overscroll by moving the list, and pins the refresh disc over it', () => {
     const shell = read('src/styles/shell.css');
     const workspace = read('src/components/LibraryWorkspace.tsx');
@@ -2230,10 +2262,16 @@ describe('design system contract', () => {
     expect(shell).not.toMatch(/library-refresh-hint/);
     expect(workspace).not.toMatch(/library-refresh-hint|pullTicks/);
     // The gesture is answered by the content: one signed offset slides the list
-    // past either end, and touch tracks the finger while the wheel eases.
+    // past either end, and the release springs it back. 2026-10-17 改口：三种状态
+    // 各说一句话——跟手（wheel / touch）不许有过渡（每格滚轮都拖一条 100ms 的尾巴，
+    // 用户报的就是「非常卡」），回弹（settle）必须有过渡（原来触摸那档一直挂着
+    // `transition: none`，写回 0 就是瞬移），三者都要把这一层提成合成层（几千像素高
+    // 的列表，不给提示就每帧重绘它）。
     expect(workspace).toMatch(/className="archive-list-pull"/);
-    expect(workspace).toMatch(/data-overscroll=\{overscrollGesture \?\? undefined\}/);
-    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='touch'\] \{ transition: none; \}/);
+    expect(workspace).toMatch(/data-overscroll=\{overscrollSettle \? 'settle' : \(overscrollGesture \?\? undefined\)\}/);
+    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='wheel'\],\s*\.archive-list-pull\[data-overscroll='touch'\] \{ transition: none; \}/);
+    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='settle'\] \{ transition: transform 240ms cubic-bezier\(\.2, \.8, \.2, 1\); \}/);
+    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='wheel'\],\s*\.archive-list-pull\[data-overscroll='touch'\],\s*\.archive-list-pull\[data-overscroll='settle'\] \{ will-change: transform; \}/);
     // The disc is an overlay, not part of the sliding content: the list springs
     // back on release and the disc stays pinned and spinning above it.
     const disc = ruleBody(shell, '.library-pull-indicator');

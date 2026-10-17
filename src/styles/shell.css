@@ -2710,11 +2710,21 @@ body::-webkit-scrollbar,
 .archive-load-more-skeleton { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-3); padding: var(--space-3); }
 
 /* Overscroll: past either end of the list the content is dragged by hand and
-   springs back on release. Touch tracks the finger exactly, a wheel eases
-   between its notches, and the release always takes the long curve back. */
+   springs back on release.
+
+   2026-10-17 改口：手势期间**一律不过渡**——原来滚轮那档是 100ms 缓动，于是每一格
+   都在拖一条尾巴，用户报「过滚效果还是非常卡」。松手时先切到 `settle` 那一档
+   （240ms 曲线）再把位置写回 0，回弹才有动画——原来触摸那档 `transition: none`
+   一直挂着，写回 0 就是瞬移（用户报「松手后会直接瞬移回原位置而不是有动画」）。
+   三种状态都带 `will-change`：这一层是几千像素高的整个列表，不给合成层提示的话
+   每帧都要重绘它。 */
 .archive-list-pull { position: relative; transition: transform var(--motion-standard); }
-.archive-list-pull[data-overscroll='wheel'] { transition: transform 100ms cubic-bezier(.2, .8, .2, 1); }
+.archive-list-pull[data-overscroll='wheel'],
+.archive-list-pull[data-overscroll='touch'],
+.archive-list-pull[data-overscroll='settle'] { will-change: transform; }
+.archive-list-pull[data-overscroll='wheel'],
 .archive-list-pull[data-overscroll='touch'] { transition: none; }
+.archive-list-pull[data-overscroll='settle'] { transition: transform 240ms cubic-bezier(.2, .8, .2, 1); }
 
 /* The refresh disc, pinned over the list instead of carried by it: it answers
    the pull with its rotation, then stays put, spinning, while the request runs.
