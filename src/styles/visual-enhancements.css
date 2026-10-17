@@ -24,10 +24,16 @@
      观察轨道宽度）读到的还是原值。
 
    放在悬停块之后：两者都是 `transform`，同特异度时靠先后决定谁说话。悬停那 1.02 落在
-   封面/缩略图层，按压这 0.97 落在盒子上，两者可以同时成立（净效果是轻微缩小）。 */
-.archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active),
-.archive-row:is(.is-pressed, :active) {
+   封面/缩略图层，按压这 0.97 落在盒子上，两者可以同时成立（净效果是轻微缩小）。
+
+   两条分开写、缩的幅度也不一样（用户 2026-10-18：列表卡的缩得太狠）：列表卡是整行宽，
+   同一个比例在它身上是三十几像素的收缩，所以只收 1%。 */
+.archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active) {
   transform: scale(0.97);
+}
+
+.archive-row:is(.is-pressed, :active) {
+  transform: scale(0.99);
 }
 
 /* ---- Gradient Button Enhancement --------------------------------------- */

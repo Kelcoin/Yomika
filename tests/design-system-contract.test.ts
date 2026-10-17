@@ -2232,7 +2232,10 @@ describe('design system contract', () => {
     // 所以纯 transform 不会让别的卡片动；设置行仍然缩内容——它连着悬停底色，缩盒子会让用户
     // 看到「点击时 hover 效果也变小」。
     expect(base).toMatch(/\.settings-row-button:active \{\s*transform: none;/);
-    expect(polish).toMatch(/\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\),\s*\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/);
+    expect(polish).toMatch(/\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/);
+    // 列表行整行就是卡片，0.97 在满宽行上要缩掉三十多像素（用户 2026-10-18 报「列表档案卡片的
+    // 缩小程度太大了」），所以那一档单独收窄到 0.99。
+    expect(polish).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.99\);/);
     // 行高由虚拟列表给死，且没有把卡片重新量一遍的钩子——这是「别的卡片不会跟着动」的依据。
     expect(workspace).toMatch(/className="archive-thumb-grid-row"[\s\S]{0,320}?height: virtualRow\.size/);
     expect(workspace).not.toMatch(/measureElement/);
@@ -2244,23 +2247,29 @@ describe('design system contract', () => {
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
   });
 
-  it('keeps the DLSSNR labels short and puts the supported series on its own line', () => {
-    // 用户 2026-10-17 报「FP16 版的文字溢出了，去掉 30 系后面的文字」⇒ 标签收短；2026-10-18
-    // 又要「把各 DLSSNR 的适配显卡系列补回来」⇒ 系列另起一行，不挤在标签里。这一条守的是
-    // **随包那份**兜底清单；线上那份在模型仓库（Kelcoin/Yomika-Models），改它要单独提交。
+  it('keeps the DLSSNR labels short and puts the supported series on the same line', () => {
+    // 用户 2026-10-17 报「FP16 版的文字溢出了，去掉 30 系后面的文字」⇒ 标签收短；2026-10-18 先要
+    // 「把各 DLSSNR 的适配显卡系列补回来」，同日又报「把图中这些版本名字改回一行」⇒ 系列回到标签
+    // 后面**同一行**（行内 nowrap，系列跟在名字后、不再独占一行）。这一条守的是**随包那份**兜底
+    // 清单；线上那份在模型仓库（Kelcoin/Yomika-Models），改它要单独提交。
     const manifest = JSON.parse(read('src-tauri/resources/dlssnr/dlssnr-manifest.json')) as {
       variants: Array<{ id: string; label: string; note?: string }>;
     };
     expect(manifest.variants.length).toBeGreaterThan(0);
     for (const variant of manifest.variants) {
       expect(`${variant.id}:${variant.label}`).toMatch(/^[a-z0-9-]+:.{2,12}$/);
-      // 系列写在 note 里，选项行把它单独渲染成一行。
+      // 系列仍写在 note 里（悬停可见），选项行把它渲染在名字后面。
       expect(variant.note ?? '').toMatch(/RTX\s*\d{2}/);
     }
     const group = read('src/components/DlssnrSettingsGroup.tsx');
     expect(group).toMatch(/formatSeries/);
     expect(group).toMatch(/className="settings-choice-option-series"/);
-    expect(read('src/styles/shell.css')).toMatch(/\.settings-choice-option-series \{[^}]*font-size: var\(--text-xs\)/);
+    const shell = read('src/styles/shell.css');
+    // 一行：行内不换行；系列跟在名字后面（不是 `flex: 0 0 100%` 那种独占一行）。
+    expect(shell, '名字与系列必须同排一行').toMatch(/\.settings-choice-option-main \{[\s\S]{0,900}?flex-wrap: nowrap;/);
+    expect(shell, '系列跟在名字后面').toMatch(/\.settings-choice-option-series \{[\s\S]{0,200}?flex: none;/);
+    expect(shell, '系列不许再独占一行').not.toMatch(/\.settings-choice-option-series \{[\s\S]{0,200}?flex: 0 0 100%/);
+    expect(shell).toMatch(/\.settings-choice-option-series \{[\s\S]{0,200}?font-size: var\(--text-xs\)/);
   });
 
   it('paints the progress bar with the theme, never a fixed gradient', () => {
@@ -3308,9 +3317,13 @@ describe('the 2026-10-17 UI batch', () => {
     expect(base, '设置行必须例外：缩盒子会把悬停底色一起缩掉').toMatch(
       /\.settings-row-button:active \{[^}]*transform: none;/,
     );
-    // 卡片反过来：2026-10-18 用户要求「点击要有缩小效果、别让其他卡片动」，缩放落在卡片盒子上。
-    expect(polish, '卡片按下去要缩自己').toMatch(
-      /\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\),\s*\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/,
+    // 卡片反过来：2026-10-18 用户要求「点击要有缩小效果、别让其他卡片动」，缩放落在卡片盒子上；
+    // 同日又报「列表档案卡片的缩小程度太大了」，于是满宽的列表行单独收到 0.99。
+    expect(polish, '缩略图卡片按下去要缩自己').toMatch(
+      /\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/,
+    );
+    expect(polish, '满宽列表行只缩一点点').toMatch(
+      /\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.99\);/,
     );
   });
 
@@ -3336,20 +3349,27 @@ describe('the 2026-10-17 UI batch', () => {
     expect(settings, '设置里不该再有自动同步开关').not.toMatch(/label="自动同步"/);
   });
 
-  it('draws the vote glyph as the Material thumb and parks it in the time column', () => {
+  it('draws the vote glyph as the Material thumb, buttons first and the score to their right', () => {
     const comments = read('src/components/EhComments.tsx');
     expect(comments, '投票用实心 Material 拇指（用户图 4 的形状）').toContain(
       'M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11z',
     );
     expect(comments, '向下那一枚是同一路径转 180°，两枚永远同形').toContain('rotate(180 12 12)');
     expect(comments, '不再用 Lucide 的描边拇指').not.toMatch(/ThumbsUp|ThumbsDown/);
+    const actionsAt = comments.indexOf('eh-comment-votes-actions');
+    const scoreAt = comments.indexOf('eh-comment-score');
+    expect(actionsAt, '投票按钮那一组在标记里存在').toBeGreaterThan(-1);
+    expect(scoreAt, '分数排在按钮之后——DOM 顺序就是视觉顺序，用户要它在按钮右侧').toBeGreaterThan(actionsAt);
 
     const shell = read('src/styles/shell.css');
-    expect(shell, '投票行与「作者 | 时间」共用同一套两列').toMatch(
-      /\.eh-comment-votes \{[^}]*grid-template-columns: minmax\(0, 1fr\) minmax\(0, auto\);/,
+    expect(shell, '投票行贴右，与上面那行的时间同一侧').toMatch(
+      /\.eh-comment-votes \{[^}]*display: flex;[^}]*justify-content: flex-end;/,
     );
-    expect(shell, '按钮从第二列开头排起，不再被评分推着走').toMatch(
-      /\.eh-comment-votes-actions \{[^}]*justify-self: start;/,
+    expect(shell, '两枚按钮永远同一行：容器落回块级就会上下堆、第二枚还会溢出卡片').toMatch(
+      /\.eh-comment-votes-actions \{[^}]*display: inline-flex;[^}]*flex-wrap: nowrap;/,
+    );
+    expect(shell, '分数宽度钉住，+6 与 +119 不会推着按钮左右移动').toMatch(
+      /\.eh-comment-votes \.eh-comment-score \{[^}]*flex: none;[^}]*min-width: 4ch;/,
     );
   });
 });

@@ -466,7 +466,7 @@ describe('DLSS5 settings group', () => {
     expect(within(snippets).queryByText(/MB/)).toBeNull();
   });
 
-  it('lays every variant out as a name line plus a supported-series line', async () => {
+  it('lays every variant out as a name plus its supported series on one line', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
     renderDlssnr();

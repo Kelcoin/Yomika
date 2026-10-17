@@ -1465,9 +1465,10 @@ body::-webkit-scrollbar,
   justify-content: center;
   min-width: 0;
   min-height: 44px;
-  /* 允许换行：DLSSNR 的选项行是「名字 + 适配系列」两行（见下面 `.settings-choice-option-series`）。
-     不换行时那两段会被挤成一行再各自省略号，用户报的「适配的显卡系列」就看不见了。 */
-  flex-wrap: wrap;
+  /* 不换行：名字与适配系列同排一行（用户 2026-10-18 第二次口径——两行看着散，要「改回
+     一行」）。名字那一档带省略号兜底，系列跟在它后面（见 `.settings-choice-option-series`
+     的 `margin-inline-start`），行尾的动作槽不动。 */
+  flex-wrap: nowrap;
   padding: 0 var(--space-3);
   border: 0;
   border-radius: var(--radius-control);
@@ -1489,10 +1490,12 @@ body::-webkit-scrollbar,
   text-overflow: ellipsis;
 }
 
-/* 适配的显卡系列：占满一整行（`flex-basis: 100%`），小一号、淡一档，居中排在名字下面。
-   它和名字是同一条选项的两个字段，所以不写 `title`——用户要的是**看得见**。 */
+/* 适配的显卡系列：跟在名字后面同一行，小一号、淡一档（`margin-inline-start` 顶出间距，
+   不用父层的 `gap`——那会连设备行的名字/地址也撑开）。它和名字是同一条选项的两个字段，
+   所以不写 `title`——用户要的是**看得见**。 */
 .settings-choice-option-series {
-  flex: 0 0 100%;
+  flex: none;
+  margin-inline-start: var(--space-2);
   color: var(--on-surface-variant);
   font-size: var(--text-xs);
   font-weight: var(--weight-regular);
@@ -2244,13 +2247,20 @@ body::-webkit-scrollbar,
 /* Pinned to a token: with none declared the body fell back to the UA default
    16px — off the scale, and larger than the name that is meant to lead the card. */
 .eh-comments-list p { margin: 0; font-size: var(--text-md); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-relaxed); }
-/* 投票行与上面那行共用同一条两列网格（作者 | 时间）：分数落在左列、贴右边缘，两枚按钮
-   落在右列、贴左列。于是按钮的左边缘就是时间那一列的左边缘（用户要「令其左侧对齐上面
-   的时间的左侧」），而分数的宽窄再也推不动按钮（用户要「点赞按钮的位置不要受评分的
-   影响」）。 */
-.eh-comment-votes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); align-items: center; gap: var(--space-3); font-size: var(--text-xs); }
-.eh-comment-votes-actions { grid-area: 1 / 2; justify-self: start; display: inline-flex; flex-shrink: 0; align-items: center; gap: 2px; }
-.eh-comment-votes .eh-comment-score { grid-area: 1 / 1; justify-self: end; }
+/* 投票行：两枚按钮在前、分数在后（用户 2026-10-18 的口径——「评分应该在按钮的右侧」），
+   整组贴右，与上面那行的时间同一侧。
+ *
+ * 两条硬约束都写在属性里，不靠上下文：
+ *  · 按钮是块级的（`display: grid` 的方框），所以容器必须显式 `inline-flex` + `nowrap`——
+ *    容器一旦落回块级，两枚按钮就上下堆起来，第二枚还会溢出卡片底边（用户报的「布局错乱」）。
+ *  · 分数给固定最小宽度：+6 与 +119 宽度不同，不钉住的话按钮会随分数宽窄左右移动
+ *    （用户上一轮的要求「点赞按钮的位置不要受评分的影响」）。
+ *
+ * 上一版把分数放在按钮左侧、好让它与时间的左边缘对齐；用户看过之后要分数在右边，所以
+ * 对齐口径改成「整组贴右」。 */
+.eh-comment-votes { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); font-size: var(--text-xs); }
+.eh-comment-votes-actions { display: inline-flex; flex-wrap: nowrap; flex-shrink: 0; align-items: center; gap: 2px; }
+.eh-comment-votes .eh-comment-score { flex: none; min-width: 4ch; text-align: start; }
 .eh-comment-votes-actions button {
   display: grid;
   place-items: center;
