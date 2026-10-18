@@ -4,7 +4,7 @@ import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
 import { useDefaultLayout } from 'react-resizable-panels';
 import { Group, Panel, Separator } from './AdaptivePanels';
@@ -240,6 +240,8 @@ interface LibraryWorkspaceProps {
   onToggleFavorite?: (() => Promise<void>) | undefined;
   searchQuery?: string | undefined;
   onSearchQueryChange?: ((value: string) => void) | undefined;
+  sortTimeLabel?: string | undefined;
+  archiveDateById?: ReadonlyMap<string, number> | undefined;
   sortMode?: 'title' | 'added' | undefined;
   onSortModeChange?: ((value: 'title' | 'added') => void) | undefined;
   sortOrder?: 'asc' | 'desc' | undefined;
@@ -318,7 +320,7 @@ function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): 
   return collapsed ? previous.current : { items, totalSize };
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, peekThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, peekThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortTimeLabel = '添加时间', archiveDateById, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
     if (listLoading && archives.length === 0) {
@@ -700,6 +702,8 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   /** 没存过布局时档案库列表与详情那一栏的比例（64/36；只有一个面板时按满宽算）。 */
   const listPanelLayout: Layout = showDetail ? { 'library-list': 64, 'library-detail': 36 } : { 'library-list': 100 };
   const navigate = useNavigate();
+  const location = useLocation();
+  const detailArchiveId = showDetail ? selectedId : matchPath(`${detailBasePath}/:archiveId`, location.pathname)?.params.archiveId;
   useTagTranslations();
 
   const searchQuery = controlledSearchQuery ?? localSearchQuery;
@@ -1006,7 +1010,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     }} eager={eager} />;
     /* 紧凑档不画「详情已打开」那条高亮：手机上详情本来就是整屏盖住的，列表上留着的那圈
        primary 边框只剩「失焦也不消失」这一种读法（用户 2026-10-18 报的卡片高亮边框）。 */
-    const pressed = !compact && selectedId !== undefined && archive.archiveId === selectedId;
+    const pressed = !compact && archive.archiveId === detailArchiveId;
     return (
     <>
     {dayLabel && (
@@ -1039,7 +1043,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           progressPage={readingProgressByArchiveId?.get(archive.archiveId)}
           progressScope={progressScope}
           pageCount={archive.pageCount}
-          meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
+          meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archiveDateById?.get(archive.archiveId) ?? archive.addedAt)}</span></>}
         />
       </button>
     ) : (
@@ -1060,7 +1064,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
           <span className="archive-row-footer">
             <small className="archive-row-category" data-category={archiveCategoryKey(archive)}>{cardCategoryLabel(archive) || archiveLanguageLabel(archive)}</small>
-            <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archive.addedAt)].filter(Boolean).join(' · ')}</small>
+            <small className="archive-row-stats">{[formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId)), formatArchiveDate(archiveDateById?.get(archive.archiveId) ?? archive.addedAt)].filter(Boolean).join(' · ')}</small>
           </span>
         </span>
         {/* 进度条贴的是卡片自己的底边，所以它是卡片的直接子元素、排在文案之后：
@@ -1156,7 +1160,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
           name="sortMode"
           aria-label="排序字段"
           value={sortMode}
-          options={[{ value: 'title', label: '名称' }, { value: 'added', label: '添加时间' }]}
+          options={[{ value: 'title', label: '名称' }, { value: 'added', label: sortTimeLabel }]}
           onChange={(value) => {
             if (value === sortMode) updateSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
             else updateSortMode(value as 'title' | 'added');

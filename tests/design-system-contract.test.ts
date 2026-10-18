@@ -1741,7 +1741,7 @@ describe('design system contract', () => {
     // 曾经写成 inset: 1px + 半径 - 1px，那是「往里缩一格」而不是「同一条环」：在
     // DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条、上/右中间空出一个设备
     // 像素的背景，于是选中态看起来是两条线（用户报「顶部和右侧会有两条」）。
-    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after");
+    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after,\n.archive-list.is-thumbnail .archive-thumb-card:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after");
     expect(overlay).toMatch(/inset:\s*0/);
     expect(overlay).toMatch(/z-index:\s*1/);
     expect(overlay).toMatch(/border:\s*1px solid var\(--primary\)/);
@@ -1759,6 +1759,7 @@ describe('design system contract', () => {
     // 取整，z-index 仍把横条抬到卡片内容之上；同 z-index 时按文档顺序，宽行档的选中
     // 覆盖层仍在它上面。
     const gridBar = ruleBody(shell, '.archive-card-progress');
+    expect(gridBar).toMatch(/backdrop-filter:\s*blur\(6px\)/);
     expect(gridBar).toMatch(/height:\s*6px/);
     expect(gridBar).toMatch(/z-index:\s*1/);
   });
@@ -3487,7 +3488,7 @@ describe('移动端：软键盘、卡片高亮、底部留白、底栏避让', (
   it('keeps the open-detail highlight off the compact card list', () => {
     const library = read('src/components/LibraryWorkspace.tsx');
     expect(library, '紧凑档详情本来就是整屏，列表上那圈 primary 高亮只剩「失焦也不消失」这一种读法，所以卡片高亮必须把 compact 算进去').toMatch(
-      /const pressed = !compact && selectedId !== undefined && archive\.archiveId === selectedId;/,
+      /const pressed = !compact && archive\.archiveId === detailArchiveId;/,
     );
   });
 

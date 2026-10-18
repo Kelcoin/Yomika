@@ -733,17 +733,18 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
     const ids = sortedWatchlist.map((item) => item.archiveId);
     return ids.map((id) => archiveById.get(id)).filter((archive): archive is ArchiveRecord => Boolean(archive));
   }, [archiveById, history, name, sortedWatchlist]);
-  /** 书架自己的顺序按选择的排序方式重排。档案库那份排序是服务器做的（查询里带
-   * sortBy/order），书架手上只有这几十条记录，所以在这里排。
-   *
-   * 「添加时间」= 书架自己的顺序：收藏夹是服务器那条分类的顺序，待看是加入时间倒序，
-   * 历史是访问时间倒序。它本身就是「最近的在前」，所以升序是把它反过来读。 */
+  // 待看按本地加入时间；收藏按档案添加时间，不能用远端分类成员的排列顺序。
+  const readingListDates = useMemo(() => new Map(activeWatchlist.map(item =>
+    [item.archiveId, Date.parse(item.addedAt) / 1000 || 0])), [activeWatchlist]);
   const sortedArchives = useMemo(() => {
-    const base = sortMode === 'title'
-      ? [...shelfArchives].sort((left, right) => left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' }))
-      : shelfArchives;
-    return sortOrder === 'asc' ? [...base].reverse() : base;
-  }, [shelfArchives, sortMode, sortOrder]);
+    if (name === 'history') return shelfArchives;
+    const direction = sortOrder === 'asc' ? 1 : -1;
+    return [...shelfArchives].sort((left, right) => direction * (sortMode === 'title'
+      ? left.title.localeCompare(right.title, undefined, { numeric: true, sensitivity: 'base' })
+      : name === 'toRead'
+        ? (readingListDates.get(left.archiveId) ?? 0) - (readingListDates.get(right.archiveId) ?? 0)
+        : (left.addedAt ?? 0) - (right.addedAt ?? 0)));
+  }, [shelfArchives, name, readingListDates, sortMode, sortOrder]);
   /** 分类筛选同样在本地做。档案库那条 `untaggedOnly` 是服务器搜索的参数，书架没有
    * 对应的查询，所以按已有分类的成员表算：「无标签」= 不在任何分类里的档案。 */
   const categoryFilterIds = useMemo(() => {
@@ -835,6 +836,8 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
    * （它没有查询要分享，切走再回来也不该丢掉选中的分类），所以状态留在这里，只把
    * 控件要的值和回调交出去。历史没有顶栏，所以一个都不传。 */
   const toolbarProps = showShelfToolbar ? {
+    sortTimeLabel: name === 'toRead' ? '加入待看时间' : '添加时间',
+    archiveDateById: name === 'toRead' ? readingListDates : undefined,
     categories,
     categoriesLoading: categories === undefined,
     sortMode,

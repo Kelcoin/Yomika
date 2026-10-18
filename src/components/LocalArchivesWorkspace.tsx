@@ -107,7 +107,7 @@ type LocalSortOrder = 'asc' | 'desc';
 /** 和档案库那两个下拉框同一套选项，顺序也一样。 */
 const SORT_OPTIONS: SelectOption[] = [
   { value: 'title', label: '名称' },
-  { value: 'added', label: '添加时间' },
+  { value: 'added', label: '下载时间' },
 ];
 
 /** 档案库的排序在原生那边做（`ORDER BY added_at DESC, path DESC`），这一页没有

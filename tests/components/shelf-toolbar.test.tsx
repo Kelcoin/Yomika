@@ -15,6 +15,7 @@ const archive = (index: number) => ({
   archiveId: `archive-${index}`,
   title: `Archive ${index}`,
   pageCount: 40,
+  addedAt: index === 0 ? 1_800_000_000 : 1_700_000_000,
   updatedAt: '2026-09-01T00:00:00.000Z',
 });
 
@@ -99,22 +100,33 @@ describe('shelf toolbar', () => {
     await screen.findByRole('combobox', { name: '分类筛选' });
     expect(adapter).toHaveBeenCalledWith('read_favorites_category', { serverId: 'server-1' });
     expect(adapter.mock.calls.some(([command]) => command === 'list_watchlist')).toBe(false);
-    // 默认保留远端 Favorites 分类顺序：archive-1 在前。
-    expect(listTitles()).toEqual(['Archive 1', 'Archive 0']);
+    // 添加时间倒序，与远端分类成员排列顺序无关。
+    expect(listTitles()).toEqual(['Archive 0', 'Archive 1']);
 
     fireEvent.change(screen.getByRole('combobox', { name: '分类筛选' }), { target: { value: 'category000001' } });
     await waitFor(() => expect(listTitles()).toEqual(['Archive 0']));
 
     fireEvent.change(screen.getByRole('combobox', { name: '分类筛选' }), { target: { value: '' } });
-    await waitFor(() => expect(listTitles()).toEqual(['Archive 1', 'Archive 0']));
-    fireEvent.change(screen.getByRole('combobox', { name: '排序字段' }), { target: { value: 'title' } });
     await waitFor(() => expect(listTitles()).toEqual(['Archive 0', 'Archive 1']));
+    fireEvent.change(screen.getByRole('combobox', { name: '排序字段' }), { target: { value: 'title' } });
+    await waitFor(() => expect(listTitles()).toEqual(['Archive 1', 'Archive 0']));
+  });
+
+  it('reverses added time only when its direction is toggled', async () => {
+    renderShelf('/watchlist', makeAdapter());
+    await screen.findByText('Archive 0');
+    expect(listTitles()).toEqual(['Archive 0', 'Archive 1']);
+    fireEvent.click(screen.getByRole('button', { name: '添加时间' }));
+    fireEvent.click(within(screen.getByRole('listbox', { name: '排序字段' })).getByRole('button', { name: '添加时间' }));
+    await waitFor(() => expect(listTitles()).toEqual(['Archive 1', 'Archive 0']));
   });
 
   it('gives 待看 the same toolbar', async () => {
     renderShelf('/to-read', makeAdapter());
     expect(await screen.findByRole('toolbar', { name: '档案库工具' })).toBeInTheDocument();
     expect(await screen.findByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '加入待看时间' })).toBeInTheDocument();
+    await waitFor(() => expect(listTitles()).toEqual(['Archive 1', 'Archive 0']));
   });
 
   it('leaves 历史 without a toolbar: its order is the timeline itself', async () => {

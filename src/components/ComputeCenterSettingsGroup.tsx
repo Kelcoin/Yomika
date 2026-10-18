@@ -1,3 +1,4 @@
+import { useTimedConfirmation } from '../lib/useTimedConfirmation';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
@@ -101,7 +102,10 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   const [pairBusy, setPairBusy] = useState(false);
   const pairPending = useRef(false);
   const [localPairMenu, setLocalPairMenu] = useState(false);
-  const [selectedClient, setSelectedClient] = useState<string>();
+  const [confirmRevoke, setConfirmRevoke] = useState<string>();
+  const [revoking, setRevoking] = useState(false);
+  const revokePending = useRef(false);
+  useTimedConfirmation(confirmRevoke, setConfirmRevoke, revoking);
   const [portMenu, setPortMenu] = useState(false);
   const [portDraft, setPortDraft] = useState(preferences.computeCenterPort);
   const [verified, setVerified] = useState(false);
@@ -124,7 +128,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
    *  于是开关先画成关、再跳成开——用户报「每次进高级页面都默认关闭再变成开启；开着就一直
    *  开着，不要每次都从关闭再变成开的」。偏好是用户自己的意图，先按它画；`refresh()` 回来
    *  之后以 status 为准（真关了也就跟着画成关）。 */
-  const serving = status?.running ?? preferences.computeCenterEnabled;
+  const serving = verified ? status?.running ?? preferences.computeCenterEnabled : preferences.computeCenterEnabled;
   /** 自动搜到的、**还没配对过**的设备：已经配好的在上面「已配对设备」那一条里，搜出来
    *  再列一遍只会让人分不清点哪个。 */
   const unpairedDevices = useMemo(
@@ -220,10 +224,15 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   }
 
   async function revokeClient(id: string) {
+    if (revokePending.current) return;
+    revokePending.current = true;
+    setRevoking(true);
     const result = await repository.revokePairing(id);
+    revokePending.current = false;
+    setRevoking(false);
+    setConfirmRevoke(undefined);
     if (!result.ok) { showToast(result.error.message, 'error'); return; }
     publishStatus(result.value);
-    setSelectedClient(undefined);
     showToast('配对已撤销', 'success');
   }
 
@@ -309,10 +318,6 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
     void connectRemote(address.trim(), result.value.token);
   }
 
-  // 单台设备那一层的内容区只写这一台的事：名字进标题，地址进说明，剩下的话留给
-  // 「撤销之后会怎样」——列表态和它共用同一块遮罩，返回手势先退回列表（见 onClose）。
-  const selectedPairClient = status?.pairedClients?.find((client) => client.id === selectedClient);
-
   return (
     <>
       {statusError && <div className="settings-group">
@@ -354,27 +359,22 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
         </SettingsMenu>}
         {status?.running && <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status.pairedClients?.length ?? 0} 台设备`} onClick={verified ? () => { setLocalPairMenu(true); void refresh(); } : undefined} />}
         {localPairMenu && <SettingsMenu
-          title={selectedPairClient?.name ?? '管理已有配对'}
+          title="管理已有配对"
           icon={<Link2 />}
-          onClose={() => { if (selectedClient) setSelectedClient(undefined); else setLocalPairMenu(false); }}
+          onClose={() => { setConfirmRevoke(undefined); setLocalPairMenu(false); }}
         >
-          {selectedPairClient ? <>
-            {/* 标题只剩名字：这一台是谁就落到正文里的地址上（菜单顶上那行小字删了）。 */}
-            <p className="settings-menu-note">{selectedPairClient.address}</p>
-            <p className="settings-menu-note">撤销后这台设备要重新配对，才能继续把图片交给本机处理。</p>
-            <div className="settings-menu-actions">
-              <button className="secondary-action" type="button" onClick={() => void revokeClient(selectedPairClient.id)}><Unlink aria-hidden="true" />撤销配对</button>
-            </div>
-          </> : <>
-            <div className="settings-choice-list">
-              {status?.pairedClients?.map((client) => <div className="settings-choice-option" key={client.id}>
-                <button className="settings-choice-option-main settings-device-option" type="button" onClick={() => setSelectedClient(client.id)}>
-                  <DeviceRowBody name={client.name} address={client.address} kind={client.kind} />
-                </button>
-              </div>)}
-              {status?.pairedClients?.length === 0 && <p className="settings-choice-empty">暂无已配对设备</p>}
-            </div>
-          </>}
+          <div className="settings-choice-list">
+            {status?.pairedClients?.map((client) => <div className="settings-choice-option settings-paired-client" key={client.id}>
+              <div className="settings-choice-option-main settings-device-option">
+                <DeviceRowBody name={client.name} address={client.address} kind={client.kind} />
+              </div>
+              <button className="secondary-action settings-revoke-action" type="button" disabled={revoking}
+                onClick={() => { if (confirmRevoke === client.id) void revokeClient(client.id); else setConfirmRevoke(client.id); }}>
+                <Unlink aria-hidden="true" />{revoking && confirmRevoke === client.id ? '撤销中…' : confirmRevoke === client.id ? '确认撤销' : '撤销配对'}
+              </button>
+            </div>)}
+            {status?.pairedClients?.length === 0 && <p className="settings-choice-empty">暂无已配对设备</p>}
+          </div>
         </SettingsMenu>}
       </div>}
 

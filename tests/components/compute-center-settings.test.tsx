@@ -2,6 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { PreferencesProvider, usePreferences } from '../../src/app/preferences';
 import { ComputeCenterSettingsGroup } from '../../src/components/ComputeCenterSettingsGroup';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -132,8 +133,9 @@ describe('compute center paired clients', () => {
     }));
     renderComputeCenter();
     const panel = await openManagedPairings();
-    await user().click(within(panel).getByRole('button', { name: /Pixel 7 Pro/ }));
-    await user().click(screen.getByRole('button', { name: '撤销配对' }));
+    const row = within(panel).getByText('Pixel 7 Pro').closest('.settings-choice-option') as HTMLElement;
+    await user().click(within(row).getByRole('button', { name: '撤销配对' }));
+    await user().click(within(row).getByRole('button', { name: '确认撤销' }));
     expect(await screen.findByText('暂无已配对设备')).toBeInTheDocument();
     await act(async () => finish({ ok: true, value: computeStatus({ running: true, pairedClients: CLIENTS }) }));
     expect(screen.getByText('暂无已配对设备')).toBeInTheDocument();
@@ -163,7 +165,7 @@ describe('compute center paired clients', () => {
     renderComputeCenter();
 
     const panel = await openManagedPairings();
-    const row = (name: string) => within(panel).getByRole('button', { name: new RegExp(name) });
+    const row = (name: string) => within(panel).getByText(name).closest('.settings-choice-option') as HTMLElement;
 
     // 名字与地址都在（这正是截图里显示成「Yomika」的那两行）。
     expect(row('Pixel 7 Pro').textContent).toContain('192.168.1.9');
@@ -178,20 +180,57 @@ describe('compute center paired clients', () => {
     expect(row('老设备').querySelector('svg.lucide-monitor-smartphone')).not.toBeNull();
   });
 
-  it('shows one client address in the body of its own panel', async () => {
-    setInvokeAdapterForTests(adapterFor({
+  it('confirms inline and resets when focus leaves or the menu closes', async () => {
+    const adapter = adapterFor({
       compute_center_status: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: CLIENTS }) }),
-    }));
+    });
+    setInvokeAdapterForTests(adapter);
     renderComputeCenter();
-
-    const panel = await openManagedPairings();
-    await user().click(within(panel).getByRole('button', { name: /Pixel 7 Pro/ }));
-
-    // 标题只剩名字（菜单顶上那行小字删了），这一台是谁就得靠正文里的地址说清楚。
-    const single = await screen.findByRole('dialog', { name: 'Pixel 7 Pro' });
-    expect(within(single).getByText('192.168.1.9')).toBeTruthy();
-    expect(within(single).getByRole('button', { name: '撤销配对' })).toBeTruthy();
+    let panel = await openManagedPairings();
+    const row = () => within(panel).getByText('Pixel 7 Pro').closest('.settings-choice-option') as HTMLElement;
+    await user().click(within(row()).getByRole('button', { name: '撤销配对' }));
+    expect(within(row()).getByRole('button', { name: '确认撤销' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'Pixel 7 Pro' })).toBeNull();
+    expect(adapter.mock.calls.some(([command]) => command === 'compute_center_revoke_pairing')).toBe(false);
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(within(row()).getByRole('button', { name: '撤销配对' })).toBeInTheDocument();
+    await user().click(within(row()).getByRole('button', { name: '撤销配对' }));
+    await user().keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    panel = await openManagedPairings();
+    expect(within(row()).getByRole('button', { name: '撤销配对' })).toBeInTheDocument();
+    await user().click(within(row()).getByRole('button', { name: '撤销配对' }));
+    vi.useFakeTimers();
+    try {
+      // Confirmation was armed before timers were replaced; re-arm through focus reset.
+      act(() => window.dispatchEvent(new Event('blur')));
+      act(() => within(row()).getByRole('button', { name: '撤销配对' }).click());
+      act(() => vi.advanceTimersByTime(8_001));
+      expect(within(row()).getByRole('button', { name: '撤销配对' })).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
   });
+
+  it('uses the persisted switch mirror before native preferences arrive', () => {
+    localStorage.setItem('yomika.last-nav', JSON.stringify({ computeCenterEnabled: true }));
+    setInvokeAdapterForTests(adapterFor({
+      load_preferences: () => new Promise(() => {}),
+      compute_center_status: () => new Promise(() => {}),
+    }));
+    function Group() {
+      const { preferences } = usePreferences();
+      return <ComputeCenterSettingsGroup preferences={preferences} editPreferences={() => {}} />;
+    }
+    render(<PreferencesProvider><ToastProvider><Group /></ToastProvider></PreferencesProvider>);
+    expect(screen.getByRole('switch', { name: '开启本机远程后处理服务' })).toBeChecked();
+  });
+
+  it('keeps enabled preference visible while an older cached status is unverified', () => {
+    localStorage.setItem('yomika.compute-center-status', JSON.stringify(computeStatus({ running: false })));
+    setInvokeAdapterForTests(adapterFor({ compute_center_status: () => new Promise(() => {}) }));
+    render(<ToastProvider><ComputeCenterSettingsGroup preferences={{ ...DEFAULT_PREFERENCES, computeCenterEnabled: true }} editPreferences={() => {}} /></ToastProvider>);
+    expect(screen.getByRole('switch', { name: '开启本机远程后处理服务' })).toBeChecked();
+  });
+
 });
 
 describe('compute center settings menus', () => {

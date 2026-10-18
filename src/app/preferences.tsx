@@ -79,12 +79,13 @@ function applyPreferences(preferences: PreferenceSnapshot) {
  * 存的是**形态**不是整份偏好：读回来的值只用来画第一帧，真正的偏一到就整份替换。 */
 const LAST_NAV_KEY = 'yomika.last-nav';
 
-type NavMirror = Pick<PreferenceSnapshot, 'floatingNav' | 'bottomNavItems'>;
+type NavMirror = Pick<PreferenceSnapshot, 'floatingNav' | 'bottomNavItems' | 'computeCenterEnabled'>;
 
 function writeNavMirror(preferences: PreferenceSnapshot) {
   try {
     window.localStorage.setItem(LAST_NAV_KEY, JSON.stringify({
       floatingNav: preferences.floatingNav,
+      computeCenterEnabled: preferences.computeCenterEnabled,
       bottomNavItems: preferences.bottomNavItems,
     }));
   } catch { /* storage can be unavailable */ }
@@ -98,8 +99,9 @@ function readNavMirror(): Partial<NavMirror> {
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return {};
-    const value = parsed as { floatingNav?: unknown; bottomNavItems?: unknown };
+    const value = parsed as { floatingNav?: unknown; bottomNavItems?: unknown; computeCenterEnabled?: unknown };
     return {
+      ...(typeof value.computeCenterEnabled === 'boolean' ? { computeCenterEnabled: value.computeCenterEnabled } : {}),
       ...(typeof value.floatingNav === 'boolean' ? { floatingNav: value.floatingNav } : {}),
       // 元素只验到「是字符串」：认得哪几个 key 的是底栏自己（AppShell 的
       // NAV_KEY_ROUTES），不认识的 key 在那边会被过滤掉——所以这里的断言安全，

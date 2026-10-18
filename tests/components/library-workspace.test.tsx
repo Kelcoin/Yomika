@@ -3,7 +3,7 @@ import { Profiler } from 'react';
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 import { LibraryWorkspace, RAIL_MAX_TICKS, WHEEL_IDLE_MS, WIDE_COVER_MARK_LIMIT, withWideCoverMark } from '../../src/components/LibraryWorkspace';
 import { ArchiveThumbnailCard } from '../../src/components/ArchiveThumbnailCard';
@@ -127,6 +127,17 @@ describe('library workspace', () => {
     await user.click(rows[1]!);
     expect(screen.getByRole('button', { name: /^Archive 1\b/ })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: /^Archive 0\b/ })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it.each(['wide', 'thumbnail'] as const)('clears %s detail highlight when the route closes', async (cardStyle) => {
+    function Harness() {
+      const navigate = useNavigate();
+      return <><button onClick={() => navigate('/library')}>关闭详情</button><LibraryWorkspace archives={archives} showDetail={false} cardStyle={cardStyle} /></>;
+    }
+    render(<MemoryRouter initialEntries={['/library/archive-1']}><Harness /></MemoryRouter>);
+    expect(screen.getByRole('button', { name: /^Archive 1\b/ })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.setup().click(screen.getByRole('button', { name: '关闭详情' }));
+    expect(screen.getByRole('button', { name: /^Archive 1\b/ })).toHaveAttribute('aria-pressed', 'false');
   });
 
   it('renders search input and sort controls', () => {

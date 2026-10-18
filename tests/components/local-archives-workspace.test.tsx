@@ -213,7 +213,7 @@ describe('local archives workspace', () => {
     expect(titles()).toEqual(['Beta', 'Alpha']);
 
     // 换一项排序字段：方向跟着上次的不动，还是降序。
-    await user.click(screen.getByRole('button', { name: '添加时间' }));
+    await user.click(screen.getByRole('button', { name: '下载时间' }));
     let menu = await screen.findByRole('listbox', { name: '排序字段' });
     await user.click(within(menu).getByRole('button', { name: '名称' }));
     await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument());

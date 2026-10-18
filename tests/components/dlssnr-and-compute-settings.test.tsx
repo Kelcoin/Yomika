@@ -1021,8 +1021,12 @@ describe('compute center settings group', () => {
     expect(within(group).queryByText('端口')).toBeNull();
     await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
     await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
-    await user.click(within(screen.getByRole('dialog', { name: '管理已有配对' })).getByRole('button', { name: /Phone/ }));
-    await user.click(within(screen.getByRole('dialog', { name: 'Phone' })).getByRole('button', { name: '撤销配对' }));
+    // 撤销现在长在设备行自己身上：第一下只是举着「确认撤销」，第二下才真撤销
+    // （八秒没人管、窗口失焦或面板关掉都会自己退回，见 src/lib/useTimedConfirmation.ts）。
+    const row = within(screen.getByRole('dialog', { name: '管理已有配对' }))
+      .getByText('Phone').closest('.settings-choice-option') as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: '撤销配对' }));
+    await user.click(within(row).getByRole('button', { name: '确认撤销' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_revoke_pairing', { id: 'client-1' }));
     expect(screen.getByRole('dialog', { name: '管理已有配对' })).toBeInTheDocument();
   });
@@ -1041,7 +1045,8 @@ describe('compute center settings group', () => {
     await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
 
     const panel = await screen.findByRole('dialog', { name: '管理已有配对' });
-    expect(await within(panel).findByRole('button', { name: /Tablet/ })).toBeInTheDocument();
+    // 设备行不再是按钮（撤销长在行自己身上），所以按名字找那一行。
+    expect(await within(panel).findByText('Tablet')).toBeInTheDocument();
   });
 
   it('picks up a device that pairs while the settings page stays open', async () => {
@@ -1054,14 +1059,14 @@ describe('compute center settings group', () => {
     const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
     await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
     const panel = await screen.findByRole('dialog', { name: '管理已有配对' });
-    expect(within(panel).queryByRole('button', { name: /Tablet/ })).toBeNull();
+    expect(within(panel).queryByText('Tablet')).toBeNull();
 
     // 服务端在 /v2/pair/confirm 里配对成功后广播这条事件（名字与 compute_center.rs 里的
     // PAIRING_CHANGED_EVENT 一致）——设置页收到就重拉列表，不必退出再进。
     clients = [...clients, { id: 'client-2', name: 'Tablet', address: '192.168.1.10' }];
     await act(async () => { emitTauriEvent('compute-center-pairing-changed', {}); });
 
-    expect(await within(panel).findByRole('button', { name: /Tablet/ })).toBeInTheDocument();
+    expect(await within(panel).findByText('Tablet')).toBeInTheDocument();
   });
 
   it('has no revoke-everything action in the paired-device panel', async () => {
@@ -1078,8 +1083,8 @@ describe('compute center settings group', () => {
     expect(within(panel).queryByRole('button', { name: /撤销全部配对/ })).toBeNull();
 
     // 逐台撤销还在：去掉的是「全部」那一个按钮，不是撤销这条路。
-    await user.click(within(panel).getByRole('button', { name: /Phone/ }));
-    expect(within(screen.getByRole('dialog', { name: 'Phone' })).getByRole('button', { name: '撤销配对' })).toBeInTheDocument();
+    const row = within(panel).getByText('Phone').closest('.settings-choice-option') as HTMLElement;
+    expect(within(row).getByRole('button', { name: '撤销配对' })).toBeInTheDocument();
   });
 
   it('keeps remote processing locked until pairing succeeds', async () => {

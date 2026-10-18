@@ -1,3 +1,4 @@
+import { useTimedConfirmation } from '../lib/useTimedConfirmation';
 import { PlugZap, Save, X } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 
@@ -33,13 +34,6 @@ function syncAccountIdFor(kind: SyncAccountKind, label: string): string {
   }
   return `${kind === 's3' ? 's3' : 'dav'}-${(hash >>> 0).toString(16).padStart(8, '0')}`;
 }
-
-/** 「确认重置」举着等多久。
- *
- * 破坏性的动作点两下是对的，但第二下不该被无限期地等着：举着的确认按钮既占着那一行，
- * 也在等一次误触。八秒是「看清楚提示、决定按不按」够用的时间，过不去就自己退回去——
- * 想重置的人再点一次没有任何成本，而误触一次是不可逆的。 */
-const RESET_CONFIRM_TIMEOUT_MS = 8_000;
 
 /** Account and sync state behind the settings 同步 rows: one loader, one save,
  * one sync runner, everything reported through the shared toast. `enabled` gates
@@ -79,27 +73,7 @@ export function useSyncSettings(enabled = true) {
   const [resetAccount, setResetAccount] = useState<SyncAccount>();
   const [resetting, setResetting] = useState(false);
 
-  // 举着的确认形态自己会回落。三条出路都要有，少一条就是「按了没反应」或者「一直举着」：
-  //  - 一段时间没人管：定时器到点退回初始形态；
-  //  - 窗口被切走/最小化：`visibilitychange` 说它藏起来了，用户已经不在看这一行；
-  //  - 窗口失焦：`blur` 兜住「切到别的窗口去了」这种没触发 visibilitychange 的情形。
-  // 正在重置中（`resetting`）不回落：那时候按钮上写着「正在重置…」，收掉它等于把这次
-  // 操作的进展藏起来。把 `resetting` 放进依赖，它一变这条 effect 就重跑/清掉定时器。
-  useEffect(() => {
-    if (!resetAccount || resetting) return undefined;
-    const revert = () => setResetAccount(undefined);
-    const timer = window.setTimeout(revert, RESET_CONFIRM_TIMEOUT_MS);
-    const onVisibility = () => {
-      if (document.visibilityState === 'hidden') revert();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-    window.addEventListener('blur', revert);
-    return () => {
-      window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
-      window.removeEventListener('blur', revert);
-    };
-  }, [resetAccount, resetting]);
+  useTimedConfirmation(resetAccount, setResetAccount, resetting);
 
   // 与元数据编辑面板同一条规矩：错误既进页面也进吐司（理由见 MetadataEditRoute.tsx）。
   useEffect(() => {
