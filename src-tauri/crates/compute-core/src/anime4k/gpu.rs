@@ -119,6 +119,17 @@ fn open_context() -> Result<SharedContext, String> {
     }))
     .map_err(|error| format!("没有可用的显卡适配器：{error}"))?;
     let info = adapter.get_info();
+    if matches!(info.device_type, wgpu::DeviceType::Cpu) {
+        return Err("software CPU adapter is not a GPU execution backend".to_string());
+    }
+    #[cfg(target_os = "android")]
+    if info.backend != wgpu::Backend::Vulkan {
+        return Err("Android Anime4K requires the Vulkan compute backend".to_string());
+    }
+    #[cfg(target_os = "ios")]
+    if info.backend != wgpu::Backend::Metal {
+        return Err("iOS Anime4K requires the Metal compute backend".to_string());
+    }
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("anime4k-gpu"),
         ..Default::default()

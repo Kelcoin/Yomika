@@ -1,4 +1,4 @@
-import { render, renderHook, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
@@ -32,7 +32,7 @@ describe('archive detail sections', () => {
     await user.tab();
     expect(preview).toHaveFocus();
     await user.keyboard('{Escape}');
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
@@ -84,7 +84,47 @@ describe('archive detail sections', () => {
 
     // 预览层归这个组件管，Esc 也归它关。
     await user.keyboard('{Escape}');
-    expect(document.querySelectorAll('.archive-cover-preview')).toHaveLength(0);
+    expect(document.querySelector('.archive-cover-preview')).toHaveClass('is-closing');
+    await waitFor(() => expect(document.querySelectorAll('.archive-cover-preview')).toHaveLength(0));
+  });
+
+  it('uses the wide layout only for the currently loaded landscape cover', () => {
+    const view = render(<ArchiveDetailCover title="A" cover="blob:wide" />);
+    const image = screen.getByAltText('A 封面');
+    Object.defineProperties(image, { naturalWidth: { value: 1600 }, naturalHeight: { value: 900 } });
+    fireEvent.load(image);
+    expect(document.querySelector('.archive-detail-route-cover')).toHaveClass('is-wide');
+    view.rerender(<ArchiveDetailCover title="B" cover="blob:portrait" />);
+    expect(document.querySelector('.archive-detail-route-cover')).not.toHaveClass('is-wide');
+  });
+
+  it('expands from the cover bounds and animates back before removing the overlay', async () => {
+    const user = userEvent.setup();
+    const cancel = vi.fn();
+    const animate = vi.fn((_frames: Keyframe[], _options?: KeyframeAnimationOptions) => ({ cancel }));
+    const original = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'animate');
+    Object.defineProperty(HTMLImageElement.prototype, 'animate', { configurable: true, value: animate });
+    const bounds = vi.spyOn(HTMLImageElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLImageElement) {
+      return this.parentElement?.classList.contains('archive-detail-cover-trigger')
+        ? new DOMRect(20, 30, 100, 150) : new DOMRect(200, 100, 400, 600);
+    });
+    try {
+      render(<ArchiveDetailCover title="A" cover="blob:a" />);
+      await user.click(screen.getByRole('button', { name: '查看A大图' }));
+      expect(animate.mock.calls[0]?.[0]).toEqual([
+        { transform: 'translate(-330px, -295px) scale(0.25, 0.25)' }, { transform: 'none' },
+      ]);
+      await user.keyboard('{Escape}');
+      expect(animate).toHaveBeenCalledTimes(2);
+      expect(animate.mock.calls[1]?.[0]?.[1]).toEqual({ transform: 'translate(-330px, -295px) scale(0.25, 0.25)' });
+      expect(cancel).toHaveBeenCalled();
+      expect(screen.getByRole('dialog')).toHaveClass('is-closing');
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    } finally {
+      bounds.mockRestore();
+      if (original) Object.defineProperty(HTMLImageElement.prototype, 'animate', original);
+      else delete (HTMLImageElement.prototype as { animate?: unknown }).animate;
+    }
   });
 
   it('renders a placeholder instead of a cover when there is none', () => {

@@ -520,6 +520,7 @@ describe('loadReaderComputedPage', () => {
     const b = bridge({
       artifacts: [artifact({
         enginePolicy: 'auto',
+        engineDeviceId: 'cpu',
         engineFallback: { requested: 'directml', used: 'cpu', reason: 'directml 在这台机器上不可用' },
       })],
     });
@@ -538,6 +539,7 @@ describe('loadReaderComputedPage', () => {
 
     expect(seen).toEqual([{
       policy: 'auto',
+      deviceId: 'cpu',
       fallback: { requested: 'directml', used: 'cpu', reason: 'directml 在这台机器上不可用' },
     }]);
     cache.release(handle!);

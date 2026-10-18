@@ -35,6 +35,7 @@ export interface ReaderComputedPageBridge {
 export interface ReaderPageEngine {
   policy: ComputeArtifactRecord['enginePolicy'];
   fallback: ComputeArtifactRecord['engineFallback'];
+  deviceId?: string;
 }
 
 /** 这一页没算成的原因。`code` 是宿主/领域错误码（`GPU_OUTPUT_INVALID` 这类）。
@@ -214,7 +215,11 @@ export async function loadReaderComputedPage(
       // 图真到手了才交代引擎：宿主报告里那两栏（政策 + 回退）就在这份产物上。放在认领
       // **之前**，是为了让「这一版不是显卡算的」与「这一版上屏」同时发生——等认领之后再说，
       // 中间那些 await 就可能让它晚于翻页。
-      claim.onEngine?.({ policy: newest.enginePolicy, fallback: newest.engineFallback });
+      claim.onEngine?.({
+        policy: newest.enginePolicy,
+        fallback: newest.engineFallback,
+        ...(newest.engineDeviceId ? { deviceId: newest.engineDeviceId } : {}),
+      });
 
       // Keep encoded length for disk/Blob quota and propagate decoded residency
       // separately: a tiny compressed page can still decode to hundreds of MiB.

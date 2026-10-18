@@ -2085,6 +2085,7 @@ body::-webkit-scrollbar,
   outline: 2px solid var(--focus-ring);
   outline-offset: 4px;
 }
+.archive-detail-cover-trigger[data-preview-open] img { visibility: hidden; }
 
 /* A fixed width, not `min(18vw, …)`. Viewport units meant the cover resized
    continuously while the window was dragged — and 18vw does not describe this
@@ -3908,9 +3909,24 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   display: grid;
   place-items: center;
   padding: clamp(16px, 4vw, 48px);
+  isolation: isolate;
+  cursor: zoom-out;
+}
+
+.archive-cover-preview::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
   background: var(--backdrop-overlay);
   backdrop-filter: blur(18px);
-  cursor: zoom-out;
+  animation: cover-backdrop-in var(--duration-standard) var(--ease-standard) both;
+}
+.archive-cover-preview.is-closing::before { animation: cover-backdrop-out var(--duration-standard) var(--ease-exit) both; }
+@keyframes cover-backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cover-backdrop-out { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .archive-cover-preview::before { animation: none; }
 }
 
 .archive-cover-preview img {
@@ -6531,6 +6547,14 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .archive-detail-cover-trigger, .archive-detail-route-cover img, .archive-detail-cover-placeholder { width: 104px; }
   .archive-detail-route-cover img { height: 139px; }
   .archive-detail-facts { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+}
+
+/* Landscape art gets the same uncropped treatment as wide thumbnail cards. */
+.archive-detail-overview:has(.archive-detail-route-cover.is-wide) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.archive-detail-route-cover.is-wide .archive-detail-cover-trigger { width: 100%; }
+.archive-detail-route-cover.is-wide img { width: 100%; height: auto; aspect-ratio: auto; object-fit: contain; }
+@container archive-detail (max-width: 520px) {
+  .archive-detail-overview:has(.archive-detail-route-cover.is-wide) { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ---- A finger is not a pointer ------------------------------------------

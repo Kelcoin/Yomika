@@ -746,6 +746,23 @@ fn a_cancelled_job_is_reported_as_cancelled_not_failed() {
 }
 
 #[test]
+fn disconnect_while_waiting_for_artifact_ack_releases_executor() {
+    let engine = TestEngine::new();
+    let mut harness = Harness::new("disconnect-awaiting-ack", 4096, engine.clone());
+    harness.handshake();
+    harness.host.send(&run_message("job-1", &["stage-a"]));
+    harness.host.collect_until("artifact_ready");
+    harness.host.duplex.close();
+    assert!(matches!(harness.finish(), Ok(SessionOutcome::PeerClosed)));
+    let deadline = Instant::now() + TIMEOUT;
+    // The detached executor owns an engine reference until its artifact waiter exits.
+    while Arc::strong_count(&engine.0) != 1 {
+        assert!(Instant::now() < deadline, "executor retained engine after peer disconnected awaiting ACK");
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
 fn a_cancel_while_waiting_for_the_artifact_ack_ends_the_job() {
     // 产物已经报了、宿主还没裁决时来的取消，走的是等待槽那条路，与上面的引擎
     // 检查点是两条独立路径。

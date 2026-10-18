@@ -829,6 +829,36 @@ describe('reader route', () => {
     expect(await screen.findByRole('button', { name: '关闭超分' })).toBeInTheDocument();
   });
 
+  it('pauses hidden-document preprocessing and resumes without releasing the displayed page', async () => {
+    let visibility: DocumentVisibilityState = 'hidden';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    let finishFirst!: (lease: HostLease) => void;
+    const enhance = vi.fn((pageIndex: number) => pageIndex === 0
+      ? new Promise<HostLease>((resolve) => { finishFirst = resolve; })
+      : Promise.resolve({ url: `blob:enhanced-${pageIndex}`, bytes: 1 }));
+    const release = enhancedReader(2, enhance);
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(enhance).not.toHaveBeenCalled();
+
+    visibility = 'visible';
+    fireEvent(document, new Event('visibilitychange'));
+    await waitFor(() => expect(enhance).toHaveBeenCalledTimes(1));
+    visibility = 'hidden';
+    fireEvent(document, new Event('visibilitychange'));
+    await act(async () => { finishFirst({ url: 'blob:enhanced-0', bytes: 1 }); });
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(enhance).toHaveBeenCalledTimes(1);
+    expect(release.mock.calls.some(([handle]) => handle.url === 'blob:enhanced-0')).toBe(false);
+
+    visibility = 'visible';
+    fireEvent(document, new Event('visibilitychange'));
+    await waitFor(() => expect(enhance).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
+  });
+
   it('marks the page in the viewport as foreground and the rest of the sweep as background', async () => {
     // 用户要的「超分、DLSSNR 都无条件优先处理当前页」在前端这一侧就是这一个
     // 字段：队列按档位给每件活打上前台/后台，原生那侧据此插队并掐掉正在跑的后台。
@@ -2021,9 +2051,10 @@ describe('reader route', () => {
   });
 
   it('reprobes changed remote settings and retries with the newly advertised revision', async () => {
+    installHost();
     let processed = 0;
     const { calls } = remoteReader({
-      ready: { upscale: true, dlssnr: false },
+      ready: { upscale: true, dlssnr: false }, localModel: 'local-model',
       process: () => ++processed === 1
         ? { ok: false, error: { code: 'REMOTE_PLAN_CHANGED', message: 'settings changed', retryable: true } }
         : [0x89, 0x50, 0x4e, 0x47],
@@ -2037,6 +2068,7 @@ describe('reader route', () => {
       const last = calls.filter(([name]) => name === 'remote_compute_process').at(-1)?.[1]?.input as { expectedRevision: string };
       expect(last.expectedRevision).toBe('settings-2');
     });
+    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
   });
 
   it('runs the local model only after the remote request fails', async () => {

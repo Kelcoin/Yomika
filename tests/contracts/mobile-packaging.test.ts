@@ -17,6 +17,22 @@ function readJson(path: string): Record<string, unknown> {
 }
 
 describe('mobile packaging', () => {
+  it('links mobile ORT API 27 from the pinned target build and packages its dependencies', () => {
+    const core = read('../../src-tauri/crates/compute-core/Cargo.toml');
+    expect(core).toContain('default-features = false, features = ["std", "ndarray", "tracing", "api-27"]');
+    const prepare = read('../../.github/scripts/prepare-mobile-ort.py');
+    expect(prepare).toContain('8f0278c77bf44b0cc83c098c6c722b92a36ac4b5');
+    expect(prepare).toContain('#define ORT_API_VERSION 27');
+    expect(prepare).toContain('"--use_nnapi"');
+    expect(prepare).toContain('"--use_coreml"');
+    expect(prepare).toContain('ORT_IOS_XCFWK_PATH');
+    expect(prepare).toContain('libc++_shared.so');
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    expect(workflow).toContain('prepare-mobile-ort.py android');
+    expect(workflow).toContain('prepare-mobile-ort.py ios');
+    expect(workflow).toContain('verify-mobile-runtime.py');
+  });
+
   it('declares the feature the Tauri CLI switches on for release builds', () => {
     // `cfg(dev)` comes from this cargo feature, not from the debug/release profile: a
     // build without it is a development build, and on mobile that means every asset

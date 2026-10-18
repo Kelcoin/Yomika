@@ -4,7 +4,25 @@
 //! 这几条护的是「肉眼才看得见」的那类错误：通道错位、alpha 被模型吃掉、模型在
 //! 高对比边缘过冲时整幅图出现麻点。
 
-use yomika_compute_core::tensor::{nchw_over_rgba, pad_rgba_edges, rgba_to_nchw};
+use yomika_compute_core::tensor::{nchw_over_rgba, pad_rgba_edges, preserve_neutral_chroma, rgba_to_nchw};
+
+#[test]
+fn neutral_chroma_correction_preserves_detail_colour_edges_and_alpha() {
+    let mut source = [80, 80, 80, 255].repeat(5);
+    source[4..8].copy_from_slice(&[220, 10, 20, 128]);
+    let mut output = [50, 90, 55, 77].repeat(20); // 5x1 at x2
+    let before = output.clone();
+    preserve_neutral_chroma(&source, 5, 1, 2, &mut output);
+    // Colour and its adjacent source pixels retain the model's RGB output.
+    assert_eq!(&output[..6 * 4], &before[..6 * 4]);
+    for x in 6..10 {
+        let pixel = &output[x * 4..x * 4 + 4];
+        assert_eq!(pixel[0], pixel[1]);
+        assert_eq!(pixel[1], pixel[2]);
+        assert!((78..=80).contains(&pixel[0])); // output luma, not source brightness
+        assert_eq!(pixel[3], 77);
+    }
+}
 
 #[test]
 fn rgba_round_trips_through_the_planar_layout() {

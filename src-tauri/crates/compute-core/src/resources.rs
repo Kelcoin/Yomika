@@ -7,6 +7,22 @@ pub struct SystemMemory {
     pub available_commit_bytes: u64,
     pub private_commit_bytes: u64,
 }
+/// Mobile GPU buffers share RAM with the application and compositor. Reserve
+/// only one eighth for frame buffers, accounting for decode, output and copies.
+/// Activation buffers are bounded separately by the tile ceiling below.
+pub fn mobile_page_pixel_limit(physical_ram_bytes: u64) -> u64 {
+    (physical_ram_bytes / 8 / 24).clamp(4_000_000, 32_000_000)
+}
+
+/// A conservative initial tile for unified-memory devices. Allocation failure
+/// recovery may shrink it further; a missing memory reading uses the low tier.
+pub fn mobile_tile_edge_for_pixel_budget(max_pixels: u64) -> u32 {
+    match max_pixels {
+        0..=8_000_000 => 128,
+        8_000_001..=24_000_000 => 256,
+        _ => 384,
+    }
+}
 /// Keep a quarter of the OS budget free. Missing telemetry uses a modest working set.
 pub fn gpu_available_bytes(memory: Option<GpuMemory>) -> u64 {
     memory.map(|m| m.budget_bytes.saturating_sub(m.used_bytes).saturating_sub(m.budget_bytes / 4))

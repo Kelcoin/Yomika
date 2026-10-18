@@ -15,7 +15,11 @@ use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command as ProcessCommand, Stdio};
+use std::process::{Command as ProcessCommand, Stdio};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::process::Child;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use super::mobile_worker::{Child, Stream as PipeStream};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -29,6 +33,7 @@ use yomika_compute_protocol::{
 };
 // `Ping` 是唯一没被协议 crate 的根再导出的消息类型，得从模块里拿。
 use yomika_compute_protocol::messages::Ping;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use yomika_compute_transport::pipe::PipeStream;
 use yomika_compute_transport::server::PipeServer;
 
@@ -66,6 +71,8 @@ pub struct ArtifactRecord {
     pub width: u32,
     pub height: u32,
     pub engine_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine_device_id: Option<String>,
     pub engine_precision: String,
     /// 这一阶段**被问的是哪条引擎政策**（`auto`/`cpu`/`gpu`）。`None` = 那次报告没
     /// 交代（老 worker，或事实驱动的那条路），不是「跑的是 CPU」。
@@ -333,7 +340,12 @@ pub struct SupervisorConfig {
 
 impl SupervisorConfig {
     pub fn new(worker_path: impl Into<PathBuf>, staging_root: impl Into<PathBuf>) -> Self {
-        let ram = physical_ram_bytes().unwrap_or(FALLBACK_RAM_BYTES);
+        let ram = physical_ram_bytes().unwrap_or_else(|| {
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            { super::mobile_resources::fallback_ram_bytes() }
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            { FALLBACK_RAM_BYTES }
+        });
         let cores = thread::available_parallelism()
             .map(|cores| cores.get())
             .unwrap_or(1);
@@ -1268,6 +1280,7 @@ impl Supervisor {
                         width: ready.width,
                         height: ready.height,
                         engine_id: ready.engine.id.clone(),
+                        engine_device_id: (!ready.engine.device_id.is_empty()).then(|| ready.engine.device_id.clone()),
                         engine_precision: format!("{:?}", ready.engine.precision),
                         engine_policy: ready
                             .engine
@@ -1831,6 +1844,7 @@ impl Supervisor {
         }
         // 可执行文件不在，就别按 1s/3s/10s 退避重试三次再报坏了：那不是「它刚才起崩了」，
         // 而是「这台机器上根本没有它」。一次性说清楚，并让排队的任务当场拿到结论。
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         if !self.shared.config.worker_path.is_file() {
             let reason = format!(
                 "找不到 worker 可执行文件：{}",
@@ -1847,6 +1861,12 @@ impl Supervisor {
                 state.scheduler.fail_queued(WORKER_UNAVAILABLE_CODE, now_ms)
             });
             self.shared.emit(&failed);
+            return;
+        }
+        // A timed-out mobile control session can end before its native executor.
+        // Waiting is not a spawn failure and must never spend the restart budget.
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        if super::mobile_worker::is_busy() {
             return;
         }
         let now = Instant::now();
@@ -1866,11 +1886,46 @@ impl Supervisor {
                 self.session = Some(session);
                 self.reset_idle();
             }
+            // Another manager may acquire the global permit between our check
+            // and spawn; this is still a wait, never a failed worker restart.
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             // 起不来也是一次失败：走同一套退避与熔断。
             Err(error) => self.lose_session(&format!("起 worker 失败：{error}"), None),
         }
     }
 
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    fn spawn_session(&self) -> io::Result<Session> {
+        let config = &self.shared.config;
+        std::fs::create_dir_all(&config.inputs_root)?;
+        let nonce = mint_nonce();
+        let epoch = self.shared.with_state(|state| state.scheduler.epoch());
+        let epoch_tag = format!("{epoch}-{nonce:016x}");
+        let (child, stream) = super::mobile_worker::spawn(
+            epoch_tag.clone(), nonce, config.staging_root.clone(),
+            config.inputs_root.clone(), matches!(config.worker_engine, WorkerEngine::Echo),
+        )?;
+        let reader_stream = stream.clone();
+        let (sender, reports) = mpsc::channel();
+        if let Err(error) = thread::Builder::new().name("yomika-compute-reader".into())
+            .spawn(move || read_loop(reader_stream, sender)) {
+            stream.shutdown();
+            return Err(error);
+        }
+        Ok(Session {
+            epoch, epoch_tag, peer_pid: std::process::id(), child, stream, reports,
+            job: None, limits_applied: false,
+            limits_note: Some(super::mobile_worker::LIMITS_NOTE.into()),
+            stderr_tail: Arc::new(Mutex::new(VecDeque::new())), stderr_drain: None,
+            spawned_at: Instant::now(), handshaked: false,
+            ping_at: Instant::now() + Duration::from_millis(PING_INTERVAL_MS),
+            misses: 0, ping_nonce: 0, running: None, release_reply: None,
+            release_pending: false, release_at: None,
+        })
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn spawn_session(&self) -> io::Result<Session> {
         let config = &self.shared.config;
         let server = PipeServer::create()?;
@@ -2049,13 +2104,16 @@ impl Supervisor {
             let Some(session) = self.session.as_mut() else {
                 return;
             };
-            let run = build_run(
+            #[allow(unused_mut)]
+            let mut run = build_run(
                 &dispatched,
                 &template,
                 &prepared,
                 &session.epoch_tag,
                 self.shared.config.intra_threads,
             );
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            { run.budgets.max_pixels = yomika_compute_core::resources::mobile_page_pixel_limit(self.shared.config.physical_ram_bytes); }
             match send_frame(&mut session.stream, &Message::Run(run)) {
                 Ok(()) => {
                     session.running = Some(Running {
@@ -2423,6 +2481,7 @@ fn send_frame(stream: &mut PipeStream, message: &Message) -> io::Result<()> {
 }
 
 /// 收掉进程，并且**等它真的退出**（§8.2：没退出之前不给下一件任务许可）。
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn terminate_process(session: &mut Session, grace: Duration) {
     if let Some(job) = session.job.take() {
         let _ = job.terminate();
@@ -2439,6 +2498,12 @@ fn terminate_process(session: &mut Session, grace: Duration) {
     let _ = session.child.wait();
 }
 
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn terminate_process(session: &mut Session, _grace: Duration) {
+    // Closing the transport cancels protocol waiters; native inference is never killed.
+    session.stream.shutdown();
+}
+
 /// 把 staging 里上一代留下来的东西收回去。
 ///
 /// 只在**确定没有写者**的两个时刻调用：握手刚谈成（上一代 worker 已经不在了，这批
@@ -2452,6 +2517,8 @@ fn terminate_process(session: &mut Session, grace: Duration) {
 /// **输入根不在这儿收**：里面的东西是宿主放的，排队的任务可能还要用，收摊这一刻并不能
 /// 证明它们没人要。
 fn reclaim_staging(shared: &Shared) {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    if super::mobile_worker::is_busy() { return; }
     let staging_root = shared.config.staging_root.clone();
     match crate::compute::artifacts::sweep_staging(&staging_root, Duration::ZERO) {
         Ok(sweep) if sweep.removed_files > 0 => eprintln!(
@@ -2534,6 +2601,7 @@ fn verify_artifact(
         width: ready.width,
         height: ready.height,
         engine_id: ready.engine.id.clone(),
+        engine_device_id: (!ready.engine.device_id.is_empty()).then(|| ready.engine.device_id.clone()),
         engine_precision: format!("{:?}", ready.engine.precision),
         engine_policy: ready
             .engine
@@ -2587,10 +2655,13 @@ fn physical_ram_bytes() -> Option<u64> {
     Some(status.ullTotalPhys)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
 fn physical_ram_bytes() -> Option<u64> {
     None
 }
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn physical_ram_bytes() -> Option<u64> { super::mobile_resources::physical_ram_bytes() }
 
 /// 整卡本地段的显存余量（`budget - used`）与预算，问的是 DXGI。
 ///

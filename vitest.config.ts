@@ -24,6 +24,12 @@ export default defineConfig({
     // `docs/` holds read-only copies of reference projects (LANreader, JHenTai,
     // ComicReadScript…), and their own test files are not ours to run — they
     // fail on dependencies this project does not have.
-    exclude: ['**/node_modules/**', '**/dist/**', 'docs/**'],
+    //
+    // `src-tauri/target/` is a build directory, but it is not only build output:
+    // `.github/scripts/prepare-mobile-ort.py` extracts the pinned ONNX Runtime
+    // **source tree** under `src-tauri/target/mobile-ort*/`, and that tree ships
+    // its own `*.test.js` (a Detox e2e file that needs a device). Sweeping it
+    // turns the whole run red on someone else's test — exclude the build dir.
+    exclude: ['**/node_modules/**', '**/dist/**', 'docs/**', 'src-tauri/target/**'],
   },
 });

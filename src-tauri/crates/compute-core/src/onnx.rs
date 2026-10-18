@@ -19,7 +19,7 @@ use crate::error::ComputeError;
 use crate::inputs::file_fingerprint;
 use crate::probe::{self, ProbeKey, ProbeKind};
 use crate::runtime::{available_runtimes, open_session, platform_preference, RuntimeId};
-use crate::tensor::{nchw_over_rgba, pad_rgba_edges, rgba_to_nchw};
+use crate::tensor::{nchw_over_rgba, pad_rgba_edges, preserve_neutral_chroma, rgba_to_nchw};
 use crate::upscale::UpscaleEngine;
 
 /// 探针用的瓦片尺寸（源像素）。72×64 是历史值：够大能跨过 Real-CUGAN 图内那 18 px
@@ -163,7 +163,16 @@ impl OnnxEngine {
             // 这份构建/这台机器连一条硬件运行库都没有：没得问，也就没得测。
             None => (RuntimeId::Cpu, ValidationVerdict::NotTested),
         };
-        let engine = Self::open_with_runtime(path, used, scale, max_pixels, min_input_edge)?;
+        let (engine, used, verdict) = match Self::open_with_runtime(path, used, scale, max_pixels, min_input_edge) {
+            Ok(engine) => (engine, used, verdict),
+            Err(error) if used.is_hardware_accelerated() => {
+                let reason = format!("{} session failed after successful probe: {error}; using CPU reference", used.as_str());
+                eprintln!("yomika: {reason}");
+                (Self::open_with_runtime(path, RuntimeId::Cpu, scale, max_pixels, min_input_edge)?,
+                    RuntimeId::Cpu, ValidationVerdict::Failed { reason })
+            }
+            Err(error) => return Err(error),
+        };
         Ok((
             engine,
             RuntimeChoice {
@@ -216,6 +225,21 @@ fn resolve_input_dimensions(fixed: Option<(u32,u32)>, width: u32, height: u32) -
     }
 }
 
+fn profile_has_provider_nodes(profile: &str, runtime: RuntimeId) -> bool {
+    let provider = match runtime {
+        RuntimeId::DirectMl => "DmlExecutionProvider",
+        RuntimeId::CoreMl => "CoreMLExecutionProvider",
+        RuntimeId::Nnapi => "NnapiExecutionProvider",
+        RuntimeId::Cpu => "CPUExecutionProvider",
+    };
+    serde_json::from_str::<serde_json::Value>(profile).ok()
+        .and_then(|value| value.as_array().cloned())
+        .is_some_and(|events| events.iter().any(|event| {
+            event.get("cat").and_then(|v| v.as_str()) == Some("Node")
+                && event.pointer("/args/provider").and_then(|v| v.as_str()) == Some(provider)
+        }))
+}
+
 pub fn validate_runtime(
     path: &Path,
     runtime: RuntimeId,
@@ -232,7 +256,13 @@ pub fn validate_runtime(
     }
     let probe = |runtime: RuntimeId| -> Result<Vec<f32>, String> {
         probe::note_probe_opened();
-        let mut session = open_session(path, runtime)?;
+        // Each probe owns a unique profile prefix; never reuse another model's evidence.
+        static PROFILE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let profile_prefix = crate::runtime::profile_directory().join(format!("yomika-ort-probe-{}-{}", std::process::id(),
+            PROFILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        let mut session = crate::runtime::builder(runtime)?
+            .with_profiling(&profile_prefix).map_err(|error| error.to_string())?
+            .commit_from_file(path).map_err(|error| error.to_string())?;
         let fixed = session.inputs().first().and_then(|input| input.dtype().tensor_shape())
             .and_then(|shape| static_input_dimensions(shape));
         let (width, height) = resolve_input_dimensions(fixed, PROBE_WIDTH.max(min_input_edge as usize) as u32, PROBE_HEIGHT.max(min_input_edge as usize) as u32);
@@ -275,7 +305,16 @@ pub fn validate_runtime(
             runtime.as_str(),
             started.elapsed()
         );
-        Ok(values.to_vec())
+        let result = values.to_vec();
+        drop(outputs);
+        let profile_path = session.end_profiling().map_err(|error| error.to_string())?;
+        let profile = std::fs::read_to_string(&profile_path).map_err(|error| error.to_string());
+        let _ = std::fs::remove_file(&profile_path);
+        if runtime.is_hardware_accelerated() && !profile_has_provider_nodes(&profile?, runtime) {
+            return Err(format!("{} registered but no computing node was executed by this provider; CPU-only graph fallback rejected", runtime.as_str()));
+        }
+        eprintln!("yomika: ONNX provider={} actual graph assignment verified (CPU operator fallback permitted)", runtime.as_str());
+        Ok(result)
     };
     let actual = match probe(runtime) {
         Ok(values) => values,
@@ -430,6 +469,7 @@ impl UpscaleEngine for OnnxEngine {
             (height * self.scale) as usize,
             &mut output,
         );
+        preserve_neutral_chroma(rgba, width, height, self.scale, &mut output);
         Ok(output)
     }
 }
@@ -483,6 +523,13 @@ mod tests {
 
     /// CPU 就是参照，所以「对 CPU 做实测」只能有一个结论：通过。这条看着像废话，但它
     /// 挡住的是「探针在 CPU 上也硬要比一次、比完还可能判失败」那种自相矛盾。
+    #[test]
+    fn assignment_evidence_requires_a_computing_node_on_the_requested_provider() {
+        assert!(profile_has_provider_nodes(r#"[{"cat":"Node","args":{"provider":"NnapiExecutionProvider"}}]"#, RuntimeId::Nnapi));
+        assert!(!profile_has_provider_nodes(r#"[{"cat":"Node","args":{"provider":"CPUExecutionProvider"}}]"#, RuntimeId::Nnapi));
+        assert!(!profile_has_provider_nodes(r#"[{"cat":"Session","args":{"provider":"CoreMLExecutionProvider"}}]"#, RuntimeId::CoreMl));
+    }
+
     #[test]
     fn the_reference_runtime_is_always_a_pass() {
         let verdict = validate_runtime(Path::new("does-not-exist.onnx"), RuntimeId::Cpu, 2, 20);

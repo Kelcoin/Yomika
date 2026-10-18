@@ -68,6 +68,7 @@ Thumbs.db
 # CI 构建时会往这里写一份（从 secret 解出来），本地测试密钥也放这里——都不进仓库。
 /src-tauri/gen/android/release.keystore
 /src-tauri/gen/android/keystore.local.properties
+/src-tauri/gen/android/app/src/main/jniLibs/
 
 # 本机运行时留下的目录。NGX/DLSS 会在「当前工作目录」旁建一个空的
 # `NVIDIA Corporation/`（仓库根、src-tauri/、src-tauri/worker/ 都出现过），

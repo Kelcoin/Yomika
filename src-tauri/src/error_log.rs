@@ -421,7 +421,7 @@ fn expected_outcome(message: &str) -> bool {
         "INFERENCE_CANCELLED" | "COMPUTE_CANCELLED" |
         "COMPUTE_QUEUE_FULL" | "COMPUTE_UNAVAILABLE" | "COMPUTE_WORKER_BUSY" |
         "APP_RELEASE_CHECK_FAILED" | "APP_RELEASE_UNREACHABLE" |
-        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" | "ERR_CANCELED" | "REMOTE_TIMEOUT")
+        "QUEUE_FULL" | "CANCELLED" | "CANCELED" | "ABORTED" | "ABORT_ERR" | "ERR_CANCELED" | "REMOTE_TIMEOUT" | "REMOTE_PLAN_CHANGED")
 }
 
 fn transport_failure(message: &str) -> bool {

@@ -316,7 +316,7 @@ describe('archive detail route', () => {
     expect(within(dialog).queryByRole('heading')).not.toBeInTheDocument();
     expect(within(dialog).queryByRole('button')).not.toBeInTheDocument();
     fireEvent.click(preview);
-    expect(screen.queryByRole('dialog', { name: 'Archive detail封面大图' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Archive detail封面大图' })).not.toBeInTheDocument());
   });
 
   it('links translated detail tags to an exact library search', async () => {

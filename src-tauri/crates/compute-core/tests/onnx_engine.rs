@@ -100,3 +100,20 @@ mod with_ort {
         assert_eq!(engine.runtime(), RuntimeId::Cpu);
     }
 }
+
+#[cfg(feature = "ort")]
+#[test]
+fn realcugan_neutral_fixture_retains_neutral_chroma() {
+    use yomika_compute_core::{onnx::OnnxEngine, runtime::RuntimeId, upscale::UpscaleEngine};
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../docs/models/realcugan-2x-conservative-dml1.onnx");
+    if !path.is_file() { return; }
+    let mut input = Vec::new();
+    for y in 0..64 { for x in 0..64 {
+        let level = if (x+y)%7 < 3 { 40 } else { 210 };
+        input.extend_from_slice(&[level,level,level,255]);
+    }}
+    let engine = OnnxEngine::open_with_runtime(&path,RuntimeId::Cpu,2,1_000_000,20).unwrap();
+    let output = engine.upscale_tile(&input,64,64).unwrap();
+    let max_chroma = output.chunks_exact(4).map(|p| p[..3].iter().max().unwrap()-p[..3].iter().min().unwrap()).max().unwrap();
+    assert!(max_chroma <= 2, "neutral manga acquired chroma: {max_chroma}");
+}

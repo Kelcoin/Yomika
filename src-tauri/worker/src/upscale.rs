@@ -385,6 +385,10 @@ impl Engine for UpscaleEngine {
         let fixed = engine.fixed_input_size();
         let padding = upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
         let adaptive = resources::auto_tile_size(gpu_memory, scale, padding, min_input_edge, fixed);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let adaptive = adaptive.min(resources::mobile_tile_edge_for_pixel_budget(request.run.budgets.max_pixels)).max(min_input_edge);
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let tile = tile.min(adaptive);
         let options = UpscaleOptions {
             output_scale: Some(delivery_scale),
             tile_size: if tile == 0 { adaptive } else { fixed.map(|_| tile.min(adaptive)).unwrap_or(tile) },
@@ -463,11 +467,11 @@ fn open_forced_gpu(
 ) -> Result<OnnxEngine, StageError> {
     let runtime = runtime::available_runtimes()
         .into_iter()
-        .find(|id| id.is_hardware_accelerated())
+        .find(|id| id.proves_gpu_execution())
         .ok_or_else(|| {
             StageError::failed(
                 GPU_BACKEND_UNAVAILABLE_CODE,
-                "这份构建里没有可用的 GPU 运行库",
+                "没有可证明 GPU 执行的运行库；NNAPI/CoreML 硬件加速请使用自动模式",
             )
         })?;
     match validate_runtime_cached(path, runtime, scale, min_input_edge) {

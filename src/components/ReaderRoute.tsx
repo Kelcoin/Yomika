@@ -188,6 +188,7 @@ function ReaderRouteChromeShell({ className, title, goBack, children }: { classN
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageActive = usePageActive();
+  const documentVisibleRef = useRef(document.visibilityState !== 'hidden');
   const pageActiveRef = useRef(pageActive);
   pageActiveRef.current = pageActive;
   /** 进入这一本时那次清理有没有落地。
@@ -795,7 +796,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 原因，所以按内容去重而不是按页。 */
   const noticeEngineFallback = useCallback((model: string, engine: ReaderPageEngine) => {
     const fallback = engine.fallback;
-    if (!fallback) return;
+    if (!fallback) {
+      const label = engine.deviceId === 'accelerator:nnapi:gpu-or-npu'
+        ? 'NNAPI 硬件加速（GPU 或 NPU）'
+        : engine.deviceId === 'accelerator:coreml:cpu-and-gpu'
+          ? 'CoreML（CPU／GPU 自动调度）'
+          : undefined;
+      const key = `accelerator:${model}:${engine.deviceId}`;
+      if (label && !engineNoticeRef.current.has(key)) {
+        engineNoticeRef.current.add(key);
+        showToast(`超分正在使用 ${label}。`, 'info');
+      }
+      return;
+    }
     const key = `fallback:${model}:${fallback.requested}:${fallback.used}:${fallback.reason}`;
     if (engineNoticeRef.current.has(key)) return;
     engineNoticeRef.current.add(key);
@@ -854,7 +867,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       for (;;) {
         // 用户已经离开阅读器（路由被留在后面）时不该再占着那一道全局推理闸：整本
         // 预处理是这次阅读起的头，人不在就没有理由继续跑下去。
-        if (!pageActiveRef.current) break;
+        if (!pageActiveRef.current || !documentVisibleRef.current) break;
         // 队列空了就从后台游标补一件。前台任务永远排在它前面——预处理是顺手做的，
         // 不是承诺：正在读的那一页等不到结果，这个功能就是坏的。
         if (derivedQueueRef.current.length === 0) pumpSweep();
@@ -873,6 +886,12 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           // 都会跳过它，于是这一页在这次阅读里永远是原图——「翻页了也不处理」。
           derivedAttemptedRef.current.delete(pageIndex);
           continue;
+        }
+        if (!documentVisibleRef.current) {
+          derivedAttemptedRef.current.delete(pageIndex);
+          derivedQueueRef.current.unshift(job);
+          if (contextRef.current === context && !screenOwnedPagesRef.current.has(pageIndex)) releasePage(pageIndex);
+          break;
         }
         if (job.generation !== derivedGenerationRef.current) {
           if (contextRef.current === context && !screenOwnedPagesRef.current.has(pageIndex)) releasePage(pageIndex);
@@ -900,6 +919,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           // Remote owns the complete chain: upload the original once and only
           // download the final result. Local compute is a fallback, never a prerequisite.
           let derived: ImageHandle | undefined;
+          let remotePlanChanged = false;
           if (job.engine === 'remote') {
             setDerivingStage('remote');
             derived = await imageCache.load({
@@ -917,6 +937,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               taskId: `${taskBase}:remote`,
             }, { signal: controller.signal }).catch((error: unknown) => {
               const code = renditionErrorCode(error);
+              remotePlanChanged = code === 'REMOTE_PLAN_CHANGED';
               if (code === 'REMOTE_PLAN_CHANGED' && mountedRef.current
                   && contextRef.current?.generation === context.generation
                   && job.generation === derivedGenerationRef.current) {
@@ -932,6 +953,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               return undefined;
             });
           }
+          // A settings revision is a replan, not an unavailable remote worker.
+          // The capability probe invalidates this generation and queues the new
+          // rendition. Falling through would start unsupported local compute on mobile.
+          if (remotePlanChanged) continue;
           if (controller.signal.aborted) {
             if (derived) imageCache.release(derived);
             continue;
@@ -1054,6 +1079,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             // 被「让位」掐掉的后台任务退回游标队首：整本预处理不该因为让了一次路就
             // 永远漏掉这一页（让位只发生在用户翻页时，所以它很快会再轮到）。
             if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
+            else if (!documentVisibleRef.current && job.generation === derivedGenerationRef.current) derivedQueueRef.current.unshift(job);
           }
           // The sweep owns only background-only sources. The screen may retain
           // this page beyond visible+prefetch, or claim it during computation.
@@ -1075,6 +1101,27 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, noticeEngineFallback, noticeUpscaleFailure, prefetchDistance, releasePage, scheduleWorkspaceRelease, sessionPurged]);
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      documentVisibleRef.current = document.visibilityState !== 'hidden';
+      if (documentVisibleRef.current) {
+        if (pageActiveRef.current) void runDerivedQueue();
+        return;
+      }
+      // Preserve displayed handles and the sweep cursor. Only speculative work
+      // is cancelled; a visible page already executing may finish at its boundary.
+      const active = activeDerivedRef.current;
+      if (active && active.tier !== 'visible') active.controller.abort();
+      if (!derivedBusyRef.current) {
+        cancelWorkspaceRelease();
+        releaseDlssnrWorkspaces();
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    onVisibilityChange();
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [cancelWorkspaceRelease, runDerivedQueue]);
 
   // 用户离开这一本（切到别的档案或别的页面）时，把它的派生渲染当场放掉：这时它
   // 一页都不显示，留着只占内存——实测一页 21–27 MB，501 页那份档案攒到 2.9 GB，

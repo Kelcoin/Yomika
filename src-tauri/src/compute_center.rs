@@ -734,7 +734,7 @@ fn plan_revision(
     engine_policy: &str,
 ) -> String {
     let canonical = serde_json::json!({
-        "revision": 1,
+        "revision": 2, // Source-guided neutral chroma preservation changes output pixels.
         "protocol": PROTOCOL_VERSION,
         "steps": steps,
         "model": model_id,

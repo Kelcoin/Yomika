@@ -77,4 +77,18 @@ describe('repository layout', () => {
     expect(exists('../../.github/scripts/ensure-release.sh')).toBe(true);
     expect(publish).toContain('ensure-release.sh');
   });
+
+  it('keeps the test runner out of the build directory', () => {
+    const config = read('../../vitest.config.ts');
+    const prepare = read('../../.github/scripts/prepare-mobile-ort.py');
+
+    // `prepare-mobile-ort.py` extracts the pinned ONNX Runtime **source tree**
+    // under `src-tauri/target/mobile-ort*/`，and that tree ships its own Detox
+    // e2e `*.test.js` (it needs a device). Sweeping it turns the whole run red
+    // on someone else's test, so the build directory has to stay excluded.
+    expect(prepare).toContain('mobile-ort');
+    expect(config).toContain("'src-tauri/target/**'");
+    // 参考项目的只读副本同理：`docs/` 里的测试也不是我们该跑的。
+    expect(config).toContain("'docs/**'");
+  });
 });

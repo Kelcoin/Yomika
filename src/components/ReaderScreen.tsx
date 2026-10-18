@@ -461,9 +461,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    */
   const settleZoomNow = useCallback(() => {
     const next = settleZoom(zoomRef.current);
-    followZoom(next);
     setZoom(() => next);
-  }, [followZoom, setZoom]);
+    // React may still remember scale(1) while gesture frames changed the DOM.
+    // Set the transition before restoring the transform, without scheduling a
+    // frame that setZoom would immediately cancel.
+    const element = zoomElementRef.current;
+    if (element) {
+      element.style.transition = reduceMotion ? 'none' : 'transform 140ms ease-out';
+      element.style.transform = `scale(${next.scale}) translate(${next.panX}px, ${next.panY}px)`;
+    }
+  }, [reduceMotion, setZoom]);
   useEffect(() => () => {
     if (zoomFrameRef.current !== undefined) cancelAnimationFrame(zoomFrameRef.current);
     zoomFrameRef.current = undefined;

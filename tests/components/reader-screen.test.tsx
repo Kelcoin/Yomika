@@ -265,6 +265,22 @@ describe('reader screen', () => {
     expect(frame.style.transition).toContain('transform 140ms');
   });
 
+  it('restores the frame when React still remembers the settled transform', async () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const frame = document.querySelector<HTMLElement>('.reader-frame .reader-spread, .reader-frame .reader-single')!;
+    const box = reader.getBoundingClientRect();
+    const x = box.left + box.width / 2, y = box.top + box.height / 2;
+    fireEvent.touchStart(reader, { touches: [{ clientX: x - 100, clientY: y }, { clientX: x + 100, clientY: y }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(frame.style.transform).toContain('scale(0.8');
+    // Separate the render that enables transitions from the direct DOM write.
+    await act(async () => { fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] }); });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
+  });
+
   it('keeps the browser page zoom out of the reader in continuous scroll too', async () => {
     const user = userEvent.setup();
     renderReader();

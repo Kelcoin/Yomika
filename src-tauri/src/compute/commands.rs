@@ -1188,6 +1188,7 @@ mod tests {
             width: 320,
             height: 240,
             engine_id: "onnx".to_string(),
+            engine_device_id: None,
             engine_precision: "fp32".to_string(),
             engine_policy: None,
             engine_fallback: None,

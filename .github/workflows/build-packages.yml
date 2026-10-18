@@ -120,6 +120,10 @@ jobs:
           "$sdkmanager" --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
       - run: npm ci --no-audit --no-fund
       - run: npx tauri android init --ci --skip-targets-install
+      - name: Build pinned Android ONNX Runtime with NNAPI
+        run: |
+          python3 -m pip install 'cmake==3.31.6' 'ninja==1.11.1.4' numpy packaging
+          python3 .github/scripts/prepare-mobile-ort.py android
       # `init` 生成的工程带的是模板默认图标，`tauri icon` 才会把项目图标写进去：
       # 存在 gen/<平台> 工程时写进工程，否则退回 icons/<平台>。少了这一步，APK 的
       # 启动图标一直是 Tauri 那套默认图。
@@ -144,6 +148,13 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: npx tauri android build --ci --apk --target aarch64
+      - name: Verify Android native runtime dependency closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk=$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -print -quit)
+          test -n "$apk"
+          python3 .github/scripts/verify-mobile-runtime.py "$apk" --readelf "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
       - name: Publish the Android package to the release
         if: needs.prepare-release.outputs.tag != ''
         env:
@@ -182,6 +193,10 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
       - run: npx tauri ios init --ci
+      - name: Build pinned iOS ONNX Runtime with CoreML
+        run: |
+          python3 -m pip install --break-system-packages 'cmake==3.31.6' numpy packaging
+          python3 .github/scripts/prepare-mobile-ort.py ios
       # 与 Android 作业同理：init 生成的资产目录里是 Tauri 的默认图标，这一步用
       # 项目图标（icon-manifest.json）覆盖 AppIcon.appiconset。
       - name: Write the project icons into the generated Xcode project
@@ -230,7 +245,7 @@ jobs:
           project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)
           scheme=$(xcodebuild -list -project "$project" | awk '/Schemes:/{getline; gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}')
           test -n "$scheme"
-          xcodebuild -project "$project" -scheme "$scheme" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' build
+          xcodebuild -project "$project" -scheme "$scheme" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' FRAMEWORK_SEARCH_PATHS="\$(inherited) $ORT_IOS_XCFWK_PATH/ios-arm64" OTHER_LDFLAGS="\$(inherited) -framework onnxruntime -framework CoreML -framework Metal -framework Accelerate -lc++" build
           app=$(find "$RUNNER_TEMP/yomika-ios/Build/Products" -type d -name '*.app' -path '*iphoneos*' -print -quit)
           test -d "$app"
           mkdir -p artifacts/Payload

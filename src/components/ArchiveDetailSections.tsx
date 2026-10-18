@@ -5,6 +5,7 @@ import { OverlayLayer } from './OverlayLayer';
 import { myTagChipStyle, normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { usePageActive } from '../app/RetainedPage';
+import { isWideCoverRatio } from '../lib/archiveCardPresentation';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { categorizeSearchableTags, type SearchableTagGroup } from '../lib/tags';
 import { TagSearchLink } from './TagSearchLink';
@@ -102,23 +103,59 @@ export function useArchiveCover({ scopeId, serverId, archiveId, enabled = true }
  * 不用再管。 */
 export function ArchiveDetailCover({ title, cover, loading = false }: { title: string; cover?: string | undefined; loading?: boolean }) {
   const pageActive = usePageActive();
-  const [previewOpen, setPreviewOpen] = useState(false);
-  useLayoutEffect(() => { if (!pageActive) setPreviewOpen(false); }, [pageActive]);
-  useEffect(() => { setPreviewOpen(false); }, [cover, title]);
+  const [preview, setPreview] = useState<'closed' | 'open' | 'closing'>('closed');
+  const [coverShape, setCoverShape] = useState<{ url: string; wide: boolean }>();
+  const triggerImage = useRef<HTMLImageElement>(null);
+  const previewImage = useRef<HTMLImageElement>(null);
+  const animation = useRef<Animation>();
+  const previewOpen = preview === 'open';
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+  const close = () => setPreview(reducedMotion ? 'closed' : 'closing');
+  useLayoutEffect(() => { if (!pageActive) setPreview('closed'); }, [pageActive]);
+  useLayoutEffect(() => { setPreview('closed'); }, [cover, title]);
+  const animateCover = () => {
+    const image = previewImage.current;
+    const source = triggerImage.current;
+    if (!image || !source || reducedMotion || !image.animate) return;
+    // Read the visible position before cancelling an interrupted opening.
+    const current = image.getBoundingClientRect();
+    animation.current?.cancel();
+    const target = image.getBoundingClientRect();
+    const origin = source.getBoundingClientRect();
+    if (!target.width || !target.height || !origin.width || !origin.height) return;
+    const transform = (rect: DOMRect) => `translate(${rect.left + rect.width / 2 - target.left - target.width / 2}px, ${rect.top + rect.height / 2 - target.top - target.height / 2}px) scale(${rect.width / target.width}, ${rect.height / target.height})`;
+    animation.current = image.animate(
+      preview === 'closing'
+        ? [{ transform: transform(current) }, { transform: transform(origin) }]
+        : [{ transform: transform(origin) }, { transform: 'none' }],
+      { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'both' },
+    );
+  };
+  useLayoutEffect(() => {
+    if (preview !== 'closed') animateCover();
+    else { animation.current?.cancel(); animation.current = undefined; }
+    if (preview !== 'closing') return;
+    const timer = window.setTimeout(() => setPreview('closed'), 220);
+    return () => window.clearTimeout(timer);
+  }, [preview]);
+  useEffect(() => () => animation.current?.cancel(), []);
   // 返回手势先关预览这一层（见 overlayBackGuard）。
-  useOverlayBackGuard(previewOpen, () => setPreviewOpen(false));
+  useOverlayBackGuard(previewOpen, close);
   return <>
-    <div className="archive-detail-route-cover">
+    <div className={`archive-detail-route-cover${coverShape?.url === cover && coverShape?.wide ? ' is-wide' : ''}`}>
       {cover
-        ? <button className="archive-detail-cover-trigger" type="button" onClick={() => setPreviewOpen(true)} aria-label={`查看${title}大图`} title="查看大图"><img src={cover} alt={`${title} 封面`} decoding="async" /></button>
+        ? <button className="archive-detail-cover-trigger" type="button" data-preview-open={preview !== 'closed' ? '' : undefined} onClick={() => setPreview('open')} aria-label={`查看${title}大图`} title="查看大图"><img ref={triggerImage} src={cover} alt={`${title} 封面`} decoding="async" onLoad={(event) => {
+          const image = event.currentTarget;
+          setCoverShape({ url: cover, wide: isWideCoverRatio(image.naturalWidth / image.naturalHeight) });
+        }} /></button>
         : <div className={`archive-detail-cover-placeholder${loading ? ' is-skeleton' : ''}`} aria-label={loading ? '正在加载封面' : '暂无封面'} />}
     </div>
-    {previewOpen && cover && (
+    {preview !== 'closed' && pageActive && cover && (
       <OverlayLayer>
-      <FocusScope asChild trapped loop><div className="archive-cover-preview" role="dialog" tabIndex={-1} aria-modal="true" aria-label={`${title}封面大图`} onClick={() => setPreviewOpen(false)} onKeyDown={(event) => {
-        if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); setPreviewOpen(false); }
+      <FocusScope asChild trapped loop><div className={`archive-cover-preview${preview === 'closing' ? ' is-closing' : ''}`} role="dialog" tabIndex={-1} aria-modal="true" aria-label={`${title}封面大图`} onClick={close} onKeyDown={(event) => {
+        if (event.key === 'Escape' && !event.nativeEvent.isComposing) { event.preventDefault(); event.stopPropagation(); close(); }
       }}>
-        <img src={cover} alt={`${title} 封面大图`} decoding="async" />
+        <img ref={previewImage} src={cover} alt={`${title} 封面大图`} decoding="async" onLoad={() => { if (!animation.current) animateCover(); }} />
       </div></FocusScope>
       </OverlayLayer>
     )}

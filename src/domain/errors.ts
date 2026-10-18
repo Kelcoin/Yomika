@@ -117,6 +117,7 @@ export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
  * 表示传输失败时由 errorLog.ts 过滤，不能把 schema、解码逻辑或计算模型错误一起吞掉。
  */
 export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
+  'REMOTE_PLAN_CHANGED', // Expected when the connected server changes its settings.
   'QUEUE_FULL', 'CANCELLED', 'CANCELED', 'ABORTED', 'ABORT_ERR',
   'ERR_CANCELED',
   'REMOTE_TIMEOUT',

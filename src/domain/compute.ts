@@ -178,6 +178,7 @@ export const ComputeArtifactRecordSchema = z.object({
   height: z.number().int().nonnegative(),
   engineId: z.string(),
   enginePrecision: z.string(),
+  engineDeviceId: z.string().optional(),
   /** 这一阶段**被问的是哪条引擎政策**。`null` = 那次报告没交代（老 worker，或事实驱动
    * 的那条路），不是「跑的就是 CPU」——这两件事在界面上要分开说。 */
   enginePolicy: EnginePolicySchema.nullable(),

@@ -187,6 +187,14 @@ fn pack_worker_payload(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn main() {
+    // Native mobile code is linked into the app, never borrowed from the host.
+    // ort-sys consumes the paths below before this build script executes.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+        for framework in ["CoreML", "Metal", "Foundation", "Accelerate"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rustc-link-lib=c++");
+    }
     // 构建戳的显式输入：构建脚本会先把当前 HEAD 放进这个变量（见 `stamp_build_info`）。
     // 只改了源码、没碰 `tauri.conf.json` 与图标时，tauri-build 注册的
     // `rerun-if-changed` 不会让这一份 build script 重跑，产物就会带着**上一个**提交号；

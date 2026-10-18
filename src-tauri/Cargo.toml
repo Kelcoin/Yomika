@@ -79,6 +79,10 @@ yomika-compute-transport = { path = "crates/compute-transport" }
 # hand-rolled `cargo build` has to pass `--features custom-protocol` itself.
 custom-protocol = ["tauri/custom-protocol"]
 
+# Mobile executes the worker library on bounded background threads in-process.
+[target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
+yomika-compute-worker = { path = "worker" }
+
 # 测试二进制仍然链 ONNX Runtime。
 #
 # 出厂的那份宿主二进制不链（`cargo tree -e normal` 与 PE 导入表看得见），但

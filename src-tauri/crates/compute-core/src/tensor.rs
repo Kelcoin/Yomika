@@ -73,3 +73,42 @@ pub fn nchw_over_rgba(
         }
     }
 }
+
+/// Learned RGB models can introduce chroma even into strictly neutral manga.
+/// Remove only invented chroma: preserve output luminance/detail and alpha,
+/// and leave source colour (including a one-source-pixel border) untouched.
+/// The mask is separable, so its cost is linear in the source/output size.
+pub fn preserve_neutral_chroma(source: &[u8], width: u32, height: u32, scale: u32, output: &mut [u8]) {
+    let (w, h, s) = (width as usize, height as usize, scale as usize);
+    let mut horizontal = vec![0_u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut chroma = 0;
+            for nx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                let rgb = &source[(y * w + nx) * 4..][..3];
+                chroma = chroma.max(rgb.iter().max().unwrap() - rgb.iter().min().unwrap());
+            }
+            horizontal[y * w + x] = chroma;
+        }
+    }
+    let out_w = w * s;
+    for y in 0..h {
+        for x in 0..w {
+            let chroma = (y.saturating_sub(1)..=(y + 1).min(h - 1))
+                .map(|ny| horizontal[ny * w + x]).max().unwrap();
+            // Feather near-neutral compression noise; genuine tints remain intact.
+            if chroma >= 12 { continue; }
+            let keep = f32::from(chroma.saturating_sub(2)) / 10.0;
+            for dy in 0..s {
+                for dx in 0..s {
+                    let index = (((y * s + dy) * out_w) + x * s + dx) * 4;
+                    let rgb = &mut output[index..index + 3];
+                    let luma = 0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2]);
+                    for channel in rgb {
+                        *channel = (luma + (f32::from(*channel) - luma) * keep).round().clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        }
+    }
+}

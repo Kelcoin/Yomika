@@ -11,6 +11,14 @@ function collect() {
 afterEach(() => setErrorLogSinkForTests());
 
 describe('error log', () => {
+  it('keeps remote settings replans quiet at both bridge and image boundaries', async () => {
+    const written = collect();
+    const error = Object.assign(new Error('settings changed'), { code: 'REMOTE_PLAN_CHANGED' });
+    logError('bridge/remote_compute_process', error.message, { error });
+    logError('image/remote', error.message, { error });
+    await flushErrorLog();
+    expect(written).toHaveLength(0);
+  });
   it('batches records instead of one IPC per error, and redacts secrets', async () => {
     const written = collect();
 

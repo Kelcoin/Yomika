@@ -83,10 +83,11 @@ pub(crate) fn to_stage_error(error: ComputeError) -> StageError {
 
 /// `device_id` 说的是**实际**跑在哪：报告里不许出现「选了显卡、跑在 CPU」。
 pub(crate) fn device_id(runtime: RuntimeId) -> String {
-    if runtime.is_hardware_accelerated() {
-        "gpu:0".to_string()
-    } else {
-        "cpu".to_string()
+    match runtime {
+        RuntimeId::DirectMl => "gpu:0".to_string(),
+        RuntimeId::Nnapi => "accelerator:nnapi:gpu-or-npu".to_string(),
+        RuntimeId::CoreMl => "accelerator:coreml:cpu-and-gpu".to_string(),
+        RuntimeId::Cpu => "cpu".to_string(),
     }
 }
 

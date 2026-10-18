@@ -16,6 +16,12 @@ pub mod inputs;
 pub mod job_object;
 pub mod leases;
 pub mod manager;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod mobile_worker;
+#[cfg(any(test, target_os = "android", target_os = "ios"))]
+mod mobile_permit;
+#[cfg(any(test, target_os = "android", target_os = "ios"))]
+mod mobile_resources;
 pub mod models;
 pub mod page_budget;
 pub mod proxy;
@@ -98,11 +104,14 @@ pub fn start(app: &tauri::AppHandle) -> Result<ComputeHandle, String> {
     //
     // 第二个落点是数据目录：主程序旁边可能根本写不进去（装在 `Program Files` 下之类），
     // 而数据目录按定义是可写的，否则这个应用本来也起不来。
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let worker_path = worker_binary::ensure(
         &worker_binary_path(),
         &data_root.join("compute"),
         worker_binary::payload(),
     );
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let worker_path = PathBuf::new(); // Mobile links the worker library; no executable is extracted.
     let mut config = SupervisorConfig::new(worker_path, &staging_root);
     // 模型和页面走**同一条**只读输入根（`models` 的模块注释）：worker 因此只保留一条
     // 能被允许读用户数据的路，而不是「页面一条、模型一条」。

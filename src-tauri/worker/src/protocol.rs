@@ -172,22 +172,26 @@ impl ArtifactSlot {
 }
 
 pub(crate) struct Waiters {
+    closed: AtomicBool,
     slots: Mutex<HashMap<String, Arc<ArtifactSlot>>>,
 }
 
 impl Waiters {
     pub(crate) fn new() -> Self {
         Self {
+            closed: AtomicBool::new(false),
             slots: Mutex::new(HashMap::new()),
         }
     }
 
     pub(crate) fn insert(&self, artifact_id: String) -> Arc<ArtifactSlot> {
         let slot = Arc::new(ArtifactSlot::new());
-        self.slots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(artifact_id, slot.clone());
+        let mut slots = self.slots.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.closed.load(Ordering::SeqCst) {
+            slot.decide(SlotDecision::Cancelled);
+        } else {
+            slots.insert(artifact_id, slot.clone());
+        }
         slot
     }
 
@@ -208,7 +212,18 @@ impl Waiters {
         // 迟到或重复的裁决一律不处理（§6.5：终态只转换一次）。
         if let Some(slot) = slot {
             slot.decide(decision);
-        }    }
+        }
+    }
+
+    fn close(&self) {
+        // Hold the insertion lock while marking closed: a racing insertion must either
+        // be cancelled here or observe closed and receive a pre-cancelled slot.
+        let slots = self.slots.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.closed.store(true, Ordering::SeqCst);
+        for slot in slots.values() {
+            slot.decide(SlotDecision::Cancelled);
+        }
+    }
 
     pub(crate) fn cancel_all(&self) {
         let slots: Vec<Arc<ArtifactSlot>> = self
@@ -221,6 +236,20 @@ impl Waiters {
         for slot in slots {
             slot.decide(SlotDecision::Cancelled);
         }
+    }
+}
+
+/// Every return path (including write failures propagated by `?`) wakes artifact
+/// ACK waiters. Otherwise an in-process executor can retain its mobile permit forever.
+struct SessionExit {
+    waiters: Arc<Waiters>,
+    current: Arc<Mutex<Option<RunningJob>>>,
+}
+
+impl Drop for SessionExit {
+    fn drop(&mut self) {
+        stop_running(&self.current);
+        self.waiters.close();
     }
 }
 
@@ -280,6 +309,7 @@ where
     let (sender, receiver) = mpsc::channel::<JobEnvelope>();
     let current: Arc<Mutex<Option<RunningJob>>> = Arc::new(Mutex::new(None));
     let last_job: Arc<Mutex<Option<JobRef>>> = Arc::new(Mutex::new(None));
+    let _session_exit = SessionExit { waiters: Arc::clone(&waiters), current: Arc::clone(&current) };
 
     // 执行器线程是**分离**的：句柄直接丢掉，返回时不 join。重任务没法被安全打断，
     // 宿主按 §6.5 超时杀进程，而不是等 worker 自己体面收尾。
@@ -544,3 +574,18 @@ fn failure(epoch: &str, run: &Run, code: &str, message: &str) -> Message {
     })
 }
 
+
+#[cfg(test)]
+mod waiter_tests {
+    use super::*;
+
+    #[test]
+    fn closing_waiters_cancels_existing_and_future_artifact_waits() {
+        let waiters = Waiters::new();
+        let existing = waiters.insert("before-close".to_string());
+        waiters.close();
+        assert_eq!(existing.wait(), SlotDecision::Cancelled);
+        let racing = waiters.insert("after-close".to_string());
+        assert_eq!(racing.wait(), SlotDecision::Cancelled);
+    }
+}

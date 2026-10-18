@@ -31,6 +31,12 @@ impl RuntimeId {
         }
     }
 
+    /// CoreML permits CPU/GPU mixing; NNAPI can choose a GPU or NPU.
+    /// Neither provider proves GPU execution, even after graph assignment.
+    pub fn proves_gpu_execution(self) -> bool {
+        matches!(self, Self::DirectMl)
+    }
+
     pub fn is_hardware_accelerated(self) -> bool {
         !matches!(self, Self::Cpu)
     }
@@ -84,7 +90,20 @@ pub fn available_runtimes() -> Vec<RuntimeId> {
             runtimes.push(RuntimeId::DirectMl);
         }
     }
-    // 其余平台保持诚实：EP 没有随构建一起发出去、也没有注册，就一个字都不许说。
+    #[cfg(all(target_os = "android", feature = "nnapi"))]
+    {
+        use ort::ep::ExecutionProvider;
+        if ort::ep::NNAPI::default().is_available().unwrap_or(false) {
+            runtimes.push(RuntimeId::Nnapi);
+        }
+    }
+    #[cfg(all(target_os = "ios", feature = "coreml"))]
+    {
+        use ort::ep::ExecutionProvider;
+        if ort::ep::CoreML::default().is_available().unwrap_or(false) {
+            runtimes.push(RuntimeId::CoreMl);
+        }
+    }
     runtimes.push(RuntimeId::Cpu);
     runtimes
 }
@@ -142,6 +161,19 @@ pub fn runtime_label_mismatch(promised: &str) -> Option<String> {
     })
 }
 
+/// Mobile app sandboxes must provide a writable cache directory before probing.
+/// Android's default system temporary directory may not be app writable.
+static PROFILE_DIRECTORY: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_profile_directory(path: std::path::PathBuf) -> Result<(), String> {
+    std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    PROFILE_DIRECTORY.set(path).map_err(|_| "profile directory already configured".to_string())
+}
+
+pub fn profile_directory() -> std::path::PathBuf {
+    PROFILE_DIRECTORY.get().cloned().unwrap_or_else(std::env::temp_dir)
+}
+
 /// 按运行库开一个 `SessionBuilder`：线程、内存与并行策略在这里统一。
 #[cfg(feature = "ort")]
 pub fn builder(runtime: RuntimeId) -> Result<ort::session::builder::SessionBuilder, String> {
@@ -181,6 +213,18 @@ pub fn builder(runtime: RuntimeId) -> Result<ort::session::builder::SessionBuild
                 cpu,
             ])
             .map_err(|error| error.to_string()),
+        #[cfg(all(target_os = "android", feature = "nnapi"))]
+        RuntimeId::Nnapi => builder.with_execution_providers([
+            ort::ep::NNAPI::default().with_disable_cpu(true).with_fp16(false)
+                .build().error_on_failure(), cpu,
+        ]).map_err(|error| error.to_string()),
+        #[cfg(all(target_os = "ios", feature = "coreml"))]
+        RuntimeId::CoreMl => builder.with_execution_providers([
+            ort::ep::CoreML::default()
+                .with_compute_units(ort::ep::coreml::ComputeUnits::CPUAndGPU)
+                .with_low_precision_accumulation_on_gpu(false)
+                .build().error_on_failure(), cpu,
+        ]).map_err(|error| error.to_string()),
         RuntimeId::Cpu => builder
             .with_execution_providers([cpu])
             .map_err(|error| error.to_string()),
@@ -231,6 +275,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mobile_accelerators_do_not_promise_exclusive_gpu_execution() {
+        assert!(!RuntimeId::Nnapi.proves_gpu_execution());
+        assert!(!RuntimeId::CoreMl.proves_gpu_execution());
+        assert!(RuntimeId::DirectMl.proves_gpu_execution());
+    }
+
+    #[test]
     fn cpu_pools_are_bounded_and_leave_room_for_ui() {
         assert_eq!([1, 2, 4, 64].map(cpu_threads), [1, 1, 2, 2]);
     }
@@ -277,7 +328,7 @@ mod tests {
                 ort::ep::DirectML::default().is_available().unwrap_or(false)
             );
         }
-        #[cfg(not(all(windows, feature = "directml")))]
+        #[cfg(not(any(all(windows, feature = "directml"), all(target_os = "android", feature = "nnapi"), all(target_os = "ios", feature = "coreml"))))]
         assert_eq!(runtimes, vec![RuntimeId::Cpu]);
     }
 
@@ -315,7 +366,7 @@ mod tests {
     #[cfg(feature = "ort")]
     #[test]
     fn a_runtime_this_build_does_not_ship_is_refused() {
-        for runtime in [RuntimeId::CoreMl, RuntimeId::Nnapi] {
+        for runtime in [RuntimeId::CoreMl, RuntimeId::Nnapi].into_iter().filter(|id| !available_runtimes().contains(id)) {
             let error = match builder(runtime) {
                 Ok(_) => panic!("{} 没有注册代码，不该开得起来", runtime.as_str()),
                 Err(error) => error,
