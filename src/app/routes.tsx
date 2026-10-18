@@ -11,6 +11,7 @@ import { LibraryShell } from '../components/LibraryShell';
 import { HomeShell } from '../components/HomeShell';
 import { ShelfShell } from '../components/ShelfShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
+import { WorkspaceLoadingSkeleton } from '../components/WorkspaceLoadingSkeleton';
 import { LoadingIndicator } from '../components/LoadingIndicator';
 import { pickServer } from '../domain/server';
 import { ServerRequiredPrompt } from '../components/ServerRequiredPrompt';
@@ -978,7 +979,7 @@ export function WorkspaceRoutes() {
   visited.current.set(routeKey, location);
   return <>{[...visited.current].map(([key, saved]) => (
     <RetainedPage key={key} active={routeKey === key} motionSurface flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>
-      <Suspense fallback={<LoadingIndicator size="lg" label="正在加载" />}>
+      <Suspense fallback={<WorkspaceLoadingSkeleton path={saved.pathname} />}>
         <Routes location={saved}>
           <Route path="/" element={<HomeShell><HomeWorkspace /></HomeShell>} />
           {/* 首页自己的详情：卡片开在 `/home/:id` 上，返回与再进首页都落在首页，

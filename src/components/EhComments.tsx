@@ -1,3 +1,4 @@
+import { ContentSkeleton } from './ContentSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
@@ -247,7 +248,7 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
       </div>
       {error && <StatusLine tone="error">{error}</StatusLine>}
       {loading && comments.length === 0
-        ? <StatusLine busy>正在读取评论…</StatusLine>
+        ? <ContentSkeleton label="正在读取评论" variant="comments" rows={2} />
         : !error && comments.length === 0 ? <StatusLine>暂无评论</StatusLine> : null}
       {comments.length > 0 && <ul className="eh-comments-list">{comments.map((comment) => (
         <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>

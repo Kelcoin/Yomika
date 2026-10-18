@@ -45,7 +45,7 @@ describe('EhAccountPanel', () => {
 
   it('shows loading state', () => {
     render(<EhAccountPanel accounts={[]} loading />);
-    expect(screen.getByText('正在读取账户…')).toBeDefined();
+    expect(screen.getByRole('status', { name: '正在读取账户' }).querySelector('.skeleton-line')).not.toBeNull();
   });
 
   it('saves the account from a web sign-in, which is the only way past a challenge', async () => {

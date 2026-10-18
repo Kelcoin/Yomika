@@ -9,6 +9,15 @@ import { installTagTranslations } from '../../src/lib/tags';
 afterEach(resetInvokeAdapterForTests);
 
 describe('metadata editor navigation and plugins', () => {
+  it('keeps the editor header and field skeleton while metadata is delayed', () => {
+    setInvokeAdapterForTests(async () => new Promise(() => {}));
+    render(<MemoryRouter><ToastProvider><MetadataEditRoute archiveId="a" /></ToastProvider></MemoryRouter>);
+    expect(screen.getByRole('heading', { name: '编辑元数据' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '返回上一页' })).toBeEnabled();
+    expect(screen.getByRole('status', { name: '正在载入元数据' }).querySelector('.metadata-skeleton-summary')).not.toBeNull();
+    expect(screen.queryByLabelText('标题')).toBeNull();
+  });
+
   it('defaults to E-Hentai and returns to its actual home origin', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Server', baseUrl: 'https://example.com' }] };

@@ -2729,7 +2729,7 @@ describe('design system contract', () => {
     // 空状态是整块区域、加载态也必须整块区域的那两处（列表里、卡片里的行不加）。
     for (const path of ['src/components/LocalArchivesWorkspace.tsx', 'src/components/DeduplicationWorkspace.tsx']) {
       const source = read(path);
-      expect(source, path).toMatch(/<StatusLine busy region>/);
+      expect(source, path).toMatch(/<(?:ArchiveListSkeleton|ContentSkeleton)/);
       expect(source, path).toMatch(/<EmptyState/);
     }
   });

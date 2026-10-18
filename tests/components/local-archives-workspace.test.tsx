@@ -75,7 +75,7 @@ describe('local archives workspace', () => {
     expect(screen.getByTestId('current-location')).toHaveTextContent('/elsewhere');
   });
 
-  it('waits in the middle of the region, in the shape the empty state will take', async () => {
+  it('uses card skeletons until the initial list is ready', async () => {
     // 用户报的是这一页的加载提示：空的时候是居中的空状态，读的时候却是左上角一行
     // 小字。两态现在共用一块区域（`is-region` 取 .empty-state 的几何），标记也从
     // 15px 放大到 28px。
@@ -89,13 +89,11 @@ describe('local archives workspace', () => {
     });
     render(<MemoryRouter initialEntries={['/downloads']}><LocalArchivesWorkspace /></MemoryRouter>);
 
-    const line = await screen.findByText('正在读取本地档案…');
-    expect(line.className).toContain('status-line');
-    expect(line.className).toContain('is-region');
-    expect(line.querySelector('.loading-mark')).not.toBeNull();
-
+    const skeleton = screen.getByRole('status', { name: '正在读取本地档案' });
+    expect(skeleton.querySelectorAll('.archive-row-skeleton').length).toBeGreaterThan(0);
+    expect(screen.queryByText('正在读取本地档案…')).toBeNull();
     await act(async () => { release?.(); });
-    await waitFor(() => expect(screen.queryByText('正在读取本地档案…')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole('status', { name: '正在读取本地档案' })).toBeNull());
     // 同一块区域接着交给空状态：句子换了，几何没换。
     expect(screen.getByText('还没有下载过档案')).toBeInTheDocument();
   });
@@ -494,11 +492,26 @@ describe('local archives workspace', () => {
 
     // 任务列表先落地也不能代表档案读完了：空状态放行得太早，就会先闪一下
     // 「还没有下载过档案」再变成有数据的样子。
-    await screen.findByText('正在读取本地档案…');
+    await screen.findByRole('status', { name: '正在读取本地档案' });
     expect(screen.queryByText('还没有下载过档案')).not.toBeInTheDocument();
     resolveArchives();
     expect(await screen.findByText('测试档案')).toBeInTheDocument();
     expect(screen.queryByText('还没有下载过档案')).not.toBeInTheDocument();
+  });
+
+  it('keeps loaded archives visible while the slower task list finishes', async () => {
+    let finish!: (value: unknown) => void;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      if (command === 'list_tasks') return new Promise(resolve => { finish = resolve; });
+      return { ok: true, value: [] };
+    });
+    renderPage();
+    await screen.findByText('测试档案');
+    expect(screen.queryByRole('status', { name: '正在读取本地档案' })).toBeNull();
+    expect(screen.queryByText('还没有下载过档案')).toBeNull();
+    await act(async () => finish({ ok: true, value: [] }));
+    expect(screen.getByText('测试档案')).toBeInTheDocument();
   });
 
   it('reads a local file through the server copy it was downloaded from', async () => {

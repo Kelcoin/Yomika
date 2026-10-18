@@ -1,3 +1,4 @@
+import { ContentSkeleton } from './ContentSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -968,7 +969,7 @@ export function SettingsWorkspace() {
             control in this panel saves itself, so a line saying so on every
             section was chrome that never told anyone anything they could act on.
             A failed save still interrupts, through the toast. */}
-        {preferenceState.loading ? <StatusLine busy>正在读取偏好…</StatusLine> : (
+        {preferenceState.loading ? <ContentSkeleton label="正在读取偏好" rows={6} /> : (
           <div className="preferences-form">
             {selectedSettingsSection === 'settings-general' && platformName === 'windows' && (
               <div className="settings-group">
@@ -1342,7 +1343,7 @@ export function SettingsWorkspace() {
                     网格的行间距不认「零高」——收起的那一层照样占一道缝，按钮下面就
                     多出一块空白。 */}
                 <div className="settings-menu-accounts">
-                  {sync.loading ? <StatusLine busy>正在读取同步账户…</StatusLine> : !sync.activeAccount ? (
+                  {sync.loading ? <ContentSkeleton label="正在读取同步账户" rows={3} /> : !sync.activeAccount ? (
                     <p className="settings-menu-desc">还没有账户：填下面的表单即可开始。</p>
                   ) : (
                     /* 单账户：只维护一个 WebDAV 账户。 */
@@ -1706,7 +1707,7 @@ export function SettingsWorkspace() {
                 each row opens the same setup dialog the add row does. */}
             {selectedSettingsSection === 'settings-general' && (
               <div className="settings-group server-region" role="region" aria-label="服务器" aria-live="polite">
-                {loading && <StatusLine busy>正在读取服务器…</StatusLine>}
+                {loading && servers.length === 0 && <ContentSkeleton label="正在读取服务器" rows={2} />}
                 {!loading && loadError && (
                   <div className="server-list-error">
                     <p className="form-error" role="alert">{loadError}</p>

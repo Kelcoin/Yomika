@@ -12,7 +12,7 @@ import { MetadataTagRows } from './MetadataTagRows';
 import { ArchiveDeleteDialog } from './ArchiveDeleteDialog';
 import { TagSuggest } from './TagSuggest';
 import { useToast } from './Toast';
-import { LoadingIndicator } from './LoadingIndicator';
+import { MetadataEditorSkeleton } from './MetadataEditorSkeleton';
 import { StatusLine } from './StatusLine';
 import { SelectField } from './SelectField';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
@@ -182,8 +182,7 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     owner.busy = false;
   };
 
-  // 整页等待用全应用同一个标记：之前这里引的是不存在的 .spin 类，图标根本不会转。
-  if (loading) return <main className="metadata-edit-page metadata-edit-loading"><LoadingIndicator size="lg" label="正在载入元数据" /></main>;
+  if (loading) return <MetadataEditorSkeleton onBack={goBack} />;
   if (error && !ready) return <main className="metadata-edit-page"><p className="form-error" role="alert">{error}</p><button className="primary-action" type="button" onClick={() => setReload(value => value + 1)}><RotateCcw aria-hidden="true" />重试载入元数据</button><button className="secondary-action" type="button" onClick={goBack}><ArrowLeft aria-hidden="true" />返回</button></main>;
   return (
     <main className="metadata-edit-page" aria-labelledby="metadata-edit-title">

@@ -1,3 +1,4 @@
+import { ContentSkeleton } from './ContentSkeleton';
 import { ChevronDown, ClipboardCopy, Copy, Download, Info, MessageSquareWarning, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
@@ -10,7 +11,6 @@ import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { NativeErrorLogRepository, type ErrorLogEntry } from '../repositories/nativeErrorLogRepository';
 import { NativeAppInfoRepository, type AppBuildInfo } from '../repositories/nativeAppInfoRepository';
 import { useToast } from './Toast';
-import { StatusLine } from './StatusLine';
 import { ConfirmDialog } from './ConfirmDialog';
 
 const repository = new NativeErrorLogRepository();
@@ -350,7 +350,6 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
   return <div className="error-log-panel">
     {/* 顶上不再有刷新与 ⋮（用户要的）：刷新由面板自己轮询（见上面的 effect），
         四个动作像其它设置面板那样铺在底部。这里只剩头一次读取的那半拍。 */}
-    {entries === undefined && <StatusLine busy>正在读取…</StatusLine>}
 
     {/* 相关信息：能抄给别人的那一份现场。折起来是它默认的样子——它是给「要报问题」的
         时候用的，不是每次看日志都要读一遍。 */}
@@ -386,8 +385,8 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
       )}
     </section>
 
-    {/* 第一次读回来时列表整块长出来（`.error-log-reveal` 的 0fr → 1fr）：
-        面板从「正在读取…」跳到几十条记录，那一截高度变化不该是硬跳。 */}
+    {/* 首次读取占住日志行的位置，读完仍使用原有的列表展开动画。 */}
+    {entries === undefined && <ContentSkeleton label="正在读取错误日志" variant="log" rows={3} />}
     {entries && entries.length > 0 && <div className="error-log-reveal">
       <ul className="error-log-list" aria-label="错误记录">
         {/* 原生侧给的就是从新到旧的顺序（本次在前、上次在后，各自新的在上），这里原样铺开。

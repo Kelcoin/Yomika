@@ -1,3 +1,4 @@
+import { ContentSkeleton } from './ContentSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePageActive } from '../app/RetainedPage';
@@ -991,7 +992,7 @@ export function DeduplicationWorkspace() {
               </div>
             </li>)}
           </ul> : historyBusy
-            ? <StatusLine busy region>正在读取扫描结果…</StatusLine>
+            ? <ContentSkeleton label="正在读取扫描结果" rows={3} />
             : <EmptyState
               icon={History}
               title="还没有保存的扫描结果"

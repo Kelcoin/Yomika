@@ -13,7 +13,8 @@ import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArc
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
 import { SelectField, type SelectOption } from './SelectField';
-import { StatusLine } from './StatusLine';
+import { ArchiveListSkeleton } from './ArchiveListSkeleton';
+import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
@@ -294,20 +295,20 @@ export function LocalArchivesWorkspace() {
     if (!pageActive) return;
     let active = true;
     void (async () => {
-      const [presetResult] = await Promise.all([repository.listSearchPresets(LOCAL_PRESET_SCOPE)]);
+      const [presetResult] = await Promise.all([repository.listSearchPresets(LOCAL_PRESET_SCOPE), loadArchives()]);
       if (!active) return;
       if (presetResult.ok) setPresets(presetResult.value);
-      await loadArchives();
     })();
     return () => { active = false; };
   }, [pageActive, loadArchives]);
 
   // 没有下载在跑 = 上一次的落地已经写完了，档案列表可能多了一份。
-  const settled = !unfinished;
+  const wasUnfinished = useRef(unfinished);
   useEffect(() => {
-    if (!pageActive || !settled) return;
-    void loadArchives();
-  }, [pageActive, settled, loadArchives]);
+    const completed = wasUnfinished.current && !unfinished;
+    wasUnfinished.current = unfinished;
+    if (pageActive && completed) void loadArchives();
+  }, [pageActive, unfinished, loadArchives]);
 
   const activeDownloads = useMemo(
     () => tasks.filter(isActiveDownload).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
@@ -450,6 +451,10 @@ export function LocalArchivesWorkspace() {
   });
   const shownRows = useStableVirtualRows(rowVirtualizer.getVirtualItems(), rowVirtualizer.getTotalSize(), listRows.length);
 
+  // Partial results can already render; a slower task read must not cover ready archives.
+  const initialLoading = (loading || !archivesLoaded) && listRows.length === 0 && !error && !taskError;
+  const skeleton = useDelayedUnmount(initialLoading, 180);
+
   const list = (
     <div className="local-archives">
       <h1 className="visually-hidden">本地档案</h1>
@@ -548,23 +553,22 @@ export function LocalArchivesWorkspace() {
           </button>
         </div>
       </div>
-      {/* 这一行顶替的是整块列表区（空的时候那一块是 `EmptyState`），所以走 `region`：
-          从前它是一行贴左上角的小字，与「还没有下载过档案」那块居中的空状态不像同一
-          件事的两种状态。 */}
-      {(loading || !archivesLoaded) && <StatusLine busy region>正在读取本地档案…</StatusLine>}
       {error && <div className="form-error" role="alert">{error}<button className="secondary-action" type="button" onClick={() => void loadArchives()}>重试读取本地档案</button></div>}
       {taskError && <div className="form-error" role="alert">{taskError}<button className="secondary-action" type="button" disabled={loading} onClick={() => { setLoading(true); setTaskReload((current) => current + 1); }}>重试读取下载任务</button></div>}
-      {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && !taskError && (
-        <EmptyState
-          icon={Download}
-          title={query || categoryFilter ? '没有匹配的档案' : '还没有下载过档案'}
-          description={query || categoryFilter ? '换个关键词或换个分类试试。' : '右键档案卡片选「下载档案」，进度和文件都会出现在这里。'}
-        />
-      )}
-      {listRows.length > 0 && (
+      {(listRows.length > 0 || skeleton.mounted || (!loading && archivesLoaded && !error && !taskError)) && (
         /* `archive-list is-wide`：这一页的行就是档案库的宽行。行高、封面框、文案
            三格和标签瀑布全部由那一套规则给，本地档案只多写「行里写什么」。 */
         <div className="archive-list is-wide local-archives-list" data-scroll-region ref={listRef} role="list" aria-label="本地档案">
+          {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && !taskError && (
+            <EmptyState
+              icon={Download}
+              title={query || categoryFilter ? '没有匹配的档案' : '还没有下载过档案'}
+              description={query || categoryFilter ? '换个关键词或换个分类试试。' : '右键档案卡片选「下载档案」，进度和文件都会出现在这里。'}
+            />
+          )}
+          {skeleton.mounted && <div className={`archive-list-skeleton-layer${initialLoading ? '' : ' is-exiting'}`}>
+            <ArchiveListSkeleton mode="wide" label="正在读取本地档案" exiting={!initialLoading} />
+          </div>}
           <div className="archive-list-inner" style={{ height: shownRows.totalSize }}>
             {shownRows.items.map((virtualRow) => {
               const row = listRows[virtualRow.index];

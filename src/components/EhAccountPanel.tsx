@@ -1,3 +1,4 @@
+import { ContentSkeleton } from './ContentSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { KeyRound, LogIn, Download, LogOut, Pencil, Save, X } from 'lucide-react';
@@ -192,10 +193,10 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
     setEditingAccountId(account.id);
   }
 
-  if (loading) {
+  if (loading && accounts.length === 0) {
     return (
       <section className="eh-account-panel" aria-label="E-Hentai 账户">
-        <StatusLine busy>正在读取账户…</StatusLine>
+        <ContentSkeleton label="正在读取账户" rows={3} />
       </section>
     );
   }
