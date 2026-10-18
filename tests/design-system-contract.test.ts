@@ -2712,6 +2712,28 @@ describe('design system contract', () => {
     expect(read('src/components/LoadingIndicator.tsx')).toMatch(/export function LoadingIndicator\(/);
   });
 
+  it('gives a whole-region wait the empty state’s geometry instead of a corner sentence', () => {
+    // 本地档案页从前是「空的时候一块居中的空状态、读的时候左上角一行小字」：同一件
+    // 事的两种状态长得不像一件事，读的那一态看着像页面坏了。`is-region` 是那一档：
+    // 几何照抄 .empty-state，标记放大到 is-sm（28px），别再让小圈挂在正中。
+    const status = read('src/components/StatusLine.tsx');
+    expect(status).toMatch(/region\?: boolean;/);
+    expect(status).toMatch(/region \? ' is-region' : ''/);
+    const css = read('src/styles/shell.css');
+    const region = /\.status-line\.is-region \{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(region, 'region 那一档要有自己的几何').toContain('display: grid');
+    expect(region).toContain('place-content: center');
+    expect(region).toContain('min-height: 320px');
+    expect(region).toContain('text-align: center');
+    expect(css).toMatch(/\.status-line\.is-region \.loading-mark svg \{ width: 28px; height: 28px; \}/);
+    // 空状态是整块区域、加载态也必须整块区域的那两处（列表里、卡片里的行不加）。
+    for (const path of ['src/components/LocalArchivesWorkspace.tsx', 'src/components/DeduplicationWorkspace.tsx']) {
+      const source = read(path);
+      expect(source, path).toMatch(/<StatusLine busy region>/);
+      expect(source, path).toMatch(/<EmptyState/);
+    }
+  });
+
   it('binds the pull to whatever scrolls, on every layout', () => {
     // The gesture used to be bound to the archive list, which only scrolls inside
     // the library's own panels on a wide window. On compact and behind the

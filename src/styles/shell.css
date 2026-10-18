@@ -682,6 +682,27 @@ body::-webkit-scrollbar,
 
 .status-line.is-error { color: var(--error); }
 
+/* 整块区域在等的时候，这一行要长得像 .empty-state 那块区域，而不是像列表里的一行。
+ *
+ * 本地档案页从前是：空的时候一块居中的空状态，读的时候左上角一行小字——两态一个在
+ * 正中、一个贴左上角，看起来不像同一件事的两种状态。几何直接照抄 .empty-state（同一段
+ * 最小高度、同一处留白、同样居中），只有标记放大到 is-sm 那一档（28px），免得一枚 15px
+ * 的小圈孤零零挂在正中央。
+ *
+ * 列表里、卡片里、表单里的那行不要加 is-region：那些地方本来就该是一条贴行的句子。 */
+.status-line.is-region {
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  min-height: 320px;
+  padding: var(--space-8) var(--space-5);
+  text-align: center;
+}
+
+.status-line.is-region .loading-mark svg { width: 28px; height: 28px; }
+
 .toast-stack { position: fixed; z-index: var(--z-toast); right: var(--space-5); bottom: calc(28px + var(--space-6)); display: grid; gap: var(--space-2); width: min(420px, calc(100vw - 32px)); pointer-events: none; }
 
 /* A phone gets Android's toast, not the desktop card.

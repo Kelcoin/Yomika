@@ -548,7 +548,10 @@ export function LocalArchivesWorkspace() {
           </button>
         </div>
       </div>
-      {(loading || !archivesLoaded) && <StatusLine busy>正在读取本地档案…</StatusLine>}
+      {/* 这一行顶替的是整块列表区（空的时候那一块是 `EmptyState`），所以走 `region`：
+          从前它是一行贴左上角的小字，与「还没有下载过档案」那块居中的空状态不像同一
+          件事的两种状态。 */}
+      {(loading || !archivesLoaded) && <StatusLine busy region>正在读取本地档案…</StatusLine>}
       {error && <div className="form-error" role="alert">{error}<button className="secondary-action" type="button" onClick={() => void loadArchives()}>重试读取本地档案</button></div>}
       {taskError && <div className="form-error" role="alert">{taskError}<button className="secondary-action" type="button" disabled={loading} onClick={() => { setLoading(true); setTaskReload((current) => current + 1); }}>重试读取下载任务</button></div>}
       {!loading && archivesLoaded && activeDownloads.length === 0 && visibleArchives.length === 0 && !error && !taskError && (

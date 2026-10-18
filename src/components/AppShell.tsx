@@ -69,6 +69,22 @@ export function compactNavHiddenItems(bottomNavItems: readonly string[] = []) {
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
 
+/** 侧栏那一条指向哪儿（`to`）与它代表哪几段路径是两件事。
+ *
+ * 首页的详情是它自己的一条路由（`/home/:archiveId`），而侧栏那一条指向 `/`：`end`
+ * 让 `/` 只认根路径，于是「在首页点开一张档案」会把首页图标熄灭。档案库、历史、收藏
+ * 的详情都挂在自己的前缀下（`/library/:archiveId`、`/history/:archiveId` …），
+ * react-router 本来就认，所以只有首页有这个毛病。
+ *
+ * 导出是为了能直接量这条规则——它是纯函数，不必把整棵树渲染起来。 */
+const NAV_EXTRA_PREFIXES: Record<string, string> = { '/': '/home/' };
+
+export function navEntryActive(to: string, isActive: boolean, pathname: string): boolean {
+  if (isActive) return true;
+  const prefix = NAV_EXTRA_PREFIXES[to];
+  return prefix !== undefined && pathname.startsWith(prefix);
+}
+
 // DOM nodes are replaced when a route unmounts, but the user's reading position
 // belongs to the route. Keep it outside React so switching tabs does not turn a
 // scroll restoration into another render or request.
@@ -97,7 +113,7 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
               const queryOnly = to.includes('?');
               const active = queryOnly
                 ? isActive && location.search === to.slice(to.indexOf('?'))
-                : isActive;
+                : navEntryActive(to, isActive, location.pathname);
               return `nav-link${active ? ' is-active' : ''}`;
             }}
             end={to === '/'}

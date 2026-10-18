@@ -14,6 +14,7 @@ vi.mock('../../src/components/LibraryRouteWorkspace', () => ({
 
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
+import { AppShell, navEntryActive } from '../../src/components/AppShell';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 
@@ -405,5 +406,44 @@ describe('home detail route', () => {
       expect([panelGrow(list), panelGrow(detail)], entry).toEqual(['58', '42']);
       view.unmount();
     }
+  });
+});
+
+describe('侧栏那一条与详情挂在谁下面', () => {
+  it('counts /home/:archiveId as the home entry, and nothing else as home', () => {
+    // 纯规则：`to` 是点它去哪儿，额外前缀是它还代表哪几段路径。
+    expect(navEntryActive('/', false, '/home/archive-0')).toBe(true);
+    expect(navEntryActive('/', false, '/library/archive-0')).toBe(false);
+    expect(navEntryActive('/library', false, '/home/archive-0')).toBe(false);
+    // react-router 本来就认的那些（详情挂在自己前缀下）不受影响。
+    expect(navEntryActive('/library', true, '/library/archive-0')).toBe(true);
+  });
+
+  it('keeps the home entry lit while the detail opened from the home page is up', async () => {
+    // 用户报的：Windows 双页模式下从首页点开详情，左侧「首页」图标变成未选中。
+    // `/` 那条带 `end`，只认根路径；首页的详情却是 `/home/:archiveId`。
+    render(
+      <MemoryRouter initialEntries={['/home/archive-0']}>
+        <PreferencesProvider><ToastProvider>
+          <AppShell><WorkspaceRoutes /></AppShell>
+        </ToastProvider></PreferencesProvider>
+      </MemoryRouter>,
+    );
+    const nav = await screen.findByRole('navigation', { name: '主导航' });
+    expect(within(nav).getByRole('link', { name: '首页' }).className).toContain('is-active');
+    expect(within(nav).getByRole('link', { name: '档案库' }).className).not.toContain('is-active');
+  });
+
+  it('lights the shelf entry whose own detail is open, not the home entry', async () => {
+    render(
+      <MemoryRouter initialEntries={['/library/archive-0']}>
+        <PreferencesProvider><ToastProvider>
+          <AppShell><WorkspaceRoutes /></AppShell>
+        </ToastProvider></PreferencesProvider>
+      </MemoryRouter>,
+    );
+    const nav = await screen.findByRole('navigation', { name: '主导航' });
+    expect(within(nav).getByRole('link', { name: '档案库' }).className).toContain('is-active');
+    expect(within(nav).getByRole('link', { name: '首页' }).className).not.toContain('is-active');
   });
 });

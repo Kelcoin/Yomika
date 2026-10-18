@@ -991,7 +991,7 @@ export function DeduplicationWorkspace() {
               </div>
             </li>)}
           </ul> : historyBusy
-            ? <StatusLine busy>正在读取扫描结果…</StatusLine>
+            ? <StatusLine busy region>正在读取扫描结果…</StatusLine>
             : <EmptyState
               icon={History}
               title="还没有保存的扫描结果"

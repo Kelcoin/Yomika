@@ -75,6 +75,31 @@ describe('local archives workspace', () => {
     expect(screen.getByTestId('current-location')).toHaveTextContent('/elsewhere');
   });
 
+  it('waits in the middle of the region, in the shape the empty state will take', async () => {
+    // 用户报的是这一页的加载提示：空的时候是居中的空状态，读的时候却是左上角一行
+    // 小字。两态现在共用一块区域（`is-region` 取 .empty-state 的几何），标记也从
+    // 15px 放大到 28px。
+    let release: (() => void) | undefined;
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') {
+        await new Promise<void>((resolve) => { release = resolve; });
+        return { ok: true, value: [] };
+      }
+      return { ok: true, value: [] };
+    });
+    render(<MemoryRouter initialEntries={['/downloads']}><LocalArchivesWorkspace /></MemoryRouter>);
+
+    const line = await screen.findByText('正在读取本地档案…');
+    expect(line.className).toContain('status-line');
+    expect(line.className).toContain('is-region');
+    expect(line.querySelector('.loading-mark')).not.toBeNull();
+
+    await act(async () => { release?.(); });
+    await waitFor(() => expect(screen.queryByText('正在读取本地档案…')).not.toBeInTheDocument());
+    // 同一块区域接着交给空状态：句子换了，几何没换。
+    expect(screen.getByText('还没有下载过档案')).toBeInTheDocument();
+  });
+
   it('closes local deletion confirmation when its retained page hides', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_local_archives') return { ok: true, value: [localFile] };
