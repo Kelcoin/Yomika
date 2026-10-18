@@ -317,6 +317,11 @@ detailBasePath?: string | undefined }) {
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
   const progress = useArchiveReadingProgress(scopeId, archiveId);
+  /** 有进度时阅读按钮写成「从 N 页继续」：这一页真正的下一步是接着读，而不是从第一页
+   * 重来。窄容器里退成「继续」（`shell.css` 的 `detail-actions` 容器查询），再窄就只剩
+   * 图标——和这一排其它动作同一套退化。 */
+  const readPage = progress.pageIndex ?? 0;
+  const readLabel = progress.hasProgress && readPage > 0 ? `从 ${readPage + 1} 页继续` : '阅读';
   const [downloading, setDownloading] = useState(false);
   const downloadOwner = useRef({ identity: readingIdentity, busy: false, active: true });
   if (downloadOwner.current.identity !== readingIdentity) downloadOwner.current = { identity: readingIdentity, busy: false, active: true };
@@ -400,7 +405,7 @@ detailBasePath?: string | undefined }) {
         {detailActions.includes('read') && <Link
           className="secondary-action"
           to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
-          aria-label="阅读"
+          aria-label={readLabel}
           title="阅读（长按进入无痕阅读）"
           onPointerDown={startIncognitoPress}
           onPointerUp={cancelIncognitoPress}
@@ -408,7 +413,7 @@ detailBasePath?: string | undefined }) {
           onPointerCancel={cancelIncognitoPress}
           onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
-        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>}
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label">{readLabel}</span>{progress.hasProgress && <span className="archive-action-label-short">继续</span>}</Link>}
         {detailActions.includes('readingList') && <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
           if (!scopeId || readingOwner.current.busy) return;
           const identity = readingIdentity;

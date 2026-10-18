@@ -10,6 +10,25 @@ export const DlssnrGpuSchema = z.object({
   recommendedVariant: z.string().nullable().optional(),
 });
 
+/** 库里的一种已装片段（`data/dlssnr/variants/` 里的一个文件）。
+ *
+ * 下载不再顶掉别的版本：每一个变体各占库里的一个文件，固定名那份才是阅读器真正用的。
+ * `id` / `label` 为空代表这份文件的字节认不出是哪一条目录里的变体（自己塞进来的、
+ * 改过的、目录里已经下架的）；`active` 是**此刻**正在用的那一种。
+ */
+export const DlssnrInstalledVariantSchema = z.object({
+  /** 目录里的变体 id（`official` / `community` / `sf-v2`…）；认不出就是 null。 */
+  id: z.string().nullable(),
+  /** 后端认出来的名字；认不出就是 null。 */
+  label: z.string().nullable(),
+  bytes: z.number(),
+  active: z.boolean(),
+  /** 库目录里的文件名，认不出的片段靠它才叫得出来。 */
+  file: z.string(),
+});
+
+export type DlssnrInstalledVariant = z.output<typeof DlssnrInstalledVariantSchema>;
+
 /** 这台机器上 DLSSNR 的现状。全是便宜事实：枚举显卡、看文件在不在、认哈希。 */
 export const DlssnrStatusSchema = z.object({
   dllPresent: z.boolean(),
@@ -22,6 +41,10 @@ export const DlssnrStatusSchema = z.object({
   /** 盘上这份片段的 SHA-256。**不能拿字节数代替**：官方原版与Lecram 版都是
    * 165,840,496 字节，只有哈希分得开。老版本后端没有这个字段，所以是可选的。 */
   dllSha256: z.string().nullable().optional(),
+  /** 这台机器上装过的每一种（一个变体一个文件），按文件名排。认不出的文件也在里面，
+   * 这样设置页才看得见「为什么下了一个版本会顶掉别的」已经不再发生。
+   * 老版本后端没有这个字段，所以是可选的。 */
+  installedVariants: z.array(DlssnrInstalledVariantSchema).optional(),
   gpu: DlssnrGpuSchema.nullable().optional(),
   gpuName: z.string(),
   recommendedVariant: z.string().nullable(),
@@ -171,9 +194,21 @@ export class NativeDlssnrRepository {
     return invokeCommand('dlssnr_catalog', {}, DlssnrCatalogSchema);
   }
 
-  /** 下载某一条变体并装进数据目录（旧的被换掉）。 */
+  /** 下载某一条变体装进库里，并把它放到固定名上给阅读器用。
+   *
+   * 库里其它版本一个都不动：每一条各占自己的文件，所以下了一个版本不会顶掉别的版本；
+   * 想换回去用 `activateVariant`。 */
   downloadVariant(variantId: string): Promise<CommandResult<z.output<typeof InstalledDllSchema>>> {
     return invokeCommand('dlssnr_download_variant', { variantId }, InstalledDllSchema);
+  }
+
+  /** 换成库里已经装过的另一种，不用重新下载。
+   *
+   * `variantId` 收目录里的变体 id，也收库里的完整文件名（认不出的片段只有文件名可用）。
+   * 后端动手之前会先退掉计算进程（片段映在它身上），所以换完**不用重启应用**，
+   * 下一页会重新算。 */
+  activateVariant(variantId: string): Promise<CommandResult<z.output<typeof InstalledDllSchema>>> {
+    return invokeCommand('dlssnr_activate_variant', { variantId }, InstalledDllSchema);
   }
 
   /** 拿缓存里的一页跑一遍，回 PNG 字节。

@@ -458,13 +458,21 @@ describe('native shell configuration', () => {
     const commands = read('../../src-tauri/src/dlssnr/commands.rs');
     expect(commands).toContain('fn commit_candidate(');
     expect(commands).toContain('manager.retire_and_mutate("DLSSNR 片段换了版本", install)');
-    // 两条装片段的入口（导入文件 / 下载变体）都要换代；旧做法（只 `forget_probe`）不该
-    // 留在调用点上——那正是「换了片段但那一代还在跑」。
+    // 三处改动片段的入口（导入文件 / 下载变体 / 在库里切换）都要换代；旧做法（只
+    // `forget_probe`）不该留在调用点上——那正是「换了片段但那一代还在跑」。切换那条没有
+    // 候选文件要提交，形状与另两条不同（把库里那份复制到固定名上），所以单独钉一句。
     expect(
       commands.match(/commit_candidate\(manager\.as_deref\(\),/g) ?? [],
       '两条装片段的入口都要换代',
     ).toHaveLength(2);
-    expect(commands.match(/super::forget_probe\(\);/g) ?? [], '作废探针只在助手体内发生一次').toHaveLength(1);
+    expect(
+      commands,
+      '切换片段那条也要请这一代退下（库里复制到固定名之前）',
+    ).toContain('manager.retire_and_mutate(&reason, move || switch(&data, &id))');
+    expect(
+      commands.match(/super::forget_probe\(\);/g) ?? [],
+      '作废探针要出现在每一处真换了片段的助手体里（导入/下载一处、切换一处）',
+    ).toHaveLength(2);
 
     // 宿主这一侧的形状。
     const manager = read('../../src-tauri/src/compute/manager.rs');

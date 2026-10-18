@@ -34,6 +34,7 @@ import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueCon
 import { StatusLine } from './StatusLine';
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } from './SyncSettings';
+import { UpscaleIcon } from './UpscaleIcon';
 import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
 import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
 import { scopeLabel } from '../domain/syncScope';
@@ -167,6 +168,16 @@ function formatCacheBytes(value: number): string {
   const index = Math.min(units.length - 1, Math.floor(Math.log(value) / Math.log(1024)));
   const amount = value / 1024 ** index;
   return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')} ${units[index]}`;
+}
+
+/** 超分模型列表的固定头名次：内置的那两档（Anime4K 的 shader 链、随包 waifu2x）永远
+ * 排在最前，其余的按 id 排。名次写死在这里而不是从数据库或目录里读——那两处的顺序
+ * 会随「下载完成」「目录刷新」「版本更新」变化，而列表顺序不该跟着跳（用户 2026-10-18：
+ * 模型下载完成会导致顺序发生变化，另外让 anime4k 和 waifu2x 放到上面）。 */
+const BUILT_IN_HEAD = ['anime4k-hq', 'anime4k-ultra', 'anime4k', 'waifu2x-upconv7'];
+function builtInRank(id: string): number {
+  const at = BUILT_IN_HEAD.indexOf(id);
+  return at === -1 ? BUILT_IN_HEAD.length : at;
 }
 
 /** Keep the selector compact: version and scale are implementation metadata. */
@@ -346,8 +357,12 @@ export function SettingsWorkspace() {
   const upscaleOn = preferenceDraft.upscaleBackend !== 'off' && Boolean(runnableModels.length);
   const upscaleReady = Boolean(runnableModels.length);
   /** 目录里还没装上盘的那些：列出来才有下载按钮。只列已安装的模型，手机端
-   * 就永远等不到 real-esrgan —— 既没有导入入口，也没有下载入口。已安装的排
-   * 在前（内置 Anime4K、随包 waifu2x 是默认选择），目录里的跟在后面。
+   * 就永远等不到 real-esrgan —— 既没有导入入口，也没有下载入口。
+   *
+   * 顺序**不跟安装状态走**：用户 2026-10-18 报「模型下载完成会导致顺序发生变化」。
+   * 以前是「已装的在前、目录里的在后」，已装那一半的顺序来自数据库行序，于是装完一个
+   * 就会跳一下。现在两档内置（Anime4K 的 shader 链、随包 waifu2x）永远在最前，其余按
+   * id 排——id 不随下载、目录刷新、版本更新变化，列表因此在任何时刻都一样。
    *
    * 行名以目录为准：装之前叫「Real-ESRGAN 通用 x4」，装完还叫这个，不会退回
    * 内置那份按 id 拼出来的名字。 */
@@ -357,13 +372,15 @@ export function SettingsWorkspace() {
     ...(upscaleCatalog ?? [])
       .filter((hosted) => !runnableModels.some((installed) => installed.id === hosted.id))
       .map((hosted) => ({ value: hosted.id, label: hosted.label })),
-  ];
+  ].sort((left, right) => builtInRank(left.value) - builtInRank(right.value) || left.value.localeCompare(right.value));
   /** 已装、但目录里报了新版本的那些。更新就是同一个下载动作，只是按钮换个说法：
    * 后端把版本编进安装路径（`models/<id>/<version>`），新版本落一个新目录，取用时
    * 认的是最新的那一版，所以不需要先卸载旧的。 */
   const outdatedUpscaleIds = new Set(availableModelUpdates(installedModels, upscaleCatalog).map((update) => update.id));
-  /** 这一行显示哪个模型。下载在二级菜单里按选项走，所以这里不需要配一份「当前选项」。 */
-  const upscaleSelectedModel = preferenceDraft.upscaleModel || upscaleModelOptions[0]?.value || '';
+  /** 这一行显示哪个模型。下载在二级菜单里按选项走，所以这里不需要配一份「当前选项」。
+   * 兜底仍然是**已装的第一个**（旧行为）：列表现在是按内置优先排的，拿列表头当兜底
+   * 会顺手把「开启超分时默认选谁」也改掉——那是另一件事，用户没让改。 */
+  const upscaleSelectedModel = preferenceDraft.upscaleModel || runnableModels[0]?.id || upscaleModelOptions[0]?.value || '';
   // 选择器的值不能为空：命令失败时列表可能真的是空的，退回随包 waifu2x。
   if (!upscaleModelOptions.length) upscaleModelOptions.push({ value: 'waifu2x-upconv7', label: 'waifu2x' });
   const statsRequestedRef = useRef(false);
@@ -1592,7 +1609,7 @@ export function SettingsWorkspace() {
             {selectedSettingsSection === 'settings-advanced' && (
               <div className="settings-group">
                 <SettingsSwitch
-                  icon={<Sparkles />}
+                  icon={<UpscaleIcon enabled={upscaleOn} />}
                   label="启用超分"
                   /* 模型还没读出来时说「正在读取」，读完才回答有没有——不然一行人
                      打开页面就被告知「尚未安装」，而它只是还没查到。 */
@@ -1602,7 +1619,10 @@ export function SettingsWorkspace() {
                   onToggle={() => {
                     if (upscaleOn) { editPreferences({ upscaleBackend: 'off' }); return; }
                     if (!upscaleReady) { showToast('超分模型未安装，无法启用', 'error'); return; }
-                    editPreferences({ upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || upscaleModelOptions[0]!.value });
+                    // 开启时默认选谁：仍是**已装的第一个**（旧行为）。列表现在按内置优先
+                    // 排，拿列表头当兜底会顺手改掉这个默认——那是另一件事（用户 2026-10-18
+                    // 只要求把 anime4k / waifu2x 排到上面，没要求换默认模型）。
+                    editPreferences({ upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || runnableModels[0]?.id || upscaleModelOptions[0]!.value });
                   }}
                 />
                 <SettingsChoice

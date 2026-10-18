@@ -1261,6 +1261,17 @@ describe('design system contract', () => {
     expect(reader).toMatch(/\.reader-icon-button,[\s\S]*?\.reader-toolbar button\s*\{[\s\S]*width:\s*var\(--icon-button-size\)[\s\S]*height:\s*var\(--icon-button-size\)/);
   });
 
+  // 用户报 4（2026-10-18）：「为超分和 dlssnr 图标绘制关闭 / 启用两种状态，不要单纯只是
+  // 颜色变化。」阅读器底栏那两枚由 reader-screen.test.tsx 的
+  // 'draws a different glyph for the on and off state of both enhancement switches' 从
+  // 行为上钉住；设置页是同一对开关的第二处落点（超分在 SettingsWorkspace、DLSSNR 在
+  // DlssnrSettingsGroup）。两态画在组件里以后，还得有人把当前状态真的传下去——传丢了
+  // 组件会退回默认的「开」那一态，页面上就只剩颜色在动，正是用户报的那个样子。
+  it('draws the enhancement switches in both states wherever they appear', () => {
+    expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/icon=\{<UpscaleIcon enabled=\{upscaleOn\} \/>\}/);
+    expect(read('src/components/DlssnrSettingsGroup.tsx')).toMatch(/icon=\{<DlssnrIcon enabled=\{preferences\.dlssnrEnabled\} \/>\}/);
+  });
+
   it('gives the reader chrome the Material 3 app-bar geometry and roles', () => {
     // 阅读模式的顶栏/底栏按 M3 的 small top app bar 与 bottom app bar 规格：容器
     // 64dp / 80dp（各加自己的安全区）、左右 4dp（TopAppBarHorizontalPadding 与
@@ -1430,6 +1441,31 @@ describe('design system contract', () => {
     const leavingPill = ruleBody(reader, '.reader-page-indicator.is-leaving');
     expect(leavingPill).toMatch(/opacity:\s*0/);
     expect(leavingPill).not.toMatch(/bottom\s+0s/);
+
+    // 2026-10-18 用户报 14：「页码指示器的自动显隐响应有点慢，并且有时候出现缺少动画」。
+    // 慢和缺动画是同一处机制的两种表现，所以判据钉在机制上而不是某一条时长：
+    // ① 出现/消失各写各的时长，且消失更快。原来进出共用一条 280ms（全应用最慢的一档：
+    //    栏 260ms、标准 220ms、快速 140ms）。无头 Edge + CDP 工装实测
+    //    （debug_outputs/reader-batch/pill-probe）：修前淡出到 opacity 0 用 276ms、
+    //    淡入到 1 用 271ms；修后消失 140ms、出现 220ms。
+    // ② 不许再挂 `reader-indicator-in` 关键帧。它是 `backwards` 填充，从安静回到可见时
+    //    从 0 重新起播而不是接着当前值走：实测在 opacity 0.209 那一帧被打断，画面先掉到
+    //    0 再重新淡入——看起来就是「闪一下/没有动画」（同一处修后 0.209 → 0.21 接着走）。
+    // ③ 减弱动效时两个方向都直接落位：只压一半（只压退出）会让「安静下去」瞬移、回来却
+    //    还在淡入，同一颗胶囊两个方向两种读法。
+    const pillBase = ruleBody(reader, '.reader-page-indicator');
+    expect(pillBase, '出现走标准时长').toMatch(/transition:\s*opacity var\(--duration-standard\) var\(--ease-standard\)/);
+    const pillQuiet = ruleBody(reader, ".reader-page-indicator[data-visible='false']");
+    expect(pillQuiet, '消失比出现快一档').toMatch(/transition-duration:\s*var\(--duration-fast\)/);
+    expect(pillQuiet, '消失用加速曲线').toMatch(/transition-timing-function:\s*var\(--ease-exit\)/);
+    const readerRules = reader.replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(readerRules, '关键帧那条已经删掉').not.toMatch(/@keyframes reader-indicator-in/);
+    expect(readerRules, '可见态不再让关键帧兜「刚挂载」那一拍').not.toMatch(/animation:\s*reader-indicator-in/);
+    expect(readerRules, '那枚通吃的时长令牌也一起退休').not.toMatch(/--duration-reader-indicator/);
+    expect(tokens, '两档时长都在令牌里').toMatch(/--duration-fast:\s*140ms/);
+    expect(reader, '减弱动效两个方向都直接落位').toMatch(
+      /@media \(prefers-reduced-motion: reduce\) \{\s*\.reader-page-indicator,\s*\.reader-page-indicator\[data-visible='false'\] \{ transition: none; \}/,
+    );
 
     // 胶囊的落点：桌面可以借右下角那半格，手机永远居中。竖着占满屏幕的页在桌面上会把
     // 胶囊推进右边缝里，可手指也在那里，而且手机上那半格本来就没宽到能放一条「2 / 100」；
@@ -2245,6 +2281,11 @@ describe('design system contract', () => {
     // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-copy \{\s*transform-origin: left center;/);
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
+    // 用户 2026-10-18 又报「按钮的点击缩小效果缺少动画」：`button:active` 那条只给几何、不给
+    // 过渡，于是凡是没有自己声明 transition 的按钮/链接、以及设置行里那三块内容，按下去那一拍
+    // 都是瞬变。父行的 transition 管不到子元素的 transform，所以这一条必须落在子元素上。
+    expect(base, '按钮/链接的按压要有过渡').toMatch(/button,\s*a \{\s*transition: transform var\(--motion-crisp\);/);
+    expect(base, '设置行内容的按压要有过渡').toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,320}?transition: transform var\(--motion-crisp\);/);
   });
 
   it('keeps the DLSSNR labels short and puts the supported series on the same line', () => {
@@ -2882,6 +2923,22 @@ describe('design system contract', () => {
     expect(source).toMatch(/className="select-option-download"/);
   });
 
+  it('gives the installed-snippet library the shared row and the mirrored switch slot', () => {
+    // 用户 2026-10-18 报「dlssnr多个版本没法共存，导致下了一个版本就会顶掉其他版本」：库里
+    // 每一种都要看得见、换得回去。这一段不能自造行式——行体走共享的 `.settings-choice-option-main`，
+    // 行尾动作必须挂在 `.select-option-download` 上：shell.css 那条
+    // `:has(> .select-option-download)` 的镜像留白只认这个类，换成 `.secondary-action`（约 50px）
+    // 会让「切换」那一行的字比「正在用」那行偏左几个像素，正是那条规则注释里用户报过的毛病。
+    const source = read('src/components/DlssnrSettingsGroup.tsx');
+    expect(source).toMatch(/aria-label="已安装的片段"/);
+    // 切换按钮自己带上是哪一条（无障碍名），动作本身也走上面那个镜像槽。
+    expect(source).toMatch(/aria-label=\{`切换到\$\{name\}`\}/);
+    expect(source).toMatch(/className="select-option-download"[\s\S]{0,400}?切换/);
+    // 库里的行不许自造类名（自造就意味着脱离共享行式与那条镜像留白）。
+    expect(source).not.toContain('dlssnr-library');
+    expect(read('src/styles/shell.css')).toMatch(/\.settings-choice-option:has\(> \.select-option-download\)/);
+  });
+
   it('packs choice rows with no phantom second line and centres their labels', () => {
     // 模型菜单每一项都挂着常驻的下载进度槽（关着时高度 0）。`gap` 会给换下来的那条
     // **空**行照样留 8px 行间距，于是每行都比自己的按钮高 8px、高亮块跟着多出一截，
@@ -3370,6 +3427,63 @@ describe('the 2026-10-17 UI batch', () => {
     );
     expect(shell, '分数宽度钉住，+6 与 +119 不会推着按钮左右移动').toMatch(
       /\.eh-comment-votes \.eh-comment-score \{[^}]*flex: none;[^}]*min-width: 4ch;/,
+    );
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * 移动端四项缺陷（用户 2026-10-18 报的 5 / 6 / 7 / 12）。
+ * 判据钉行为语义，不钉行号与文本顺序：键盘收不收、高亮在不在、底部有没有多出
+ * 一截空带、底栏跟不跟着键盘走。
+ * ------------------------------------------------------------------------- */
+describe('移动端：软键盘、卡片高亮、底部留白、底栏避让', () => {
+  it('hides the soft keyboard when Enter commits an input', () => {
+    const library = read('src/components/LibraryWorkspace.tsx');
+    expect(library, '搜索框的 Enter 分支：preventDefault 掉默认提交之后输入法不会自己落下，得把焦点从输入框上拿走').toMatch(
+      /if \(event\.key !== 'Enter'\) return;\s*\n\s*event\.preventDefault\(\);[\s\S]{0,400}?event\.currentTarget\.blur\(\);/,
+    );
+    const dialog = read('src/components/TextInputDialog.tsx');
+    expect(dialog, '对话框输入框的 Enter 分支同理：先失焦再提交，元素被摘掉并不保证键盘跟着落下').toMatch(
+      /if \(event\.key === 'Enter'\) \{ event\.preventDefault\(\); event\.currentTarget\.blur\(\); void submit\(\); \}/,
+    );
+  });
+
+  it('keeps the open-detail highlight off the compact card list', () => {
+    const library = read('src/components/LibraryWorkspace.tsx');
+    expect(library, '紧凑档详情本来就是整屏，列表上那圈 primary 高亮只剩「失焦也不消失」这一种读法，所以卡片高亮必须把 compact 算进去').toMatch(
+      /const pressed = !compact && selectedId !== undefined && archive\.archiveId === selectedId;/,
+    );
+  });
+
+  it('leaves no tail padding inside the library scrollers', () => {
+    const shell = read('src/styles/shell.css');
+    expect(shell, '详情面板不再单独补一份底部留白：面板在宽档自己就是滚动容器，补进去的留白只会落在滚动范围里').not.toMatch(
+      /\.library-shell-detail \{[^}]*padding-bottom/,
+    );
+    expect(shell, '详情路由也不再补：min-height: 100% 配底部内边距撑不掉那截空带').not.toMatch(
+      /\.archive-detail-route \{[^}]*padding-bottom/,
+    );
+    expect(shell, '两个面板在窄档的下内边距同样归零（窄档滚动的是 .workspace 自己）').toMatch(
+      /\.library-shell-list,\s*\.library-shell-detail \{ padding: var\(--space-4\) var\(--space-4\) 0;/,
+    );
+    expect(shell, '遮挡格仍只由唯一的滚动容器补：悬浮底栏那一格').toMatch(
+      /\.app-shell\.is-floating-nav \.workspace,[\s\S]{0,160}padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\);/,
+    );
+  });
+
+  it('keeps the floating nav where it is when the soft keyboard opens', () => {
+    const main = read('src/main.tsx');
+    expect(main, '布局视口被键盘缩短了多少，写成 --keyboard-inset（visualViewport 的收缩量）').toMatch(
+      /visualViewport[\s\S]{0,600}setProperty\('--keyboard-inset'/,
+    );
+    const base = read('src/styles/base.css');
+    expect(base, '变量得有声明在 html 上的兜底值，否则 calc() 整条失效').toMatch(/--keyboard-inset: 0px;/);
+    const shell = read('src/styles/shell.css');
+    expect(shell, '悬浮底栏把这份缩短量反向减掉：屏幕上原地不动、由键盘盖过去，而不是跟着往上避让').toMatch(
+      /\.compact-nav\.is-floating \{[\s\S]{0,600}bottom: calc\(var\(--safe-bottom\) \+ var\(--space-3\) - var\(--keyboard-inset\)\);/,
+    );
+    expect(shell, '这套补偿只给悬浮底栏：停靠底栏与对话框要留在键盘之上').not.toMatch(
+      /\.compact-nav \{[^}]*--keyboard-inset/,
     );
   });
 });

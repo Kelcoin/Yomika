@@ -449,7 +449,6 @@
     --ease-spring: cubic-bezier(0.26, 1.2, 0.48, 1);
     --motion-fast: 140ms var(--ease-standard);
     --motion-crisp: 180ms var(--ease-smooth);
-    --duration-reader-indicator: 280ms;
     --motion-toast-enter: 320ms var(--ease-spring);
     --motion-toast-exit: 280ms cubic-bezier(.4,0,1,1);
     --motion-dock: 280ms cubic-bezier(.22, 1, .36, 1);
@@ -462,6 +461,9 @@
        --motion-* value into that slot puts two easing functions into one
        transition item, which makes the entire declaration invalid. */
     --duration-standard: 220ms;
+    /* 退出比进入快一档：画面已经在走了，读者不需要再看一遍完整时长（页码胶囊
+       2026-10-18 的读数就是这条曲线的来由，见 reader.css 里那颗胶囊的注释）。 */
+    --duration-fast: 140ms;
     --duration-exit: 260ms;
 
     /* Looping indicators need a linear clock, so they cannot ride --motion-*.

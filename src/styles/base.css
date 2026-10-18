@@ -23,6 +23,11 @@
  */
 html {
   --viewport-height: 100vh;
+  /* 软键盘抬起时布局视口被 `interactive-widget=resizes-content` 缩短的像素数
+     （见 index.html 的 viewport 说明与 src/main.tsx 的 visualViewport 跟踪）。
+     预置 0px 是给 `calc()` 留一个有效值：没有它，`- var(--keyboard-inset)`
+     会在键盘机制缺席时把整条声明算成无效。 */
+  --keyboard-inset: 0px;
   min-width: 320px;
   height: 100%;
   /* Nothing here scrolls, so no scroller should be able to hand a gesture back
@@ -408,6 +413,16 @@ textarea:focus {
   }
 }
 
+/* 按压的**动画**：`button:active` 那条只给几何、不给过渡，凡是自己没有声明
+   `transition` 的按钮/链接，按下去那一拍就是瞬变（用户 2026-10-18：按钮的点击缩小
+   效果缺少动画）。这里只补 `transform` 一项，组件自己声明的 `transition`（在
+   shell.css / visual-enhancements.css 里，靠后或更具体）照旧说了算；跟手拖拽的那些面
+   （列表过滚层等）是 div，不受这条影响。 */
+button,
+a {
+  transition: transform var(--motion-crisp);
+}
+
 button:active,
 a:active {
   transform: translateY(1px) scale(0.98);
@@ -426,11 +441,14 @@ a:active {
 }
 
 /* 行里三块内容各缩各的，所以原点要错开：图标向右缩、正文向左缩、值向右缩，
-   它们之间的间距看起来才是整体缩小，而不是各自往中间挤出一堆缝。 */
+   它们之间的间距看起来才是整体缩小，而不是各自往中间挤出一堆缝。
+   过渡必须写在这三个**子元素**自己身上：父行那条 `transition` 管不到子元素的
+   `transform`（用户 2026-10-18：按钮的点击缩小效果缺少动画）。 */
 .settings-row-button:is(.is-pressed, :active) > .settings-row-icon,
 .settings-row-button:is(.is-pressed, :active) > .settings-row-copy,
 .settings-row-button:is(.is-pressed, :active) > .settings-row-value {
   transform: scale(0.98);
+  transition: transform var(--motion-crisp);
 }
 .settings-row-button:is(.is-pressed, :active) > .settings-row-icon,
 .settings-row-button:is(.is-pressed, :active) > .settings-row-value {

@@ -391,7 +391,9 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
         {/* 打开这一行只开菜单：探针由挂载时那次 `quiet: true` 的 `connectRemote` 负责，换设备
             时那次调用也会重跑。从前这里再连一次（不 quiet），于是「进页面」那一次与「点开这一
             行」那一次各弹一张一模一样的「已连上 X」——两张说的是同一件事。 */}
-        <SettingsRow icon={<Server />} label="已配对设备" value={remoteOps.pairedDevices.find((device) => device.address === preferences.remoteComputeUrl)?.name ?? '未选择'} onClick={() => setDeviceMenu(true)} /><SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />
+        <SettingsRow icon={<Server />} label="已配对设备" value={remoteOps.pairedDevices.find((device) => device.address === preferences.remoteComputeUrl)?.name ?? '未选择'} onClick={() => setDeviceMenu(true)} />        {/* 已经配过一台就不再摆「添加设备」这一行：配对是**替换**而不是追加，
+            要换设备进「已配对设备」那张菜单（它的动作行里有「添加设备」）。 */}
+        {remoteOps.pairedDevices.length === 0 && <SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />}
         {deviceMenu && <SettingsMenu title="已配对设备" icon={<Server />} onClose={() => setDeviceMenu(false)}>
           <div className="settings-choice-list">
             {remoteOps.pairedDevices.map((device) => <div className="settings-choice-option" key={device.address}>
@@ -412,6 +414,9 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
           </div>
           <div className="settings-menu-actions">
             <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新服务</button>
+            {/* 「添加设备」那一行在配过设备之后是收起来的，换设备只能从这里进；
+                替换语义（配对成功顶掉现在这一台）在配对那张菜单里由按钮文字自己说清。 */}
+            {remoteOps.pairedDevices.length > 0 && <button className="secondary-action" type="button" onClick={() => { setDeviceMenu(false); setPairMenu(true); void scanDevices(); }}><Plus aria-hidden="true" />添加设备</button>}
           </div>
         </SettingsMenu>}
         {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { if (pairPending.current) return; setPairMenu(false); setRequestId(''); setCode(''); }}>
@@ -428,7 +433,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
               </button>
             </div>)}
             {unpairedDevices.length === 0 && <p className="settings-choice-empty">
-              {devices.length > 0 ? '搜到的设备都已经配对过了，在上面「已配对设备」里选' : '没搜到其他设备，可以填地址直接配对'}
+              {devices.length > 0 ? '搜到的设备都已配对过' : '没搜到设备，直接填地址'}
             </p>}
           </div>
           {/* 字段名写在框上面：占位符放不下「这台设备是什么」，读起来也不再是一行孤零零的输入框。 */}
@@ -456,15 +461,13 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
               onChange={(event) => setCode(event.target.value)}
             />
           </label> : null}
-          {/* 这一页只连一台：配对成功是**替换**而不是追加，先说清楚，免得上一台静悄悄失效。 */}
-          {remoteOps.pairedDevices.length > 0 && <p className="settings-menu-desc">
-            配对成功会替换掉现在这一台（{remoteOps.pairedDevices[0]?.name}），旧设备当场失效。
-          </p>}
           <div className="settings-menu-actions">
             <button className="secondary-action" type="button" disabled={pairBusy} onClick={() => void scanDevices()}><RefreshCw aria-hidden="true" />重新搜索</button>
+            {/* 配对是**替换**而不是追加：这件事原来靠一段小字说，现在收进按钮文字里
+                ——已经有一台时按钮就叫「替换配对」，不用再读一行解释。 */}
             {requestId
-              ? <button className="primary-action" type="button" disabled={pairBusy || code.length !== 6} onClick={() => void finishPairing()}><Link2 aria-hidden="true" />完成配对</button>
-              : <button className="primary-action" type="button" disabled={pairBusy || !address.trim()} onClick={() => void startPairing()}><Link2 aria-hidden="true" />配对</button>}
+              ? <button className="primary-action" type="button" disabled={pairBusy || code.length !== 6} onClick={() => void finishPairing()}><Link2 aria-hidden="true" />{remoteOps.pairedDevices.length > 0 ? '完成替换' : '完成配对'}</button>
+              : <button className="primary-action" type="button" disabled={pairBusy || !address.trim()} onClick={() => void startPairing()}><Link2 aria-hidden="true" />{remoteOps.pairedDevices.length > 0 ? '替换配对' : '配对'}</button>}
           </div>
         </SettingsMenu>}
       </div>}

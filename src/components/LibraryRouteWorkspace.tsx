@@ -27,6 +27,7 @@ function readPersistedCategories(serverParam: string | null) {
 }
 import { isCommittableSearchQuery } from '../lib/searchQuery';
 import { TextInputDialog } from './TextInputDialog';
+import { peekCachedImageUrl } from '../lib/unifiedImageCache';
 import type { ImageHandle } from '../lib/unifiedImageCache';
 import { useToast } from './Toast';
 import { useCardStyle } from '../app/preferences';
@@ -499,6 +500,11 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
 
   const releaseThumbnail = useCallback((handle: ImageHandle) => imageCache.release(handle), []);
 
+  /** 同步种子：暖缓存里有这张封面时，重挂载的行第一帧就能出图（细则见 unifiedImageCache）。 */
+  const peekThumbnail = useCallback((archive: ArchiveRecord) => (scopeId && serverId
+    ? peekCachedImageUrl(imageCache, { scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 })
+    : undefined), [scopeId, serverId]);
+
   useEffect(() => {
     void loadLibrary();
     return () => { libraryRequest.current++; };
@@ -824,6 +830,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
         } : undefined}
         onLoadThumbnail={loadThumbnail}
         onReleaseThumbnail={releaseThumbnail}
+        peekThumbnail={peekThumbnail}
         onUpdateMetadata={async (input) => {
           if (!serverId || !selectedArchiveId) return { ok: false, error: { message: '档案未选择' } };
           const request = detailRequest.current;

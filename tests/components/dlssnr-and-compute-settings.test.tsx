@@ -55,6 +55,14 @@ const DLSSNR_CATALOG = {
   ],
 };
 
+/** 库里的三种已装片段（`dlssnr_status.installedVariants`）：一个变体一个文件，谁都没顶掉谁。
+ *  最后一份是后端认不出的（`id` / `label` 都是 null）——文件名就是它唯一的名字。 */
+const DLSSNR_LIBRARY = [
+  { id: 'community', label: 'Lecram 版', bytes: 165_840_496, active: false, file: 'nvngx_dlssnr--community-rtx40-50.dll' },
+  { id: 'sf-v2', label: 'SF 版', bytes: 165_830_144, active: true, file: 'nvngx_dlssnr--sf-v2.dll' },
+  { id: null, label: null, bytes: 165_840_496, active: false, file: 'nvngx_dlssnr--custom.dll' },
+];
+
 function capability(id: string, ready: boolean, label = id) {
   return { id, label, ready, detail: ready ? '可用' : '不可用' };
 }
@@ -424,6 +432,121 @@ describe('DLSS5 settings group', () => {
     expect(otherMain).toBeEnabled();
     await user.click(otherMain);
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
+  });
+
+  it('lists the snippets already in the library and marks the one in use', async () => {
+    // 用户 2026-10-18 报「dlssnr多个版本没法共存，导致下了一个版本就会顶掉其他版本」。
+    // 后端现在一个变体一个文件，设置页要把库里这些都列出来：认得出的用清单里的名字，
+    // 认不出的念文件名——165 MB 就在盘上，不能因为认不出是什么变体就不给换回去。
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ installedVariants: DLSSNR_LIBRARY }) }),
+    }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const library = await screen.findByRole('group', { name: '已安装的片段' });
+    const rows = [...library.querySelectorAll<HTMLElement>('.settings-choice-option')];
+    expect(rows).toHaveLength(DLSSNR_LIBRARY.length);
+
+    // 正在用的那一条由高亮 + aria-pressed 说；它行尾没有「切换」（没有要换的东西）。
+    const inUse = rows.filter((row) => row.classList.contains('is-active'));
+    expect(inUse).toHaveLength(1);
+    expect(inUse[0]!.textContent).toContain('SF 版');
+    expect(inUse[0]!.querySelector('.settings-choice-option-main')!.getAttribute('aria-pressed')).toBe('true');
+    expect(inUse[0]!.querySelector('button.select-option-download')).toBeNull();
+
+    // 其余每一条都能换回去：行尾那个按钮的文案就是「切换」，无障碍名带上是哪一条。
+    expect(within(library).getByRole('button', { name: '切换到Lecram 版' })).toBeTruthy();
+    const switches = [...library.querySelectorAll<HTMLButtonElement>('button.select-option-download')];
+    expect(switches).toHaveLength(DLSSNR_LIBRARY.length - 1);
+    switches.forEach((button) => expect(button.textContent).toBe('切换'));
+
+    // 认不出的那一份也在列表里：没有名字就拿文件名当名字，另起一行小字说明它不是坏掉了。
+    expect(within(library).getByText('nvngx_dlssnr--custom.dll')).toBeTruthy();
+    expect(within(library).getByText('认不出的片段')).toBeTruthy();
+  });
+
+  it('switches to a snippet already in the library without downloading it again', async () => {
+    // 切换＝把库里那一份放回固定名，不下载；后端会先退掉计算进程，所以换完要重新读一遍
+    // 状态（「现在用的是哪一条」是它回答的），并且明确告诉用户引擎重启了。
+    const user = userEvent.setup();
+    const adapter = adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ installedVariants: DLSSNR_LIBRARY }) }),
+      dlssnr_activate_variant: (args) => ({ ok: true, value: { bytes: 165_840_496, variant: args?.variantId ?? null, variantLabel: 'Lecram 版' } }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const library = await screen.findByRole('group', { name: '已安装的片段' });
+    const before = adapter.mock.calls.filter(([command]) => command === 'dlssnr_status').length;
+
+    await user.click(within(library).getByRole('button', { name: '切换到Lecram 版' }));
+
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_activate_variant', { variantId: 'community' }));
+    // 没重新下载：库里那份原样留着，只是放回了固定名。
+    expect(adapter.mock.calls.filter(([command]) => command === 'dlssnr_download_variant')).toHaveLength(0);
+    // 盘上那一份换了，状态得重新读一遍。
+    await waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'dlssnr_status').length).toBeGreaterThan(before));
+    expect(await screen.findByText(/已切换到：Lecram 版/)).toBeTruthy();
+    expect(screen.getByText(/计算进程已重启/)).toBeTruthy();
+  });
+
+  it('switches a file the backend cannot name by its file name', async () => {
+    // 认不出的片段只有文件名可用（`id` 是 null）：设置页要把文件名发过去。不然这份
+    // 165 MB 既看不见也换不了，用户还是只能靠删文件解决。
+    const user = userEvent.setup();
+    const adapter = adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ installedVariants: DLSSNR_LIBRARY }) }),
+      dlssnr_activate_variant: (args) => ({ ok: true, value: { bytes: 165_840_496, variant: null, variantLabel: args?.variantId ?? null } }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const library = await screen.findByRole('group', { name: '已安装的片段' });
+    await user.click(within(library).getByRole('button', { name: '切换到nvngx_dlssnr--custom.dll' }));
+
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_activate_variant', { variantId: 'nvngx_dlssnr--custom.dll' }));
+  });
+
+  it('reports a failed switch instead of claiming the snippet was changed', async () => {
+    // 失败时盘上那份一个字节没动，就不能报「已切换」——用户会以为换过去了。
+    const user = userEvent.setup();
+    const adapter = adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ installedVariants: DLSSNR_LIBRARY }) }),
+      dlssnr_activate_variant: () => ({
+        ok: false,
+        error: { code: 'MODEL_ACTIVATION_FAILED', message: '算力进程没能退休：切换没做成，用的还是原来那一份', retryable: true },
+      }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const library = await screen.findByRole('group', { name: '已安装的片段' });
+    await user.click(within(library).getByRole('button', { name: '切换到Lecram 版' }));
+
+    expect(await screen.findByText(/算力进程没能退休/)).toBeTruthy();
+    expect(screen.queryByText(/已切换到：/)).toBeNull();
+  });
+
+  it('draws no snippet library when the backend does not report one', async () => {
+    // `installedVariants` 是后加的可选字段：老后端不回这一段，设置页照样得能用
+    // （状态本身能解析、菜单照开、只是没有这一段）。
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
+    renderDlssnr();
+
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    expect(screen.queryByRole('group', { name: '已安装的片段' })).toBeNull();
   });
 
   it('disables the variant rows while one of them is coming down', async () => {

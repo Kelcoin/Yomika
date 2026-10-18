@@ -341,11 +341,41 @@ pub fn with_context_at<T>(
     }
 }
 
-/// 初始化失败时给用户看的那句话：错误码 + **哪一份片段** + 怎么办 + 第几次。
+/// 建上下文失败时能带走的第二件事：**实际选中的那块适配器**（枚举得到的话）。
+///
+/// 一台机器上插着两块卡（或者一块核显一块独显）时，「初始化失败」这四个字本身分不出是
+/// 哪一块在报错——而这句话是用户唯一能拿去查的东西。
+#[derive(Debug)]
+pub(super) struct CreateFailure {
+    error: String,
+    adapter: Option<String>,
+}
+
+/// 从宽字符串拿来的名字（DXGI 的 `Description` 是定长 UTF-16）得洗过再进消息：宿主 ↔
+/// worker 的协议层拒收带控制字符的字段（`compute-protocol` 的 `text` 那条规则），一个
+/// 残留的 NUL 就够整条消息被拒。顺手把首尾空白掐掉。
+fn clean_diagnostic_text(value: &str) -> String {
+    value
+        .trim_end_matches('\0')
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// 初始化失败时给用户看的那句话：错误码 + **哪一份片段**（含认得出的变体）+ **哪块卡** +
+/// 我们按哪个 NGX API 版本在说话 + 怎么办 + 第几次。
 ///
 /// 抽成纯函数是为了能不碰 GPU / NGX 就钉住这句话的每一段：真让 `GpuContext::create` 失败
 /// 需要一台有显卡的机器，而且失败形态取决于当时车上的是哪一份 DLL。
-fn init_failure_message(error: &str, dll: &std::path::Path, bytes: u64, tried: u32) -> String {
+fn init_failure_message(
+    error: &str,
+    dll: &std::path::Path,
+    bytes: u64,
+    tried: u32,
+    adapter: Option<&str>,
+) -> String {
     // 试满次数之后就把「换一份 DLL 或重启」说死；还没试满则说明冷却窗过后会自动再试一次
     // ——用户看到的这句话决定了他是去换 DLL 还是干等。
     let hint = if tried >= MAX_INIT_ATTEMPTS {
@@ -353,12 +383,28 @@ fn init_failure_message(error: &str, dll: &std::path::Path, bytes: u64, tried: u
     } else {
         "这一份片段没能建起 GPU 上下文：过一会儿这一份会自己再试一次，也可以换一份 DLL 或重启应用"
     };
-    // 文件名 + 字节数足以对上目录里那一份，又不必把 165MB 的哈希算一遍。
     let snippet = dll
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| dll.display().to_string());
-    format!("{error}（片段 {snippet} · {bytes} 字节；{hint}；第 {tried} 次）")
+    let mut parts = vec![format!("片段 {snippet} · {bytes} 字节")];
+    // 库里同时躺着好几份片段时，光看文件名（切过变体之后三份都叫 `nvngx_dlssnr.dll`）
+    // 分不出用户手上这份是哪一版；认得出就把 id 与中文名都写出来。读不到文件就跳过。
+    if let Some(variant) = super::file_sha256(dll)
+        .and_then(|digest| super::variant_of(bytes as usize, &digest))
+    {
+        parts.push(format!("变体 {}（{}）", variant.id(), variant.label()));
+    }
+    let adapter = adapter
+        .map(clean_diagnostic_text)
+        .filter(|name| !name.is_empty());
+    if let Some(adapter) = adapter {
+        parts.push(format!("适配器 {adapter}"));
+    }
+    parts.push(format!("NGX API {}", super::ngx::NGX_VERSION_API));
+    parts.push(hint.to_string());
+    parts.push(format!("第 {tried} 次"));
+    format!("{error}（{}）", parts.join("；"))
 }
 
 /// 建一份新上下文并立刻跑这次请求（失败记住、中毒丢掉）。
@@ -382,9 +428,15 @@ fn create_and_run<T>(
                 }
             }
         }
-        Err(error) => {
+        Err(failure) => {
             let tried = attempts.saturating_add(1);
-            let message = init_failure_message(&error, dll, key.dll_bytes, tried);
+            let message = init_failure_message(
+                &failure.error,
+                dll,
+                key.dll_bytes,
+                tried,
+                failure.adapter.as_deref(),
+            );
             *guard = ContextState::Failed {
                 key,
                 message: message.clone(),
@@ -443,12 +495,24 @@ fn dlssnr_adapter_supported(vendor: u32, flags: u32) -> bool {
 }
 
 impl GpuContext {
-    fn create(data_dir: &std::path::Path, dll: &std::path::Path) -> Result<Self, String> {
+    /// 建一份上下文；失败时把**选中的那块适配器**一起带走（给 [`init_failure_message`] 用）。
+    fn create(data_dir: &std::path::Path, dll: &std::path::Path) -> Result<Self, CreateFailure> {
         // 顺序不能换：核心 → 设备 → 片段。片段的 `Init_Ext` 一条也不能少（少了核心
         // 它不是报错，是崩）。
-        let core = NgxCore::new();
+        let (device, adapter) = create_device()?;
+        Self::build(data_dir, dll, device).map_err(|error| CreateFailure {
+            error,
+            adapter: Some(adapter),
+        })
+    }
 
-        let device = create_device()?;
+    /// 设备到手之后的那些步骤（核心 / 片段 / 队列 / 栅栏）。
+    fn build(
+        data_dir: &std::path::Path,
+        dll: &std::path::Path,
+        device: ID3D12Device,
+    ) -> Result<Self, String> {
+        let core = NgxCore::new();
         // 片段交给核心加载一次：核心初始化时按搜索路径找到 `nvngx_dlssnr.dll` 并把它
         // 载进进程——片段的 `Init_Ext` **依赖这个会话**（没有它不是报错，是崩）。
         let feature_dir = dll.parent().unwrap_or(data_dir).to_path_buf();
@@ -1060,14 +1124,21 @@ fn create_device_on(adapter: Option<&IDXGIAdapter1>) -> Result<ID3D12Device, Str
     device.ok_or_else(|| "D3D12 没有返回设备".to_string())
 }
 
-/// 建一块支持 compute 队列的设备（优先独显）。
-pub(super) fn create_device() -> Result<ID3D12Device, String> {
+/// 建一块支持 compute 队列的设备（优先独显），并说出**选中的是哪一块**。
+///
+/// 适配器名要跟着设备一起回去：失败诊断里那句「实际选中的适配器」只能从这里拿。
+pub(super) fn create_device() -> Result<(ID3D12Device, String), CreateFailure> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 
-    let factory: IDXGIFactory1 =
-        unsafe { CreateDXGIFactory1() }.map_err(|error| format!("创建 DXGI 工厂失败：{error}"))?;
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
+        .map_err(|error| CreateFailure {
+            error: format!("创建 DXGI 工厂失败：{error}"),
+            adapter: None,
+        })?;
     let mut index = 0u32;
     let mut last_error = String::from("没有可用的 D3D12 适配器");
+    // 已经试着建过设备的那块卡：设备建失败时它就是「实际选中的」那一块。
+    let mut tried_adapter: Option<String> = None;
     loop {
         let adapter = match unsafe { factory.EnumAdapters1(index) } {
             Ok(adapter) => adapter,
@@ -1081,12 +1152,17 @@ pub(super) fn create_device() -> Result<ID3D12Device, String> {
         // Capability detection already names an NVIDIA device. Selecting the
         // first D3D12-capable iGPU here contradicts that gate on hybrid systems.
         if !dlssnr_adapter_supported(desc.VendorId, desc.Flags) { continue; }
+        let name = clean_diagnostic_text(&String::from_utf16_lossy(&desc.Description));
+        tried_adapter = Some(name.clone());
         match create_device_on(Some(&adapter)) {
-            Ok(device) => return Ok(device),
+            Ok(device) => return Ok((device, name)),
             Err(error) => last_error = error,
         }
     }
-    Err(format!("没有可用的 NVIDIA D3D12 设备：{last_error}"))
+    Err(CreateFailure {
+        error: format!("没有可用的 NVIDIA D3D12 设备：{last_error}"),
+        adapter: tried_adapter,
+    })
 }
 
 
@@ -1223,20 +1299,62 @@ mod tests {
     /// 是「过了冷却窗就真的再建一遍」，同时钉住「试满次数之后不再反复试」。
     /// 失败那句话必须说清「哪一份片段」：真机上用户换过变体，三份都叫同一个文件名，
     /// 日志里只留一个错误码时谁也说不清当时车上的是哪一份（2026-10-13 的 0xBAD00001）。
+    /// 2026-10-18 再加三件：认得出的变体 id、**实际选中的适配器名**、我们说的 NGX API 版本
+    /// ——一块核显一块独显的机器上，「初始化失败」这四个字本身分不出是哪块卡在报错。
     #[test]
     fn the_init_failure_message_names_the_snippet_that_was_in_use() {
-        let dll = std::path::Path::new("C:\\data\\dlssnr\\nvngx_dlssnr.dll");
+        // 一份**不存在**的片段：这一条问的是这句话本身，不该顺带算 165MB 的哈希。
+        let dll = std::env::temp_dir()
+            .join("yomika-dlssnr-init-message-not-there")
+            .join("nvngx_dlssnr.dll");
+        let adapter = "NVIDIA GeForce RTX 4070";
         let failure = "NGX 核心初始化失败：这个功能在当前系统/硬件/图形 API 上不支持（0xBAD00001）";
-        let first = init_failure_message(failure, dll, 165_840_496, 1);
+        let first = init_failure_message(failure, &dll, 165_840_496, 1, Some(adapter));
         assert!(first.contains("nvngx_dlssnr.dll"), "{first}");
         assert!(first.contains("165840496 字节"), "{first}");
         assert!(first.contains("第 1 次"), "{first}");
+        // 哪块卡在报错、以及我们按哪个 API 版本在说话——这两条以前都没有。
+        assert!(first.contains(&format!("适配器 {adapter}")), "{first}");
+        assert!(
+            first.contains(&format!("NGX API {}", super::super::ngx::NGX_VERSION_API)),
+            "{first}"
+        );
         // 还没试满：这句话得让用户知道「可以等」。
         assert!(first.contains("过一会儿这一份会自己再试一次"), "{first}");
         // 试满之后不能再承诺重试：只能让他换 DLL 或重启。
-        let last = init_failure_message(failure, dll, 165_840_496, MAX_INIT_ATTEMPTS);
+        let last = init_failure_message(failure, &dll, 165_840_496, MAX_INIT_ATTEMPTS, Some(adapter));
         assert!(last.contains("换一份 DLL 或重启应用会重新尝试"), "{last}");
         assert!(!last.contains("过一会儿这一份会自己再试一次"), "{last}");
+
+        // 认得出是哪一种变体时得写出来（切过变体之后固定名都叫一个名字）。用真片段：
+        // 要认出是哪一种就得是真字节。本地没有就跳过这一段。
+        let official = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../docs/DLSSNR-DLL-Options-310.8.0.0/NVIDIA-Original/nvngx_dlssnr.dll");
+        if official.is_file() {
+            let bytes = std::fs::metadata(&official).expect("官方原版").len();
+            let named = init_failure_message(failure, &official, bytes, 1, None);
+            assert!(
+                named.contains("变体 official（官方原版）"),
+                "认得出的变体要写出来：{named}"
+            );
+        } else {
+            println!("跳过变体那一段：本地没有那份真片段（{}）", official.display());
+        }
+
+        // 协议那一关不许看到控制字符（宽字符串拿来的名字得先洗过），否则整条诊断消息
+        // 会被 `compute-protocol` 的字段规则拒掉——那样用户连这句话都看不到。
+        let noisy = init_failure_message(
+            failure,
+            &dll,
+            165_840_496,
+            1,
+            Some("NVIDIA\u{0} GeForce\u{7}\u{0}\u{0}"),
+        );
+        assert!(
+            !noisy.chars().any(char::is_control),
+            "消息里不许有控制字符：{noisy:?}"
+        );
+        assert!(noisy.contains("适配器 NVIDIA GeForce"), "{noisy}");
     }
 
     #[test]

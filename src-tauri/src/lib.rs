@@ -126,8 +126,8 @@ use model_release::{
 };
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
 use dlssnr::commands::{
-    dlssnr_apply_page, dlssnr_catalog, dlssnr_download_variant, dlssnr_import_dll, dlssnr_probe,
-    dlssnr_release_workspaces, dlssnr_status,
+    dlssnr_activate_variant, dlssnr_apply_page, dlssnr_catalog, dlssnr_download_variant,
+    dlssnr_import_dll, dlssnr_probe, dlssnr_release_workspaces, dlssnr_status,
 };
 use compute_center::{
     compute_center_configure, compute_center_revoke_pairing, compute_center_status, compute_discover, compute_pair_request,
@@ -522,6 +522,7 @@ pub fn run() {
             dlssnr_import_dll,
             dlssnr_catalog,
             dlssnr_download_variant,
+            dlssnr_activate_variant,
             dlssnr_apply_page,
             dlssnr_release_workspaces,
             compute_center_status,

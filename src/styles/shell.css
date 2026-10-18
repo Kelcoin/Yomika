@@ -1964,8 +1964,11 @@ body::-webkit-scrollbar,
 }
 .library-shell-detail::-webkit-scrollbar { display: none; }
 
+/* 面板不再自带尾部留白（用户 2026-10-18：档案库 / 历史 / 收藏 / 本地档案 / 详情页
+   底部都有额外空带）。基线规则 1946 那边本来就把下内边距清零了，这里 1967 又补回
+   一份：面板在宽档自己就是滚动容器，这份内边距只会落在滚动范围里，于是「刚好放得下」
+   的页面仍然多滚一格。遮挡格只由唯一的滚动容器 .workspace 补。 */
 .library-shell-detail {
-  padding-bottom: var(--space-4);
   border-left: 1px solid var(--hairline);
 }
 
@@ -1973,9 +1976,10 @@ body::-webkit-scrollbar,
   width: 100%;
 }
 
+/* `min-height: 100%` 配上底部内边距是「把留白挪进面板」那套做法，实测不成立：
+   面板被 100% 撑满后，那 24px 仍然加在滚动高度上（用户 2026-10-18 报的详情页底部空带）。 */
 .archive-detail-route {
   min-height: 100%;
-  padding-bottom: var(--space-6);
   font-family: var(--font-body);
   color: var(--ink-primary);
 }
@@ -2164,6 +2168,20 @@ body::-webkit-scrollbar,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 「从 12 页继续」是这一排里最长的一个词，宽的时候它比「阅读」多占三四个字的位置，
+   窄的时候整排都会被它挤走。所以它另有一份短写法：宽容器用长的，窄容器换成
+   「继续」，再窄才和别的动作一样只剩图标（上面那条 `max-width: 510px` 的规则）。
+   短写法只在有进度时才渲染，没读过的一本仍然是「阅读」。 */
+.archive-action-label-short {
+  display: none;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+@container detail-actions (max-width: 510px) {
+  .archive-detail-route-actions .archive-action-label-short { display: block; }
 }
 
 /* The row's buttons share the full width. The old .archive-action-button carried
@@ -4909,8 +4927,10 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .library-workspace { height: auto; min-height: 0; }
   .metadata-edit-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metadata-edit-actions > .primary-action { grid-column: 1 / -1; }
+  /* 窄档下滚动的是 .workspace 自己，两个面板是 height:auto / overflow:visible，
+     在这里补下内边距同样只是给「底部异常留空」添一份（用户 2026-10-18）。 */
   .library-shell-list,
-  .library-shell-detail { padding: var(--space-4); border: 0; }
+  .library-shell-detail { padding: var(--space-4) var(--space-4) 0; border: 0; }
   .library-shell.has-detail .library-shell-list { display: none; }
   .library-shell:not(.has-detail) .library-shell-detail { display: none; }
   .library-shell-detail { overflow: visible; }
@@ -5165,7 +5185,11 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
   .compact-nav.is-floating {
     right: auto;
-    bottom: calc(var(--safe-bottom) + var(--space-3));
+    /* 悬浮底栏不避让软键盘（用户 2026-10-18）：布局视口被键盘缩短了多少
+       （`--keyboard-inset`，写在 html 上、由 src/main.tsx 的 visualViewport 跟踪维护），
+       就在这里反向减掉多少，底栏在屏幕上原地不动，由键盘盖过去；
+       需要留在键盘之上的对话框照旧靠视口收缩让位。 */
+    bottom: calc(var(--safe-bottom) + var(--space-3) - var(--keyboard-inset));
     left: 50%;
     translate: -50% 0;
     display: flex;
@@ -5234,8 +5258,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
         color: var(--on-primary-container);
     }
   }
-
-  .workspace.is-library-workspace .library-shell-detail { padding-bottom: var(--space-6); }
 
   /* 悬浮底栏浮在内容之上，滚动容器得补出它的高度，最后一屏内容才能完整滚出
      （首页、书架、档案库通用）。整条 fixed 的底栏本来就占一行——.app-main 的

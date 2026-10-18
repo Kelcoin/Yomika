@@ -1613,7 +1613,7 @@ mod tests {
         let dir = std::env::temp_dir().join("yomika-ngx-slot-probe");
         std::fs::create_dir_all(&dir).expect("目录");
         let core = NgxCore::new();
-        let mut device = crate::dlssnr::device::create_device().expect("设备");
+        let (mut device, _adapter) = crate::dlssnr::device::create_device().expect("设备");
         core.initialize(&device, &dir, &dir).expect("初始化");
         let parameters = core.allocate_parameters().expect("参数表");
         let base = parameters.vtable_pointer();
@@ -1675,7 +1675,7 @@ mod tests {
         let mut engine = 0i32;
         let mut version = NGX_VERSION_API;
         let mut feature_info = true;
-        let mut device = Some(crate::dlssnr::device::create_device().expect("设备"));
+        let mut device = Some(crate::dlssnr::device::create_device().expect("设备").0);
         match mode.as_str() {
             "full" => {}
             "null-device" => device = None,

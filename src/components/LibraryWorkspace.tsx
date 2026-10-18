@@ -226,6 +226,8 @@ interface LibraryWorkspaceProps {
   thumbnail?: string | undefined;
   onLoadThumbnail?: ((archive: ArchiveRecord, signal?: AbortSignal) => Promise<ImageHandle | undefined>) | undefined;
   onReleaseThumbnail?: ((handle: ImageHandle) => void) | undefined;
+  /** 暖缓存里已经有这张封面时，重挂载的行第一帧就直接画它，不再先闪一下骨架。 */
+  peekThumbnail?: ((archive: ArchiveRecord) => string | undefined) | undefined;
   totalCount?: number | undefined;
   hasMore?: boolean | undefined;
   loadingMore?: boolean | undefined;
@@ -316,7 +318,7 @@ function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): 
   return collapsed ? previous.current : { items, totalSize };
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, peekThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
     if (listLoading && archives.length === 0) {
@@ -989,12 +991,14 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const press = onArchiveContextMenu
       ? longPressHandlers((at) => onArchiveContextMenu(archive, at))
       : {};
-    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} onAspectRatio={(ratio) => {
+    const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} peek={peekThumbnail} onAspectRatio={(ratio) => {
       // 量到的比例既留在本次会话（组件态，立刻重排），也记进跨路由的那份记录。
       rememberWideCoverMark(archive.serverId, archive.archiveId, isWideCoverRatio(ratio));
       setWideCoverIds((current) => withWideCoverMark(current, archive.archiveId, isWideCoverRatio(ratio)));
     }} eager={eager} />;
-    const pressed = selectedId !== undefined && archive.archiveId === selectedId;
+    /* 紧凑档不画「详情已打开」那条高亮：手机上详情本来就是整屏盖住的，列表上留着的那圈
+       primary 边框只剩「失焦也不消失」这一种读法（用户 2026-10-18 报的卡片高亮边框）。 */
+    const pressed = !compact && selectedId !== undefined && archive.archiveId === selectedId;
     return (
     <>
     {dayLabel && (
@@ -1097,6 +1101,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key !== 'Enter') return;
               event.preventDefault();
+              /* 移动端：被 preventDefault 掉的 Enter，输入法不会自己落下
+                 （用户 2026-10-18 报的「回车后软键盘不隐藏」），得把焦点从输入框上拿走。 */
+              event.currentTarget.blur();
               updateSearchQuery(searchDraft);
             }}
           />
@@ -1428,14 +1435,16 @@ function ArchiveListSkeleton({ mode, timeline = false, exiting = false }: { mode
   );
 }
 
-function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = false }: {
+function LazyThumbnail({ archive, onLoad, onRelease, onAspectRatio, eager = false, peek }: {
   archive: ArchiveRecord;
   onLoad?: ((archive: ArchiveRecord, signal?: AbortSignal) => Promise<ImageHandle | undefined>) | undefined;
   onRelease?: ((handle: ImageHandle) => void) | undefined;
   onAspectRatio?: ((ratio: number) => void) | undefined;
   eager?: boolean;
+  /** 只在这一行第一次挂载时读一次：暖缓存命中就直接出图，不先画骨架那一帧。 */
+  peek?: ((archive: ArchiveRecord) => string | undefined) | undefined;
 }) {
-  const [src, setSrc] = useState<string>();
+  const [src, setSrc] = useState<string | undefined>(() => peek?.(archive));
   const [retry, setRetry] = useState(0);
   /** 重试用尽之后它就不是「还在加载」了。占位块照旧占着位置，但不该再闪：
    * `skeleton-shimmer` 动的是 background-position，是主线程每帧重画——一屏几十张

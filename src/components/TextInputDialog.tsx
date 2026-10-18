@@ -96,7 +96,9 @@ function TextInputDialogContent({
               onChange={(event) => { setValue(event.target.value); setSaveError(undefined); }}
               onKeyDown={(event) => {
                 if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-                if (event.key === 'Enter') { event.preventDefault(); void submit(); }
+                /* 移动端：Enter 提交之后输入法不会自己收起（用户 2026-10-18），先失焦；
+                   对话框关闭时元素被摘掉并不保证键盘跟着落下。 */
+                if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); void submit(); }
               }}
             />
           </label>

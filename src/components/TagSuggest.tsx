@@ -19,14 +19,18 @@ export function TagSuggest({ inputValue, anchorRef, onSelect, exact = true }: Ta
   const panelId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const optionId = (index: number) => `${panelId}-option-${index}`;
-  const [active, setActive] = useState(0);
+  /** 光标从「没有」开始（-1）：面板一开第一条就带选中态，看起来像「已经选了它」
+   * （用户 2026-10-18：标签建议栏第一条一直显示成被选中状态）。这也正是 ARIA 组合框
+   * 的写法——第一次 ArrowDown 落在第一条上，ArrowUp 落在最后一条上。Enter 仍然选第一
+   * 条（没动过光标时 `active < 0`，取 `suggestions[0]`），那是原本就有的行为。 */
+  const [active, setActive] = useState(-1);
   const [focused, setFocused] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [position, setPosition] = useState<{ left: number; top: number; width: number; maxHeight: number; above: boolean }>();
   const token = useMemo(() => inputValue.slice(inputValue.lastIndexOf(',') + 1).trim(), [inputValue]);
   const suggestions = useMemo(() => searchTags(token), [token]);
 
-  useEffect(() => { setActive(0); setDismissed(false); }, [token]);
+  useEffect(() => { setActive(-1); setDismissed(false); }, [token]);
   useEffect(() => {
     const input = anchorRef.current;
     if (!input) return;
@@ -72,13 +76,14 @@ export function TagSuggest({ inputValue, anchorRef, onSelect, exact = true }: Ta
     const onKeyDown = (event: KeyboardEvent) => {
       if (!pageActive || !focused || dismissed || !position || !suggestions.length || event.isComposing || event.keyCode === 229) return;
       if (event.key === 'ArrowDown') { event.preventDefault(); setActive((value) => (value + 1) % suggestions.length); }
-      else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((value) => (value - 1 + suggestions.length) % suggestions.length); }
-      else if (event.key === 'Enter' && suggestions[active]) {
+      else if (event.key === 'ArrowUp') { event.preventDefault(); setActive((value) => (value <= 0 ? suggestions.length - 1 : value - 1)); }
+      else if (event.key === 'Enter' && suggestions[active < 0 ? 0 : active]) {
         event.preventDefault();
         // The editor/search input also handles Enter in React. One key must
         // choose the candidate once, without committing the unfinished token.
+        // 没动过光标时 Enter 选第一条：光标从「没有」开始，但「直接回车」应当仍然有效。
         event.stopPropagation();
-        onSelect(formatSuggestion(suggestions[active], exact));
+        onSelect(formatSuggestion(suggestions[active < 0 ? 0 : active]!, exact));
         setDismissed(true);
       }
       else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setDismissed(true); }
@@ -107,7 +112,7 @@ export function TagSuggest({ inputValue, anchorRef, onSelect, exact = true }: Ta
     input.setAttribute('aria-autocomplete', 'list');
     input.setAttribute('aria-controls', panelId);
     input.setAttribute('aria-expanded', String(open));
-    if (open) input.setAttribute('aria-activedescendant', optionId(active));
+    if (open && active >= 0) input.setAttribute('aria-activedescendant', optionId(active));
     else input.removeAttribute('aria-activedescendant');
     return () => {
       input.setAttribute('aria-expanded', 'false');
@@ -117,23 +122,26 @@ export function TagSuggest({ inputValue, anchorRef, onSelect, exact = true }: Ta
   if (!pageActive || !focused || dismissed || !position || !suggestions.length || typeof document === 'undefined') return null;
   return createPortal(
     <div ref={panelRef} className="tag-suggest-panel" id={panelId} role="listbox" style={{ position: 'fixed', left: position.left, top: position.top, width: position.width, maxHeight: position.maxHeight, transform: position.above ? 'translateY(-100%)' : undefined }}>
-      {suggestions.map((suggestion, index) => (
-        <button
-          key={`${suggestion.namespace}:${suggestion.key}`}
-          id={optionId(index)}
-          type="button"
-          role="option"
-          aria-selected={index === active}
-          className={`tag-suggest-option${index === active ? ' is-active' : ''}`}
-          onMouseEnter={() => setActive(index)}
-          onMouseDown={(event) => event.preventDefault()}
-          onClick={() => { onSelect(formatSuggestion(suggestion, exact)); setDismissed(true); }}
-        >
-          <span className={`tag-suggest-badge tag-group-${suggestion.namespace}`}>{NS_CN_LABELS[suggestion.namespace] ?? suggestion.namespace}</span>
-          <span className="tag-suggest-label">{suggestion.label}</span>
-          <span className="tag-suggest-tag">{formatSuggestion(suggestion, exact)}</span>
-        </button>
-      ))}
+      {suggestions.map((suggestion, index) => {
+        const highlighted = index === active;
+        return (
+          <button
+            key={`${suggestion.namespace}:${suggestion.key}`}
+            id={optionId(index)}
+            type="button"
+            role="option"
+            aria-selected={highlighted}
+            className={`tag-suggest-option${highlighted ? ' is-active' : ''}`}
+            onMouseEnter={() => setActive(index)}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => { onSelect(formatSuggestion(suggestion, exact)); setDismissed(true); }}
+          >
+            <span className={`tag-suggest-badge tag-group-${suggestion.namespace}`}>{NS_CN_LABELS[suggestion.namespace] ?? suggestion.namespace}</span>
+            <span className="tag-suggest-label">{suggestion.label}</span>
+            <span className="tag-suggest-tag">{formatSuggestion(suggestion, exact)}</span>
+          </button>
+        );
+      })}
     </div>,
     document.body,
   );

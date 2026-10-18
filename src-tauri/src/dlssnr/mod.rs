@@ -69,6 +69,14 @@ pub mod commands {
     }
 
     #[tauri::command]
+    pub async fn dlssnr_activate_variant(
+        _app: tauri::AppHandle,
+        _variant_id: String,
+    ) -> CommandResult<serde_json::Value> {
+        unavailable()
+    }
+
+    #[tauri::command]
     pub async fn dlssnr_apply_page(
         _input: serde_json::Value,
         _app: tauri::AppHandle,
@@ -97,6 +105,30 @@ mod release;
 /// 这些写法在搬之前之后都得成立（`commands.rs` 与 `compute_center.rs` 都按它写）。
 #[cfg(windows)]
 pub use yomika_compute_core::dlssnr::*;
+
+/// 库里的那一份长什么样：宿主这一层的概念（引擎那一层只认固定名那一份），所以从
+/// `release` 再导一遍给 `commands.rs` 与它的测试用。
+#[cfg(windows)]
+pub use release::InstalledVariant;
+
+/// 库里装过的每一种（文件名 / 字节数 / 是不是正在用的那一条）。设置页的「切换」列表看它。
+#[cfg(windows)]
+pub fn installed_variants(data_dir: &std::path::Path) -> Vec<InstalledVariant> {
+    release::installed_variants(data_dir)
+}
+
+/// 把库里已经装过的某一种换成正在用的那一份（库里那份**留着**，随时能切回来）。
+///
+/// 纯文件那一半：固定名是按名字找片段的 NGX 核心唯一认的名字，所以「换一种」只能是往它
+/// 上面复制。切换之后要作废的进程内结论（探针、产物身份）由 `commands.rs` 那条命令负责
+/// ——用它的测试要的正是这个不碰计算进程的入口。
+#[cfg(windows)]
+pub fn activate_variant(
+    data_dir: &std::path::Path,
+    variant_id: &str,
+) -> Result<InstalledDll, String> {
+    release::activate_variant(data_dir, variant_id)
+}
 
 /// 「这份产品里的引擎在哪一侧」——**装配事实**，不是这台机器的现状。
 ///

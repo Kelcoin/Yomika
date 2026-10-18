@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { StrictMode } from 'react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, vi } from 'vitest';
 
 import { App } from '../../src/app/App';
@@ -242,6 +242,41 @@ describe('reader screen', () => {
     expect(frame.style.transform).toContain('scale(0.88)');
     fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] });
     expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
+  });
+
+  // 用户报的原话是「双指缩放将图片缩小到小于默认比例后松手图片不会复位到默认状态，
+  // 然后过一会儿会瞬间复位」。触控板的双指捏合在 WebView 里就是 ctrl+wheel，它同时
+  // 是**浏览器的页面缩放**手势：缩的是整页，而且不在阅读器的收势里。阅读器必须把它
+  // 拦下来——分页档和条漫档都一样。
+  it('keeps the browser page zoom out of the reader and springs the rubber scale back', async () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+    const y = window.innerHeight / 2;
+    const x = window.innerWidth / 2 + 100;
+    expect(fireEvent.wheel(reader, { ctrlKey: true, deltaY: 120, clientX: x, clientY: y })).toBe(false);
+    fireEvent.touchStart(reader, { touches: [{ clientX: x - 50, clientY: y }, { clientX: x + 50, clientY: y }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(frame.style.transform).toContain('scale(0.8');
+    fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] });
+    expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
+    // 收势不是硬跳：不在拖拽时那一层带 140ms 的过渡。
+    expect(frame.style.transition).toContain('transform 140ms');
+  });
+
+  it('keeps the browser page zoom out of the reader in continuous scroll too', async () => {
+    const user = userEvent.setup();
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    await user.click(reader);
+    const layoutButton = () => screen.getByRole('button', { name: /^阅读布局：/ });
+    await user.click(layoutButton());
+    await user.click(layoutButton());
+    await user.click(layoutButton());
+    expect(layoutButton()).toHaveAccessibleName('阅读布局：连续滚动，点击切换');
+    // 条漫档里阅读器自己不管缩放，但浏览器的页面缩放同样不能放进来。
+    expect(fireEvent.wheel(reader, { ctrlKey: true, deltaY: 120, clientX: 200, clientY: 300 })).toBe(false);
   });
 
   it('reveals the toolbar at the hovered edge only', async () => {
@@ -649,10 +684,137 @@ describe('reader screen', () => {
     fireEvent.keyDown(reader, { key: 'ArrowRight' });
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
     fireEvent.keyDown(reader, { key: 'PageDown' });
-    fireEvent.keyDown(reader, { key: 'PageDown' });
     expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+    // 末页再往下一页翻那一下已经不属于「翻页」了——它退出阅读模式，由下面那条用例
+    // 单钉（见 'leaves the reader when a next-page turn happens on the last page'）。
     fireEvent.keyDown(reader, { key: 'ArrowLeft' });
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+  });
+
+  // 用户报 13（2026-10-18）：「在阅读模式时，在最后一页继续往下一页方向翻页无法退出阅读
+  // 模式。」原来 `advanceReader` 被 `clampPage` 夹在最后一页上，那一翻什么也没发生。现在
+  // 它接到顶栏返回键同一条路径（`goBack`）——所以判据断言的是「路由真的回到了来处」，
+  // 而不是某个内部标志。这条用例自己给路由表：没有路由可去的话，「退出了」和「还停在
+  // 原地」在断言层面长得一模一样。
+  it('leaves the reader when a next-page turn happens on the last page', () => {
+    render(
+      <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+        <Routes>
+          <Route path="/library" element={<p>library list</p>} />
+          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+
+    // 缺陷形态：这一下被夹住，页还是第 3 页，阅读器还在。
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+
+    expect(screen.queryByRole('main', { name: '漫画阅读器' })).not.toBeInTheDocument();
+    expect(screen.getByText('library list')).toBeInTheDocument();
+  });
+
+  // 同一条路的手势入口：在末页往下一页方向甩一下也该退出。这条路走 `finishDrag`，
+  // 它原来只在「页号真的变了」时才提交，末页那一甩连 `move()` 都到不了，手指划到头
+  // 只是弹回去——同样是报告 13 说的那一下。
+  it('leaves the reader when a swipe past the last page is released', () => {
+    render(
+      <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+        <Routes>
+          <Route path="/library" element={<p>library list</p>} />
+          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const turnForward = () => {
+      fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 100 }] });
+      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 50, clientY: 100 }] });
+    };
+
+    turnForward();
+    turnForward();
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+
+    // 缺陷形态：这一甩被 `commit` 挡掉，页还是第 3 页，阅读器还在。
+    turnForward();
+
+    expect(screen.queryByRole('main', { name: '漫画阅读器' })).not.toBeInTheDocument();
+    expect(screen.getByText('library list')).toBeInTheDocument();
+  });
+
+  // 反向的那一头只是停住，不是合上书：报告 13 说的是「往下一页方向」。
+  it('stays put when paging backwards from the first page', () => {
+    render(
+      <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+        <Routes>
+          <Route path="/library" element={<p>library list</p>} />
+          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+
+    fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+    fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+    expect(screen.queryByText('library list')).not.toBeInTheDocument();
+  });
+
+  // 连续滚动档（条漫）滚到底不能被当成「翻到下一页」把书合上。这一档的纵向手势由滚动
+  // 拥有——`onWheel` 在 webtoon 直接 return，根本走不到 `move`——用户在页面底部的继续
+  // 下拉只该停在最后一页；键盘/按钮在这一档同理只是停住。
+  it('does not close continuous mode when it runs past the last page', () => {
+    render(
+      <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+        <Routes>
+          <Route path="/library" element={<p>library list</p>} />
+          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="webtoon" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+
+    for (let step = 0; step < 4; step += 1) fireEvent.keyDown(reader, { key: 'ArrowRight' });
+
+    expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+    expect(screen.queryByText('library list')).not.toBeInTheDocument();
+  });
+
+  // 反面：上头那条退出判据不能把自动翻页也带进去。读到末页它该停下来等读者——人在末页
+  // 发呆时书自己合上，比「翻不动」还糟。`move` 的第二参数就是为这一档留的。
+  it('does not close the reader when auto-play reaches the last page', () => {
+    vi.useFakeTimers();
+    const view = render(
+      <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+        <Routes>
+          <Route path="/library" element={<p>library list</p>} />
+          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.keyDown(reader, { key: 'ArrowRight' });
+      fireEvent.keyDown(reader, { key: 'ArrowRight' });
+      expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+
+      fireEvent.click(reader);
+      fireEvent.click(screen.getByRole('button', { name: '自动翻页' }));
+      act(() => vi.advanceTimersByTime(5_000));
+
+      expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+      expect(screen.queryByText('library list')).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
   });
 
   it('keeps pages either side loaded and releases only what is far away', async () => {
@@ -1344,6 +1506,56 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '关闭超分' }));
     expect(toggleUpscale).toHaveBeenCalledTimes(1);
+  });
+
+  // 用户报 4（2026-10-18）：「为超分和 dlssnr 图标绘制关闭 / 启用两种状态，不要单纯只是
+  // 颜色变化。」所以判据钉在**几何**上：同一个开关在开/关两态下画出来的 svg 不是同一张
+  // 图。关闭态多一条 lucide 的 off 语汇斜杠（`image-off` 那句 `line x1=2 y1=2 x2=22
+  // y2=22`），启用态没有；两态的 `innerHTML` 也必须不同——只换颜色的话这里是相等的。
+  it('draws a different glyph for the on and off state of both enhancement switches', async () => {
+    const user = userEvent.setup();
+    const noop = () => undefined;
+
+    const geometry = async (active: boolean) => {
+      const view = render(
+        <MemoryRouter>
+          <ReaderScreen
+            archiveId="a1"
+            title="Test archive"
+            pages={pages}
+            upscale={{ configured: true, active, toggle: noop }}
+            dlssnr={{ configured: true, active, toggle: noop }}
+          />
+        </MemoryRouter>,
+      );
+      await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      const svgOf = (name: string) => screen.getByRole('button', { name }).querySelector('svg')!.innerHTML;
+      const drawn = {
+        upscale: svgOf(active ? '关闭超分' : '开启超分'),
+        dlssnr: svgOf(active ? '关闭 DLSSNR' : '开启 DLSSNR'),
+      };
+      view.unmount();
+      return drawn;
+    };
+
+    const on = await geometry(true);
+    const off = await geometry(false);
+
+    expect(off.upscale).not.toBe(on.upscale);
+    expect(off.dlssnr).not.toBe(on.dlssnr);
+
+    // off 态那道斜杠：属性顺序不进判据，只认这四条几何值（跟 lucide 的 off 图标同一句）。
+    const offSlash = (markup: string) => {
+      const line = /<line\b[^>]*>/.exec(markup)?.[0] ?? '';
+      return ['x1="2"', 'y1="2"', 'x2="22"', 'y2="22"'].every((attr) => line.includes(attr));
+    };
+    expect(offSlash(off.upscale), '关闭态的超分图标带斜杠').toBe(true);
+    expect(offSlash(off.dlssnr), '关闭态的 DLSSNR 图标带斜杠').toBe(true);
+    expect(on.upscale, '启用态不再带斜杠').not.toContain('<line');
+    expect(on.dlssnr, '启用态不再带斜杠').not.toContain('<line');
+    // DLSSNR 的启用态还把最上面那层板填实——关闭态是同一枚空心几何加斜杠。
+    expect(on.dlssnr, '启用态的画法本身也不同').toContain('fill="currentColor"');
+    expect(off.dlssnr).not.toContain('fill="currentColor"');
   });
 
   it('loads only a window of pages in continuous mode', async () => {

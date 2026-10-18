@@ -1,12 +1,16 @@
 //! DLSSNR 片段的目录：三种变体在模型仓库里各自一份，用户自己挑一种。
 //!
-//! 片段（`nvngx_dlssnr.dll`）按名字固定地住在数据目录的 `dlssnr/` 下，同一时刻
-//! 只有一种，所以「能选哪些」这件事必须由清单来说：仓库正文的
-//! `dlssnr-manifest.json` 一条变体一条，各自记着自己的字节数与 SHA-256。官方原版
-//! 与Lecram 版因此可以分开维护——谁也不覆盖谁，用户点哪一条就装哪一条。
+//! 片段（`nvngx_dlssnr.dll`）按名字固定地住在数据目录的 `dlssnr/` 下——NGX 核心就是按
+//! 这个名字在搜索路径里找它的，所以「正在用」的那一份永远是固定名。用户装过的每一种各
+//! 在 `dlssnr/variants/` 下占一份（文件名就是清单里的资产名），下载 / 导入先落库、再复制
+//! 到固定名上，切换也走同一条复制：谁也不顶掉谁。
+//!
+//! 「能选哪些」这件事由清单来说：仓库正文的 `dlssnr-manifest.json` 一条变体一条，各自
+//! 记着自己的字节数与 SHA-256。官方原版与Lecram 版因此可以分开维护——用户点哪一条就装
+//! 哪一条，装过的都留在库里。
 //!
 //! 和超分模型那套走同一条路：`raw.githubusercontent.com` 上的本体文件 → 镜像前缀
-//! → Release 资产，逐条回退；下载完先校验再改名就位。
+//! → Release 资产，逐条回退；下载完先校验，再收进变体库、复制到固定名上。
 
 use serde::{Deserialize, Serialize};
 
@@ -15,7 +19,7 @@ use crate::model_release::{
     MODEL_RELEASE_REPO,
 };
 
-use super::{dll_path, file_sha256, installed_variant, require_valid_snippet, InstalledDll, SnippetTrust};
+use super::{dll_path, file_sha256, installed_variant, require_valid_snippet, variant_of, InstalledDll, SnippetTrust};
 
 /// 仓库正文里这份清单的文件名（与 `manifest.json` / `upscale-manifest.json` 同规矩）。
 pub const CATALOG_FILE: &str = "dlssnr-manifest.json";
@@ -149,6 +153,214 @@ pub fn installed_id(data_dir: &std::path::Path) -> Option<String> {
     installed_variant(data_dir).map(|(variant, _)| variant.id().to_string())
 }
 
+/// 重下一遍、或者库里那份认不出是哪一种时，就用这个名字收着。
+const CUSTOM_ASSET: &str = "nvngx_dlssnr--custom.dll";
+
+/// 变体库：装过的每一种各占一份，文件名就是它的资产名。
+///
+/// 固定名那一份（[`dll_path`]）永远是「正在用」的那一份的**副本**：NGX 核心按名字找
+/// `nvngx_dlssnr.dll`，所以换一种只能是往固定名上复制，库里那份得原样留着——用户才能
+/// 随时切回去。
+pub fn library_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("dlssnr").join("variants")
+}
+
+/// 库里的某一份（`asset` 是资产名，例如 `nvngx_dlssnr--official.dll`）。
+pub fn library_file(data_dir: &std::path::Path, asset: &str) -> std::path::PathBuf {
+    library_dir(data_dir).join(asset)
+}
+
+/// 库里的一个文件认出来的样子。认不出是哪一种也列出来（清单之外的自定义片段照样能用）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledVariant {
+    /// 内置表认出来的变体 id（`official` / `community` / `sf-v2`）；认不出是 `None`。
+    pub id: Option<String>,
+    /// 设置页显示的名字；认不出是 `None`。
+    pub label: Option<String>,
+    pub bytes: u64,
+    /// 现在固定名那份就是它（内容完全相同）。
+    pub active: bool,
+    /// 库里的文件名（不含目录）。
+    pub file: String,
+}
+
+/// 库里装过的每一种，按文件名排序（顺序稳定，设置页不用自己排）。
+///
+/// 「正在用」= 与固定名那份**内容哈希相同**的那一条：拿字节数比不行——官方原版与
+/// Lecram 版一样大（见 `docs/144`），只有哈希分得开。
+pub fn installed_variants(data_dir: &std::path::Path) -> Vec<InstalledVariant> {
+    let active = active_fingerprint(data_dir);
+    let mut variants = Vec::new();
+    let Ok(entries) = std::fs::read_dir(library_dir(data_dir)) else {
+        return variants;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|value| value.to_str()) {
+            Some(name) if is_library_asset(name) && path.is_file() => name.to_string(),
+            _ => continue,
+        };
+        let bytes = std::fs::metadata(&path).map(|value| value.len()).unwrap_or(0);
+        let digest = file_sha256(&path);
+        let variant = digest
+            .as_deref()
+            .and_then(|digest| variant_of(bytes as usize, digest));
+        let in_use = match (&active, digest.as_deref()) {
+            (Some((active_bytes, active_digest)), Some(digest)) => {
+                *active_bytes == bytes && active_digest == digest
+            }
+            _ => false,
+        };
+        variants.push(InstalledVariant {
+            id: variant.map(|value| value.id().to_string()),
+            label: variant.map(|value| value.label().to_string()),
+            bytes,
+            active: in_use,
+            file: name,
+        });
+    }
+    variants.sort_by(|left, right| left.file.cmp(&right.file));
+    variants
+}
+
+/// 固定名那份的（字节数，SHA-256）；还没装就是 `None`。
+fn active_fingerprint(data_dir: &std::path::Path) -> Option<(u64, String)> {
+    let target = dll_path(data_dir);
+    let bytes = std::fs::metadata(&target).ok()?.len();
+    Some((bytes, file_sha256(&target)?))
+}
+
+/// 库里的文件名是不是这个库该管的那些（`nvngx_dlssnr--*.dll`，且是单个安全路径段）。
+fn is_library_asset(name: &str) -> bool {
+    name.starts_with("nvngx_dlssnr--") && name.ends_with(".dll") && safe_segment(name)
+}
+
+/// 一份字节在库里该叫什么名字。
+///
+/// 认得出是哪一种就用它的资产名（`nvngx_dlssnr--<id>.dll`）——下载与导入两条路因此落到
+/// 同一个文件上，**一个变体只占一份**。认不出来才轮到 `preferred`（下载时是清单给的资产
+/// 名：清单日后加的新变体就是这么落库的），再不然就当自定义的一份收着。
+fn library_asset_name(bytes: u64, digest: Option<&str>, preferred: Option<&str>) -> String {
+    if let Some(id) = digest.and_then(|digest| variant_of(bytes as usize, digest).map(|value| value.id()))
+    {
+        return format!("nvngx_dlssnr--{id}.dll");
+    }
+    match preferred {
+        Some(name) if is_library_asset(name) => name.to_string(),
+        _ => CUSTOM_ASSET.to_string(),
+    }
+}
+
+/// 把校验过的暂存文件**改名**进库（下载那条路：暂存文件不留），返回库里的路径。
+fn move_into_library(
+    staged: &std::path::Path,
+    data_dir: &std::path::Path,
+    preferred: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let bytes = std::fs::metadata(staged)
+        .map_err(|error| format!("读不了 {}：{error}", staged.display()))?
+        .len();
+    let digest = file_sha256(staged);
+    let target = library_file(data_dir, &library_asset_name(bytes, digest.as_deref(), preferred));
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
+    }
+    // 同名的那份（重下一遍同一条变体）直接换掉——`rename` 在 Windows 上是替换语义。
+    std::fs::rename(staged, &target)
+        .map_err(|error| format!("收进变体库失败：{error}（{}）", target.display()))?;
+    Ok(target)
+}
+
+/// 把一份片段**复制**进库（导入那条路：源文件是用户给的，不能动），返回库里的路径。
+pub fn copy_into_library(
+    source: &std::path::Path,
+    data_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let bytes = std::fs::metadata(source)
+        .map_err(|error| format!("读不了 {}：{error}", source.display()))?
+        .len();
+    let digest = file_sha256(source);
+    let preferred = source.file_name().and_then(|value| value.to_str());
+    let target = library_file(data_dir, &library_asset_name(bytes, digest.as_deref(), preferred));
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
+    }
+    std::fs::copy(source, &target)
+        .map_err(|error| format!("收进变体库失败：{error}（{}）", target.display()))?;
+    Ok(target)
+}
+
+/// 把库里的那一份复制到固定名上（**不是改名**：库那份必须留着）。
+///
+/// Windows 上正在被这个进程加载的 DLL 挡得住改名/覆盖（拒绝访问 / 共享冲突），所以失败
+/// 时先删再复制——已被映射的镜像允许删除，真正危险的是把原来那份弄丢：两个动作都失败就
+/// 原样报错，库里那份留着，用户重启应用再切一次即可。
+fn copy_into_place(source: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
+    let target = dll_path(data_dir);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
+    }
+    let mut last = match std::fs::copy(source, &target) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    if matches!(last.raw_os_error(), Some(5) | Some(32) | Some(33)) {
+        // 旧的那份正被用着：先摘掉它，再让新的就位。
+        if std::fs::remove_file(&target).is_ok() {
+            match std::fs::copy(source, &target) {
+                Ok(_) => return Ok(()),
+                Err(error) => last = error,
+            }
+        }
+    }
+    Err(format!(
+        "换不了 {}：{last}。如果应用正在用它，重启应用后再试。",
+        target.display()
+    ))
+}
+
+/// 把库里已经装过的那一种换成正在用的那一份，返回与安装路径同形状的结果。
+///
+/// 认得出的按变体 id 找；**认不出的按库里的完整文件名找**——界面给这种片段的按钮发的是
+/// 文件名（它没有 id 可发），没有这条兜底它会永远切不过去。找不到就直接报错，**固定名那份
+/// 一个字节都不碰**：切换失败不该把用户现在能用的那份弄没。
+pub fn activate_variant(
+    data_dir: &std::path::Path,
+    variant_id: &str,
+) -> Result<InstalledDll, String> {
+    let library = installed_variants(data_dir);
+    let Some(found) = library
+        .iter()
+        .find(|variant| variant.id.as_deref() == Some(variant_id) || variant.file == variant_id)
+    else {
+        let known = library
+            .iter()
+            .map(|variant| variant.id.clone().unwrap_or_else(|| variant.file.clone()))
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "库里没有 {variant_id} 这一种（现有：{}）",
+            if known.is_empty() {
+                "空".to_string()
+            } else {
+                known.join(" / ")
+            }
+        ));
+    };
+    copy_into_place(&library_file(data_dir, &found.file), data_dir)?;
+    // 文件名没变、内容变了：进程内记住的那份指纹要作废（与安装那条路同一条理由）。
+    super::forget_fingerprint();
+    let target = dll_path(data_dir);
+    let bytes = std::fs::metadata(&target).map(|value| value.len()).unwrap_or(0);
+    let variant = installed_variant(data_dir).map(|(variant, _)| variant);
+    Ok(InstalledDll {
+        bytes,
+        variant: variant.map(|value| value.id().to_string()),
+        variant_label: variant.map(|value| value.label().to_string()),
+        version: super::dll_version(&target),
+    })
+}
+
 /// 校验一个刚落盘的文件：字节数与 SHA-256 都要对上清单。
 fn verify_file(path: &std::path::Path, size: u64, sha256: &str) -> Result<(), String> {
     let actual = std::fs::metadata(path).map_err(|error| error.to_string())?.len();
@@ -160,35 +372,6 @@ fn verify_file(path: &std::path::Path, size: u64, sha256: &str) -> Result<(), St
         return Err(format!("{} 的 SHA-256 与清单不符", path.display()));
     }
     Ok(())
-}
-
-/// 把校验过的暂存文件改成数据目录里那一份。
-///
-/// Windows 上正在被这个进程加载的 DLL 挡得住改名（拒绝访问 / 共享冲突），所以失败
-/// 时先删再改名——已被映射的镜像允许删除，真正危险的是把原来那份弄丢，所以两个
-/// 动作都失败就原样报错，暂存文件留着，用户重启应用再点一次即可。
-fn put_in_place(staged: &std::path::Path, data_dir: &std::path::Path) -> Result<(), String> {
-    let target = dll_path(data_dir);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
-    }
-    let mut last = match std::fs::rename(staged, &target) {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    if matches!(last.raw_os_error(), Some(5) | Some(32) | Some(33)) {
-        // 旧的那份正被用着：先摘掉它，再让新的就位。
-        if std::fs::remove_file(&target).is_ok() {
-            match std::fs::rename(staged, &target) {
-                Ok(()) => return Ok(()),
-                Err(error) => last = error,
-            }
-        }
-    }
-    Err(format!(
-        "换不了 {}：{last}。如果应用正在用它，重启应用后再试。",
-        target.display()
-    ))
 }
 
 /// 把已经校验过的暂存文件装进数据目录，并报出装的是哪一种。
@@ -211,7 +394,10 @@ fn install_staged_with(
     if trust == SnippetTrust::Required {
         require_valid_snippet(staged)?;
     }
-    put_in_place(staged, data_dir)?;
+    // 先落库（每一种装过的都得留着，「切换」才有东西可切），再把库里那一份复制到固定名。
+    let preferred = staged.file_name().and_then(|value| value.to_str());
+    let library = move_into_library(staged, data_dir, preferred)?;
+    copy_into_place(&library, data_dir)?;
     // 文件名没变、内容变了：进程内记住的那份指纹（产物身份与探针结论都看它）要作废。
     super::forget_fingerprint();
     let target = dll_path(data_dir);
@@ -475,6 +661,258 @@ mod tests {
         assert!(catalog.variant("official").is_some());
         assert!(catalog.variant("wat").is_none());
         assert!(catalog.ids().contains("community"));
+    }
+
+    /// 合成一份「装得下去」的片段：这几条问的是**库与切换**那条路，签名与结构那两关显式
+    /// 跳过，所以只要两份字节不一样、大小对得上即可。尾部带个标记，读回来一比就知道是谁。
+    fn fake_snippet(seed: u8) -> Vec<u8> {
+        let mut bytes = vec![seed; 65_536];
+        bytes.extend_from_slice(&(seed as u64).to_le_bytes());
+        bytes
+    }
+
+    /// 把一份字节摆成「刚下载完、还在暂存」的样子。
+    fn staged_snippet(dir: &std::path::Path, asset: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let staged = dir.join("dlssnr").join(asset);
+        std::fs::create_dir_all(staged.parent().expect("父目录")).expect("建目录");
+        std::fs::write(&staged, bytes).expect("写暂存");
+        staged
+    }
+
+    /// 同上，但源是本地那份真片段（要认得出是哪一种就得用真字节）。
+    fn staged_from(
+        dir: &std::path::Path,
+        asset: &str,
+        source: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let staged = dir.join("dlssnr").join(asset);
+        std::fs::create_dir_all(staged.parent().expect("父目录")).expect("建目录");
+        std::fs::copy(source, &staged).expect("摆一份真片段当暂存");
+        staged
+    }
+
+    /// 装过的每一种都得留在库里。以前固定名那一份是被**改名**覆盖的，所以下第二条变体时
+    /// 第一条的字节就没了——用户报的「多个版本没法共存」就是这个。
+    #[test]
+    fn a_second_install_keeps_the_first_variant_in_the_library() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let first = fake_snippet(0x41);
+        let second = fake_snippet(0x42);
+        install_staged_with(
+            &staged_snippet(dir.path(), "nvngx_dlssnr--official.dll", &first),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("第一条就位");
+        install_staged_with(
+            &staged_snippet(dir.path(), "nvngx_dlssnr--community.dll", &second),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("第二条就位");
+
+        assert_eq!(
+            std::fs::read(library_file(dir.path(), "nvngx_dlssnr--official.dll")).expect("第一条还在库里"),
+            first,
+            "下第二条不该把第一条顶掉"
+        );
+        assert_eq!(
+            std::fs::read(library_file(dir.path(), "nvngx_dlssnr--community.dll")).expect("第二条在库里"),
+            second
+        );
+        assert_eq!(
+            std::fs::read(dll_path(dir.path())).expect("固定名那份"),
+            second,
+            "固定名换成最后装的那一份"
+        );
+    }
+
+    /// 设置页要能看到「库里有哪些、现在用的是哪一条」；认不出是哪一种的也照样列出来。
+    #[test]
+    fn the_library_lists_every_variant_and_marks_the_one_in_use() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let first = fake_snippet(0x41);
+        let second = fake_snippet(0x42);
+        install_staged_with(
+            &staged_snippet(dir.path(), "nvngx_dlssnr--official.dll", &first),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("第一条");
+        install_staged_with(
+            &staged_snippet(dir.path(), "nvngx_dlssnr--community.dll", &second),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("第二条");
+
+        let listed = installed_variants(dir.path());
+        assert_eq!(listed.len(), 2, "两条都得列出来：{listed:?}");
+        assert_eq!(listed[0].file, "nvngx_dlssnr--community.dll", "按文件名排，顺序稳定");
+        assert_eq!(listed[1].file, "nvngx_dlssnr--official.dll");
+        assert!(listed[0].active, "刚装的是 community，它才是在用的那条");
+        assert!(!listed[1].active, "official 在库里但没在用");
+        assert_eq!(listed[0].bytes, second.len() as u64);
+        // 合成字节认不出是哪一种——认不出不算错，照旧列出来。
+        assert_eq!(listed[0].id, None);
+        assert_eq!(listed[0].label, None);
+    }
+
+    /// 库里没有这一种：报出来，而且**一个字节都别动**——切换失败不该把现在能用的那份弄没。
+    #[test]
+    fn activating_a_variant_that_is_not_in_the_library_changes_nothing() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let first = fake_snippet(0x41);
+        install_staged_with(
+            &staged_snippet(dir.path(), "nvngx_dlssnr--official.dll", &first),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("先装一条");
+        let before = std::fs::read(dll_path(dir.path())).expect("固定名那份");
+
+        let refused = activate_variant(dir.path(), "sf-v2").expect_err("库里没有 sf-v2");
+        assert!(refused.contains("库里没有 sf-v2"), "{refused}");
+        assert!(refused.contains("现有"), "得说清库里有什么：{refused}");
+        assert_eq!(
+            std::fs::read(dll_path(dir.path())).expect("固定名那份"),
+            before,
+            "报错时不许碰固定名那份"
+        );
+    }
+
+    /// 认不出的片段（库里那条的 `id` 是 `None`）在界面上只有文件名可发，切换必须按文件名
+    /// 找得到它：没有这条兜底，用户自己拖进来的那份永远切不过去，只能再导入一次。
+    #[test]
+    fn activating_a_snippet_the_catalog_cannot_name_works_by_file_name() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let custom = fake_snippet(0x7c);
+        install_staged_with(
+            &staged_snippet(dir.path(), "nvngx_dlssnr--custom.dll", &custom),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("先装一条认不出的");
+        let listed = installed_variants(dir.path());
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].id, None, "合成字节认不出是哪一种");
+        assert_eq!(listed[0].file, "nvngx_dlssnr--custom.dll");
+
+        // 把固定名那份换成别的字节（相当于后来装了另一份），再按**文件名**切回来。
+        std::fs::write(dll_path(dir.path()), fake_snippet(0x11)).expect("换掉固定名那份");
+        crate::dlssnr::forget_fingerprint();
+
+        let switched =
+            activate_variant(dir.path(), "nvngx_dlssnr--custom.dll").expect("按文件名切得回来");
+        assert_eq!(switched.variant, None, "认不出的那条切过来仍然认不出");
+        assert_eq!(
+            std::fs::read(dll_path(dir.path())).expect("固定名那份"),
+            custom,
+            "固定名那份的字节得与库里那条完全相同"
+        );
+    }
+
+    /// 切换 = 把库里那一份**复制**到固定名上（NGX 核心按固定名找片段，名字改不得），
+    /// 库里那份留着，认出来的变体跟着变。用真片段：要认出是哪一种就得是真字节。
+    #[test]
+    fn activating_a_variant_copies_it_back_onto_the_fixed_name() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/DLSSNR-DLL-Options-310.8.0.0");
+        let official = root.join("NVIDIA-Original").join("nvngx_dlssnr.dll");
+        let community = root.join("Community-Lecram-310.8.3").join("nvngx_dlssnr.dll");
+        if !official.is_file() || !community.is_file() {
+            println!("跳过：本地没有那两份真片段（{}）", root.display());
+            return;
+        }
+        let dir = tempfile::tempdir().expect("临时目录");
+        // 先装官方原版，再装 Lecram 版：两条一样大、哈希不同（`docs/144` 那个坑）。
+        install_staged_with(
+            &staged_from(dir.path(), "nvngx_dlssnr--official.dll", &official),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("装官方原版");
+        let second = install_staged_with(
+            &staged_from(dir.path(), "nvngx_dlssnr--community.dll", &community),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("装 Lecram 版");
+        assert_eq!(second.variant.as_deref(), Some("community"), "认得出是哪一种");
+
+        let switched = activate_variant(dir.path(), "official").expect("库里那条切得回来");
+        assert_eq!(switched.variant.as_deref(), Some("official"));
+        assert_eq!(
+            switched.bytes,
+            std::fs::metadata(&official).expect("官方原版").len()
+        );
+        assert_eq!(
+            std::fs::read(dll_path(dir.path())).expect("固定名那份"),
+            std::fs::read(&official).expect("官方原版"),
+            "固定名那份的字节得与库里的 official 完全相同"
+        );
+        assert_eq!(
+            installed_variant(dir.path()).map(|(variant, _)| variant.id().to_string()),
+            Some("official".to_string()),
+            "进程内认出来的变体跟着变"
+        );
+        assert_eq!(installed_id(dir.path()).as_deref(), Some("official"));
+
+        // 库里两条都在（**切走不等于搬走**：拿它当源改名就会把库里那条弄没），标记跟着换。
+        let listed = installed_variants(dir.path());
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        let in_use: Vec<_> = listed.iter().filter(|variant| variant.active).collect();
+        assert_eq!(in_use.len(), 1, "同时只有一条在用：{listed:?}");
+        assert_eq!(in_use[0].id.as_deref(), Some("official"));
+        assert_eq!(in_use[0].label.as_deref(), Some("官方原版"));
+        assert!(
+            library_file(dir.path(), "nvngx_dlssnr--official.dll").is_file(),
+            "切过来之后 official 那份还得留在库里（复制，不是改名）"
+        );
+        assert!(
+            library_file(dir.path(), "nvngx_dlssnr--community.dll").is_file(),
+            "切走不等于删掉"
+        );
+    }
+
+    /// 同一种变体只占库里一个文件：下载那条路拿的是清单资产名、导入那条路拿的是用户给的
+    /// 文件名，两条路必须落到同一个文件上，不然设置页会把同一种列两遍。
+    #[test]
+    fn one_variant_occupies_one_file_in_the_library() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/DLSSNR-DLL-Options-310.8.0.0");
+        let community = root.join("Community-Lecram-310.8.3").join("nvngx_dlssnr.dll");
+        if !community.is_file() {
+            println!("跳过：本地没有那份社区包（{}）", community.display());
+            return;
+        }
+        let dir = tempfile::tempdir().expect("临时目录");
+        std::fs::create_dir_all(library_dir(dir.path())).expect("建库目录");
+
+        // 下载那条路：暂存文件名就是清单里的资产名。
+        install_staged_with(
+            &staged_from(
+                dir.path(),
+                "nvngx_dlssnr--community-rtx40-50.dll",
+                &community,
+            ),
+            dir.path(),
+            SnippetTrust::Skipped,
+        )
+        .expect("下载那条路");
+        // 导入那条路：文件躺在用户自己的目录里，名字与清单无关。
+        let picked = dir.path().join("user-picked.dll");
+        std::fs::copy(&community, &picked).expect("用户给的那份");
+        copy_into_library(&picked, dir.path()).expect("导入那条路");
+
+        let listed = installed_variants(dir.path());
+        assert_eq!(listed.len(), 1, "同一种变体只该占一个文件：{listed:?}");
+        assert_eq!(listed[0].file, "nvngx_dlssnr--community.dll");
+        assert_eq!(listed[0].id.as_deref(), Some("community"));
+        assert_eq!(
+            listed[0].bytes,
+            std::fs::metadata(&community).expect("社区包").len()
+        );
     }
 
     /// 整条下载路径，对着真仓库的那一份：清单取得到、解析得动，写在上面的资产名与

@@ -24,6 +24,9 @@ export function useArchiveSelection(options: {
   /** 收藏夹 membership is the LANraragi 🔖 Favorites category, so shelf
    * writes are mirrored to the server when the caller has a server. */
   serverId?: string | undefined;
+  /** 这一页的多选能不能就地删除档案。历史页要清的是「看过」这件事，不是档案
+   * 本体，所以那一页不给「删除所选」（它的清理入口是「清理所选记录」）。 */
+  allowDelete?: boolean | undefined;
   /** Called with the ids the list must stop showing. */
   onRemoved: (archiveIds: string[]) => void;
 }): {
@@ -38,7 +41,7 @@ export function useArchiveSelection(options: {
   /** The delete confirmation, rendered once by the page. */
   dialogs: JSX.Element | null;
 } {
-  const { archives, scopeId, membership, serverId, onRemoved } = options;
+  const { archives, scopeId, membership, serverId, onRemoved, allowDelete = true } = options;
   const { showToast } = useToast();
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedArchiveIds, setSelectedArchiveIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -110,9 +113,11 @@ export function useArchiveSelection(options: {
       )}
       {/* 删除也用同一颗按钮的形状——危险只体现在色调上，底色加文字与其它
           动作一致，不再是一圈红描边。 */}
-      <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
-        <Trash2 aria-hidden="true" />
-      </button>
+      {allowDelete && (
+        <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
+          <Trash2 aria-hidden="true" />
+        </button>
+      )}
     </>
   );
 

@@ -23,6 +23,7 @@ import {
   parseDlssnrPasses,
   serializeDlssnrPasses,
   type DlssnrCatalog,
+  type DlssnrInstalledVariant,
   type DlssnrPass,
   type DlssnrStatus,
 } from '../repositories/nativeDlssnrRepository';
@@ -162,6 +163,15 @@ interface Props {
   visible: boolean;
 }
 
+/** 库里一条片段叫什么。
+ *
+ *  认得出的那条用清单里的名字（清单没取到就退回后端内置表的名字）；认不出的直接念文件名
+ *  ——165 MB 就摆在盘上，不能因为认不出是什么变体就不让用户看见它、换回它。 */
+function installedSnippetName(variant: DlssnrInstalledVariant, catalog: DlssnrCatalog | undefined): string {
+  if (!variant.id) return variant.file;
+  return catalog?.variants.find((entry) => entry.id === variant.id)?.label ?? variant.label ?? variant.id;
+}
+
 /** DLSSNR 设置组：组件、开关与 1–5 层参数。 */
 export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: Props) {
   const pageActive = usePageActive();
@@ -174,6 +184,8 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   /** 正在下载的那一条变体 id（同一时刻只有一条：后端那条下载路径也只跑一件）。 */
   const [downloading, setDownloading] = useState<string>();
   const [download, setDownload] = useState<{ completed: number; total?: number | undefined }>();
+  /** 正在切换的那一份库文件（认不出的片段没有 id，所以认文件名；同一时刻只切一份）。 */
+  const [switching, setSwitching] = useState<string>();
   const [selectedLayer, setSelectedLayer] = useState<number | undefined>();
   const [draftPass, setDraftPass] = useState<DlssnrPass>();
   const [layerMenu, setLayerMenu] = useState(false);
@@ -338,6 +350,24 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     showToast(`已装好并启用：${installedDllLabel(result.value.variantLabel, variantId, result.value.version)}${RESTART_NOTE}`, 'success');
   }
 
+  /** 换成库里已经装过的另一种：不下载，只把库里那一份放到固定名上。
+   *
+   *  后端动手前会先退掉计算进程（片段映在它身上），所以这次**不用重启应用**，只是下一页
+   *  要重新算——提示里把这件事说清楚，别让用户以为白等了。 */
+  async function activateVariant(variant: DlssnrInstalledVariant) {
+    setSwitching(variant.file);
+    const result = await repository.activateVariant(variant.id ?? variant.file);
+    setSwitching(undefined);
+    if (!result.ok) {
+      showToast(result.error.message, 'error');
+      return;
+    }
+    // 「现在用的是哪一条」与开关那一行的说明都是从 status 读的，换完得重新读一遍。
+    await refresh();
+    const name = installedSnippetName(variant, catalog);
+    showToast(`已切换到：${installedDllLabel(result.value.variantLabel, name, result.value.version)}；计算进程已重启，下一页会重新算`, 'success');
+  }
+
   if (!visible) return null;
   if (!status) {
     return (
@@ -366,11 +396,13 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   const installedLabel = installedVariant === undefined
     ? undefined
     : catalog?.variants.find((entry) => entry.id === installedVariant)?.label ?? status.variantLabel ?? undefined;
+  // 库里装过的每一种（一个变体一个文件）。老后端没有这个字段，那就是空——这一段不画。
+  const installedVariants = status.installedVariants ?? [];
 
   return (
     <div className="settings-group" role="region" aria-label="DLSSNR">
       <SettingsSwitch
-        icon={<DlssnrIcon />}
+        icon={<DlssnrIcon enabled={preferences.dlssnrEnabled} />}
         label="启用 DLSSNR"
         hint={
             probed
@@ -473,6 +505,43 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           </div>;
         })}
       </div>
+      {/* 库里的每一种：下载不再顶掉别的版本（同一条变体的旧副本也留在库里），所以这里得
+          看得见、换得回去。认不出的自定义片段也列出来——没有 id 就拿文件名当名字
+          （`installedVariants` 是后来才加上的字段，老后端没有这一段，那就不画）。 */}
+      {installedVariants.length > 0 && <div className="settings-choice-list" role="group" aria-label="已安装的片段">
+        <p className="settings-choice-empty">这台机器上装了这些片段，点「切换」就换成它（库里的那份原样留着）</p>
+        {installedVariants.map((variant) => {
+          const name = installedSnippetName(variant, catalog);
+          const busy = switching === variant.file;
+          return <div className={`settings-choice-option${variant.active ? ' is-active' : ''}`} key={variant.file}>
+            {/* 正在用的那一条点不动（没有可换的东西）；其余的点它就是切换——和上面下载行
+                「选中行只报状态、动作在行尾」是同一套。 */}
+            <button
+              className="settings-choice-option-main"
+              type="button"
+              disabled={switching !== undefined}
+              aria-pressed={variant.active}
+              title={variant.file}
+              onClick={() => { if (variant.active) return; void activateVariant(variant); }}
+            >
+              <span className="settings-choice-option-name">{name}</span>
+              {/* 认不出的那份没有名字可报，只能念文件名，所以补一句说明它不是坏掉了。 */}
+              {!variant.id && <span className="settings-choice-option-series">认不出的片段</span>}
+            </button>
+            {/* 行尾用下载行那套动作槽：`.settings-choice-option:has(> .select-option-download)`
+                照它写出镜像留白，所以「切换」落在和上面那些按钮同一个位置，行的中心也与
+                「正在用」那一行对得上（换成 `.secondary-action` 会偏左几个像素）。 */}
+            {!variant.active && <button
+              className="select-option-download"
+              type="button"
+              disabled={switching !== undefined}
+              aria-label={`切换到${name}`}
+              title="切换到这个片段（会重启计算进程）"
+              onClick={() => void activateVariant(variant)}
+            >{busy ? '切换中' : '切换'}</button>}
+          </div>;
+        })}
+      </div>}
       </SettingsMenu>}
 
       {/* 层数：同一张图串行跑几个 pass（1–5 层，往上收益很小，耗时线性涨）。 */}

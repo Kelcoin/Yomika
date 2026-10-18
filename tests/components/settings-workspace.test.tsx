@@ -497,6 +497,56 @@ describe('settings workspace', () => {
     expect(screen.queryByRole('button', { name: '下载Anime4K' })).toBeNull();
   });
 
+  it('keeps the model list in one fixed order: the built-ins first, then ids', async () => {
+    const user = userEvent.setup();
+    // 用户 2026-10-18：模型下载完成会导致顺序发生变化，另外让 anime4k 和 waifu2x 放到上面。
+    // 顺序不能跟着「装了什么」「目录怎么排」走——那两处都会在下载完成/目录刷新后变——
+    // 所以内置两档（Anime4K 的 shader 链、随包 waifu2x）永远最前，其余按 id 排。
+    // 列表顺序会读 localStorage 里的快照，上一个用例留下的目录快照（常常是空目录）
+    // 会让这一条测到「目录没来」的情形——整文件跑时红、单跑时绿就是这么来的。
+    localStorage.removeItem('yomika.advanced-models');
+    localStorage.removeItem('yomika.advanced-upscale-catalog');
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [{ id: 'realcugan-2x-conservative', version: '1', scale: 2, kind: 'upscale', components: [] }],
+      };
+      if (command === 'model_release_list_upscalers') return {
+        ok: true,
+        value: {
+          tag: 'v1',
+          models: [
+            { id: 'realesr-general-x4v3', label: 'Real-ESRGAN 通用 x4', scale: 4, version: '1', files: [{ name: 'model.onnx', size: 1, sha256: 'a'.repeat(64) }] },
+            { id: 'waifu2x-upconv7', label: 'waifu2x', scale: 2, version: '1', files: [{ name: 'model.onnx', size: 1, sha256: 'b'.repeat(64) }] },
+            { id: 'anime4k-hq', label: 'Anime4K', scale: 2, version: '1', files: [{ name: 'model.onnx', size: 1, sha256: 'c'.repeat(64) }] },
+          ],
+        },
+      };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    await user.click(await screen.findByRole('button', { name: '超分模型' }));
+    const menu = await screen.findByRole('dialog', { name: '超分模型' });
+    // 目录是异步来的：菜单先开、目录后到。整文件跑时这一步的时序与单跑不同，
+    // 直接读会读到「目录还没来」的那一版（只有已装模型），所以要等到目录落地。
+    await vi.waitFor(() => {
+      const rows = [...menu.querySelectorAll('.settings-choice-option-main')];
+      expect(rows.some((row) => (row.textContent ?? '').includes('Anime4K'))).toBe(true);
+    });
+    const order = [...menu.querySelectorAll('.settings-choice-option-main')].map((row) => row.textContent ?? '');
+    // 断言自带实际顺序：顺序类缺陷的失败信息必须能直接读出「现在是怎样」。
+    expect(order[0], `实际顺序：${order.join(' | ')}`).toContain('Anime4K');
+    expect(order[1]).toContain('waifu2x');
+    // 其余按 id 排：realcugan… 在 realesr… 之前。这条断言是「顺序不随安装状态走」的
+    // 承重部分——目录里 realesr 排在 waifu2x 前面，装没装都改不了它落到最后。
+    expect(order[2]).toContain('Real-CUGAN');
+    expect(order[3]).toContain('Real-ESRGAN');
+  });
+
   it('collapses model menu rows that share an id into one option', async () => {
     const user = userEvent.setup();
     // 后端按版本各出一条记录，选项的值是 id：两个版本照旧渲染成两行一模一样的

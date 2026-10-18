@@ -293,14 +293,19 @@ describe('one paired device at a time', () => {
     );
 
     const group = await screen.findByRole('region', { name: '远程后处理服务' });
-    await user().click(within(group).getByRole('button', { name: '添加设备' }));
+    // 已经配了一台：列表里不再摆「添加设备」那一行（配对是替换不是追加），入口收进
+    // 「已配对设备」这张菜单的动作行里。
+    expect(within(group).queryByRole('button', { name: '添加设备' })).toBeNull();
+    await user().click(within(group).getByRole('button', { name: '已配对设备' }));
+    const pairedDialog = await screen.findByRole('dialog', { name: '已配对设备' });
+    await user().click(within(pairedDialog).getByRole('button', { name: '添加设备' }));
     const dialog = await screen.findByRole('dialog', { name: '添加设备' });
-    // 已经配了一台，就要提前说清楚这是替换而不是追加（上一台会当场失效）。
-    expect(within(dialog).getByText(/替换掉现在这一台（DESKTOP-PC）/)).toBeTruthy();
+    // 替换语义写在按钮文字里，不再是一段解释的小字。
+    expect(within(dialog).getByRole('button', { name: /^替换配对$/ })).toBeTruthy();
     await user().type(within(dialog).getByLabelText('设备地址'), '192.168.1.10:47653');
-    await user().click(within(dialog).getByRole('button', { name: /^配对$/ }));
+    await user().click(within(dialog).getByRole('button', { name: /^替换配对$/ }));
     await user().type(await screen.findByLabelText('配对码'), '001422');
-    await user().click(within(await screen.findByRole('dialog', { name: '添加设备' })).getByRole('button', { name: '完成配对' }));
+    await user().click(within(await screen.findByRole('dialog', { name: '添加设备' })).getByRole('button', { name: '完成替换' }));
 
     await waitFor(() => expect(written.some((patch) => patch.remoteComputeOps)).toBe(true));
     const last = written[written.length - 1];

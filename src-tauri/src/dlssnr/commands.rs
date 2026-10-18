@@ -18,11 +18,13 @@ fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     crate::data_paths::data_dir(app).map_err(|error| error.to_string())
 }
 
-/// 把这台机器上的 DLSSNR 现状说清楚：显卡、装了哪一种 DLL、最近一次检测的结论。
+/// 把这台机器上的 DLSSNR 现状说清楚：显卡、装了哪一种 DLL、库里还有哪几种、最近一次检测
+/// 的结论。返回一个**对象**（不是 `DlssnrStatus` 本身）是因为多带一份 `installedVariants`，
+/// 设置页那份 schema 会把它自己认识的字段挑走、多出来的键不管。
 ///
 /// **不跑图**：设置页一打开就调它，所以只做枚举显卡、看文件、认哈希这些便宜事。
 #[tauri::command]
-pub async fn dlssnr_status(app: tauri::AppHandle) -> CommandResult<DlssnrStatus> {
+pub async fn dlssnr_status(app: tauri::AppHandle) -> CommandResult<serde_json::Value> {
     let data = match data_dir(&app) {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
@@ -35,10 +37,35 @@ pub async fn dlssnr_status(app: tauri::AppHandle) -> CommandResult<DlssnrStatus>
         let mut status = super::status_with(&data, super::engine_facts(build.as_ref()));
         status.probe = super::last_probe_for(&data);
         status.probe_valid = super::probe_is_valid(&data);
-        status
+        let variants = release::installed_variants(&data);
+        (status, variants)
     }).await {
-        Ok(status) => CommandResult::success(status),
+        Ok((status, variants)) => match status_payload(status, variants) {
+            Ok(payload) => CommandResult::success(payload),
+            Err(error) => CommandResult::failure("UNKNOWN", error, false),
+        },
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
+    }
+}
+
+/// 现状 + 库里的那几张牌，拼成设置页要的那份 JSON。
+///
+/// 抽出来是为了能钉住这条判据：`DlssnrStatus` 自己的键一个不少，另加一个
+/// `installedVariants`（camelCase，与其它键同一风格）。前端那份 schema 只挑自己认识的键，
+/// 多出来这个不会让它判不过。
+fn status_payload(
+    status: DlssnrStatus,
+    variants: Vec<crate::dlssnr::InstalledVariant>,
+) -> Result<serde_json::Value, String> {
+    match serde_json::to_value(&status) {
+        Ok(serde_json::Value::Object(mut object)) => {
+            // 库里装过哪几种、现在用的是哪一条——设置页的「切换」列表看它。
+            object.insert("installedVariants".into(), serde_json::json!(variants));
+            Ok(serde_json::Value::Object(object))
+        }
+        // `DlssnrStatus` 序列化出来必定是个对象；真不是的话也没法往里塞键。
+        Ok(other) => Err(format!("说不出现状（结果不是个对象）：{other}")),
+        Err(error) => Err(format!("说不出现状（结果序列化失败）：{error}")),
     }
 }
 
@@ -251,6 +278,9 @@ fn commit_candidate(
     let candidate = candidate.to_path_buf();
     let data = data.to_path_buf();
     let install = move || {
+        // 先收进变体库再动固定名：库那份收不下就整件事失败，用户手上那份**原样留着**。
+        // 收下了再装，装到哪一步都不回退——库里多一份不碍事，用户随时切得回去。
+        release::copy_into_library(&candidate, &data)?;
         let installed = super::install_dll(&candidate, &data)?;
         super::forget_probe();
         if let Some(report) = verification {
@@ -395,6 +425,49 @@ pub async fn dlssnr_download_variant(
         }
         Ok(Err(error)) => CommandResult::failure("MODEL_DOWNLOAD_FAILED", error, true),
         Err(error) => CommandResult::failure("MODEL_DOWNLOAD_FAILED", error.to_string(), true),
+    }
+}
+
+/// 把库里已经装过的某一种换成正在用的那一份（库里那份原样留着，随时能切回来）。
+///
+/// 纪律与安装那条路一样，两件都要：过 `with_install_lock`（同一时间只许一件事动安装目录），
+/// 以及**让计算进程先退**——它手里映着旧片段，不先退就往固定名上覆盖，等于在它眼皮底下把
+/// 文件删掉半截，它下一次 `Init_Ext` 拿到的可能是半份字节。所以复制这一步放进
+/// `retire_and_mutate` 的闭包里（`commit_candidate` 也是这么做的）。
+#[tauri::command]
+pub async fn dlssnr_activate_variant(
+    app: tauri::AppHandle,
+    variant_id: String,
+) -> CommandResult<InstalledDll> {
+    let data = match data_dir(&app) {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
+    };
+    let manager = crate::compute::manager_from_app(&app);
+    let id = variant_id.clone();
+    let switched = tauri::async_runtime::spawn_blocking(move || {
+        super::import_transaction::with_install_lock(|| {
+            // 纯文件那一半：库里那份复制到固定名上，再把进程内记住的结论作废。
+            let switch = move |data: &std::path::Path, wanted: &str| {
+                let switched = release::activate_variant(data, wanted)?;
+                super::forget_probe();
+                Ok(switched)
+            };
+            let reason = format!("DLSSNR 片段切到了 {id}");
+            match manager {
+                Some(manager) => {
+                    let data = data.clone();
+                    manager.retire_and_mutate(&reason, move || switch(&data, &id))?
+                }
+                None => switch(&data, &id),
+            }
+        })
+    })
+    .await;
+    match switched {
+        Ok(Ok(switched)) => CommandResult::success(switched),
+        Ok(Err(error)) => CommandResult::failure("MODEL_ACTIVATION_FAILED", error, true),
+        Err(error) => CommandResult::failure("MODEL_ACTIVATION_FAILED", error.to_string(), true),
     }
 }
 
@@ -1230,5 +1303,40 @@ mod tests {
             .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
             .expect("编码 PNG");
         bytes
+    }
+
+    /// 现状那份 JSON 得把库里那几张牌一起说出去：设置页的「切换」列表读的就是这个键，
+    /// 名字与其它键同一风格（camelCase），而且 `DlssnrStatus` 原本的键一个都不能少
+    /// （前端那份 zod schema 读的就是它们）。
+    #[test]
+    fn the_status_payload_carries_the_installed_variants() {
+        let directory = tempfile::tempdir().expect("临时目录");
+        let library = super::release::library_dir(directory.path());
+        std::fs::create_dir_all(&library).expect("建库目录");
+        std::fs::write(
+            library.join("nvngx_dlssnr--official.dll"),
+            vec![7u8; 1024],
+        )
+        .expect("往库里放一份");
+
+        let status = crate::dlssnr::status_with(
+            directory.path(),
+            crate::dlssnr::EngineFacts { core_available: true, gpu: None },
+        );
+        let payload = status_payload(status, release::installed_variants(directory.path()))
+            .expect("拼得出来");
+
+        let variants = payload
+            .get("installedVariants")
+            .expect("这份 JSON 必须带上库里那几张牌")
+            .as_array()
+            .expect("是个数组")
+            .clone();
+        assert_eq!(variants.len(), 1, "库里就放过一份");
+        assert_eq!(variants[0]["file"], "nvngx_dlssnr--official.dll");
+        assert_eq!(variants[0]["active"], false, "固定名那份还是空的，谁都不在用");
+        // 原本那些键一个不少——前端 schema 读的就是它们（多出来的键它自己会挑掉）。
+        assert!(payload.get("dllPresent").is_some(), "原有的键不能少");
+        assert!(payload.get("recommendedVariant").is_some(), "原有的键不能少");
     }
 }

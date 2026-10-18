@@ -463,8 +463,20 @@
   font-variant-numeric: tabular-nums;
   letter-spacing: var(--tracking-wide);
   pointer-events: none;
-  /* Keep a full fade even when chrome mounts or artwork overlap changes. */
-  transition: opacity var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1), translate var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1), scale var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1);
+  /* 出现与消失是同一套机制的两个方向（2026-10-18 用户报 14：「页码指示器的自动显隐
+     响应有点慢，并且有时候出现缺少动画」）。
+     ① 慢：原来进出共用一条 280ms 过渡，是全应用最慢的一档（栏 260ms、标准 220ms、
+        快速 140ms），无头 Edge 里实测淡出到 opacity 0 要 276ms。现在出现用
+        `--duration-standard`（220ms），消失用 `--duration-fast`（140ms）+ 加速曲线
+        ——退出本来就该比进入快。
+     ② 缺动画：原来 `[data-visible='true']` 上挂着一条 `reader-indicator-in` 关键帧
+        （`backwards` 填充）来兜「刚挂载」那一拍。可它每次从安静回到可见都从 0 重新
+        起播，不是从当前值接着走：实测淡出到 0.209 时又被翻开，画面先黑一下再亮起来，
+        看起来就是「闪一下/没有动画」。关键帧删掉，只剩过渡——任何中途反转都从当前
+        opacity 接着走。
+     两个方向各用各的时长，所以时长写在两条规则上（基准＝出现，`[data-visible='false']`
+     ＝消失），不要在基准里写一条通吃。 */
+  transition: opacity var(--duration-standard) var(--ease-standard), translate var(--duration-standard) var(--ease-standard), scale var(--duration-standard) var(--ease-standard);
   opacity: 1;
   translate: 0 0;
   scale: 1;
@@ -477,12 +489,21 @@
   transform: translateX(-50%);
 }
 
-/* Zoomed or continuous: the page owns the screen, so the pill goes quiet. */
-.reader-page-indicator[data-visible='false'] { opacity: 0; translate: 0 6px; scale: 0.96; }
-.reader-page-indicator[data-visible='true'] { animation: reader-indicator-in var(--duration-reader-indicator) cubic-bezier(.2, 0, .2, 1) backwards; }
-@keyframes reader-indicator-in {
-  from { opacity: 0; translate: 0 6px; scale: 0.96; }
-  to { opacity: 1; translate: 0 0; scale: 1; }
+/* Zoomed or continuous: the page owns the screen, so the pill goes quiet.
+   退场这一档比出现快一档：`--duration-fast` + `--ease-exit`（见上面那条规则的注释②）。
+   减弱动效时两个方向都直接落位——只压一半会让「安静下去」变成瞬移、回来时却还在淡入，
+   同一颗胶囊两个方向两种读法。 */
+.reader-page-indicator[data-visible='false'] {
+  opacity: 0;
+  translate: 0 6px;
+  scale: 0.96;
+  transition-duration: var(--duration-fast);
+  transition-timing-function: var(--ease-exit);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reader-page-indicator,
+  .reader-page-indicator[data-visible='false'] { transition: none; }
 }
 
 /* 底栏在的时候胶囊不再「抬到栏顶」了（2026-10-15 用户要求：底栏一出现，页码就隐藏）。
@@ -538,11 +559,11 @@
 /* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时跟着栏一起淡出（`is-leaving` 就是这一
    档）。它**不再有落位要推迟**：胶囊在「栏在 + 退场」整段里根本不移动（2026-10-15 改成
    隐藏，见上面那条注释），原来那条 `bottom 0s var(--duration-exit)` 是为了让它别从栏顶
-   滑到屏幕底、横穿整条栏——那个动作没有了，那条过渡也就没有存在的理由。 */
+   滑到屏幕底、横穿整条栏——那个动作没有了，那条过渡也就没有存在的理由。
+   时长也不在这条里写：这一拍 `data-visible` 已经是 `'false'`，快慢由那条退场规则说话
+   （2026-10-18 之前这里把 280ms 又写了一遍，两处各说一套，改一处另一处就不跟）。 */
 .reader-page-indicator.is-leaving {
   opacity: 0;
-  transition-duration: var(--duration-reader-indicator);
-  transition-timing-function: cubic-bezier(.2, 0, .2, 1);
 }
 
 /* M3 subtitle role in an app bar: on-surface-variant. */

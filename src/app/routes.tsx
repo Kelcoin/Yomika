@@ -776,6 +776,9 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
     membership: name === 'history'
       ? undefined
       : { list: name === 'toRead' ? 'reading' : 'favorites', label: name === 'toRead' ? '待看' : '收藏夹', present: true },
+    // 历史页的多选不给「删除所选」：那一页的清理入口是「清理所选记录」，
+    // 误点删除会连带把档案本体从服务器上删掉。
+    allowDelete: name !== 'history',
     onRemoved: removeShelfArchives,
   });
   const progressByArchiveId = useMemo(

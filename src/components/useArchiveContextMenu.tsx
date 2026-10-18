@@ -58,10 +58,24 @@ export function useArchiveContextMenu(options: {
   const membership = membershipState?.serverId === target?.archive.serverId && membershipState?.archiveId === target?.archive.archiveId ? membershipState : undefined;
   const progress = useArchiveReadingProgress(membership?.scopeId, target?.archive.archiveId);
   const membershipRequest = useRef(0);
+  /** 同一张卡片再次呼出菜单时保留已经解析好的 membership。Android 的长按会既送 hold 回调
+   * 又送一个合成的 `contextmenu`，两次 `open()` 都把 membership 清掉的话，`progress.ready`
+   * 会跟着掉回 false，菜单先被拆下、等下一轮 IPC 回来再重建——用户看到的就是「菜单闪一下」。 */
+  const settledKey = useRef<string>();
   useEffect(() => {
-    setMembership(undefined);
-    setUnavailableTarget(undefined);
-    if (!target) return;
+    if (!target) {
+      settledKey.current = undefined;
+      setMembership(undefined);
+      setUnavailableTarget(undefined);
+      return;
+    }
+    const key = `${target.archive.serverId}\0${target.archive.archiveId}`;
+    const sameCard = settledKey.current === key;
+    settledKey.current = key;
+    if (!sameCard) {
+      setMembership(undefined);
+      setUnavailableTarget(undefined);
+    }
     const refresh = () => {
       const request = ++membershipRequest.current;
       void (async () => {
@@ -83,7 +97,7 @@ export function useArchiveContextMenu(options: {
       const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
       if (!prefix || prefix === 'state:' || prefix === 'favorites:') refresh();
     };
-    refresh();
+    if (!sameCard) refresh();
     window.addEventListener('yomika:route-cache-invalidated', invalidate);
     return () => { membershipRequest.current += 1; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
   }, [target, showToast]);
@@ -105,8 +119,11 @@ export function useArchiveContextMenu(options: {
   };
   const open = useCallback(
     (archive: ArchiveRecord, at: { x: number; y: number }) => {
-      setMembership(undefined);
-      setUnavailableTarget(undefined);
+      const key = `${archive.serverId}\0${archive.archiveId}`;
+      if (settledKey.current !== key) {
+        setMembership(undefined);
+        setUnavailableTarget(undefined);
+      }
       setTarget({ archive, ...at });
     },
     [],

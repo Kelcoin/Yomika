@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Sparkles, Square, Wand2 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
@@ -8,6 +8,7 @@ import { advanceReader, classifyPageShape, createReaderState, createZoomState, d
 import { panZoom, zoomAtPoint, ZOOM_RUBBER_MIN, ZOOM_RUBBER_MAX } from '../domain/reader';
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
+import { UpscaleIcon } from './UpscaleIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 import { getPlatformCapabilities, setStatusBarVisible } from '../bridge/platform';
@@ -451,6 +452,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (element) element.style.transform = `scale(${current.scale}) translate(${current.panX}px, ${current.panY}px)`;
     });
   }, []);
+  /**
+   * 手势收势：把橡皮比例收回默认比例，并让这一拍有过渡。
+   *
+   * 收势同时直写 DOM 与对齐 React 状态：手势期间 `followZoom` 是直接写元素
+   * `style.transform` 的，而收势这一拍 React 未必会写（算出来的 transform 与上一次
+   * 渲染值相同就跳过），两条路都走一遍最稳。
+   */
+  const settleZoomNow = useCallback(() => {
+    const next = settleZoom(zoomRef.current);
+    followZoom(next);
+    setZoom(() => next);
+  }, [followZoom, setZoom]);
   useEffect(() => () => {
     if (zoomFrameRef.current !== undefined) cancelAnimationFrame(zoomFrameRef.current);
     zoomFrameRef.current = undefined;
@@ -524,11 +537,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       pinchStart.current = undefined;
       panStart.current = undefined;
       setPanning(false);
-      setZoom(settleZoom);
+      settleZoomNow();
       setThumbnailPanelOpen(false);
       setThumbnails(new Map());
     }
-  }, [pageActive, setZoom]);
+  }, [pageActive, setZoom, settleZoomNow]);
   // 缩略面板是阅读器里的一层：返回手势先收掉它，而不是直接把阅读页带走
   // （返回手势走 webview 历史，见 `lib/overlayBackGuard`）。
   useOverlayBackGuard(thumbnailPanelOpen, () => setThumbnailPanelOpen(false));
@@ -937,7 +950,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     let settleTimer: number | undefined;
     const onWheel = (event: globalThis.WheelEvent) => {
       const target = event.target instanceof Element ? event.target : null;
-      if (layoutRef.current === 'webtoon' || target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller, .reader-overview')) return;
+      const inControl = target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller, .reader-overview') !== null;
+      // 触控板的双指捏合在 WebView 里就是 ctrl+wheel，而它同时是**浏览器的页面缩放**
+      // 手势。阅读器自己管缩放（分页档）或压根不管（条漫档），两种都不该让浏览器把整页
+      // 缩放掉：页面缩放不在阅读器的收势里，用户看到的是「缩小到小于默认比例后松手不
+      // 复位，过一会儿又瞬间复位」——复位的那一下正是 WebView 把页面缩放扔掉的时候。
+      if (event.ctrlKey && !inControl && event.cancelable) event.preventDefault();
+      if (layoutRef.current === 'webtoon' || inControl) return;
       if (event.deltaY === 0) return;
       if (event.cancelable) event.preventDefault();
       if (sliding.current || panStart.current || pinchStart.current) return;
@@ -948,7 +967,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       // elastic instead of hard-stopping mid-gesture.
       window.clearTimeout(settleTimer);
       settleTimer = window.setTimeout(() => {
-        if (!panStart.current && !pinchStart.current) setZoom(settleZoom);
+        if (!panStart.current && !pinchStart.current) settleZoomNow();
       }, 180);
     };
     element.addEventListener('wheel', onWheel, { passive: false });
@@ -956,7 +975,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       window.clearTimeout(settleTimer);
       element.removeEventListener('wheel', onWheel);
     };
-  }, []);
+  }, [settleZoomNow]);
 
   // Arrow keys are bound to the canvas, so it has to own focus from the start;
   // otherwise the user must click first, and that click toggles the chrome.
@@ -964,17 +983,34 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   useEffect(() => {
     if (!pageActive || !autoPlay) return undefined;
-    const timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') move('next'); }, 5000);
+    // 自动翻页读到末页就停：那里 `move` 的第二参数正是为它准备的（见 `move` 的注释）。
+    const timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') move('next', false); }, 5000);
     return () => window.clearInterval(timer);
   }, [autoPlay, effectiveLayout, state.direction, state.layout, pageActive]);
 
   /** Past this much travel a gesture is a drag rather than a tap. */
   const TAP_SLOP = 5;
 
-  function move(intent: 'next' | 'previous') {
+  /** 到末页还往下一页翻，就是「这本书读完了」。
+   *
+   * 用户报 13（2026-10-18）：「在阅读模式时，在最后一页继续往下一页方向翻页无法退出
+   * 阅读模式。」`advanceReader` 在边界上被 `clampPage` 夹住，`pageIndex` 原地不动，于是
+   * 那一下翻页什么也没发生。现在它接到顶栏返回键的**同一条路径**（`goBack`，见本组件
+   * 顶部那颗返回按钮）——连「有没有上一页可回」这种历史语义都跟着一起对，不再另造
+   * 一条退出。只在 `next` 方向上退出：往上一页翻到头应当停在第 1 页，不是合上书。
+   *
+   * `allowExit: false` 是自动翻页：读到最后一页它该停下来等读者，不能自己把书合上。
+   * 条漫档（`webtoon`）不进来：连续滚动档的纵向手势根本到不了这里（wheel 监听在
+   * `webtoon` 上提前返回，滚动由容器自己管），而在末页继续往下滚属于滚动，不是翻页
+   * ——所以 `effectiveLayout` 那一关是手势分流，不是退出条件。 */
+  function move(intent: 'next' | 'previous', allowExit = true) {
     if (sliding.current) return;
     const current = readerStateRef.current;
     const advanced = advanceReader(current, intent);
+    if (allowExit && intent === 'next' && advanced.pageIndex === current.pageIndex && effectiveLayout !== 'webtoon') {
+      goBack();
+      return;
+    }
     const next = current.phase === 'chrome-visible' ? { ...advanced, phase: current.phase } : advanced;
     readerStateRef.current = next;
     setState(next);
@@ -1036,7 +1072,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const current = readerStateRef.current;
     const sample = dragSample.current;
     const velocity = sample ? (elapsed - sample.elapsed < 100 ? sample.velocity : 0) : undefined;
-    const commit = shouldCommitPageTurn(dx, elapsed, width, velocity) && advanceReader(current, intent).pageIndex !== current.pageIndex;
+    // 在末页往下一页方向划，也是一次「往下一页方向翻页」（用户报 13）。它原来被
+    // `pageIndex !== current.pageIndex` 挡在门外，手指划到头只会弹回去；现在把这一档
+    // 也算进 `commit`，由 `move()` 决定那一下是翻页还是退出（`move` 自己认边界）。
+    // 条漫档到不了这里：`trackDrag` 在 `webtoon` 上提前返回。
+    const crossedLastPage = intent === 'next' && effectiveLayout !== 'webtoon'
+      && advanceReader(current, intent).pageIndex === current.pageIndex;
+    const commit = shouldCommitPageTurn(dx, elapsed, width, velocity)
+      && (crossedLastPage || advanceReader(current, intent).pageIndex !== current.pageIndex);
     const target = commit ? (dx < 0 ? -width : width) : 0;
     const finish = () => {
       slideAnimation.current?.cancel();
@@ -1172,7 +1215,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           panStart.current = undefined;
           touchStartRef.current = null;
           setPanning(false);
-          setZoom(settleZoom);
+          settleZoomNow();
           return;
         }
         const now = Date.now();
@@ -1196,7 +1239,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       }
       panStart.current = undefined;
       setPanning(false);
-      setZoom(settleZoom);
+      settleZoomNow();
       return;
     }
     const start = touchStartRef.current;
@@ -1233,7 +1276,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // Same distance and recent-velocity rule as the mouse.
     gestureMovedRef.current = true;
     finishDrag(dx, elapsed);
-  }, [handleChromeTouchTap]);
+  }, [handleChromeTouchTap, settleZoomNow]);
 
   /** Windows fires mouse events for a trackpad or mouse drag, so paging needs a
    * press-drag-release gesture here; touch keeps its own swipe handler. */
@@ -1274,7 +1317,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       dragZoom(event.clientX, event.clientY);
       panStart.current = undefined;
       setPanning(false);
-      setZoom(settleZoom);
+      settleZoomNow();
       return;
     }
     const start = pointerStartRef.current;
@@ -1332,7 +1375,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     pinchStart.current = undefined;
     panStart.current = undefined;
     setPanning(false);
-    setZoom(settleZoom);
+    settleZoomNow();
     if (!sliding.current) finishDrag(0, 0);
   }
 
@@ -1753,10 +1796,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                   aria-label={upscale.configured ? (upscale.active ? '关闭超分' : '开启超分') : '超分：未选择模型'}
                   title={upscale.configured ? '超分' : '超分：先在阅读设置里选择模型'}
                   onClick={upscale.toggle}
-                ><Sparkles aria-hidden="true" /></button>
+                ><UpscaleIcon enabled={upscale.active} /></button>
               )}
               {dlssnr?.configured && (
-                <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon /></button>
+                <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon enabled={dlssnr.active} /></button>
               )}
               {autoPlayJoinsProcessing && autoPlayControl}
               </div>
