@@ -196,7 +196,7 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       {archives.length === 0 && loading
         ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
-        : archives.map((archive) => <ArchiveThumbnailCard key={archive.archiveId} archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} progressScope={progressScope} detailBasePath={detailBasePath} />)}
+        : archives.map((archive) => <div className="archive-rail-item" key={archive.archiveId}><ArchiveThumbnailCard archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} progressScope={progressScope} detailBasePath={detailBasePath} /></div>)}
     </div>
   </section>;
 }

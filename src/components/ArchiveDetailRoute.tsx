@@ -447,6 +447,7 @@ detailBasePath?: string | undefined }) {
           if (!serverId || currentDownloadOwner.busy || !currentDownloadOwner.active) return;
           currentDownloadOwner.busy = true;
           setDownloading(true);
+          showToast('正在下载档案', 'info');
           void repository.downloadArchive(serverId, archiveId).then((result) => {
             if (downloadOwner.current !== currentDownloadOwner || !currentDownloadOwner.active) return;
             showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');

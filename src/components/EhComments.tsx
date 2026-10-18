@@ -19,8 +19,8 @@ import type { ArchiveRecord } from '../domain/library';
  *  一枚把同一条路径转 180°，两枚因此永远同形。 */
 function ThumbGlyph({ down = false }: { down?: boolean }) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor" transform={down ? 'rotate(180 12 12)' : undefined}>
-      <path d="M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11zm19.83-7.12c.11-.25.17-.52.17-.8V11c0-1.1-.9-2-2-2h-5.5l.92-4.65c.05-.22.02-.46-.08-.66-.23-.45-.52-.86-.88-1.22L14 2 7.59 8.41C7.21 8.79 7 9.3 7 9.83v7.84C7 18.95 8.05 20 9.34 20h8.11c.7 0 1.36-.37 1.72-.97l2.66-6.15z" />
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="currentColor">
+      <path transform={down ? 'rotate(180 12 12)' : undefined} d="M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11zm19.83-7.12c.11-.25.17-.52.17-.8V11c0-1.1-.9-2-2-2h-5.5l.92-4.65c.05-.22.02-.46-.08-.66-.23-.45-.52-.86-.88-1.22L14 2 7.59 8.41C7.21 8.79 7 9.3 7 9.83v7.84C7 18.95 8.05 20 9.34 20h8.11c.7 0 1.36-.37 1.72-.97l2.66-6.15z" />
     </svg>
   );
 }
@@ -29,7 +29,7 @@ const repository = new NativeEhRepository();
 const libraryRepository = new NativeLibraryRepository();
 const COMMENT_CACHE_TTL_MS = 5 * 60 * 1000;
 const COMMENT_CACHE_STORAGE_PREFIX = 'yomika.eh.comments.v1:';
-type CommentsResult = Awaited<ReturnType<NativeEhRepository['getComments']>>;
+type CommentsResult = Awaited<ReturnType<NativeEhRepository['getComments']>> & { cachedComments?: EhComment[] };
 type CommentsCacheEntry = { comments: EhComment[]; cachedAt: number };
 const CommentsCacheSchema = z.object({ comments: EhCommentSchema.array(), cachedAt: z.number().finite() });
 const commentsCache = new Map<string, CommentsCacheEntry>();
@@ -54,10 +54,9 @@ function loadComments(accountId: string, galleryId: string, token: string, force
       commentsCache.set(key, entry);
       writePersistedComments(key, entry);
     } else if (cached) {
-      // Keep a stale snapshot visible when the refresh is blocked by a
-      // transient network or Cloudflare failure. A later manual refresh can
-      // replace it once the service is reachable again.
-      return { ok: true as const, value: cached.comments };
+      // Preserve the snapshot without disguising a failed refresh as success:
+      // the panel must explain why the current gallery could not be read.
+      return { ...result, cachedComments: cached.comments };
     }
     return result;
   }).finally(() => {
@@ -183,15 +182,14 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
     void loadComments(accountId, galleryId, token, reload > 0).then((result) => {
       if (!active) return;
       if (result.ok) setComments(result.value);
-      else setError(presentEhError(result.error.code, result.error.message));
+      else {
+        if (result.cachedComments) setComments(result.cachedComments);
+        setError(presentEhError(result.error.code, result.error.message));
+      }
       setLoading(false);
     });
     return () => { active = false; };
   }, [accountId, galleryId, reload, token]);
-
-  useEffect(() => {
-    if (error) showToast(error, 'error');
-  }, [error, showToast]);
 
   const vote = async (comment: EhComment, value: 1 | -1) => {
     if (pendingVotes.current.has(comment.id)) return;
@@ -247,6 +245,7 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
         <h2><MessageCircle aria-hidden="true" />E-Hentai 评论</h2>
         <button className="icon-action" type="button" onClick={refresh} disabled={loading} aria-label="刷新 E-Hentai 评论" title="刷新评论"><RefreshCw aria-hidden="true" className={loading ? 'is-spinning' : undefined} /></button>
       </div>
+      {error && <StatusLine tone="error">{error}</StatusLine>}
       {loading && comments.length === 0
         ? <StatusLine busy>正在读取评论…</StatusLine>
         : !error && comments.length === 0 ? <StatusLine>暂无评论</StatusLine> : null}

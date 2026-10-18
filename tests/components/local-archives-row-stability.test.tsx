@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -44,7 +44,7 @@ function installVirtualLayoutFake() {
     configurable: true,
     get(this: HTMLElement) {
       if (this.closest('[hidden]')) return 0;
-      if (this.classList.contains('local-archives-list')) return VIEWPORT_HEIGHT;
+      if (this.classList.contains('local-archives-list') || this.classList.contains('workspace')) return VIEWPORT_HEIGHT;
       if (this.classList.contains('archive-row-wrap')) return ARCHIVE_LIST_ROW_STRIDE;
       return 0;
     },
@@ -53,7 +53,7 @@ function installVirtualLayoutFake() {
     configurable: true,
     get(this: HTMLElement) {
       if (this.closest('[hidden]')) return 0;
-      if (this.classList.contains('local-archives-list')) return VIEWPORT_WIDTH;
+      if (this.classList.contains('local-archives-list') || this.classList.contains('workspace')) return VIEWPORT_WIDTH;
       return 0;
     },
   });
@@ -165,4 +165,23 @@ describe('local archives rows across a hidden panel', () => {
     expect(shared.length).toBeGreaterThan(0);
     for (const index of shared) expect(back.get(index)).toBe(onScreen.get(index));
   });
+});
+
+it('advances the local virtual window with the compact page scroller', async () => {
+  installVirtualLayoutFake();
+  const original = window.matchMedia;
+  window.matchMedia = ((query: string) => ({ media: query, matches: query.includes('max-width'), onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => true })) as typeof window.matchMedia;
+  try {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: Array.from({ length: 80 }, (_, index) => localFile(index)) };
+      return { ok: true, value: [] };
+    });
+    render(<MemoryRouter initialEntries={['/downloads']}><div className="workspace"><LocalArchivesWorkspace /></div></MemoryRouter>);
+    await screen.findByText('档案 0');
+    const host = document.querySelector<HTMLElement>('.workspace')!;
+    Object.defineProperty(host, 'scrollHeight', { configurable: true, value: 80 * ARCHIVE_LIST_ROW_STRIDE });
+    fireEvent.scroll(host, { target: { scrollTop: 40 * ARCHIVE_LIST_ROW_STRIDE } });
+    await waitFor(() => expect(screen.getByText('档案 40')).toBeInTheDocument());
+    expect(screen.queryByText('档案 0')).not.toBeInTheDocument();
+  } finally { window.matchMedia = original; }
 });

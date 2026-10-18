@@ -45,7 +45,8 @@ interface ArchiveContextMenuProps {
  *
  * Radix needs an element to anchor to; a zero-size virtual anchor at the click
  * point is how a context menu is positioned without wrapping every card in a
- * trigger. */
+ * trigger. Keep it nonmodal: locking body scroll changes scrollbar geometry
+ * beneath a scrolled virtual grid and can repack/remount the cards behind it. */
 export function ArchiveContextMenu({
   target,
   onClose,
@@ -72,7 +73,7 @@ export function ArchiveContextMenu({
   const archive = target.archive;
   const galleryUrl = archiveSourceUrl(archive.tags);
   return (
-    <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DropdownMenu.Root modal={false} open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DropdownMenu.Trigger asChild>
         <span
           aria-hidden="true"
@@ -177,7 +178,7 @@ export function LocalArchiveContextMenu({ target, onClose, onOpen, onDelete }: {
 }) {
   if (!target) return null;
   return (
-    <DropdownMenu.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
+    <DropdownMenu.Root modal={false} open onOpenChange={(open) => { if (!open) onClose(); }}>
       <DropdownMenu.Trigger asChild>
         <span
           aria-hidden="true"

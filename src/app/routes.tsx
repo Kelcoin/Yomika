@@ -74,7 +74,7 @@ import { readKnownServerPresence } from '../lib/serverPresence';
 import { isArchiveFinished } from '../lib/archiveCardPresentation';
 import { useCardStyle, usePreferences } from './preferences';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import type { ImageHandle } from '../lib/unifiedImageCache';
+import { peekCachedImageUrl, type ImageHandle } from '../lib/unifiedImageCache';
 import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
 import { ArchiveRecordSchema, ReadingHistoryRecordSchema, ServerRecordSchema, WatchlistRecordSchema } from '../domain/library';
 import { DomainErrorSchema } from '../domain/errors';
@@ -827,6 +827,9 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
     }
   }, [scopeId, serverId]);
   const releaseThumbnail = useCallback((handle: ImageHandle) => stateImageCache.release(handle), []);
+  const peekThumbnail = useCallback((archive: ArchiveRecord) => (scopeId && serverId
+    ? peekCachedImageUrl(stateImageCache, { scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 })
+    : undefined), [scopeId, serverId]);
 
   /** 顶栏那套受控属性。档案库把这几项写进 URL 查询，书架的筛选与排序只活在这一页
    * （它没有查询要分享，切走再回来也不该丢掉选中的分类），所以状态留在这里，只把
@@ -888,7 +891,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
             });
           }}
           {...(timelineByArchiveId ? { timelineByArchiveId } : {})}
-          {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail } : {})}
+          {...(scopeId && serverId ? { onLoadThumbnail: loadThumbnail, onReleaseThumbnail: releaseThumbnail, peekThumbnail } : {})}
           /* Pulling a shelf re-reads the shelf, in place — same gesture, same
              disc, as the library. */
           refreshing={pulling}

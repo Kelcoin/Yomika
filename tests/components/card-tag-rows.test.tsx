@@ -1,5 +1,6 @@
 import { act, render } from '@testing-library/react';
 
+import { RetainedPage } from '../../src/app/RetainedPage';
 import { CardTagRows } from '../../src/components/CardTagRows';
 import { clearTagTranslations, installTagTranslations } from '../../src/lib/tags';
 
@@ -12,8 +13,9 @@ import { clearTagTranslations, installTagTranslations } from '../../src/lib/tags
 function installMeasureFake() {
   const originalObserver = window.ResizeObserver;
   const originalRect = HTMLElement.prototype.getBoundingClientRect;
+  const originalOffset = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
   const callbacks = new Map<Element, ResizeObserverCallback>();
-  const state = { laidOut: false, containerWidth: 134, chipWidth: 70 };
+  const state = { laidOut: false, containerWidth: 134, chipWidth: 70, paintScale: 1 };
 
   class FakeResizeObserver {
     constructor(private readonly callback: ResizeObserverCallback) {}
@@ -23,9 +25,10 @@ function installMeasureFake() {
   }
 
   window.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver;
+  Object.defineProperty(HTMLElement.prototype, 'offsetWidth', { configurable: true, get() { return this.classList?.contains('card-tag-measure') && state.laidOut ? state.chipWidth : 0; } });
   HTMLElement.prototype.getBoundingClientRect = function measureStub(this: HTMLElement) {
     if (this.classList?.contains('card-tag-measure')) {
-      const width = state.laidOut ? state.chipWidth : 0;
+      const width = state.laidOut ? state.chipWidth * state.paintScale : 0;
       return { width, height: 20, top: 0, left: 0, right: width, bottom: 20, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
     }
     return originalRect.call(this);
@@ -48,6 +51,7 @@ function installMeasureFake() {
     restore() {
       window.ResizeObserver = originalObserver;
       HTMLElement.prototype.getBoundingClientRect = originalRect;
+      if (originalOffset) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', originalOffset);
     },
   };
 }
@@ -77,6 +81,36 @@ describe('card tag rows', () => {
     expect(visible()).toBe('某位画师');
     act(() => clearTagTranslations());
     expect(visible()).toBe('somebody');
+  });
+
+  it('measures a retained page synchronously when it becomes active', () => {
+    const fake = installMeasureFake();
+    try {
+      const view = (active: boolean) => <RetainedPage active={active}><CardTagRows tags={TAGS} rowCount={2} fill className="tags" /></RetainedPage>;
+      const { container, rerender } = render(view(false));
+      const root = container.querySelector<HTMLElement>('.tags')!;
+      fake.track(root);
+      fake.state.laidOut = true;
+      // No observer callback: activation must fix the rows before the reveal paints.
+      rerender(view(true));
+      expect(rowLengths(container)).toEqual([1, 1]);
+    } finally { fake.restore(); }
+  });
+
+  it('keeps tag packing stable while the card is visually scaled on press', () => {
+    const fake = installMeasureFake();
+    try {
+      const { container } = render(<CardTagRows tags={TAGS} rowCount={2} fill className="tags" />);
+      const root = container.querySelector<HTMLElement>('.tags')!;
+      fake.track(root);
+      fake.state.laidOut = true;
+      fake.state.chipWidth = 64;
+      act(() => fake.fire(root));
+      expect(rowLengths(container)).toEqual([1, 1]);
+      fake.state.paintScale = .97;
+      act(() => fake.fire(root));
+      expect(rowLengths(container)).toEqual([1, 1]);
+    } finally { fake.restore(); }
   });
 
   it('re-measures the chips when a card that mounted unseen is laid out at last', () => {

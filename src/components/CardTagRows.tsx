@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { usePageActive } from '../app/RetainedPage';
 import { pickCardTags } from '../lib/archiveCardPresentation';
 import { normalizeMyTagKey } from '../lib/ehMyTags';
 import { translateRawTag } from '../lib/tags';
@@ -42,6 +43,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
   leading?: readonly CardTagLeadingChip[] | undefined;
 }) {
   const root = useRef<HTMLSpanElement>(null);
+  const pageActive = usePageActive();
   const translationRevision = useTagTranslations();
   const [measured, setMeasured] = useState<{ tags: string[]; widths: number[]; containerWidth: number }>();
   // 翻译与序列化只在标签集合变化时重算：搜索框每敲一键，档案库会重渲染
@@ -61,8 +63,10 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     let active = true;
     const measureTags = () => {
       if (!active) return;
+      // Use layout widths: painted rects shrink with card press animations,
+      // while the row capacity (clientWidth) remains unchanged.
       const widths = [...element.querySelectorAll<HTMLElement>('.card-tag-measure')]
-        .map((chip) => chip.getBoundingClientRect().width);
+        .map((chip) => chip.offsetWidth);
       // In fill mode the span stretches to the slot (inline width 100%), so its
       // own clientWidth is the row capacity. Shrink-wrapped, it would measure
       // itself — and a resizeObserver on it would never fire when the CARD
@@ -92,7 +96,9 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     observer?.observe(element);
     void document.fonts?.ready.then(measureTags);
     return () => { active = false; observer?.disconnect(); };
-  }, [tags, labelKey, fill]);
+  // Retained pages reveal before ResizeObserver delivers: measure in the
+  // activation layout effect so the fallback rows never reach the screen.
+  }, [tags, labelKey, fill, pageActive]);
   // 测量层的顺序与 labels 一致（判定胶囊在前），所以宽度表也按 labels 兜底。
   const widths = measured?.tags === tags ? measured.widths : labels.map(() => 1);
   const containerWidth = measured?.tags === tags ? measured.containerWidth : 0;

@@ -9,7 +9,7 @@ vi.mock('../../src/lib/nativeImageCache', () => ({
   }),
 }));
 
-import { ArchiveProgressBar, ArchiveThumbnailCard } from '../../src/components/ArchiveThumbnailCard';
+import { ArchiveProgressBar, ArchiveThumbnailCard, ArchiveThumbnailRail } from '../../src/components/ArchiveThumbnailCard';
 
 it('keeps one read page out of 259 visible without rounding it to zero', () => {
   const { container } = render(<ArchiveProgressBar page={1} pageCount={259} visibility="all" />);
@@ -155,4 +155,13 @@ describe('ArchiveProgressBar', () => {
     rerender(<ArchiveProgressBar page={50} pageCount={100} visibility="all" scope="elsewhere" />);
     expect(container.querySelector('.archive-card-progress')).not.toBeNull();
   });
+});
+
+
+it('keeps rail snap targets outside the cards that animate on press', () => {
+  const archive = { serverId: 'server', archiveId: 'rail-a', title: 'Rail A', pageCount: 10, updatedAt: '', tags: [] };
+  const { container } = render(<MemoryRouter><ArchiveThumbnailRail title="Rail" archives={[archive]} scopeId="scope" serverId="server" /></MemoryRouter>);
+  const card = container.querySelector('.archive-thumb-card')!;
+  expect(card.parentElement).toHaveClass('archive-rail-item');
+  expect(card.parentElement?.parentElement).toHaveClass('archive-rail-grid');
 });

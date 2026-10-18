@@ -207,15 +207,36 @@ describe('E-Hentai comments', () => {
     await vi.waitFor(() => expect(screen.getAllByText('Reader')).toHaveLength(2));
   });
 
-  it('reports a classified failure through the global toast without an inline error block', async () => {
+  it.each([
+    ['EH_CLOUDFLARE', 'challenge', 'Cloudflare 验证'],
+    ['EH_GALLERY_COPYRIGHT_REMOVED', 'removed', '版权要求被移除'],
+    ['EH_GALLERY_DELETED', 'missing', '不存在或已被删除'],
+    ['EH_UNAVAILABLE', '网络连接失败，请重试。', '网络连接失败'],
+  ])('keeps the failure reason inline for %s', async (code, message, reason) => {
     setInvokeAdapterForTests(async (command: string) => {
-      if (command === 'get_eh_comments') return { ok: false, error: { code: 'EH_CLOUDFLARE', message: 'challenge', retryable: true } };
+      if (command === 'get_eh_comments') return { ok: false, error: { code, message, retryable: true } };
       throw new Error(`Unexpected command: ${command}`);
     });
     render(<ToastProvider><EhComments accountId="eh-a" galleryId="12345" token="abc" /></ToastProvider>);
 
     const region = await screen.findByRole('region', { name: 'E-Hentai 评论' });
-    expect(within(region).queryByRole('alert')).toBeNull();
-    expect(await screen.findByRole('alert')).toHaveTextContent('Cloudflare 验证');
+    expect(await within(region).findByRole('alert')).toHaveTextContent(reason);
+    expect(within(region).queryByText('暂无评论')).not.toBeInTheDocument();
+    expect(within(region).getByRole('button', { name: '刷新 E-Hentai 评论' })).toBeEnabled();
+  });
+
+  it('keeps cached comments visible while explaining a failed refresh and clears the error on retry', async () => {
+    let requests = 0;
+    setInvokeAdapterForTests(async () => ++requests === 2
+      ? { ok: false, error: { code: 'EH_GALLERY_COPYRIGHT_REMOVED', message: 'removed', retryable: false } }
+      : { ok: true, value: [comment] });
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    await screen.findByText('Useful comment');
+    fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('版权要求被移除');
+    expect(screen.getByText('Useful comment')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: '刷新 E-Hentai 评论' })).toBeEnabled());
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

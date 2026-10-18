@@ -76,6 +76,40 @@ function linear(channel: number): number {
 }
 
 describe('design system contract', () => {
+  it('keeps dialog centering independent from its entry animation', () => {
+    const entry = ruleBody(read('src/styles/visual-enhancements.css'), '@keyframes dialog-in');
+    expect(entry).toMatch(/scale:\s*0\.96/);
+    expect(entry).not.toMatch(/transform:/);
+    expect(ruleBody(read('src/styles/shell.css'), '.dialog-content')).toMatch(/transform: translate\(-50%, -50%\)/);
+  });
+
+  it('does not apply archive tag tracks to an unfinished download', () => {
+    const shell = read('src/styles/shell.css');
+    const copy = ruleBody(shell, '.local-archives-list .archive-row.is-downloading > .archive-row-copy');
+    expect(copy).toMatch(/height:\s*auto/);
+    expect(copy).toMatch(/grid-template-rows:\s*auto 4px auto/);
+    expect(copy).toMatch(/align-content:\s*center/);
+  });
+
+  it('keeps compact page flow free of duplicated viewport and tail reservations', () => {
+    const compact = ruleBody(read('src/styles/shell.css'), '@media (max-width: 900px)');
+    // Check all compact blocks: some specialize sizing after the first block.
+    const shell = read('src/styles/shell.css');
+    expect(shell).toMatch(/\.library-shell\.has-detail > \[data-panel\]:has\(\.library-shell-detail\) \{\s*height: auto !important/);
+    expect(shell).toMatch(/\.archive-detail-route \{ min-height: 0; \}/);
+    expect(shell).toMatch(/\.local-archives \{ height: auto; min-height: 0; \}/);
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \{ padding-bottom: 0; \}/);
+    expect(compact).toBeTruthy();
+  });
+
+  it('keeps comment voting in one compact row with a right-aligned trailing score', () => {
+    const shell = read('src/styles/shell.css');
+    expect(ruleBody(shell, '.eh-comment-votes')).toMatch(/flex-wrap:\s*nowrap/);
+    expect(ruleBody(shell, '.eh-comment-votes .eh-comment-score')).toMatch(/text-align:\s*end/);
+    expect(ruleBody(shell, '.eh-comment-votes-actions button')).toMatch(/flex:\s*0 0 28px/);
+    expect(ruleBody(shell, '.eh-comment-votes-actions svg')).toMatch(/display:\s*block/);
+  });
+
   it('does not stretch shelf errors into a full-page obstruction', () => {
     const shell = read('src/styles/shell.css');
     expect(shell).toMatch(/\.shelf-workspace\s*>\s*\.form-error\s*\{[^}]*align-self:\s*start/);
@@ -2268,7 +2302,7 @@ describe('design system contract', () => {
     // 所以纯 transform 不会让别的卡片动；设置行仍然缩内容——它连着悬停底色，缩盒子会让用户
     // 看到「点击时 hover 效果也变小」。
     expect(base).toMatch(/\.settings-row-button:active \{\s*transform: none;/);
-    expect(polish).toMatch(/\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/);
+    expect(polish).toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/);
     // 列表行整行就是卡片，0.97 在满宽行上要缩掉三十多像素（用户 2026-10-18 报「列表档案卡片的
     // 缩小程度太大了」），所以那一档单独收窄到 0.99。
     expect(polish).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.99\);/);
@@ -3377,7 +3411,7 @@ describe('the 2026-10-17 UI batch', () => {
     // 卡片反过来：2026-10-18 用户要求「点击要有缩小效果、别让其他卡片动」，缩放落在卡片盒子上；
     // 同日又报「列表档案卡片的缩小程度太大了」，于是满宽的列表行单独收到 0.99。
     expect(polish, '缩略图卡片按下去要缩自己').toMatch(
-      /\.archive-list\.is-thumbnail \.archive-thumb-card:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/,
+      /\.archive-thumb-card:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.97\);/,
     );
     expect(polish, '满宽列表行只缩一点点').toMatch(
       /\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.99\);/,

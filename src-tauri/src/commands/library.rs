@@ -6,6 +6,7 @@
 //! 用户自己的整理）。所有同步命令都必须遵守 `command_dispatch` 的不变量：不许 `block_on`、
 //! 不许锁那把全局库锁、不许等子进程。
 
+use super::archive_publish::publish_archive_download;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Client;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
@@ -1900,7 +1901,10 @@ fn store_archive_response(
                     return Err(message);
                 }
             }
-            let path = publish_archive_download(&part, directory, &filename)?;
+            let path = publish_archive_download(&part, directory, &filename).map_err(|error| {
+                mark_task_failed(database, &task_id, &error);
+                error
+            })?;
             finish_download_task(
                 database,
                 &task_id,
@@ -2447,6 +2451,37 @@ mod archive_download_tests {
         assert_eq!(std::fs::read(other).unwrap(), b"second");
         // 发布之后没有留下半份文件。
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn publication_failure_marks_the_download_task_failed() {
+        struct LostPart {
+            body: std::io::Cursor<Vec<u8>>,
+            directory: std::path::PathBuf,
+        }
+        impl Read for LostPart {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                let count = self.body.read(bytes)?;
+                if count == 0 {
+                    // Model a file disappearing between streaming and publication.
+                    for entry in std::fs::read_dir(&self.directory)? {
+                        let path = entry?.path();
+                        if path.extension().is_some_and(|extension| extension == "part") {
+                            std::fs::remove_file(path)?;
+                        }
+                    }
+                }
+                Ok(count)
+            }
+        }
+        let database = Database::open_path(":memory:").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut source = LostPart {
+            body: std::io::Cursor::new(vec![1, 2, 3]),
+            directory: directory.path().to_path_buf(),
+        };
+        assert!(store(&database, directory.path(), &mut source, Some(3)).is_err());
+        assert_eq!(only_task(&database).status, "failed");
     }
 
     #[test]
@@ -3141,35 +3176,6 @@ mod archive_download_tests {
         assert!(claimed.exists());
         assert!(!orphan.exists());
     }
-}
-
-fn publish_archive_download(
-    part: &std::path::Path,
-    directory: &std::path::Path,
-    filename: &str,
-) -> Result<String, String> {
-    for suffix in 0..1000 {
-        let name = if suffix == 0 {
-            filename.to_string()
-        } else {
-            let path = std::path::Path::new(filename);
-            format!(
-                "{} ({suffix}).{}",
-                path.file_stem().unwrap_or_default().to_string_lossy(),
-                path.extension().unwrap_or_default().to_string_lossy()
-            )
-        };
-        let destination = directory.join(name);
-        match std::fs::hard_link(part, &destination) {
-            Ok(()) => {
-                std::fs::remove_file(part).map_err(|error| error.to_string())?;
-                return Ok(destination.to_string_lossy().into_owned());
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-    Err("Too many existing copies of this archive".into())
 }
 
 /// 下载目录里认得出的档案后缀。下载写的是 `.part`，扫描时按后缀跳过。

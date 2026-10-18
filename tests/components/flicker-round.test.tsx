@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 
+import { ArchiveContextMenu } from '../../src/components/ArchiveContextMenu';
 import { LibraryWorkspace } from '../../src/components/LibraryWorkspace';
 import { useArchiveContextMenu } from '../../src/components/useArchiveContextMenu';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
@@ -78,4 +79,12 @@ it('still starts a cold row on its skeleton', async () => {
   await waitFor(() => expect(container.querySelector('.archive-row-thumb')).not.toBeNull());
   expect(container.querySelector('.archive-row-thumb')!.className).toContain('is-skeleton');
   expect(container.querySelector('.archive-row-thumb img')).toBeNull();
+});
+
+
+it('opens a card context menu without changing the page scroll lock', async () => {
+  render(<ArchiveContextMenu target={{ archive: archiveList[0]!, x: 20, y: 20 }} onClose={() => {}} onRead={() => {}} onReadIncognito={() => {}} />);
+  await screen.findByRole('menu');
+  expect(document.body).not.toHaveAttribute('data-scroll-locked');
+  expect(document.body.style.pointerEvents).not.toBe('none');
 });

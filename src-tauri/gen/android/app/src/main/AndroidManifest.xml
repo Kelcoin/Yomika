@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Only legacy Android allows arbitrary shared archive paths through these
+         runtime permissions. App-private downloads need no storage permission;
+         modern Android uses scoped storage and grants selected by its picker. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
     <!-- 长按的触感确认（`haptic_feedback` → `MobileHost.vibrate`）：少了这一条，
          `Vibrator.vibrate` 会被系统静默忽略，页面上看不出任何异常。 -->
     <uses-permission android:name="android.permission.VIBRATE" />

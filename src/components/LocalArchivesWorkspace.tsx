@@ -18,6 +18,7 @@ import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
 import { panelLayout } from '../lib/panelLayout';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { longPressHandlers } from '../lib/longPressMenu';
@@ -208,6 +209,7 @@ function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onT
 
 export function LocalArchivesWorkspace() {
   const pageActive = usePageActive();
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
   const { showToast } = useToast();
   const [searchParams, setSearchParams] = useSearchParams();
   const [archives, setArchives] = useState<LocalArchiveRecord[]>([]);
@@ -422,9 +424,25 @@ export function LocalArchivesWorkspace() {
     ...activeDownloads.map((task) => ({ kind: 'task' as const, key: task.id, task })),
     ...visibleArchives.map((archive) => ({ kind: 'archive' as const, key: archive.path, archive })),
   ], [activeDownloads, visibleArchives]);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const host = compact ? list?.closest<HTMLElement>('.workspace') : undefined;
+    if (!pageActive || !list || !host) { setScrollMargin(0); return; }
+    const measure = () => setScrollMargin(Math.max(0, list.getBoundingClientRect().top - host.getBoundingClientRect().top + host.scrollTop + list.clientTop));
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    observer?.observe(host);
+    if (list.parentElement) observer?.observe(list.parentElement);
+    window.addEventListener('resize', measure);
+    return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
+  }, [compact, pageActive, listRows.length]);
   const rowVirtualizer = useVirtualizer({
     count: listRows.length,
-    getScrollElement: () => listRef.current,
+    // Compact lists grow in the page; observing the overflow-visible list
+    // leaves the virtual window parked at page one and a blank tail below it.
+    getScrollElement: () => compact ? listRef.current?.closest<HTMLElement>('.workspace') ?? listRef.current : listRef.current,
+    scrollMargin,
     estimateSize: () => ARCHIVE_LIST_ROW_STRIDE,
     getItemKey: (index) => listRows[index]?.key ?? index,
     overscan: 6,
@@ -555,7 +573,7 @@ export function LocalArchivesWorkspace() {
                   role="listitem"
                   data-index={virtualRow.index}
                   ref={rowVirtualizer.measureElement}
-                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                  style={{ transform: `translateY(${virtualRow.start - scrollMargin}px)` }}
                 >
                   {row.kind === 'task'
                     ? <DownloadRow task={row.task} pending={pendingTaskId === row.task.id} onControl={control} />

@@ -3,8 +3,10 @@
  */
 
 /* ---- Enhanced Card Interactions ----------------------------------------- */
-.archive-list.is-thumbnail .archive-thumb-card,
-.archive-row,
+.archive-thumb-card,
+.archive-row {
+  transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp), filter var(--motion-standard);
+}
 .archive-list.is-thumbnail .archive-thumb-card-media,
 .archive-row-thumb {
   transition: transform var(--motion-crisp), filter var(--motion-standard);
@@ -17,23 +19,19 @@
   }
 }
 
-/* 按下去缩的是**卡片自己**（用户 2026-10-18 再报：缩略图卡点了没反应、列表卡只有封面在缩）。
-   缩盒子不会带动别的卡片，也不会让悬停面跟着变形：
-   · 虚拟列表的每一行都是绝对定位、高度来自 `estimateSize`，从不回量卡片自己的矩形；
-   · `transform` 只影响绘制，不进 `clientWidth` —— 卡片上那条进度条的量法（`CardProgressBar`
-     观察轨道宽度）读到的还是原值。
-
-   放在悬停块之后：两者都是 `transform`，同特异度时靠先后决定谁说话。悬停那 1.02 落在
-   封面/缩略图层，按压这 0.97 落在盒子上，两者可以同时成立（净效果是轻微缩小）。
-
-   两条分开写、缩的幅度也不一样（用户 2026-10-18：列表卡的缩得太狠）：列表卡是整行宽，
-   同一个比例在它身上是三十几像素的收缩，所以只收 1%。 */
-.archive-list.is-thumbnail .archive-thumb-card:is(.is-pressed, :active) {
+/* Rail and grid cards share press feedback. Rail snap targets live on a
+   stationary wrapper, so shrinking a card never changes the rail position. */
+.archive-thumb-card:is(.is-pressed, :active) {
   transform: scale(0.97);
 }
-
 .archive-row:is(.is-pressed, :active) {
   transform: scale(0.99);
+}
+@media (prefers-reduced-motion: reduce) {
+  .archive-thumb-card,
+  .archive-row { transition: none; }
+  .archive-thumb-card:is(.is-pressed, :active),
+  .archive-row:is(.is-pressed, :active) { transform: none; }
 }
 
 /* ---- Gradient Button Enhancement --------------------------------------- */
@@ -137,11 +135,13 @@ button[data-variant="primary"],
 @keyframes dialog-in {
   from {
     opacity: 0;
-    transform: scale(0.96) translateY(8px);
+    scale: 0.96;
+    translate: 0 8px;
   }
   to {
     opacity: 1;
-    transform: scale(1) translateY(0);
+    scale: 1;
+    translate: 0 0;
   }
 }
 

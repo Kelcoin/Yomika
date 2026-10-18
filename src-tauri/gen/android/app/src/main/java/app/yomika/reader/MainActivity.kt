@@ -1,12 +1,17 @@
 package app.yomika.reader
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -43,6 +48,21 @@ class MainActivity : TauriActivity() {
       applyInsets(view, windowInsets)
     }
     ViewCompat.requestApplyInsets(content)
+    requestLegacyStoragePermissions()
+  }
+
+  private fun requestLegacyStoragePermissions() {
+    // ZIP/CBZ files are documents, so READ_MEDIA_* does not grant access to them.
+    // Android 10+ scoped storage needs no runtime permission for our default
+    // app-private download directory; only older shared paths need this prompt.
+    if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) return
+    val missing = arrayOf(
+      Manifest.permission.READ_EXTERNAL_STORAGE,
+      Manifest.permission.WRITE_EXTERNAL_STORAGE,
+    ).filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+    if (missing.isNotEmpty()) {
+      ActivityCompat.requestPermissions(this, missing.toTypedArray(), 1001)
+    }
   }
 
   private fun applyInsets(view: View, windowInsets: WindowInsetsCompat): WindowInsetsCompat {

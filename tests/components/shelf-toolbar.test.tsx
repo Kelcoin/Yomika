@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
+import { getNativeImageCache } from '../../src/lib/nativeImageCache';
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { ToastProvider } from '../../src/components/Toast';
@@ -121,4 +122,14 @@ describe('shelf toolbar', () => {
     await screen.findByText('暂无历史');
     expect(screen.queryByRole('toolbar', { name: '档案库工具' })).not.toBeInTheDocument();
   });
+});
+
+
+it('paints shelf covers directly from the shared warm cache', async () => {
+  const peek = vi.spyOn(getNativeImageCache(), 'peekUrl').mockReturnValue('blob:warm-shelf-cover');
+  try {
+    const { container } = renderShelf('/watchlist', makeAdapter());
+    await screen.findByText('Archive 0');
+    expect(container.querySelector('.archive-row-thumb img')?.getAttribute('src')).toBe('blob:warm-shelf-cover');
+  } finally { peek.mockRestore(); }
 });
