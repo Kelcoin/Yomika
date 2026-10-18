@@ -4450,7 +4450,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
 .archive-rail-item > .archive-thumb-card { scroll-snap-align: none; }
-.archive-thumb-card { display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
+.archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
 /* 悬停只换颜色，不再把卡片提起来。这条 `translateY(-2px)` 换来的是一张合成层，
@@ -4460,7 +4460,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    又报「部分 hover 效果会盖住下面的元素」，这一条就是其中之一：悬停不再改变任何
    几何。 */
 @media (hover: hover) {
-  .archive-thumb-card:hover { border-color: var(--primary); background: var(--surface-container-high); }
+  .archive-thumb-card:hover:not([aria-current='page']) { background: var(--surface-container-highest); }
 }
 
 .archive-thumb-card.is-skeleton { flex-basis: 150px; width: 150px; min-width: 150px; pointer-events: none; border-color: var(--outline-variant); }
@@ -4527,7 +4527,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    往里挪了一格：DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条，上/右之间
    空出一个设备像素的卡片底色，选中态就成了两条线（用户：「顶部和右侧会有两条」）。 */
 .archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after,
-.archive-list.is-thumbnail .archive-thumb-card:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after {
+.archive-thumb-card:is(.is-selected, [aria-checked='true'], [aria-pressed='true'], [aria-current='page'])::after {
   content: '';
   position: absolute;
   inset: 0;
@@ -6690,9 +6690,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     background: var(--surface-container-highest);
   }
 
-  .archive-thumb-card:is(.is-pressed, :active) {
-    border-color: var(--primary);
-    background: var(--surface-container-high);
+  .archive-thumb-card:is(.is-pressed, :active):not([aria-current='page']) {
+    background: var(--surface-container-highest);
   }
 
   /* 次级动作：悬停时往容器里掺一点次级色，不是整块换底。 */
@@ -7114,3 +7113,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .settings-paired-client { flex-wrap: nowrap; }
 .settings-paired-client .settings-device-option { grid-template-columns: auto minmax(0, 1fr); }
 .settings-revoke-action { flex: none; margin-inline-end: var(--space-2); white-space: nowrap; }
+
+.archive-thumb-card[aria-current='page'] {
+  background: var(--surface-container-highest);
+  outline-color: var(--primary);
+}

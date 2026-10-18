@@ -1,5 +1,5 @@
 import { act, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { vi } from 'vitest';
 
 vi.mock('../../src/lib/nativeImageCache', () => ({
@@ -40,6 +40,19 @@ function installTrackResizeFake() {
 }
 
 describe('archive thumbnail card', () => {
+  it('highlights a rail card only while its own detail route is open', () => {
+    function Harness() {
+      const navigate = useNavigate();
+      return <><button onClick={() => navigate('/home')}>关闭详情</button>
+        <ArchiveThumbnailCard archive={{ serverId: 'server-a', archiveId: 'archive-a', title: 'Archive A', pageCount: 10, updatedAt: '' }} scopeId="scope-a" serverId="server-a" detailBasePath="/home" />
+      </>;
+    }
+    render(<MemoryRouter initialEntries={['/home/archive-a?server=server-a']}><Harness /></MemoryRouter>);
+    expect(screen.getByRole('link', { name: /Archive A/ })).toHaveAttribute('aria-current', 'page');
+    act(() => screen.getByRole('button', { name: '关闭详情' }).click());
+    expect(screen.getByRole('link', { name: /Archive A/ })).not.toHaveAttribute('aria-current');
+  });
+
   it('keeps the page count clear of decorative navigation icons', () => {
     const { container } = render(
       <MemoryRouter>

@@ -145,12 +145,7 @@ button[data-variant="primary"],
   }
 }
 
-/* ---- Enhanced Selection States ----------------------------------------- */
-.archive-row[aria-pressed='true'],
-.archive-thumb-card[aria-pressed='true'] {
-  box-shadow: 0 0 0 2px var(--primary),
-              var(--shadow-card);
-}
+/* Selection borders use the shared 1px overlay in shell.css. */
 
 /* ---- Enhanced Input Focus ---------------------------------------------- */
 input:focus,

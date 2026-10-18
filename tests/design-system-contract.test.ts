@@ -1741,7 +1741,7 @@ describe('design system contract', () => {
     // 曾经写成 inset: 1px + 半径 - 1px，那是「往里缩一格」而不是「同一条环」：在
     // DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条、上/右中间空出一个设备
     // 像素的背景，于是选中态看起来是两条线（用户报「顶部和右侧会有两条」）。
-    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after,\n.archive-list.is-thumbnail .archive-thumb-card:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after");
+    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after,\n.archive-thumb-card:is(.is-selected, [aria-checked='true'], [aria-pressed='true'], [aria-current='page'])::after");
     expect(overlay).toMatch(/inset:\s*0/);
     expect(overlay).toMatch(/z-index:\s*1/);
     expect(overlay).toMatch(/border:\s*1px solid var\(--primary\)/);

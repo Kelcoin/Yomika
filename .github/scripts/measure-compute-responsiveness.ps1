@@ -81,7 +81,9 @@ if (-not $OutputDir) { $OutputDir = Join-Path $root "debug_outputs\measure\$stam
 if (-not [System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir = Join-Path $root $OutputDir }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 $manifest = 'src-tauri\Cargo.toml'
-$env:CARGO_TARGET_DIR = Join-Path $root 'debug_outputs\cargo-target'
+# 2026-10-18：原来指 debug_outputs\cargo-target（与开发构建各一份 50 GB 级 debug 产物），
+# 现在与整轮、开发构建共用 src-tauri\target —— 下面的 targetDir 读的就是这个变量。
+$env:CARGO_TARGET_DIR = Join-Path $root 'src-tauri\target'
 
 if (-not $FixtureManifest) {
   # 这里只要一份「这一跑用的是哪套素材」的指纹（下一行把它哈希进报告），不读里面的内容。

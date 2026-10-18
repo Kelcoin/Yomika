@@ -3,13 +3,14 @@ import { CardTagRows, ArchiveCardTags } from './CardTagRows';
 import { CardProgressBar } from './CardProgressBar';
 import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
 import { Heart } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, matchPath, useLocation } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { CARD_TAG_LIMIT_THUMBNAIL, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberWideCoverMark } from '../lib/archiveCardPresentation';
 import { peekCachedImageUrl } from '../lib/unifiedImageCache';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 import { longPressHandlers } from '../lib/longPressMenu';
+import { useMediaQuery, COMPACT_WIDTH_QUERY } from '../lib/useMediaQuery';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { useProgressBarVisibility } from '../app/preferences';
 
@@ -114,6 +115,12 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
  * the detail on the home page — opening a card from there must not navigate
  * into the library and leave it showing that archive afterwards. */ detailBasePath?: string | undefined }) {
   const [aspectRatio, setAspectRatio] = useState<number>();
+  const location = useLocation();
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  const detailMatch = matchPath(`${detailBasePath}/:archiveId`, location.pathname);
+  const detailServer = new URLSearchParams(location.search).get('server');
+  const detailOpen = !compact && detailMatch?.params.archiveId === archive.archiveId
+    && (!detailServer || detailServer === archive.serverId);
   /** 自然宽高比要等 `<img>` load 才拿得到，而重进档案库时第一帧还没 load；那就先看这份
    * 「上一次量到的宽窄」（见 archiveCardPresentation 里的跨路由记录）。否则第一帧按窄卡排版、
    * 图一落地又翻成宽卡，整屏卡片重排一次——比骨架闪更明显。 */
@@ -122,6 +129,7 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   // press-and-hold on a phone.
   const press = onContextMenu ? longPressHandlers((at) => onContextMenu(archive, at)) : {};
   return <Link
+    aria-current={detailOpen ? 'page' : undefined}
     className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
     to={`${detailBasePath}/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`}
     onClick={onOpen}
