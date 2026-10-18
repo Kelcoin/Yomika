@@ -1976,10 +1976,9 @@ body::-webkit-scrollbar,
   width: 100%;
 }
 
-/* `min-height: 100%` 配上底部内边距是「把留白挪进面板」那套做法，实测不成立：
-   面板被 100% 撑满后，那 24px 仍然加在滚动高度上（用户 2026-10-18 报的详情页底部空带）。 */
+/* 内容按实际高度收尾；仅加载占位需要铺满视口。 */
 .archive-detail-route {
-  min-height: 100%;
+  min-height: 0;
   font-family: var(--font-body);
   color: var(--ink-primary);
 }
@@ -2243,16 +2242,14 @@ body::-webkit-scrollbar,
 .eh-comments-heading h2 svg { width: 18px; height: 18px; color: var(--brand-vermilion); }
 .eh-comments-list { display: grid; min-width: 0; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
 /* Shared horizontal insets align the author, body and vote row. */
-.eh-comments-list li { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; min-width: 0; gap: var(--space-2); padding: var(--space-3) var(--space-3) var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
+.eh-comments-list li { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-content: start; min-width: 0; gap: var(--space-2) var(--space-3); padding: var(--space-3) var(--space-3) var(--space-2); border: 1px solid var(--outline-variant); border-radius: var(--radius-control); background: var(--surface-container-high); }
 .eh-comments-list li.is-uploader { border-left: 3px solid var(--brand-vermilion); }
-.eh-comment-meta { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, auto); align-items: start; gap: var(--space-3); color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.eh-comment-meta { display: grid; grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) minmax(0, auto); grid-template-columns: subgrid; align-items: start; gap: var(--space-3); color: var(--ink-secondary); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .eh-comment-meta > span { display: inline-flex; flex-wrap: wrap; align-items: center; min-width: 0; gap: var(--space-2); }
 /* Comment bodies inherit color and drop underlines globally, so a bare URL
    inside one would be indistinguishable from prose. */
 .eh-comment-link { text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
-/* Votes and the score share one row: the score sits in the meta grid's first
-   column (right-aligned), the buttons in the second (left-aligned), so the
-   buttons' left edge is the timestamp column's left edge. */
+/* The timestamp and vote row share the card's second grid track. */
 .eh-comment-score { color: var(--state-success); font-weight: var(--weight-bold); }
 .eh-comment-score.is-negative,
 .archive-context-menu-item.is-danger { color: var(--state-danger); }
@@ -2264,19 +2261,9 @@ body::-webkit-scrollbar,
 .eh-comment-meta small { padding: 2px 5px; border-radius: var(--radius-control); background: var(--primary-container); color: var(--on-primary-container); }
 /* Pinned to a token: with none declared the body fell back to the UA default
    16px — off the scale, and larger than the name that is meant to lead the card. */
-.eh-comments-list p { margin: 0; font-size: var(--text-md); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-relaxed); }
-/* 投票行：两枚按钮在前、分数在后（用户 2026-10-18 的口径——「评分应该在按钮的右侧」），
-   整组贴右，与上面那行的时间同一侧。
- *
- * 两条硬约束都写在属性里，不靠上下文：
- *  · 按钮是块级的（`display: grid` 的方框），所以容器必须显式 `inline-flex` + `nowrap`——
- *    容器一旦落回块级，两枚按钮就上下堆起来，第二枚还会溢出卡片底边（用户报的「布局错乱」）。
- *  · 分数给固定最小宽度：+6 与 +119 宽度不同，不钉住的话按钮会随分数宽窄左右移动
- *    （用户上一轮的要求「点赞按钮的位置不要受评分的影响」）。
- *
- * 上一版把分数放在按钮左侧、好让它与时间的左边缘对齐；用户看过之后要分数在右边，所以
- * 对齐口径改成「整组贴右」。 */
-.eh-comment-votes { display: flex; flex-wrap: nowrap; align-self: end; align-items: center; justify-content: flex-end; gap: var(--space-2); font-size: var(--text-xs); }
+.eh-comments-list p { grid-column: 1 / -1; margin: 0; font-size: var(--text-md); white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--leading-relaxed); }
+/* 两枚按钮从时间列左侧起排，分数贴右。分数的最小宽度避免常见票数变化挤动按钮。 */
+.eh-comment-votes { display: flex; grid-column: 2; flex-wrap: nowrap; align-self: end; align-items: center; justify-content: space-between; gap: var(--space-2); font-size: var(--text-xs); }
 .eh-comment-votes-actions { display: inline-flex; flex-wrap: nowrap; flex-shrink: 0; align-items: center; gap: 2px; }
 .eh-comment-votes .eh-comment-score { flex: none; min-width: 4ch; text-align: end; }
 .eh-comment-votes-actions button {
@@ -2293,6 +2280,7 @@ body::-webkit-scrollbar,
   cursor: pointer;
   transition: color var(--motion-fast), transform var(--motion-fast);
 }
+.eh-comment-votes-actions button:first-child { justify-items: start; }
 .eh-comment-votes-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
 .tag-group-character h2,
 .tag-group-character h3 { background: var(--primary); color: var(--on-primary); }
@@ -2656,14 +2644,9 @@ body::-webkit-scrollbar,
      overscroll glow or hand the gesture to an ancestor. */
   overscroll-behavior: contain;
   background: var(--surface-panel);
-  /* The global :focus-visible ring is drawn outside the element, and a scroll
-     container clips whatever leaves its padding box — without this, a
-     keyboard-focused card's ring is cut off against the edges.
-     The trailing space is *inside* the scroller on purpose: as padding on the
-     panel around it, it was a strip of bare canvas between the last card and the
-     status bar — which is the dark band that kept getting reported. Here it
-     scrolls away with the content and the list reaches the panel's edge. */
-  padding: 4px 4px calc(var(--space-8) + var(--chrome-bottom));
+  /* Keep a small focus-ring inset. The status bar already has its own layout
+     track, so reserving its height again creates a blank scroll tail. */
+  padding: 4px;
   scrollbar-width: none;
 }
 
@@ -5273,13 +5256,15 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     }
   }
 
-  /* 悬浮底栏浮在内容之上，滚动容器得补出它的高度，最后一屏内容才能完整滚出
-     （首页、书架、档案库通用）。整条 fixed 的底栏本来就占一行——.app-main 的
-     高度里已经减掉了它——再补这 80px 只会在内容下方留一块同色空带，手机上就是
-     底栏之上那一大块「遮挡」。 */
+  /* Only the visible floating bar needs clearance. When it parks off-screen,
+     retain the system safe area without leaving an empty navigation-sized tail. */
 .app-shell.is-floating-nav .workspace,
   .app-shell.is-floating-nav .workspace.is-library-workspace {
     padding-bottom: calc(var(--safe-bottom) + 80px);
+  }
+  .app-shell.is-floating-nav[data-compact-nav-hidden] .workspace,
+  .app-shell.is-floating-nav[data-compact-nav-hidden] .workspace.is-library-workspace {
+    padding-bottom: var(--safe-bottom);
   }
 
   /* Native compact flow has one scroller: only workspace clears the nav.

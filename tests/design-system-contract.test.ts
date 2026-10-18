@@ -313,7 +313,7 @@ describe('design system contract', () => {
     const [padded] = shell.split('padding-bottom: calc(var(--safe-bottom) + 80px)');
     expect(padded!.trimEnd()).toMatch(/\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{$/);
     // 收不收底栏由悬浮开关决定：没开悬浮时它有自己的行，不该被滚动带走。
-    expect(app).toMatch(/if \(floatingNav\) \{\s*if \(current > 8 && current > before\)/);
+    expect(app).toMatch(/if \(floatingNav\) \{\s*setCompactNavHidden/);
     // 触屏没有 Tab 键，跳过链接用不上；它在 WebKit 里会被点按命中 :focus-visible，
     // 常驻成状态栏那一角的胶囊。CSS 按媒体特性挡一层，AppShell 再按平台挡一层。
     expect(shell).toMatch(/@media \(hover: none\) and \(pointer: coarse\) \{\s*\.skip-link \{ display: none; \}/);
@@ -3453,9 +3453,11 @@ describe('the 2026-10-17 UI batch', () => {
     expect(scoreAt, '分数排在按钮之后——DOM 顺序就是视觉顺序，用户要它在按钮右侧').toBeGreaterThan(actionsAt);
 
     const shell = read('src/styles/shell.css');
-    expect(shell, '投票行贴右，与上面那行的时间同一侧').toMatch(
-      /\.eh-comment-votes \{[^}]*display: flex;[^}]*justify-content: flex-end;/,
-    );
+    expect(ruleBody(shell, '.eh-comments-list li')).toMatch(/grid-template-columns: minmax\(0, 1fr\) max-content/);
+    expect(ruleBody(shell, '.eh-comment-meta')).toMatch(/grid-template-columns: subgrid/);
+    expect(ruleBody(shell, '.eh-comment-votes')).toMatch(/grid-column: 2/);
+    expect(ruleBody(shell, '.eh-comment-votes')).toMatch(/justify-content: space-between/);
+    expect(ruleBody(shell, '.eh-comment-votes-actions button:first-child')).toMatch(/justify-items: start/);
     expect(shell, '两枚按钮永远同一行：容器落回块级就会上下堆、第二枚还会溢出卡片').toMatch(
       /\.eh-comment-votes-actions \{[^}]*display: inline-flex;[^}]*flex-wrap: nowrap;/,
     );

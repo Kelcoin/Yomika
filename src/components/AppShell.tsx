@@ -185,11 +185,14 @@ export function AppShell({ children }: AppShellProps) {
       // up — or back at the top — restores it. Only the floating bar answers
       // scrolling; the docked bar has its own row and stays put.
       if (floatingNav) {
-        if (current > 8 && current > before) {
-          setCompactNavHidden(true);
-        } else if (current < before || current <= 8) {
-          setCompactNavHidden(false);
-        }
+        setCompactNavHidden((hidden) => {
+          // Removing the hidden bar's spacer can clamp scrollTop at the end.
+          // That layout correction is not an upward gesture to show it again.
+          if (hidden && current < before && region.clientHeight > 0 && current >= region.scrollHeight - region.clientHeight - 1) return true;
+          if (current > 8 && current > before) return true;
+          if (current < before || current <= 8) return false;
+          return hidden;
+        });
       }
     };
     const workspace = workspaceRef.current;
@@ -298,7 +301,7 @@ export function AppShell({ children }: AppShellProps) {
 
 
   return (
-    <div className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>
+    <div data-compact-nav-hidden={compactNavHidden || undefined} className={`app-shell${sidebarCollapsed ? ' is-sidebar-collapsed' : ''}${floatingNav ? ' is-floating-nav' : ''}`}>
       {showTitleBar && <TitleBar />}
       {showSkipLink && <a className="skip-link" href="#main-content">跳到主内容</a>}
       <aside className="sidebar" aria-label="应用侧栏">

@@ -9,7 +9,7 @@ import type { Layout } from 'react-resizable-panels';
 import { useDefaultLayout } from 'react-resizable-panels';
 import { Group, Panel, Separator } from './AdaptivePanels';
 import { usePageActive } from '../app/RetainedPage';
-import { EDGE_CLAIM_PX, rubberBand } from '../lib/motion';
+import { EDGE_CLAIM_PX, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
@@ -399,6 +399,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
    * 手势期间不过渡是刻意的——每格滚轮都拖一条 100ms 的尾巴，就是用户 2026-10-17 报的
    * 「过滚效果还是非常卡」；而回弹那一档不打开，写回 0 就是瞬移。 */
   const [overscrollSettle, setOverscrollSettle] = useState(false);
+  useEffect(() => {
+    if (!overscrollSettle) return;
+    const timer = window.setTimeout(() => setOverscrollSettle(false), EDGE_SETTLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [overscrollSettle]);
   const overscrollRef = useRef(0);
   /** Gesture travel before damping, signed like the offset. */
   const overscrollTravel = useRef(0);
@@ -442,6 +447,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   }, []);
 
   const resetOverscroll = useCallback(() => {
+    const displaced = overscrollRef.current !== 0;
     if (pullFrame.current !== undefined) window.cancelAnimationFrame(pullFrame.current);
     pullFrame.current = undefined;
     pullQueued.current = false;
@@ -458,7 +464,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     paintPull(0);
     setOverscroll(0);
     // 先把回弹那一档打开，再让位置归零：顺序反了就没有动画（见 shell.css）。
-    setOverscrollSettle(true);
+    // Ordinary scroll/long-press releases must not promote the entire tall
+    // virtual list to a persistent compositor layer behind the menu.
+    setOverscrollSettle(displaced);
     setOverscrollGesture(null);
   }, [paintPull]);
 

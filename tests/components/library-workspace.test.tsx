@@ -1234,3 +1234,27 @@ it('limits library drag DOM writes to one paint per frame', () => {
   act(() => frames.shift()!(0));
   expect(list.querySelector('.archive-list-pull')).toHaveStyle({ transform: `translateY(${rubberBand(100, 104)}px)` });
 });
+
+it('does not promote the entire virtual list when an ordinary touch ends', () => {
+  renderWorkspace({ archives });
+  const list = screen.getByRole('list', { name: '档案' });
+  scrollable(list, { scrollTop: 200, clientHeight: 600, scrollHeight: 4000 });
+  fireEvent.touchStart(list, { touches: [{ clientX: 20, clientY: 250 }] });
+  fireEvent.touchEnd(list);
+  expect(list.querySelector('.archive-list-pull')).not.toHaveAttribute('data-overscroll');
+});
+
+it('releases the whole-list compositor hint after the bounce finishes', () => {
+  vi.useFakeTimers();
+  try {
+    renderWorkspace({ archives });
+    const list = screen.getByRole('list', { name: '档案' });
+    scrollable(list, { scrollTop: 0, clientHeight: 600, scrollHeight: 4000 });
+    fireEvent.touchStart(list, { touches: [{ clientX: 20, clientY: 20 }] });
+    fireEvent.touchMove(list, { touches: [{ clientX: 20, clientY: 100 }] });
+    fireEvent.touchEnd(list);
+    expect(list.querySelector('.archive-list-pull')).toHaveAttribute('data-overscroll', 'settle');
+    act(() => vi.advanceTimersByTime(500));
+    expect(list.querySelector('.archive-list-pull')).not.toHaveAttribute('data-overscroll');
+  } finally { vi.useRealTimers(); }
+});

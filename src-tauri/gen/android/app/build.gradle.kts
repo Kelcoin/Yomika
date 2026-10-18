@@ -86,6 +86,24 @@ dependencies {
 
 apply(from = "tauri.build.gradle.kts")
 
+// `tauri android build` 自己已经先把 aarch64 的库编好、软链进 jniLibs，随后 Gradle 里
+// 那个 `rustBuild*` 任务（buildSrc 的 RustPlugin）又会为同一个 target 跑一遍
+// `tauri android android-studio-script`——实测第二次仍是完整编译（55 秒），纯浪费。
+//
+// 判据用构建戳：cargo 的那份库文件里已经带着当前 YOMIKA_BUILD_COMMIT 就跳过。
+// 读的是 cargo 的输出而不是 jniLibs 里那份——后者是它的软链，而且
+// `tests/contracts/mobile-packaging.test.ts` 明令这个文件里不许出现 jniLibs 源路径
+// （上一轮真的 strip 到源目录、改掉了本机 NDK 的软链）。Android Studio 那条路
+// （以及任何没设这个变量的调用）拿不到戳，照旧构建，行为不变。
+val androidBuildStamp = System.getenv("YOMIKA_BUILD_COMMIT")
+val androidCargoLibrary = file("../../../target/aarch64-linux-android/release/libyomika_lib.so")
+tasks.matching { it.name.startsWith("rustBuild") }.configureEach {
+    onlyIf {
+        !(androidBuildStamp != null && androidCargoLibrary.isFile &&
+            androidCargoLibrary.readBytes().toString(Charsets.ISO_8859_1).contains(androidBuildStamp))
+    }
+}
+
 // Release 的预编译原生库再 strip 一遍。
 //
 // AGP 那个 `stripUniversalReleaseDebugSymbols` 只处理它自己编出来的库：工程里的原生库是

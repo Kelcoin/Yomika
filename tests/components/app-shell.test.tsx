@@ -584,11 +584,23 @@ describe('application shell', () => {
 
       // 开了悬浮：向下滚把它送出屏幕，向上滚再回来。
       const floating = await mountWith(true);
+      const workspace = document.getElementById('main-content')!;
+      Object.defineProperties(workspace, {
+        clientHeight: { configurable: true, value: 600 },
+        scrollHeight: { configurable: true, value: 2000 },
+      });
       floating.scrollTo(200);
       floating.scrollTo(400);
       expect(floating.bar).toHaveClass('is-hidden');
+      expect(document.querySelector('.app-shell')).toHaveAttribute('data-compact-nav-hidden');
+      // Hiding the nav removes its 80px tail clearance. Browser clamping at
+      // the new maximum must not show it again and oscillate the layout.
+      floating.scrollTo(1500);
+      floating.scrollTo(1400);
+      expect(floating.bar).toHaveClass('is-hidden');
       floating.scrollTo(120);
       expect(floating.bar).not.toHaveClass('is-hidden');
+      expect(document.querySelector('.app-shell')).not.toHaveAttribute('data-compact-nav-hidden');
       cleanup();
     } finally {
       window.matchMedia = original;
