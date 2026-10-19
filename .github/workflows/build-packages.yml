@@ -119,6 +119,13 @@ jobs:
           yes | "$sdkmanager" --licenses > /dev/null || true
           "$sdkmanager" --install 'platforms;android-36' 'build-tools;36.0.0' 'ndk;28.2.13676358'
       - run: npm ci --no-audit --no-fund
+      # 构建戳必须先落进环境：`gen/android/app/build.gradle.kts` 里 `rustBuild*` 的
+      # onlyIf 靠它跳过 Gradle 那一遍 cargo（CLI 已经编过同一份）。少了它，CI 会白编
+      # 一遍，而且那第二遍跑在 Gradle 守护进程的环境里——`ORT_LIB_PATH` 不在那里时，
+      # 它会重编出一个没链 ONNX Runtime 的主库，装到手机上加载即失败。
+      - name: Pin the build stamp
+        shell: bash
+        run: echo "YOMIKA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
       - run: npx tauri android init --ci --skip-targets-install
       - name: Build pinned Android ONNX Runtime with NNAPI
         run: |
@@ -188,6 +195,11 @@ jobs:
         with:
           targets: aarch64-apple-ios
       - run: npm ci --no-audit --no-fund
+      # 同一个理由：构建戳要先进环境，交付物的身份才等于这一次提交，Xcode 那一侧也不必
+      # 靠守护进程的环境去猜。
+      - name: Pin the build stamp
+        shell: bash
+        run: echo "YOMIKA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
       # tauri ios init shells out to xcodegen to render the .xcodeproj; the
       # runner image does not preinstall it.
       - name: Install XcodeGen
@@ -240,6 +252,12 @@ jobs:
             cp "$lib" "src-tauri/gen/apple/Externals/arm64/$config/libapp.a"
           done
           ls -l src-tauri/gen/apple/Externals/arm64/*/libapp.a
+      # 静态库里如果留着 ort-sys 的链接占位符（没设 `ORT_IOS_XCFWK_PATH` 时它就长那样），
+      # Xcode 那一侧永远不会去链真正的 ONNX Runtime：链接会过、包也出得来，装到设备上
+      # 加载主库直接失败。这里在**真正交给 Xcode 的那一份**上验一次。
+      - name: Verify the staged iOS library links ONNX Runtime
+        shell: bash
+        run: python3 .github/scripts/verify-mobile-runtime.py src-tauri/gen/apple/Externals/arm64/release/libapp.a --ios
       - name: Build unsigned iOS app
         run: |
           project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)

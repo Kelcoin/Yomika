@@ -158,6 +158,10 @@ export function AppShell({ children }: AppShellProps) {
   const [topPosition, setTopPosition] = useState<{ placement: string; bottom: number; right: number }>();
   /** 底栏收起时圆盘留在哪：见 `measure()` 里那段「收起期间不许挪」。 */
   const parkedTopPositionRef = useRef<{ placement: string; bottom: number; right: number }>();
+  /** 正在滚的那一栏。两栏布局里圆盘要贴它、点击也只回它，而不是永远贴窗口右下角。 */
+  const activeRegionRef = useRef<HTMLElement>();
+  /** `measure()` 在另一个 effect 里，滚动处理要能在「换了活跃栏」时请它重算一次。 */
+  const measureTopRef = useRef<(() => void) | undefined>(undefined);
   const [showScrollTop, setShowScrollTop] = useState(false);
   // The floating compact bar answers scrolling the way the scroll-to-top disc
   // does: scrolling down parks it out of the way, scrolling up — or reaching the
@@ -194,8 +198,15 @@ export function AppShell({ children }: AppShellProps) {
       previous.set(region, current);
       if (current <= 8 || current >= before) {
         setShowScrollTop(false);
+        // 这一栏回到顶上、或者改往上滚了：圆盘不该继续贴它。另一栏真在滚的话，
+        // 下一个事件会立刻把活跃栏换过去，所以这里清掉是安全的。
+        if (activeRegionRef.current === region) activeRegionRef.current = undefined;
       } else {
+        const switched = activeRegionRef.current !== region;
+        activeRegionRef.current = region;
         setShowScrollTop(true);
+        // 换了栏就要重新量一次：圆盘贴的是栏，不是窗口。
+        if (switched) measureTopRef.current?.();
       }
       // Scroll direction drives the floating bar: down past the top hides it,
       // up — or back at the top — restores it. Only the floating bar answers
@@ -252,6 +263,24 @@ export function AppShell({ children }: AppShellProps) {
       const barTop = Number.isFinite(dockBottom) ? window.innerHeight - dockBottom - (nav.offsetHeight || bar.height) : bar.top;
       const travel = (nav.offsetHeight || bar.height) + (Number.isFinite(dockBottom) ? dockBottom : 12 + safeBottom);
       button.style.setProperty('--compact-nav-travel', `${travel}px`);
+      // 两栏（首页/档案库/本地档案的双页档）里两栏各自是滚动容器：圆盘该贴的是
+      // **正在滚的那一栏**，而不是窗口右下角。贴窗口的话，滚 A 栏时它会出现在 B 栏
+      // 上面，点一下还会把两栏一起拉回顶部——用户报的正是这两条。
+      const region = activeRegionRef.current;
+      const panel = region && region !== workspaceRef.current ? region.getBoundingClientRect() : undefined;
+      if (panel && panel.width > 0) {
+        // 栏内右下角、离边 12px；底栏压着那一角时抬到底栏上面（与 `above` 同一套算法：
+        // bottom 是离窗口底边的距离，越大越靠上）。
+        const anchored = {
+          placement: 'panel',
+          bottom: Math.max(window.innerHeight - panel.bottom + 12, window.innerHeight - barTop + 12),
+          right: Math.max(12 + safeRight, window.innerWidth - panel.right + 12),
+        };
+        parkedTopPositionRef.current = anchored;
+        setTopPosition((current) => current?.placement === anchored.placement && current.bottom === anchored.bottom && current.right === anchored.right
+          ? current : anchored);
+        return;
+      }
       const beside = !compactNavHidden && bar.right + 12 + width <= window.innerWidth - 16 - safeRight;
       const bottom = compactNavHidden ? 16 + safeBottom : beside
         ? window.innerHeight - (barTop + bar.height / 2) - height / 2
@@ -262,6 +291,7 @@ export function AppShell({ children }: AppShellProps) {
       setTopPosition((current) => current?.placement === next.placement && current.bottom === next.bottom && current.right === next.right
         ? current : next);
     };
+    measureTopRef.current = measure;
     measure();
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
     observer?.observe(nav); observer?.observe(button); observer?.observe(document.documentElement);
@@ -272,6 +302,7 @@ export function AppShell({ children }: AppShellProps) {
     nav.addEventListener('transitioncancel', settled);
     window.addEventListener('resize', measure);
     return () => {
+      measureTopRef.current = undefined;
       observer?.disconnect(); insets.disconnect();
       nav.removeEventListener('transitionend', settled);
       nav.removeEventListener('transitioncancel', settled);
@@ -369,8 +400,16 @@ export function AppShell({ children }: AppShellProps) {
           {children}
         </main>
         <button ref={topButtonRef} data-placement={topPosition?.placement} data-nav-hidden={compactNavHidden || undefined} style={topPosition ? { bottom: topPosition.bottom, right: topPosition.right } : undefined} className={`scroll-to-top${showScrollTop ? '' : ' is-hidden'}`} type="button" aria-label="返回顶部" title="返回顶部" onClick={() => {
-          workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
-          document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((region) => !region.closest('[hidden]') && region.scrollTo({ top: 0, behavior: 'smooth' }));
+          const region = activeRegionRef.current;
+          if (region && region !== workspaceRef.current) {
+            // 双页档：圆盘贴的就是那一栏，回顶也只回那一栏。两栏一起回顶会让人
+            // 丢掉另一页正看到的位置。
+            region.scrollTo({ top: 0, behavior: 'smooth' });
+          } else {
+            workspaceRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+            document.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach((item) => !item.closest('[hidden]') && item.scrollTo({ top: 0, behavior: 'smooth' }));
+          }
+          activeRegionRef.current = undefined;
           setShowScrollTop(false);
         }}><ArrowUp aria-hidden="true" /></button>
         <StatusBar />

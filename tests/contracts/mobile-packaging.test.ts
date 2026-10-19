@@ -208,4 +208,50 @@ describe('mobile packaging', () => {
     }
     expect(offenders).toEqual([]);
   });
+
+  it('never compiles the same Android Rust library twice in one build', () => {
+    // `tauri android build` 先自己编一遍 Rust 库，Gradle 的 rust 插件随后又编一遍
+    // （实测一个平台 111.85 s 里有一半是白编的）。第一遍之后那个 .so 里已经有构建戳，
+    // 所以第二遍按戳跳过。戳还必须由工作流**先**落进环境：Gradle 守护进程的环境里没有
+    // `ORT_LIB_PATH`，它那一遍编出来的主库不会链 ONNX Runtime —— APK 里带着
+    // libonnxruntime.so 却「加载主库直接失败」，就是这么来的。
+    const gradle = read('../../src-tauri/gen/android/app/build.gradle.kts');
+    expect(gradle).toContain('val androidBuildStamp = System.getenv("YOMIKA_BUILD_COMMIT")');
+    expect(gradle).toContain('tasks.matching { it.name.startsWith("rustBuild") }.configureEach {');
+    expect(gradle).toContain('onlyIf {');
+    expect(gradle).toContain('../../../target/aarch64-linux-android/release/libyomika_lib.so');
+
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    expect(workflow).toContain('YOMIKA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)');
+    expect(workflow.indexOf('Pin the build stamp')).toBeLessThan(workflow.indexOf('npx tauri android build'));
+  });
+
+  it('fails a mobile build loudly when the runtime it is supposed to link is missing', () => {
+    // ort-sys 找不到运行时时不报错，只留下一个链接期占位符（`src/link_error.rs`）：
+    // 库编得出来、APK 也打得出来，装到设备上加载即失败。构建脚本要把这件事变成一句
+    // 编译失败，并且说清缺的是哪个变量。
+    const build = read('../../src-tauri/crates/compute-core/build.rs');
+    expect(build).toContain('fn require_mobile_ort()');
+    expect(build).toContain('require_mobile_ort();');
+    expect(build).toContain('CARGO_FEATURE_ORT');
+    // 断言整句 `var_os("…")` 而不是裸变量名：裸名会被 `ORT_LIB_PATH_UNUSED` 这种改名
+    // 蒙过去（子串仍在），变异检查 m3 第一次就是这么假绿的。
+    expect(build).toContain('std::env::var_os("ORT_LIB_PATH")');
+    expect(build).toContain('std::env::var_os("ORT_LIB_LOCATION")');
+    expect(build).toContain('std::env::var_os("ORT_IOS_XCFWK_PATH")');
+    expect(build).toContain('prepare-mobile-ort.py');
+  });
+
+  it('proves the iOS library handed to Xcode links the runtime', () => {
+    // iOS 的最终链接在 Xcode 那一侧（`-framework onnxruntime`），所以只能在真正交给
+    // Xcode 的那份静态库上验：既要有对 ORT C API 的引用，也不能带着 ort-sys 的占位符。
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    expect(workflow).toContain(
+      'verify-mobile-runtime.py src-tauri/gen/apple/Externals/arm64/release/libapp.a --ios',
+    );
+    const verifier = read('../../.github/scripts/verify-mobile-runtime.py');
+    expect(verifier).toContain('def verify_ios(path):');
+    expect(verifier).toContain('OrtGetApiBase');
+    expect(verifier).toContain('ort-sys crate could not link to ONNX Runtime');
+  });
 });

@@ -187,6 +187,11 @@ fn pack_worker_payload(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
+        // Shared-library linking otherwise permits unresolved ort-sys error
+        // sentinels and produces an APK that aborts during System.loadLibrary.
+        println!("cargo:rustc-link-arg=-Wl,--no-undefined");
+    }
     // Native mobile code is linked into the app, never borrowed from the host.
     // ort-sys consumes the paths below before this build script executes.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {

@@ -26,7 +26,13 @@ def verify_apk(path, readelf):
             extracted = Path(temp) / Path(name).name
             extracted.write_bytes(data)
             report = subprocess.check_output([readelf, "-d", str(extracted)], text=True)
-            for needed in re.findall(r"\(NEEDED\).*?\[(.*?)\]", report):
+            dependencies = set(re.findall(r"\(NEEDED\).*?\[(.*?)\]", report))
+            if Path(name).name == "libyomika_lib.so":
+                assert "libonnxruntime.so" in dependencies, (
+                    "App library is not linked to ONNX Runtime; copying the runtime into the APK "
+                    "does not fix an ort-sys build without ORT_LIB_PATH"
+                )
+            for needed in dependencies:
                 assert needed in packaged | system, f"Unpackaged dependency {needed} in {name}"
             if name == ort:
                 symbols = subprocess.check_output([readelf, "--dyn-syms", "--wide", str(extracted)], text=True)
@@ -35,10 +41,38 @@ def verify_apk(path, readelf):
                     assert any(" UND " not in line for line in matches), f"Missing native export {symbol}"
 
 
+MACHO_MAGICS = (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+
+
+def verify_ios(path):
+    """iOS 静态库：既要真的引用 ORT 的 C API，又不能带着 ort-sys 的链接占位符。
+
+    iOS 这一侧最终链接发生在 Xcode（`-framework onnxruntime`），所以 Rust 静态库里
+    `_OrtGetApiBase` 以**未定义引用**出现才算对。ort-sys 找不到框架时留下的不是这个
+    符号，而是一个名字里写着错误说明的假符号（`src/link_error.rs`）——Xcode 那一侧于是
+    永远不去链真正的 ONNX Runtime，装到设备上就是「加载主库直接失败」的 iOS 版本。
+    """
+    blob = path.read_bytes()
+    assert blob.startswith(b"!<arch>\n") or blob[:4] in MACHO_MAGICS, f"{path} is not a static archive or Mach-O"
+    assert b"OrtGetApiBase" in blob, (
+        f"{path} does not reference the ONNX Runtime C API: the Rust side was built without "
+        "ORT_IOS_XCFWK_PATH, so -framework onnxruntime has nothing to resolve"
+    )
+    assert b"ort-sys crate could not link to ONNX Runtime" not in blob, (
+        f"{path} carries ort-sys' link-error placeholder: the iOS build ran without "
+        "ORT_IOS_XCFWK_PATH (see .github/scripts/prepare-mobile-ort.py ios)"
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("apk", type=Path)
+    parser.add_argument("artifact", type=Path)
     parser.add_argument("--readelf", default="llvm-readelf")
+    parser.add_argument("--ios", action="store_true", help="Verify an iOS static library instead of an APK")
     args = parser.parse_args()
-    verify_apk(args.apk, args.readelf)
-    print("APK ARM64 runtime and dependency closure verified; device execution remains required.")
+    if args.ios:
+        verify_ios(args.artifact)
+        print("iOS static library references the real ONNX Runtime C API and carries no ort-sys placeholder.")
+    else:
+        verify_apk(args.artifact, args.readelf)
+        print("APK ARM64 runtime and dependency closure verified; device execution remains required.")

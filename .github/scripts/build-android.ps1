@@ -11,6 +11,8 @@ param(
 #
 # 依赖：JDK 17+（PATH 或 JAVA_HOME）、Android SDK（ANDROID_HOME 或默认位置）并带
 # NDK，rustup 装了 aarch64-linux-android 目标。
+# 首次准备移动端 ORT 还需要 Python、Git、CMake、Ninja 和 Python numpy/packaging；
+# 后续构建复用校验通过的目标运行库，不再重复下载和编译。
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -22,11 +24,11 @@ if (-not (Test-Path -LiteralPath $sdk -PathType Container)) {
 }
 $env:ANDROID_HOME = $sdk
 $env:ANDROID_SDK_ROOT = $sdk
-$ndk = Join-Path $sdk "ndk"
-if (Test-Path -LiteralPath $ndk -PathType Container) {
-    $newest = Get-ChildItem -LiteralPath $ndk -Directory | Sort-Object Name | Select-Object -Last 1
-    if ($newest) { $env:ANDROID_NDK_ROOT = $newest.FullName; Write-Host "Android NDK: $($newest.Name)" }
-}
+$ndk = Join-Path $sdk "ndk/28.2.13676358"
+if (-not (Test-Path -LiteralPath $ndk -PathType Container)) { throw "Install Android NDK 28.2.13676358 (the app's pinned NDK)." }
+$env:ANDROID_NDK_ROOT = $ndk
+$env:ANDROID_NDK_HOME = $ndk
+Write-Host "Android NDK: 28.2.13676358"
 
 # 签名：release 变体只有在 `release.keystore` + 三个口令变量齐了才会被签名
 # （见 gen/android/app/build.gradle.kts）。没签名的 APK 装不上（Android 报
@@ -60,6 +62,20 @@ if ($Release) {
 
 Push-Location $repoRoot
 try {
+    # The runtime must be linked into the host, not merely copied into the APK.
+    # A missing ORT_LIB_PATH otherwise leaves ort-sys' unresolved error sentinel
+    # in an Android shared library and System.loadLibrary fails at cold launch.
+    $runtimeOutput = Join-Path $repoRoot "src-tauri/target/mobile-ort"
+    $legacyOutput = Join-Path $repoRoot "src-tauri/target/mobile-ort-shallow"
+    if ($env:YOMIKA_MOBILE_ORT_OUTPUT) { $runtimeOutput = $env:YOMIKA_MOBILE_ORT_OUTPUT }
+    elseif (-not (Test-Path (Join-Path $runtimeOutput "android-runtime.json")) -and (Test-Path (Join-Path $legacyOutput "android-runtime.json"))) { $runtimeOutput = $legacyOutput }
+    $runtimeEnvironment = Join-Path $runtimeOutput "cargo-env.json"
+    & python (Join-Path $PSScriptRoot "prepare-mobile-ort.py") android --output $runtimeOutput --reuse-if-valid --env-file $runtimeEnvironment
+    if ($LASTEXITCODE -ne 0) { throw "Android ONNX Runtime preparation failed." }
+    $runtimeVariables = Get-Content -LiteralPath $runtimeEnvironment -Raw | ConvertFrom-Json
+    foreach ($property in $runtimeVariables.PSObject.Properties) {
+        [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
+    }
     $configuration = if ($Release) { "release" } else { "debug" }
     Write-Host "Building the $configuration APK for aarch64 (frontend first: tauri runs npm run build)."
     # 与 build-windows.ps1 同一个理由：`build.rs` 把编译时刻与
@@ -93,6 +109,9 @@ try {
         Where-Object { $_.FullName -match $configuration } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
     if (-not $apk) { throw "No $configuration APK under src-tauri\gen\android\app\build\outputs\apk." }
+    $readelf = Join-Path $ndk "toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-readelf.exe"
+    & python (Join-Path $PSScriptRoot "verify-mobile-runtime.py") $apk.FullName --readelf $readelf
+    if ($LASTEXITCODE -ne 0) { throw "APK native runtime/linkage verification failed." }
     # APK 里那个 `.so` 的构建戳必须等于构建时的 HEAD（审计 P2-3）；对不上就失败，别让
     # 一份带旧戳的包发出去。
     & (Join-Path $PSScriptRoot "verify-build-stamp.ps1") -Path $apk.FullName -InsideApk

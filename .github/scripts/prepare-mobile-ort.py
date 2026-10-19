@@ -31,6 +31,30 @@ def stage_library(source, destination):
     shutil.copy2(source, destination)
 
 
+def reuse_android(output):
+    """Reuse only a complete, fingerprinted target build, and restage JNI files."""
+    manifest_path = output / "android-runtime.json"
+    if not manifest_path.is_file():
+        return None
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    expected = {"version": VERSION, "revision": REVISION, "api": 27, "platform": "android"}
+    if any(manifest.get(key) != value for key, value in expected.items()):
+        raise RuntimeError("Cached mobile ORT source/API identity mismatch; rebuild the runtime")
+    native = output / "android/Release/libonnxruntime.so"
+    data = native.read_bytes()
+    if hashlib.sha256(data).hexdigest() != manifest.get("sha256"):
+        raise RuntimeError("Cached mobile ORT checksum mismatch; rebuild the runtime")
+    if data[:5] != b"\x7fELF\x02" or int.from_bytes(data[18:20], "little") != 183:
+        raise RuntimeError("Cached mobile ORT is not an Android ARM64 library")
+    stage = ROOT / "src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a"
+    stage.mkdir(parents=True, exist_ok=True)
+    stage_library(native, stage / native.name)
+    ndk = Path(os.environ["ANDROID_NDK_HOME"])
+    host = "windows-x86_64" if sys.platform == "win32" else ("darwin-x86_64" if sys.platform == "darwin" else "linux-x86_64")
+    stage_library(ndk / "toolchains/llvm/prebuilt" / host / "sysroot/usr/lib/aarch64-linux-android/libc++_shared.so", stage / "libc++_shared.so")
+    return {"ORT_SKIP_DOWNLOAD": "1", "ORT_LIB_PATH": str(native.parent), "ORT_PREFER_DYNAMIC_LINK": "1"}
+
+
 def prepare(platform, output):
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -108,5 +132,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("platform", choices=["android", "ios"])
     parser.add_argument("--output", type=Path, default=ROOT / "src-tauri/target/mobile-ort")
+    parser.add_argument("--reuse-if-valid", action="store_true")
+    parser.add_argument("--env-file", type=Path, help="Write the target Cargo environment as JSON")
     options = parser.parse_args()
-    prepare(options.platform, options.output)
+    output = options.output.resolve()
+    env = reuse_android(output) if options.reuse_if_valid and options.platform == "android" else None
+    if env is None:
+        env = prepare(options.platform, output)
+    if options.env_file:
+        options.env_file.parent.mkdir(parents=True, exist_ok=True)
+        options.env_file.write_text(json.dumps(env, indent=2) + "\n", encoding="utf-8")

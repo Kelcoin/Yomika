@@ -86,6 +86,8 @@ fn main() {
     // 登记一次省得 check-cfg 在别的目标上抱怨。
     println!("cargo:rustc-check-cfg=cfg(ngx_core)");
 
+    require_mobile_ort();
+
     // 只对 Windows 目标编，而且只有开了 `dlssnr` 才有那个模块（没开时
     // `include_bytes!` 根本不会被求值，编了也没人要）。
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
@@ -109,4 +111,38 @@ fn main() {
             "cargo:warning=缺少 src-tauri/vendor/ngx/nvsdk_ngx_s.lib：这个构建没有 NGX 核心，DLSS5 会被跳过"
         );
     }
+}
+
+/// 移动端开了 `ort` 就必须能在**编译时**找到 ONNX Runtime。
+///
+/// `ort-sys` 找不到时不会报错：它把错误藏成一个链接期占位符（`link_error_generic`，
+/// 见 `src/link_error.rs`）——共享库里留成未定义符号，于是 `cargo build` 绿、APK 也打
+/// 出来了，装到手机上 `System.loadLibrary` 直接失败（实测：`libyomika_lib.so` 的
+/// NEEDED 里没有 `libonnxruntime.so`，`OrtGetApiBase` 是 `UND`）。这里把它变成一句能
+/// 读懂的编译失败：缺哪个变量，消息里就写哪个。
+///
+/// 变量名取自 `ort-sys` 的 `build/vars.rs`（`ORT_LIB_PATH` / `ORT_LIB_LOCATION`）与
+/// `src/link_error.rs`（iOS 用 `ORT_IOS_XCFWK_PATH`）。两者都由
+/// `.github/scripts/prepare-mobile-ort.py` 产出：本地 Android 构建走 `build-android.ps1`
+/// （它把 `cargo-env.json` 读进进程环境），CI 走工作流里那一步。
+fn require_mobile_ort() {
+    let target = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target != "android" && target != "ios" {
+        return;
+    }
+    if std::env::var_os("CARGO_FEATURE_ORT").is_none() {
+        return;
+    }
+    let linked = std::env::var_os("ORT_LIB_PATH").is_some()
+        || std::env::var_os("ORT_LIB_LOCATION").is_some()
+        || std::env::var_os("ORT_IOS_XCFWK_PATH").is_some();
+    if linked {
+        return;
+    }
+    panic!(
+        "这个 {target} 构建开了 `ort`，但既没有 ORT_LIB_PATH / ORT_LIB_LOCATION（Android）\
+         也没有 ORT_IOS_XCFWK_PATH（iOS）：ort-sys 会退化成链接期占位符，库编得出来、\
+         装到设备上却加载失败。先跑 `.github/scripts/prepare-mobile-ort.py {target}`\
+         （本地 Android 构建脚本已内置这一步）。"
+    );
 }

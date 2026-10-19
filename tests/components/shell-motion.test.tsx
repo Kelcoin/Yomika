@@ -28,6 +28,55 @@ it('places the top button alongside a measured floating bar only when it fits', 
   fireEvent(window, new Event('resize'));
   expect(button).toHaveAttribute('data-placement', 'above');
 });
+it('anchors the disc to the panel being scrolled and sends that panel home alone', () => {
+  // 双页档：两栏各自是滚动容器（`data-scroll-region`）。圆盘从前永远贴窗口右下角，
+  // 于是滚左栏时它出现在右栏那一侧，点一下还把两栏一起拉回顶部。
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    if (this.classList.contains('compact-nav')) return { left: 100, right: 300, top: 700, bottom: 764, width: 200, height: 64 } as DOMRect;
+    if (this.dataset.testid === 'left-panel') return { left: 200, right: 600, top: 100, bottom: 700, width: 400, height: 600 } as DOMRect;
+    if (this.dataset.testid === 'right-panel') return { left: 620, right: 1020, top: 100, bottom: 700, width: 400, height: 600 } as DOMRect;
+    return { left: 0, right: 44, top: 0, bottom: 44, width: 44, height: 44 } as DOMRect;
+  });
+  render(
+    <MemoryRouter>
+      <AppShell>
+        <section data-scroll-region data-testid="left-panel" />
+        <section data-scroll-region data-testid="right-panel" />
+      </AppShell>
+    </MemoryRouter>,
+  );
+  const host = document.getElementById('main-content')!;
+  Object.defineProperties(host, { clientHeight: { configurable: true, value: 500 }, scrollHeight: { configurable: true, value: 1000 } });
+  const left = screen.getByTestId('left-panel');
+  const right = screen.getByTestId('right-panel');
+  for (const region of [left, right]) Object.defineProperties(region, { clientHeight: { value: 500 }, scrollHeight: { value: 1000 } });
+  const scrollTo = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: scrollTo });
+
+  // 往下滚（圆盘该收起）再往上滚（圆盘该出现，且贴住刚才那一栏）。
+  left.scrollTop = 600; fireEvent.scroll(left);
+  left.scrollTop = 300; fireEvent.scroll(left);
+  const button = screen.getByRole('button', { name: '返回顶部' });
+  expect(button).toHaveAttribute('data-placement', 'panel');
+  expect(button.style.right).toBe(`${window.innerWidth - 600 + 12}px`);
+  expect(button.style.bottom).toBe(`${window.innerHeight - 700 + 12}px`);
+
+  // 点一下只回左栏：右栏与整页都不许动。
+  fireEvent.click(button);
+  expect(scrollTo).toHaveBeenCalledTimes(1);
+  expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+  expect(scrollTo.mock.instances[0]).toBe(left);
+
+  // 换成滚右栏：圆盘跟过去，点击也换成只回右栏。
+  right.scrollTop = 600; fireEvent.scroll(right);
+  right.scrollTop = 300; fireEvent.scroll(right);
+  expect(button).toHaveAttribute('data-placement', 'panel');
+  expect(button.style.right).toBe(`${window.innerWidth - 1020 + 12}px`);
+  scrollTo.mockClear();
+  fireEvent.click(button);
+  expect(scrollTo).toHaveBeenCalledTimes(1);
+  expect(scrollTo.mock.instances[0]).toBe(right);
+});
 it('damps only outward edge touches, resets on return and cancel, and leaves editors and nested regions alone', () => {
   const host = renderShell();
   const drag = (target: Element, y: number, x = 0) => fireEvent.touchMove(target, { touches: [{ clientY: y, clientX: x }] });
