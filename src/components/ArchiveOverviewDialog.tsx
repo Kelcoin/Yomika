@@ -42,6 +42,7 @@ function ArchiveOverviewContent({ archive, scopeId, serverId, onClose }: Archive
   const [previews, setPreviews] = useState<ReadonlyMap<number, string>>(() => new Map());
   const tiles = useRef(new Map<number, HTMLElement>());
   const registerPreview = useRef<(index: number, node: HTMLElement) => void>();
+  const unregisterPreview = useRef<(node: HTMLElement) => void>();
 
   useEffect(() => {
     // 每次 effect 都拥有自己的租约，避免 StrictMode 重挂或换档案后接受上一轮图片。
@@ -74,6 +75,7 @@ function ArchiveOverviewContent({ archive, scopeId, serverId, onClose }: Archive
       if (index < EAGER_PREVIEWS) void loadPreview(index);
       else observer?.observe(node);
     };
+    unregisterPreview.current = (node) => observer?.unobserve(node);
     tiles.current.forEach((node, index) => registerPreview.current?.(index, node));
     void imageCache.load({ scopeId, serverId, archiveId: archive.archiveId, rendition: 'cover', pageIndex: 0 })
       .then((handle) => {
@@ -86,12 +88,18 @@ function ArchiveOverviewContent({ archive, scopeId, serverId, onClose }: Archive
       active = false;
       observer?.disconnect();
       registerPreview.current = undefined;
+      unregisterPreview.current = undefined;
       handles.forEach((handle) => imageCache.release(handle));
     };
   }, [archive.archiveId, scopeId, serverId]);
 
   const registerTile = useCallback((index: number, node: HTMLElement | null) => {
-    if (!node) { tiles.current.delete(index); return; }
+    if (!node) {
+      const previous = tiles.current.get(index);
+      if (previous) unregisterPreview.current?.(previous);
+      tiles.current.delete(index);
+      return;
+    }
     tiles.current.set(index, node);
     node.dataset.pageIndex = String(index);
     registerPreview.current?.(index, node);

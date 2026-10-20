@@ -11,6 +11,7 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
 import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
+import { useDetailListScroll } from '../lib/useDetailListScroll';
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
 import { SelectField, type SelectOption } from './SelectField';
@@ -404,6 +405,7 @@ export function LocalArchivesWorkspace() {
   // 拖动就是一顿一顿的。行座的高度交给 measureElement 去量——下载行在窄屏上
   // 高度随内容长，不能像档案库那样按固定行距算死。
   const listRef = useRef<HTMLDivElement>(null);
+  useDetailListScroll(Boolean(detail), listRef);
   const listRows = useMemo<LocalListRow[]>(() => [
     ...activeDownloads.map((task) => ({ kind: 'task' as const, key: task.id, task })),
     ...visibleArchives.map((archive) => ({ kind: 'archive' as const, key: archive.path, archive })),
@@ -434,7 +436,7 @@ export function LocalArchivesWorkspace() {
   });
   const viewport = compact ? listRef.current?.closest<HTMLElement>('.workspace') ?? listRef.current : listRef.current;
   const shownRows = useStableVirtualRows(rowVirtualizer.getVirtualItems(), rowVirtualizer.getTotalSize(), listRows.length,
-    pageActive && document.visibilityState !== 'hidden' && viewport?.clientHeight !== 0);
+    pageActive && document.visibilityState !== 'hidden' && listRef.current?.clientWidth !== 0 && viewport?.clientHeight !== 0);
 
   // Partial results can already render; a slower task read must not cover ready archives.
   const initialLoading = (loading || !archivesLoaded) && listRows.length === 0 && !error && !taskError;
@@ -645,20 +647,13 @@ export function LocalArchivesWorkspace() {
   // 档案库与各个书架的留白都来自 `.library-shell-list` 的 16px 内边距；这一页
   // 的路由同样吃 `is-library-workspace` 的零内边距，不包这层时内容直接怼到
   // 窗口边上。没开详情时也要包，四周才和别的页面一致。
-  if (!detail) {
-    return (
-      <div className="library-shell">
-        <section className="library-shell-list">{list}</section>
-      </div>
-    );
-  }
   return (
-    <Group className="library-shell has-detail" orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, splitLayout)} onLayoutChanged={layout.onLayoutChanged}>
+    <Group className={`library-shell${detail ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, splitLayout)} onLayoutChanged={layout.onLayoutChanged}>
       <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-list" minSize="40">
         <section className="library-shell-list">{list}</section>
       </Panel>
-      <Separator className="panel-separator" />
-      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-detail" minSize="30">
+      {detail && <Separator className="panel-separator" />}
+      {detail && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-detail" minSize="30">
         <section className="library-shell-detail" data-scroll-region>
           <LocalArchiveDetail
             archive={detail}
@@ -668,7 +663,7 @@ export function LocalArchivesWorkspace() {
             onSelectTag={(query) => { setDraft(query); setQuery(query); }}
           />
         </section>
-      </Panel>
+      </Panel>}
     </Group>
   );
 }

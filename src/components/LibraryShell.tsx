@@ -1,4 +1,6 @@
 import { useParams } from 'react-router-dom';
+import { useRef } from 'react';
+import { useDetailListScroll } from '../lib/useDetailListScroll';
 import type { Layout } from 'react-resizable-panels';
 import { useDefaultLayout } from 'react-resizable-panels';
 import { Group, Panel, Separator } from './AdaptivePanels';
@@ -13,6 +15,8 @@ const LIBRARY_SPLIT_LAYOUT: Layout = { 'library-shell-list': 58, 'library-shell-
 export function LibraryShell({ archiveId: archiveIdProp }: { archiveId?: string | undefined } = {}) {
   const { archiveId: routeArchiveId } = useParams();
   const archiveId = archiveIdProp ?? routeArchiveId;
+  const listRef = useRef<HTMLElement>(null);
+  useDetailListScroll(Boolean(archiveId), listRef);
   const layout = useDefaultLayout({
     id: 'library-shell-split',
     panelIds: ['library-shell-list', 'library-shell-detail'],
@@ -21,7 +25,7 @@ export function LibraryShell({ archiveId: archiveIdProp }: { archiveId?: string 
   });
   return (
     <Group className={`library-shell${archiveId ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, LIBRARY_SPLIT_LAYOUT)} onLayoutChanged={layout.onLayoutChanged}>
-      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-list" minSize="40"><section className="library-shell-list"><LibraryRouteWorkspace showDetail={false} /></section></Panel>
+      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-list" minSize="40"><section ref={listRef} className="library-shell-list"><LibraryRouteWorkspace showDetail={false} /></section></Panel>
       {archiveId && <Separator className="panel-separator" />}
       {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-detail" minSize="30"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} /></section></Panel>}
     </Group>

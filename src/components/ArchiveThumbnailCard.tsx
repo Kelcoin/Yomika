@@ -1,7 +1,7 @@
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { CardTagRows, ArchiveCardTags } from './CardTagRows';
 import { CardProgressBar } from './CardProgressBar';
-import { useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Heart } from 'lucide-react';
 import { Link, matchPath, useLocation } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
@@ -50,8 +50,36 @@ export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limi
         generous) tag list is dropped, so the slot reads full at any card
         width — the list row's waterfall keeps its own spreading behaviour. */}
     <ArchiveCardTags tags={tags} limit={limit} rowCount={2} fill className="archive-thumb-card-tags" />
-    <div className="archive-thumb-card-meta">{meta}</div>
+    <ArchiveThumbMeta>{meta}</ArchiveThumbMeta>
   </div>;
+}
+
+export function ArchiveThumbMeta({ children }: { children: ReactNode }) {
+  const root = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = root.current;
+    if (!node) return;
+    let active = true;
+    const fit = () => {
+      if (!active || node.clientWidth <= 0) return;
+      node.style.removeProperty('--archive-thumb-meta-fitted-size');
+      const style = getComputedStyle(node);
+      const base = parseFloat(style.fontSize) || 11;
+      const minimum = parseFloat(style.getPropertyValue('--archive-thumb-meta-min-font-size')) || 10;
+      const gap = parseFloat(style.columnGap) || 4;
+      const needed = () => [...node.children].reduce((width, child) => width + child.scrollWidth, 0) + gap * Math.max(0, node.children.length - 1);
+      for (let size = base; needed() > node.clientWidth && size > minimum;) {
+        size = Math.max(minimum, size - 0.5);
+        node.style.setProperty('--archive-thumb-meta-fitted-size', `${size}px`);
+      }
+    };
+    fit();
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(fit);
+    observer?.observe(node);
+    void document.fonts?.ready.then(fit);
+    return () => { active = false; observer?.disconnect(); };
+  }, [children]);
+  return <div ref={root} className="archive-thumb-card-meta">{children}</div>;
 }
 
 /** The cover box on its own: lazily loaded cover, a shimmer until it lands, and

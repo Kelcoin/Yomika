@@ -22,6 +22,16 @@ afterEach(() => {
 });
 
 describe('recommendation rules', () => {
+  it('discounts large low-coverage tag catalogues and counts duplicate tags once', () => {
+    const source = normalizeSourceTags(['female:glasses', 'female:yuri']);
+    const focused = { archiveId: 'focused', tags: ['female:glasses', 'female:yuri'] };
+    const broad = { archiveId: 'broad', tags: [...focused.tags, ...Array.from({ length: 80 }, (_, i) => `female:unrelated-${i}`)] };
+    expect(scoreCandidate(source, focused)).toBeGreaterThan(scoreCandidate(source, broad) * 3);
+    expect(scoreCandidate(source, { ...focused, tags: [...focused.tags, ' female:GLASSES ', 'language:chinese', 'source:url'] }))
+      .toBe(scoreCandidate(source, focused));
+    const partial = { archiveId: 'partial', tags: ['female:glasses', 'female:unrelated'] };
+    expect(scoreCandidate(source, partial)).toBeLessThan(scoreCandidate(source, { archiveId: 'exact', tags: ['female:glasses'] }));
+  });
   it('weights taste tags above bookkeeping namespaces', () => {
     expect(tagWeight('female:futanari')).toBe(5);
     expect(tagWeight('parody:fate grand order')).toBe(2);

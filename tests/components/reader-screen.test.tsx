@@ -784,9 +784,12 @@ describe('reader screen', () => {
       expect(hint).toHaveAttribute('data-ready', 'true');
       expect(hint).toHaveAttribute('data-side', direction === 'ltr' ? 'right' : 'left');
       expect(hint).toHaveTextContent('松手退出阅读');
+      const track = reader.querySelector('.reader-track') as HTMLElement;
+      const draggedTransform = track.style.transform;
       fireEvent.touchEnd(reader, { changedTouches: [{ clientX: endX, clientY: 300 }] });
       expect(screen.getByText('library list')).toBeInTheDocument();
       expect(animate).not.toHaveBeenCalled();
+      expect(track.style.transform).toBe(draggedTransform);
     } finally {
       vi.restoreAllMocks();
       if (original) Object.defineProperty(HTMLElement.prototype, 'animate', original);

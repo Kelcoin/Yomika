@@ -25,11 +25,19 @@ const observers: Observer[] = [];
 let mutations: MutationObserver | undefined;
 let restoreLayout: () => void = () => undefined;
 
+function resizeEntry(target: Element): ResizeObserverEntry {
+  const width = (target as HTMLElement).clientWidth;
+  const height = (target as HTMLElement).clientHeight;
+  return { target, borderBoxSize: [{ inlineSize: width, blockSize: height }],
+    contentBoxSize: [{ inlineSize: width, blockSize: height }],
+    contentRect: { width, height } } as unknown as ResizeObserverEntry;
+}
+
 function notifyObservers() {
   for (const observer of observers) {
     for (const target of observer.targets) {
       if (!target.isConnected) continue;
-      observer.callback([{ target } as unknown as ResizeObserverEntry], observer as unknown as ResizeObserver);
+      observer.callback([resizeEntry(target)], observer as unknown as ResizeObserver);
     }
   }
 }
@@ -88,7 +96,7 @@ function installVirtualLayoutFake() {
     }
     observe(target: Element) {
       this.observer.targets.add(target);
-      this.observer.callback([{ target } as unknown as ResizeObserverEntry], this as unknown as ResizeObserver);
+      this.observer.callback([resizeEntry(target)], this as unknown as ResizeObserver);
     }
     unobserve(target: Element) {
       this.observer.targets.delete(target);

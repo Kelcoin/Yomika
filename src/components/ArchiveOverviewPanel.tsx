@@ -1,4 +1,5 @@
 import { X } from 'lucide-react';
+import { VirtualPageGrid } from './VirtualPageGrid';
 import type { MouseEvent } from 'react';
 
 import { formatByteSize } from '../lib/archiveCardPresentation';
@@ -25,6 +26,7 @@ export interface ArchiveOverviewPanelProps {
   thumbnailAt: (index: number) => string | undefined;
   /** Hands the caller each tile as it mounts, so it can fetch what is visible. */
   registerTile?: ((index: number, node: HTMLElement | null) => void) | undefined;
+  onRangeChange?: ((start: number, end: number) => void) | undefined;
   /** Turning to a page. Without it the grid is reference only — the tiles are
    * still buttons (they hold the number and the frame) but nothing moves. */
   onSelectPage?: ((index: number) => void) | undefined;
@@ -34,7 +36,7 @@ export interface ArchiveOverviewPanelProps {
   onPanelClick?: ((event: MouseEvent) => void) | undefined;
 }
 
-export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags, currentPage, thumbnailAt, registerTile, onSelectPage, onClose, onPanelClick }: ArchiveOverviewPanelProps) {
+export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags, currentPage, thumbnailAt, registerTile, onRangeChange, onSelectPage, onClose, onPanelClick }: ArchiveOverviewPanelProps) {
   const grouped = categorizeSearchableTags(tags ?? []);
   // The same two facts the detail page lists beside its cover, in the same shape
   // and with the same glyphs: as a "3 页 · 143.2 MB" line of its own this was a
@@ -82,8 +84,8 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
         )}
       </div>
     </div>
-    <div className={`reader-overview-thumbnails${onSelectPage ? '' : ' is-preview'}`}>
-      {Array.from({ length: Math.max(0, pageCount) }, (_, index) => {
+    <VirtualPageGrid count={Math.max(0, pageCount)} minWidth={72} className={`reader-overview-thumbnails${onSelectPage ? '' : ' is-preview'}`} onRangeChange={onRangeChange}>
+      {(index) => {
         const preview = thumbnailAt(index);
         return <button
           key={index}
@@ -96,7 +98,7 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
           {preview ? <img src={preview} alt="" loading="lazy" decoding="async" /> : <span aria-hidden="true">{index + 1}</span>}
           <span className="reader-overview-page-number" aria-hidden="true">{index + 1}</span>
         </button>;
-      })}
-    </div>
+      }}
+    </VirtualPageGrid>
   </aside>;
 }

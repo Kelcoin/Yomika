@@ -211,6 +211,8 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
   /** Rows the server has handed over, which is the offset the next page asks for.
    * The rendered list can be shorter once duplicates are dropped. */
   const fetchedCount = useRef(cachedPage?.fetchedCount ?? cachedPage?.archives.length ?? 0);
+  const firstPageSize = useRef(0);
+  const firstPageRows = useRef(0);
   const initialArchivesLoaded = useRef(Boolean(cachedPage));
   const [searchQuery, setSearchQuery] = useState(requestedQuery ?? snapshot?.searchQuery ?? '');
   const [sortMode, setSortMode] = useState<'title' | 'added'>(snapshot?.sortMode ?? 'added');
@@ -583,15 +585,23 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     // 后台/静默重读带回来的新档案先挑出来：列表整体被替换，只有这里知道谁是新来的。
     const fresh = collectFreshArchiveIds(unique, options.background === true || options.silent === true);
     if (fresh.length > 0) setFreshArchiveIds(new Set(fresh));
-    setArchives(unique);
-    fetchedCount.current = result.value.items.length;
+    // A return-time refresh must not throw away all pages loaded by scrolling.
+    // Refresh the head in place; explicit refreshes and changed queries replace
+    // the result set normally.
+    const keepTail = options.background && !options.clear && firstPageSize.current > 0
+      && fetchedCount.current > firstPageSize.current && result.value.total > 0;
+    const oldHeadSize = firstPageRows.current;
+    setArchives((current) => keepTail ? dedupeArchives([...unique, ...current.slice(oldHeadSize)]).slice(0, result.value.total) : unique);
+    fetchedCount.current = keepTail ? Math.min(result.value.total, Math.max(fetchedCount.current, result.value.items.length)) : result.value.items.length;
+    firstPageSize.current = result.value.items.length;
+    firstPageRows.current = unique.length;
     initialArchivesLoaded.current = true;
     settledQueryKey.current = listQueryKey;
     // 就地重读成功时把上一轮的错误页收掉——它当初是因为屏幕上没有行才留下的。
     setError(undefined);
     setNeedsCredentials(false);
     setTotalArchives(result.value.total);
-    setHasMoreArchives(result.value.hasMore);
+    setHasMoreArchives(keepTail ? fetchedCount.current < result.value.total : result.value.hasMore);
     setLoading(false);
     setPageLoading(false);
     return true;

@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useRef, type ReactNode } from 'react';
+import { useDetailListScroll } from '../lib/useDetailListScroll';
 import { useParams } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
 import { useDefaultLayout } from 'react-resizable-panels';
@@ -19,6 +20,8 @@ import { ArchiveDetailRoute } from './ArchiveDetailRoute';
  * 传进来，这一层只管那一栏怎么摆。） */
 export function ShelfShell({ name, detailBasePath, children }: { name: string; /** 详情栏里那些卡片（推荐条）要落在哪个路由下：书架自己的前缀，由路由表传进来。 */ detailBasePath: string; children: ReactNode }) {
   const { archiveId } = useParams();
+  const listRef = useRef<HTMLElement>(null);
+  useDetailListScroll(Boolean(archiveId), listRef);
   const layout = useDefaultLayout({
     id: `shelf-shell-split-${name}`,
     panelIds: [`shelf-shell-list-${name}`, `shelf-shell-detail-${name}`],
@@ -29,7 +32,7 @@ export function ShelfShell({ name, detailBasePath, children }: { name: string; /
   const splitLayout: Layout = { [`shelf-shell-list-${name}`]: 58, [`shelf-shell-detail-${name}`]: 42 };
   return (
     <Group className={`library-shell${archiveId ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, splitLayout)} onLayoutChanged={layout.onLayoutChanged}>
-      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-list-${name}`} minSize="40"><section className="library-shell-list">{children}</section></Panel>
+      <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-list-${name}`} minSize="40"><section ref={listRef} className="library-shell-list">{children}</section></Panel>
       {archiveId && <Separator className="panel-separator" />}
       {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-detail-${name}`} minSize="30"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} detailBasePath={detailBasePath} /></section></Panel>}
     </Group>

@@ -349,7 +349,10 @@ describe('local archives workspace', () => {
 
     renderPage();
 
-    await user.click(await screen.findByText('测试档案'));
+      const originalCard = await screen.findByText('测试档案');
+      const originalList = document.querySelector('.local-archives-list');
+      await user.click(originalCard);
+      expect(document.querySelector('.local-archives-list')).toBe(originalList);
     await user.click(await screen.findByRole('button', { name: '更多操作' }));
 
     const menu = await screen.findByRole('menu');

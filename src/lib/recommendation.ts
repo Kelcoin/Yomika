@@ -172,16 +172,24 @@ export function scoreCandidate(
   options: RecommendationOptions = {},
 ): number {
   let score = 0;
-  for (const tag of candidate.tags ?? []) {
-    const normalized = tag.trim().toLowerCase();
-    if (!normalized || !sourceTags.has(normalized)) continue;
+  let relevant = 0;
+  let matched = 0;
+  for (const normalized of normalizeSourceTags(candidate.tags ?? [])) {
+    if (tagWeight(normalized) <= 0) continue;
+    relevant++;
+    if (!sourceTags.has(normalized)) continue;
     // 手写权重 × 全站稀有度 × 本次抖动的乘积：稀有标签更能说明口味，抖动只挪动
     // 「差不多相等」的那一档。
     const influence = tagWeight(normalized) * tagRarity(normalized);
     if (influence === 0) continue;
+    matched++;
     score += options.seed === undefined ? influence : influence * tagJitter(normalized, options.seed);
   }
   if (score === 0) return 0;
+  // A broad tag catalogue should not win just by offering more chances to hit.
+  // Keep strong individual signals, but discount unrelated tag volume and low
+  // coverage. Zero-weight bookkeeping tags do not dilute a recommendation.
+  score *= Math.sqrt(matched / relevant) / Math.sqrt(1 + Math.max(0, relevant - 20) / 20);
   // A finished archive is a weaker suggestion than an unread one.
   if (candidate.pageCount && candidate.readPages && candidate.readPages >= candidate.pageCount) score *= 0.5;
   return score;

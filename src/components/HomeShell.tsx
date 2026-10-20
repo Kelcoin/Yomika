@@ -7,6 +7,8 @@ import { Group, Panel, Separator } from './AdaptivePanels';
 
 import { panelLayout } from '../lib/panelLayout';
 import { ArchiveDetailRoute } from './ArchiveDetailRoute';
+import { useDetailListScroll } from '../lib/useDetailListScroll';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 
 /** 换容器后重写位置的帧数上限：60 帧 ≈ 1s。
  *
@@ -82,6 +84,8 @@ export function HomeShell({ children }: { children: ReactNode }) {
   const { archiveId } = useParams();
   const detailOpen = archiveId !== undefined;
   const listRef = useRef<HTMLElement>(null);
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  useDetailListScroll(detailOpen, listRef);
   /** 换容器之前，用户看到的那个位置。 */
   const offsetRef = useRef(0);
   /** 换容器之前，那个位置对着的是哪一排内容（见 [`homeScrollAnchor`]）。 */
@@ -96,8 +100,8 @@ export function HomeShell({ children }: { children: ReactNode }) {
   });
   /** 当前在滚的是谁：详情开着是左栏自己，没开是整页。 */
   const scrollerFor = useCallback((section: HTMLElement) => (
-    detailOpen ? section : section.closest<HTMLElement>('.workspace')
-  ), [detailOpen]);
+    detailOpen ? (compact ? null : section) : section.closest<HTMLElement>('.workspace')
+  ), [compact, detailOpen]);
 
   useEffect(() => {
     const section = listRef.current;

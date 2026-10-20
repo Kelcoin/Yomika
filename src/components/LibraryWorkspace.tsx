@@ -934,6 +934,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   // 藏起来时别把整屏的行塌掉（见 `useStableVirtualRows`）。两个虚拟列表各调一次，
   // 永远按同一个顺序调用，钩子位置是稳的。
   const viewportMeasurable = pageActive && document.visibilityState !== 'hidden'
+    && scrollRef.current?.clientWidth !== 0
     && (compact ? scrollHostElement?.clientHeight : scrollRef.current?.clientHeight) !== 0;
   const shownListRows = useStableVirtualRows(rows.getVirtualItems(), rows.getTotalSize(), filteredArchives.length, viewportMeasurable);
   const shownThumbnailRows = useStableVirtualRows(thumbnailRows.getVirtualItems(), thumbnailRows.getTotalSize(), gridRows.length, viewportMeasurable);

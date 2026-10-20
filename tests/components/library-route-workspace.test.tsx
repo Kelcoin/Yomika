@@ -32,6 +32,30 @@ function servedPage(items: unknown[]) {
 }
 
 describe('library route workspace', () => {
+  it('keeps scrolled-in pages when refreshing on return to the library', async () => {
+    const row = (id: string) => ({ serverId: 'scope-a', archiveId: id, title: `Archive ${id}`, pageCount: 2, updatedAt: '2026-10-20T00:00:00Z' });
+    let headRequests = 0;
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') {
+        const start = (args?.input as { start: number }).start;
+        if (start === 0) headRequests++;
+        return { ok: true, value: { items: start === 0 ? [row('head')] : [row('tail')], total: 2, hasMore: start === 0 } };
+      }
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderLibrary();
+    await screen.findByRole('button', { name: /^Archive head\b/ });
+    fireEvent.scroll(screen.getByRole('list', { name: '档案' }), { target: { scrollTop: 10000 } });
+    await screen.findByRole('button', { name: /^Archive tail\b/ });
+    const requests = headRequests;
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('link', { name: '更多' }));
+    await user.click(screen.getAllByRole('link', { name: '档案库' })[0]!);
+    await waitFor(() => expect(headRequests).toBeGreaterThan(requests));
+    expect(await screen.findByRole('button', { name: /^Archive tail\b/ })).toBeInTheDocument();
+  });
   it('ignores a malformed persisted library page after restart', async () => {
     writeRouteCache('library:workspace:default', { archives: [null], categories: [null] }, { persist: true });
     simulateRouteCacheRestartForTests();

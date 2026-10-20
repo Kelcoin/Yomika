@@ -9,7 +9,33 @@ vi.mock('../../src/lib/nativeImageCache', () => ({
   }),
 }));
 
-import { ArchiveProgressBar, ArchiveThumbnailCard, ArchiveThumbnailRail } from '../../src/components/ArchiveThumbnailCard';
+import { ArchiveProgressBar, ArchiveThumbnailCard, ArchiveThumbnailRail, ArchiveThumbMeta } from '../../src/components/ArchiveThumbnailCard';
+
+it('shrinks footer text only to its minimum and grows back when there is room', () => {
+  let available = 90;
+  vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => available);
+  vi.spyOn(HTMLElement.prototype, 'scrollWidth', 'get').mockImplementation(function (this: HTMLElement) {
+    const size = parseFloat(this.parentElement?.style.getPropertyValue('--archive-thumb-meta-fitted-size') ?? '') || 11;
+    return this.textContent === '59/235 页' ? size * 5 : size * 6;
+  });
+  const computed = globalThis.getComputedStyle;
+  vi.spyOn(globalThis, 'getComputedStyle').mockImplementation((node) => {
+    const style = computed(node);
+    Object.defineProperty(style, 'fontSize', { value: '11px' });
+    return style;
+  });
+  try {
+    const view = render(<ArchiveThumbMeta><span>59/235 页</span><span>2026-10-12</span></ArchiveThumbMeta>);
+    const meta = view.container.firstElementChild as HTMLElement;
+    expect(meta.style.getPropertyValue('--archive-thumb-meta-fitted-size')).toBe('10px');
+    available = 120;
+    view.rerender(<ArchiveThumbMeta><span>59/235 页</span><span>2026-10-12</span></ArchiveThumbMeta>);
+    expect(meta.style.getPropertyValue('--archive-thumb-meta-fitted-size')).toBe('10.5px');
+    available = 180;
+    view.rerender(<ArchiveThumbMeta><span>59/235 页</span><span>2026-10-12</span></ArchiveThumbMeta>);
+    expect(meta.style.getPropertyValue('--archive-thumb-meta-fitted-size')).toBe('');
+  } finally { vi.restoreAllMocks(); }
+});
 
 it('keeps one read page out of 259 visible without rounding it to zero', () => {
   const { container } = render(<ArchiveProgressBar page={1} pageCount={259} visibility="all" />);

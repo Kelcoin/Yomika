@@ -985,14 +985,10 @@ export function WorkspaceRoutes() {
           {/* 首页自己的详情：卡片开在 `/home/:id` 上，返回与再进首页都落在首页，
               不会把档案库那一页也带上这份详情。 */}
           <Route path="/home/:archiveId" element={<HomeShell><HomeWorkspace /></HomeShell>} />
-          <Route path="/library" element={<LibraryShell />} />
-          <Route path="/library/:archiveId" element={<LibraryShell />} />
-          <Route path="/history" element={<ShelfShell name="history" detailBasePath="/history"><StateWorkspace name="history" detailBasePath="/history" /></ShelfShell>} />
-          <Route path="/history/:archiveId" element={<ShelfShell name="history" detailBasePath="/history"><StateWorkspace name="history" detailBasePath="/history" /></ShelfShell>} />
-          <Route path="/watchlist" element={<ShelfShell name="watchlist" detailBasePath="/watchlist"><StateWorkspace name="watchlist" detailBasePath="/watchlist" /></ShelfShell>} />
-          <Route path="/watchlist/:archiveId" element={<ShelfShell name="watchlist" detailBasePath="/watchlist"><StateWorkspace name="watchlist" detailBasePath="/watchlist" /></ShelfShell>} />
-          <Route path="/to-read" element={<ShelfShell name="toRead" detailBasePath="/to-read"><StateWorkspace name="toRead" detailBasePath="/to-read" /></ShelfShell>} />
-          <Route path="/to-read/:archiveId" element={<ShelfShell name="toRead" detailBasePath="/to-read"><StateWorkspace name="toRead" detailBasePath="/to-read" /></ShelfShell>} />
+          <Route path="/library/:archiveId?" element={<LibraryShell />} />
+          <Route path="/history/:archiveId?" element={<ShelfShell name="history" detailBasePath="/history"><StateWorkspace name="history" detailBasePath="/history" /></ShelfShell>} />
+          <Route path="/watchlist/:archiveId?" element={<ShelfShell name="watchlist" detailBasePath="/watchlist"><StateWorkspace name="watchlist" detailBasePath="/watchlist" /></ShelfShell>} />
+          <Route path="/to-read/:archiveId?" element={<ShelfShell name="toRead" detailBasePath="/to-read"><StateWorkspace name="toRead" detailBasePath="/to-read" /></ShelfShell>} />
           <Route path="/library/:archiveId/edit" element={<MetadataEditRouteRoute />} />
           <Route path="/eh" element={<EhRouteWorkspace />} />
           <Route path="/downloads" element={<LocalArchivesWorkspace />} />

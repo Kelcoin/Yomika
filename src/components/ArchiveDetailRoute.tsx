@@ -1,4 +1,5 @@
 import { useArchiveReadingProgress } from './useArchiveReadingProgress';
+import { VirtualPageGrid } from './VirtualPageGrid';
 import { usePageActive } from '../app/RetainedPage';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
@@ -501,11 +502,11 @@ detailBasePath?: string | undefined }) {
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
-          <div className="archive-page-thumbnails-grid">
-            {Array.from({ length: metadata.pageCount }, (_, index) => (
+          <VirtualPageGrid count={metadata.pageCount} className="archive-page-thumbnails-grid" minWidth={96}>
+            {(index) => (
               <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)} />
-            ))}
-          </div>
+            )}
+          </VirtualPageGrid>
         </section>
       )}
 

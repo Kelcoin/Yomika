@@ -1,10 +1,33 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { LibraryWorkspace } from '../../src/components/LibraryWorkspace';
 import { RetainedPage } from '../../src/app/RetainedPage';
 
-afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+/** jsdom 不做布局：`clientWidth` / `clientHeight` 恒为 0。而这一轮的生产代码把
+ * 「量到 0 就冻结行窗口」（`viewportMeasurable`）也挂在了 `clientWidth` 上——列表
+ * 被藏、或被相邻面板夹成 0 宽时它才是真的 0。假件必须按同一口径答：普通元素给
+ * 一个视口尺寸，`[hidden]` 子树里仍然是 0（`display:none` 的真行为）。 */
+const LAYOUT = { width: 720, height: 560 };
+
+function installLayoutDoubles(): () => void {
+  const proto = HTMLElement.prototype as unknown as Record<string, unknown>;
+  const saved = (['clientWidth', 'clientHeight'] as const)
+    .map((name) => [name, Object.getOwnPropertyDescriptor(proto, name)] as const);
+  const size = (element: HTMLElement, value: number) => (element.closest('[hidden]') ? 0 : value);
+  Object.defineProperty(proto, 'clientWidth', { configurable: true, get(this: HTMLElement) { return size(this, LAYOUT.width); } });
+  Object.defineProperty(proto, 'clientHeight', { configurable: true, get(this: HTMLElement) { return size(this, LAYOUT.height); } });
+  return () => {
+    for (const [name, descriptor] of saved) {
+      if (descriptor) Object.defineProperty(proto, name, descriptor);
+      else delete proto[name];
+    }
+  };
+}
+
+let restoreLayout: () => void = () => undefined;
+beforeEach(() => { restoreLayout = installLayoutDoubles(); });
+afterEach(() => { restoreLayout(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 it('updates virtual rows and loads more when the compact page scrolls', async () => {
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));

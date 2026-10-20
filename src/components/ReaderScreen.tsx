@@ -540,6 +540,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const gestureMovedRef = useRef(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
+  const [thumbnailRange, setThumbnailRange] = useState({ start: 0, end: 0 });
+  const onThumbnailRange = useCallback((start: number, end: number) => {
+    setThumbnailRange((range) => range.start === start && range.end === end ? range : { start, end });
+  }, []);
   useLayoutEffect(() => {
     if (!pageActive) {
       pinchStart.current = undefined;
@@ -940,15 +944,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (!pageActive || !thumbnailPanelOpen || !loadPageThumbnail) return undefined;
     let active = true;
     void (async () => {
-      for (let index = 0; index < pages.length; index += 1) {
+      for (let index = thumbnailRange.start; index < Math.min(pages.length, thumbnailRange.end); index += 1) {
         if (!active) return;
+        if (thumbnails.has(index)) continue;
         const url = await loadPageThumbnail(index);
         if (!active) return;
         if (url) setThumbnails((current) => current.get(index) === url ? current : new Map(current).set(index, url));
       }
     })();
     return () => { active = false; };
-  }, [loadPageThumbnail, pages.length, thumbnailPanelOpen, pageActive]);
+  }, [loadPageThumbnail, pages.length, thumbnailPanelOpen, pageActive, thumbnailRange]);
 
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the canvas would zoom *and* scroll. Bind natively.
@@ -1078,6 +1083,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   useEffect(() => {
     if (!pageActive || effectiveLayout === 'webtoon') hideExitHint();
   }, [effectiveLayout, hideExitHint, pageActive]);
+  useLayoutEffect(() => {
+    if (!pageActive) return;
+    dragOffset.current = 0;
+    dragSample.current = undefined;
+    setDrag(null);
+    if (trackRef.current) trackRef.current.style.transform = 'translate3d(0,0,0)';
+  }, [pageActive]);
 
   useEffect(() => () => {
     if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current);
@@ -1122,7 +1134,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (commit) moveRef.current(intent);
       });
     };
-    if (commit && crossedLastPage) { finish(); return; }
+    if (commit && crossedLastPage) {
+      // RetainedPage keeps the reader visible during its exit transition.
+      // Preserve the dragged artwork until that surface is hidden.
+      flushSync(() => moveRef.current(intent));
+      return;
+    }
     // Keep both neighbouring frames mounted until the outgoing page has left.
     setDrag({ dx: 0, commits: false });
     if (!track?.animate || reducedMotionRef.current) { finish(); return; }
@@ -1884,6 +1901,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             tags={info?.tags}
             currentPage={state.pageIndex}
             thumbnailAt={(index) => thumbnails.get(index) ?? loadedPages[index]}
+            onRangeChange={onThumbnailRange}
             onSelectPage={(index) => { jumpToPage(index); setThumbnailPanelOpen(false); }}
             onClose={() => setThumbnailPanelOpen(false)}
             onPanelClick={stopChromeToggle}
