@@ -117,6 +117,17 @@ button[data-variant="primary"],
 }
 
 /* ---- Enhanced Loading States ------------------------------------------- */
+/* Touch scrolling has native inertia. Direct scroll position updates used by
+   edge handling/restoration must land immediately instead of queuing a second
+   smooth-scroll animation. Explicit scrollTo({ behavior: 'smooth' }) is kept. */
+@media (hover: none), (pointer: coarse) {
+  .workspace,
+  .library-list-panel-content,
+  [data-scroll-region] {
+    scroll-behavior: auto;
+  }
+}
+
 .loading-mark {
   animation: loading-pulse var(--duration-pulse) var(--ease-pulse) infinite;
 }

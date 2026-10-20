@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use crate::cancel::CancelToken;
 use crate::cpu_scale::cpu_scale_rgba;
 use crate::engine::{outputs_agree, ValidationVerdict};
 use crate::error::ComputeError;
@@ -82,6 +83,52 @@ pub struct OnnxEngine {
     fixed_input: Option<(u32, u32)>,
 }
 
+// NNAPI graph compilation needs concrete dimensions. Keep a reusable, bounded
+// input tile and pad edge tiles to it; dynamic page dimensions stay in the tiler.
+const NNAPI_TILE_EDGE: u32 = 128;
+
+fn nnapi_overrides(shape: &[i64], symbols: &[&str], min_edge: u32) -> Result<Vec<(String, i64)>, String> {
+    if shape.len() != 4 || symbols.len() != 4 {
+        return Err("NNAPI upscale input must be NCHW".into());
+    }
+    let edge = i64::from(NNAPI_TILE_EDGE.max(min_edge));
+    let desired = [1, 3, edge, edge];
+    let mut overrides = Vec::<(String, i64)>::new();
+    for axis in 0..4 {
+        if shape[axis] > 0 { continue; }
+        let symbol = symbols[axis];
+        if symbol.is_empty() { return Err(format!("NNAPI input axis {axis} is dynamic without a symbolic name")); }
+        if let Some((_, previous)) = overrides.iter().find(|(name, _)| name == symbol) {
+            if *previous != desired[axis] { return Err("NNAPI model reuses an input symbol for incompatible axes".into()); }
+        } else {
+            overrides.push((symbol.to_string(), desired[axis]));
+        }
+    }
+    Ok(overrides)
+}
+
+fn specialize_nnapi(mut builder: ort::session::builder::SessionBuilder, path: &Path, min_edge: u32) -> Result<ort::session::builder::SessionBuilder, String> {
+    // Inspect with CPU before hardware compilation, then release its weights.
+    let metadata = open_session(path, RuntimeId::Cpu)?;
+    let overrides = match metadata.inputs().first().map(|input| input.dtype()) {
+        Some(ort::value::ValueType::Tensor { shape, dimension_symbols, .. }) => {
+            let symbols: Vec<&str> = dimension_symbols.iter().map(String::as_str).collect();
+            nnapi_overrides(shape, &symbols, min_edge)?
+        }
+        _ => return Err("NNAPI model has no tensor input".into()),
+    };
+    drop(metadata);
+    for (name, size) in overrides {
+        builder = builder.with_dimension_override(name, size).map_err(|error| error.to_string())?;
+    }
+    Ok(builder)
+}
+
+fn model_builder(path: &Path, runtime: RuntimeId, min_edge: u32) -> Result<ort::session::builder::SessionBuilder, String> {
+    let builder = crate::runtime::builder(runtime)?;
+    if runtime == RuntimeId::Nnapi { specialize_nnapi(builder, path, min_edge) } else { Ok(builder) }
+}
+
 impl OnnxEngine {
     /// 用**指定**的运行库打开，不换也不回退。调用方要自己确保这条运行库对这份模型
     /// 实测通过（[`validate_runtime`]）——「点的是显卡、跑的是 CPU」正是这轮要消灭的
@@ -93,13 +140,25 @@ impl OnnxEngine {
         max_pixels: usize,
         min_input_edge: u32,
     ) -> Result<Self, ComputeError> {
+        Self::open_with_runtime_cancel(path, runtime, scale, max_pixels, min_input_edge, &CancelToken::none())
+    }
+
+    pub fn open_with_runtime_cancel(
+        path: &Path, runtime: RuntimeId, scale: u32, max_pixels: usize, min_input_edge: u32,
+        cancel: &CancelToken,
+    ) -> Result<Self, ComputeError> {
+        cancel.check()?;
         if scale == 0 {
             return Err(ComputeError::InvalidManifest(
                 "model scale must be at least 1".into(),
             ));
         }
-        let session = open_session(path, runtime)
+        let mut builder = model_builder(path, runtime, min_input_edge)
             .map_err(|error| ComputeError::InvalidInput(format!("ONNX session failed: {error}")))?;
+        cancel.check()?;
+        let session = builder.commit_from_file(path)
+            .map_err(|error| ComputeError::InvalidInput(format!("ONNX session failed: {error}")))?;
+        cancel.check()?;
         let fixed_input = session.inputs().first().and_then(|input| input.dtype().tensor_shape())
             .and_then(|shape| static_input_dimensions(shape));
         Ok(Self {
@@ -127,6 +186,16 @@ impl OnnxEngine {
         max_pixels: usize,
         min_input_edge: u32,
     ) -> Result<(Self, RuntimeChoice), ComputeError> {
+        Self::open_choice_observed(path, scale, max_pixels, min_input_edge, &CancelToken::none(), &|_| {})
+    }
+
+    /// Report cold-model work and stop between native calls when the page leaves.
+    /// Session compilation itself cannot be safely interrupted in-process.
+    pub fn open_choice_observed(
+        path: &Path, scale: u32, max_pixels: usize, min_input_edge: u32,
+        cancel: &CancelToken, progress: &dyn Fn(u32),
+    ) -> Result<(Self, RuntimeChoice), ComputeError> {
+        cancel.check()?;
         if scale == 0 {
             return Err(ComputeError::InvalidManifest(
                 "model scale must be at least 1".into(),
@@ -149,7 +218,7 @@ impl OnnxEngine {
                     ),
                 },
             ),
-            Some(runtime) => match validate_runtime_cached(path, runtime, scale, min_input_edge) {
+            Some(runtime) => match validate_runtime_cached_observed(path, runtime, scale, min_input_edge, cancel, progress)? {
                 ValidationVerdict::Passed => (runtime, ValidationVerdict::Passed),
                 verdict => {
                     eprintln!(
@@ -163,12 +232,16 @@ impl OnnxEngine {
             // 这份构建/这台机器连一条硬件运行库都没有：没得问，也就没得测。
             None => (RuntimeId::Cpu, ValidationVerdict::NotTested),
         };
-        let (engine, used, verdict) = match Self::open_with_runtime(path, used, scale, max_pixels, min_input_edge) {
+        progress(28);
+        cancel.check()?;
+        let opened = Self::open_with_runtime_cancel(path, used, scale, max_pixels, min_input_edge, cancel);
+        cancel.check()?;
+        let (engine, used, verdict) = match opened {
             Ok(engine) => (engine, used, verdict),
             Err(error) if used.is_hardware_accelerated() => {
                 let reason = format!("{} session failed after successful probe: {error}; using CPU reference", used.as_str());
                 eprintln!("yomika: {reason}");
-                (Self::open_with_runtime(path, RuntimeId::Cpu, scale, max_pixels, min_input_edge)?,
+                (Self::open_with_runtime_cancel(path, RuntimeId::Cpu, scale, max_pixels, min_input_edge, cancel)?,
                     RuntimeId::Cpu, ValidationVerdict::Failed { reason })
             }
             Err(error) => return Err(error),
@@ -246,26 +319,40 @@ pub fn validate_runtime(
     scale: u32,
     min_input_edge: u32,
 ) -> ValidationVerdict {
+    validate_runtime_observed(path, runtime, scale, min_input_edge, &CancelToken::none(), &|_| {})
+        .unwrap_or_else(|error| ValidationVerdict::Failed { reason: error.to_string() })
+}
+
+fn validate_runtime_observed(
+    path: &Path, runtime: RuntimeId, scale: u32, min_input_edge: u32,
+    cancel: &CancelToken, progress: &dyn Fn(u32),
+) -> Result<ValidationVerdict, ComputeError> {
+    cancel.check()?;
     if runtime == RuntimeId::Cpu {
-        return ValidationVerdict::Passed;
+        return Ok(ValidationVerdict::Passed);
     }
     if scale == 0 || !(1..=4).contains(&scale) {
-        return ValidationVerdict::Failed {
+        return Ok(ValidationVerdict::Failed {
             reason: format!("scale {scale} is outside the probe range 1..=4"),
-        };
+        });
     }
+    let probe_edge = if runtime == RuntimeId::Nnapi { Some(NNAPI_TILE_EDGE.max(min_input_edge)) } else { None };
     let probe = |runtime: RuntimeId| -> Result<Vec<f32>, String> {
+        progress(if runtime == RuntimeId::Cpu { 22 } else { 14 });
+        cancel.check().map_err(|error| error.to_string())?;
         probe::note_probe_opened();
         // Each probe owns a unique profile prefix; never reuse another model's evidence.
         static PROFILE_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let profile_prefix = crate::runtime::profile_directory().join(format!("yomika-ort-probe-{}-{}", std::process::id(),
             PROFILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-        let mut session = crate::runtime::builder(runtime)?
+        let builder = model_builder(path, runtime, min_input_edge)?;
+        cancel.check().map_err(|error| error.to_string())?;
+        let mut session = builder
             .with_profiling(&profile_prefix).map_err(|error| error.to_string())?
             .commit_from_file(path).map_err(|error| error.to_string())?;
         let fixed = session.inputs().first().and_then(|input| input.dtype().tensor_shape())
             .and_then(|shape| static_input_dimensions(shape));
-        let (width, height) = resolve_input_dimensions(fixed, PROBE_WIDTH.max(min_input_edge as usize) as u32, PROBE_HEIGHT.max(min_input_edge as usize) as u32);
+        let (width, height) = resolve_input_dimensions(fixed, probe_edge.unwrap_or(PROBE_WIDTH.max(min_input_edge as usize) as u32), probe_edge.unwrap_or(PROBE_HEIGHT.max(min_input_edge as usize) as u32));
         let (width, height) = (width as usize, height as usize);
         // A probe must remain bounded even for a malformed static model contract.
         if width.saturating_mul(height).saturating_mul(scale as usize).saturating_mul(scale as usize) > 64_000_000 {
@@ -287,6 +374,8 @@ pub fn validate_runtime(
     ];
         let tensor = ort::value::Tensor::from_array(([1_usize, 3, height, width], input.clone()))
             .map_err(|error| error.to_string())?;
+        progress(if runtime == RuntimeId::Cpu { 24 } else { 18 });
+        cancel.check().map_err(|error| error.to_string())?;
         let started = Instant::now();
         let outputs = session
             .run(ort::inputs![tensor])
@@ -316,20 +405,24 @@ pub fn validate_runtime(
         eprintln!("yomika: ONNX provider={} actual graph assignment verified (CPU operator fallback permitted)", runtime.as_str());
         Ok(result)
     };
-    let actual = match probe(runtime) {
+    let actual = probe(runtime);
+    cancel.check()?;
+    let actual = match actual {
         Ok(values) => values,
-        Err(reason) => return ValidationVerdict::Failed { reason },
+        Err(reason) => return Ok(ValidationVerdict::Failed { reason }),
     };
-    let expected = match probe(RuntimeId::Cpu) {
+    let expected = probe(RuntimeId::Cpu);
+    cancel.check()?;
+    let expected = match expected {
         Ok(values) => values,
         Err(reason) => {
-            return ValidationVerdict::Failed {
+            return Ok(ValidationVerdict::Failed {
                 reason: format!("CPU reference failed: {reason}"),
-            }
+            })
         }
     };
     if outputs_agree(&actual, &expected) {
-        return ValidationVerdict::Passed;
+        return Ok(ValidationVerdict::Passed);
     }
     let mean = actual
         .iter()
@@ -337,13 +430,13 @@ pub fn validate_runtime(
         .map(|(a, b)| f64::from((a - b).abs()))
         .sum::<f64>()
         / actual.len().max(1) as f64;
-    ValidationVerdict::Failed {
+    Ok(ValidationVerdict::Failed {
         reason: format!(
             "mean {mean:.9} > {} over {} values",
             crate::engine::PROBE_MEAN_ABS_TOLERANCE,
             actual.len()
         ),
-    }
+    })
 }
 
 /// 带记账的 [`validate_runtime`]：同一份字节、同一条运行库、同一组参数只真探一次。
@@ -351,33 +444,29 @@ pub fn validate_runtime(
 /// 指纹读不出来（路径不存在、权限不够）就不记账——没有内容可以指认，硬记一条只会把
 /// 「这个路径当时的样子」当成「这份模型的样子」，而下次拿到的可能是另一份文件。
 pub fn validate_runtime_cached(
-    path: &Path,
-    runtime: RuntimeId,
-    scale: u32,
-    min_input_edge: u32,
+    path: &Path, runtime: RuntimeId, scale: u32, min_input_edge: u32,
 ) -> ValidationVerdict {
-    if runtime == RuntimeId::Cpu {
-        // 它就是参照实现，没什么可测的（与 `validate_runtime` 同一条判据）。
-        return ValidationVerdict::Passed;
-    }
+    validate_runtime_cached_observed(path, runtime, scale, min_input_edge, &CancelToken::none(), &|_| {})
+        .unwrap_or_else(|error| ValidationVerdict::Failed { reason: error.to_string() })
+}
+
+fn validate_runtime_cached_observed(
+    path: &Path, runtime: RuntimeId, scale: u32, min_input_edge: u32,
+    cancel: &CancelToken, progress: &dyn Fn(u32),
+) -> Result<ValidationVerdict, ComputeError> {
+    cancel.check()?;
+    if runtime == RuntimeId::Cpu { return Ok(ValidationVerdict::Passed); }
     let Ok((byte_length, content_hash)) = file_fingerprint(path) else {
-        return validate_runtime(path, runtime, scale, min_input_edge);
+        return validate_runtime_observed(path, runtime, scale, min_input_edge, cancel, progress);
     };
-    let key = ProbeKey {
-        content_hash,
-        byte_length,
-        kind: ProbeKind::Upscale,
-        runtime,
-        scale,
-        min_input_edge,
-    };
-    if let Some(record) = probe::recall(&key) {
-        return record.verdict;
-    }
+    cancel.check()?;
+    let key = ProbeKey { content_hash, byte_length, kind: ProbeKind::Upscale, runtime, scale, min_input_edge };
+    if let Some(record) = probe::recall(&key) { return Ok(record.verdict); }
     let before = probe::probes_opened();
-    let verdict = validate_runtime(path, runtime, scale, min_input_edge);
+    // Cancelled probes must not poison the process-wide model verdict cache.
+    let verdict = validate_runtime_observed(path, runtime, scale, min_input_edge, cancel, progress)?;
     probe::remember(key, verdict.clone(), probe::probes_opened() - before);
-    verdict
+    Ok(verdict)
 }
 
 /// 瓦片长度必须与声明的宽高一致。拦在模型之前：不然它拿到的是一段撕裂的缓冲区，
@@ -478,6 +567,27 @@ impl UpscaleEngine for OnnxEngine {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cancelling_model_probe_stops_before_opening_or_falling_back() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = crate::cancel::CancelToken::watch(flag.clone());
+        let result = validate_runtime_observed(Path::new("does-not-exist.onnx"), RuntimeId::Nnapi, 2, 1,
+            &cancel, &|_| { flag.store(true, std::sync::atomic::Ordering::Relaxed); });
+        assert_eq!(result, Err(ComputeError::Cancelled));
+        let result = OnnxEngine::open_choice_observed(Path::new("does-not-exist.onnx"), 2, 1000, 1, &cancel, &|_| {});
+        assert!(matches!(result, Err(ComputeError::Cancelled)));
+    }
+
+    #[cfg(not(feature = "directml"))]
+    #[test]
+    fn cancellation_before_final_session_load_does_not_touch_the_model() {
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel = CancelToken::watch(flag.clone());
+        let result = OnnxEngine::open_choice_observed(Path::new("does-not-exist.onnx"), 2, 1000, 1, &cancel,
+            &|percent| { if percent == 28 { flag.store(true, std::sync::atomic::Ordering::Relaxed); } });
+        assert!(matches!(result, Err(ComputeError::Cancelled)));
+    }
+
     #[cfg(all(windows, feature = "directml"))]
     #[test]
     #[ignore = "requires an installed x2 ONNX model and real DirectML GPU"]
@@ -509,6 +619,32 @@ mod tests {
         eprintln!("adaptive upscale GPU memory={memory:?} default_tiles={} adaptive_tile={adaptive} adaptive_tiles={} baseline={baseline_time:?} adaptive={adaptive_time:?} mean_byte_difference={mean:.6} max_byte_difference={max}",baseline.tiles,actual.tiles);
         assert_eq!((actual.width,actual.height),(baseline.width,baseline.height));
         assert!(mean <= 2.0,"tile seam average exceeded 2/255: {mean}");
+    }
+
+    #[test]
+    fn nnapi_specializes_named_dynamic_axes_and_preserves_static_axes() {
+        let dims = nnapi_overrides(&[1, 3, -1, -1], &["", "", "height", "width"], 20).unwrap();
+        assert_eq!(dims, vec![("height".to_string(), 128), ("width".to_string(), 128)]);
+        assert!(nnapi_overrides(&[1, 3, 64, 96], &["", "", "", ""], 20).unwrap().is_empty());
+        assert!(nnapi_overrides(&[1, 3, -1, -1], &["", "", "", "width"], 20).is_err());
+    }
+
+    #[test]
+    fn nnapi_tile_contract_compiles_a_real_model_and_pads_narrow_edge_tiles() {
+        let path = bundled_model();
+        assert!(path.is_file(), "bundled model required: {}", path.display());
+        // Exercise the same graph specialization on the CPU runtime, so this
+        // contract is verified even on a machine without an Android device.
+        let session = specialize_nnapi(crate::runtime::builder(RuntimeId::Cpu).unwrap(), &path, 1)
+            .unwrap().commit_from_file(&path).unwrap();
+        let shape = session.inputs()[0].dtype().tensor_shape().unwrap();
+        assert_eq!(shape.as_ref(), &[1, 3, 128, 128]);
+        let engine = OnnxEngine {
+            fixed_input: static_input_dimensions(shape), session: Mutex::new(session),
+            runtime: RuntimeId::Cpu, scale: 2, max_pixels: 64_000_000, min_input_edge: 1,
+        };
+        let output = engine.upscale_tile(&vec![128; 9 * 17 * 4], 9, 17).unwrap();
+        assert_eq!(output.len(), 18 * 34 * 4);
     }
 
     #[test]

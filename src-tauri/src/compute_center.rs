@@ -800,7 +800,9 @@ fn normalized_dlssnr(
     let parsed = if value.is_null() {
         DlssnrSettings::default()
     } else {
-        serde_json::from_value::<DlssnrSettings>(value)
+        serde_json::from_value::<DlssnrSettings>(if value.is_array() {
+            serde_json::json!({ "passes": value })
+        } else { value })
             .map_err(|error| format!("DLSSNR 参数不对：{error}"))?
     };
     serde_json::to_value(parsed.normalized()).map_err(|error| error.to_string())
@@ -985,8 +987,8 @@ fn upscale_bytes(
             // 这一页是从网络那头来的字节，没有本机归档与页码可讲；四元身份里的
             // 这一栏就照实说「远端字节」，而不是借一个像模像样的页码。
             source_revision: "remote-bytes",
-            // 远端请求永远排在本机阅读之后：用户正看着的那一页先算。
-            priority: crate::compute::scheduler::Priority::Background,
+            // 网络另一端也有正在等这一页的读者；与本机可见页按前台 FIFO 共享执行机会。
+            priority: crate::compute::scheduler::Priority::Foreground,
             // 倍数由模型说了算（`scale` 是模型自己的属性），这里不再让请求体
             // 覆盖它——覆盖会让同一份输入因参数不同落进两个任务身份。
             output_scale: None,
@@ -1063,8 +1065,8 @@ fn dlssnr_bytes(
             input_id: &input_id,
             settings_id: &settings_id,
             source_revision: "remote-bytes",
-            // 远端请求永远排在本机阅读之后：用户正看着的那一页先算。
-            priority: crate::compute::scheduler::Priority::Background,
+            // 网络另一端也有正在等这一页的读者；与本机可见页按前台 FIFO 共享执行机会。
+            priority: crate::compute::scheduler::Priority::Foreground,
             stage_id: crate::compute::proxy::DLSSNR_STAGE_ID,
             feature: &crate::dlssnr::dll_path(data),
             settings: &settings,
@@ -2637,6 +2639,16 @@ async fn remote_process_cached_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn remote_dlssnr_accepts_the_pass_array_saved_by_the_settings_ui() {
+        let passes = vec![crate::dlssnr::PassSettings::default(); 2];
+        let settings = RemoteSettings { dlssnr_passes: serde_json::to_string(&passes).unwrap(), ..RemoteSettings::default() };
+        let normalized = normalized_dlssnr(None, &settings).unwrap();
+        let decoded: crate::dlssnr::DlssnrSettings = serde_json::from_value(normalized).unwrap();
+        assert_eq!(decoded.passes, passes);
+    }
 
     fn remote_failure_stub(status: u16, content_type: &str, body: &str) -> (String, std::thread::JoinHandle<()>) {
         use std::io::{Read, Write};

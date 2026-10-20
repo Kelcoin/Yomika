@@ -564,6 +564,27 @@ fn a_granted_input_is_staged_by_the_host_and_verified_by_the_worker() {
 }
 
 #[test]
+fn a_deadline_is_reported_as_timeout_instead_of_user_cancellation() {
+    for ignore_cancel in [false, true] {
+        let sandbox = Sandbox::new("deadline-outcome");
+        let mut config = config(&sandbox);
+        config.extra_env = vec![
+            ("YOMIKA_WORKER_TEST_DELAY_MS".into(), "10000".into()),
+            ("YOMIKA_WORKER_TEST_IGNORE_CANCEL".into(), if ignore_cancel { "1" } else { "0" }.into()),
+        ];
+        let manager = ComputeManager::start(config, no_events()).expect("start supervisor");
+        let submitted = manager.submit(request("deadline", 0, 300)).expect("submit");
+        let state = wait_until("deadline outcome", Duration::from_secs(12), || {
+            terminal_of(&manager, &submitted.job_id)
+        });
+        assert_eq!(state, JobState::Failed { code: "COMPUTE_TIMEOUT".into() },
+            "deadline must not be silently retried as a user cancellation (ignore_cancel={ignore_cancel})");
+        assert!(manager.failure_note(&submitted.job_id).is_some());
+        manager.shutdown();
+    }
+}
+
+#[test]
 fn a_cancel_that_the_worker_ignores_ends_with_the_process_being_collected() {
     let sandbox = Sandbox::new("cancel-grace");
     let mut config = config(&sandbox);

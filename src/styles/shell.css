@@ -2528,6 +2528,32 @@ body::-webkit-scrollbar,
   min-height: var(--control-height);
 }
 
+.search-label { position: relative; }
+.search-label input { padding-right: 42px; }
+.search-label input::-webkit-search-cancel-button { display: none; }
+.search-clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-secondary);
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .search-clear:hover { background: var(--control-background-hover); color: var(--ink-primary); }
+}
+@media (hover: none) {
+  .search-clear:is(.is-pressed, :active) { background: var(--control-background-hover); color: var(--ink-primary); }
+}
+.search-clear svg { width: 18px; height: 18px; }
+
 .tag-suggest-panel {
   z-index: var(--z-menu);
   max-height: min(360px, calc(100dvh - 24px));
@@ -2771,7 +2797,7 @@ body::-webkit-scrollbar,
 .archive-list-pull[data-overscroll='settle'] { will-change: transform; }
 .archive-list-pull[data-overscroll='wheel'],
 .archive-list-pull[data-overscroll='touch'] { transition: none; }
-.archive-list-pull[data-overscroll='settle'] { transition: transform 240ms cubic-bezier(.2, .8, .2, 1); }
+.archive-list-pull[data-overscroll='settle'] { transition: transform 360ms cubic-bezier(.22, 1, .36, 1); }
 
 /* The refresh disc, pinned over the list instead of carried by it: it answers
    the pull with its rotation, then stays put, spinning, while the request runs.

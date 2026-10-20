@@ -131,6 +131,7 @@ jobs:
         run: |
           python3 -m pip install 'cmake==3.31.6' 'ninja==1.11.1.4' numpy packaging
           python3 .github/scripts/prepare-mobile-ort.py android
+          python3 .github/scripts/prepare-mobile-ncnn.py
       # `init` 生成的工程带的是模板默认图标，`tauri icon` 才会把项目图标写进去：
       # 存在 gen/<平台> 工程时写进工程，否则退回 icons/<平台>。少了这一步，APK 的
       # 启动图标一直是 Tauri 那套默认图。

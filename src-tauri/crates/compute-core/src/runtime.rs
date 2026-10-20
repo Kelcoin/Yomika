@@ -93,7 +93,7 @@ pub fn available_runtimes() -> Vec<RuntimeId> {
     #[cfg(all(target_os = "android", feature = "nnapi"))]
     {
         use ort::ep::ExecutionProvider;
-        if ort::ep::NNAPI::default().is_available().unwrap_or(false) {
+        if nnapi_hardware_available() && ort::ep::NNAPI::default().is_available().unwrap_or(false) {
             runtimes.push(RuntimeId::Nnapi);
         }
     }
@@ -133,7 +133,7 @@ pub const fn directml_is_compiled_in() -> bool {
 /// 给出的数不保证位级一致，宿主据此作废旧产物，所以这个串从一处出、两处用。
 #[cfg(feature = "ort")]
 pub fn runtime_label() -> String {
-    format!("ort-api{}", ort::MINOR_VERSION)
+    format!("ort-api{}{}", ort::MINOR_VERSION, if cfg!(all(target_os="android",feature="ncnn-vulkan")) { "+ncnn-20260113-rgb128-v1" } else { "" })
 }
 
 /// 没有 `ort` 的构建：一份会话都开不出来，所以没有版本可说——但也必须说点什么，
@@ -406,5 +406,38 @@ mod tests {
                 "偏好里出现了没接的运行库：{name}"
             );
         }
+    }
+}
+
+/// Android 15+ frequently exposes only nnapi-reference. An empty accelerator
+/// list makes ORT compile against that software driver despite CPU_DISABLED.
+#[cfg(target_os="android")]
+fn nnapi_hardware_available() -> bool {
+    // The app supports API 24; NNAPI enumeration was added in API 29.
+    // Resolve it dynamically so older Android can still launch and use Vulkan.
+    use std::ffi::{c_void,c_char};
+    #[link(name="dl")]
+    unsafe extern "C" {
+        fn dlopen(name:*const c_char, flags:i32)->*mut c_void;
+        fn dlsym(handle:*mut c_void,name:*const c_char)->*mut c_void;
+        fn dlclose(handle:*mut c_void)->i32;
+    }
+    unsafe {
+        let lib=dlopen(c"libneuralnetworks.so".as_ptr(),2);
+        if lib.is_null(){return false;}
+        let count=dlsym(lib,c"ANeuralNetworks_getDeviceCount".as_ptr());
+        let device=dlsym(lib,c"ANeuralNetworks_getDevice".as_ptr());
+        let kind=dlsym(lib,c"ANeuralNetworksDevice_getType".as_ptr());
+        let result=if count.is_null()||device.is_null()||kind.is_null(){false}else{
+            let count:unsafe extern "C" fn(*mut u32)->i32=std::mem::transmute(count);
+            let device:unsafe extern "C" fn(u32,*mut *const c_void)->i32=std::mem::transmute(device);
+            let kind:unsafe extern "C" fn(*const c_void,*mut i32)->i32=std::mem::transmute(kind);
+            let mut n=0;
+            count(&mut n)==0 && (0..n).any(|i|{
+                let mut d=std::ptr::null();let mut t=0;
+                device(i,&mut d)==0 && !d.is_null() && kind(d,&mut t)==0 && matches!(t,3|4)
+            })
+        };
+        dlclose(lib);result
     }
 }

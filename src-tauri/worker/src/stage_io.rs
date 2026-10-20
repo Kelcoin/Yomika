@@ -53,15 +53,17 @@ pub(crate) fn probe_dimensions(source: &[u8]) -> Result<(u32, u32), StageError> 
 }
 
 pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, StageError> {
-    let image = image::RgbaImage::from_raw(width, height, rgba.to_vec()).ok_or_else(|| {
-        StageError::failed(ARTIFACT_INVALID_CODE, "像素数与画布尺寸对不上")
-    })?;
+    use image::ImageEncoder;
+    let expected = (width as usize).checked_mul(height as usize).and_then(|pixels| pixels.checked_mul(4));
+    if width == 0 || height == 0 || expected != Some(rgba.len()) {
+        return Err(StageError::failed(ARTIFACT_INVALID_CODE, "像素数与画布尺寸对不上"));
+    }
     let mut encoded = Vec::new();
-    image::DynamicImage::ImageRgba8(image)
-        .write_to(&mut Cursor::new(&mut encoded), image::ImageFormat::Png)
-        .map_err(|error| {
-            StageError::failed(ARTIFACT_INVALID_CODE, format!("PNG 编码失败：{error}"))
-        })?;
+    // Borrow the finished pixels: cloning a 4000×5646 RGBA page here alone
+    // adds 86 MiB to the mobile peak, with no benefit to the encoder.
+    image::codecs::png::PngEncoder::new(&mut encoded)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|error| StageError::failed(ARTIFACT_INVALID_CODE, format!("PNG 编码失败：{error}")))?;
     Ok(encoded)
 }
 
@@ -114,4 +116,25 @@ pub(crate) fn fallback_of(choice: &RuntimeChoice) -> Option<EngineFallback> {
             .unwrap_or("这套运行库没用上，改用 CPU")
             .to_string(),
     })
+}
+
+#[cfg(test)]
+mod png_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_png_preserves_rgb_and_partial_alpha() {
+        let pixels = [255, 0, 31, 0, 17, 200, 90, 127, 0, 25, 255, 255];
+        let encoded = encode_png(&pixels, 3, 1).unwrap();
+        let decoded = image::load_from_memory(&encoded).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (3, 1));
+        assert_eq!(decoded.as_raw().as_slice(), pixels);
+    }
+
+    #[test]
+    fn malformed_rgba_is_rejected_before_the_encoder_can_panic() {
+        for (pixels, width, height) in [(vec![0; 3], 1, 1), (vec![0; 5], 1, 1), (vec![], 0, 1)] {
+            assert!(encode_png(&pixels, width, height).is_err());
+        }
+    }
 }

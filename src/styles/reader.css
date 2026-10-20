@@ -22,6 +22,57 @@
   box-shadow: none;
 }
 
+/* Final-page feedback floats above the artwork, below the reader chrome. Its
+   progress is painted with the page drag, without re-rendering the page tree. */
+.reader-exit-hint {
+  --reader-exit-progress: 0;
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  right: max(16px, var(--safe-right));
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  max-width: 112px;
+  pointer-events: none;
+  color: var(--reader-ink);
+  font-size: var(--text-xs);
+  text-shadow: 0 1px 6px var(--reader-canvas);
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-50%);
+  transition: opacity var(--motion-fast), visibility 0s var(--duration-fast);
+}
+.reader-exit-hint[data-side='left'] { right: auto; left: max(16px, var(--safe-left)); }
+.reader-exit-hint[data-visible='true'] {
+  opacity: clamp(0, var(--reader-exit-progress), 1);
+  visibility: visible;
+  transition: visibility 0s;
+}
+.reader-exit-hint-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--reader-surface-raised);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--reader-canvas) 55%, transparent);
+  transition: color var(--motion-fast), transform var(--motion-fast);
+}
+.reader-exit-hint-icon > svg { width: 22px; height: 22px; }
+.reader-exit-hint-icon > .reader-exit-hint-progress { position: absolute; inset: 0; width: 48px; height: 48px; transform: rotate(-90deg); }
+.reader-exit-hint-progress circle {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 100;
+  stroke-dashoffset: calc(100 - var(--reader-exit-progress) * 100);
+}
+.reader-exit-hint[data-ready='true'] .reader-exit-hint-icon { color: var(--reader-primary); transform: scale(1.06); }
+.reader-exit-hint[data-side='left'] .reader-exit-hint-icon > svg:not(.reader-exit-hint-progress) { transform: scaleX(-1); }
+
 /* Every rendition of a page draws at the size the *first* one measured.
    An enhanced page is the same picture at up to twice the pixels, and an image
    sized by its own natural size is therefore drawn twice as large wherever the

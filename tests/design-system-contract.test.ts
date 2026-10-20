@@ -2377,7 +2377,7 @@ describe('design system contract', () => {
     expect(workspace).toMatch(/className="archive-list-pull"/);
     expect(workspace).toMatch(/data-overscroll=\{overscrollSettle \? 'settle' : \(overscrollGesture \?\? undefined\)\}/);
     expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='wheel'\],\s*\.archive-list-pull\[data-overscroll='touch'\] \{ transition: none; \}/);
-    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='settle'\] \{ transition: transform 240ms cubic-bezier\(\.2, \.8, \.2, 1\); \}/);
+    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='settle'\] \{ transition: transform 360ms cubic-bezier\(\.22, 1, \.36, 1\); \}/);
     expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='wheel'\],\s*\.archive-list-pull\[data-overscroll='touch'\],\s*\.archive-list-pull\[data-overscroll='settle'\] \{ will-change: transform; \}/);
     // The disc is an overlay, not part of the sliding content: the list springs
     // back on release and the disc stays pinned and spinning above it.
@@ -2400,8 +2400,8 @@ describe('design system contract', () => {
     // 并且认领之后那一层要是还在动就让位——两套滚动叠着走就是用户 2026-10-15 报的
     // 「顶部搜索框滚出视口 + 卡片与顶栏之间一大段空隙」（档案库那一处）。
     expect(workspace, '认领时把浏览器先滚掉的那一点放回去').toMatch(/scroller\.scrollTop = startScrollTop;/);
-    expect(workspace, '认领后那一层还在动就让位').toMatch(
-      /scroller\.scrollTop !== overscrollClaimedScrollTop\.current\) \{[\s\S]{0,120}cancelOverscroll\(\);/,
+    expect(workspace, '离开端点时让位，端点处的原生小数误差不取消手势').toMatch(
+      /if \(!atEdge\) \{ cancelOverscroll\(\); return; \}/,
     );
     // 位置直接写 DOM：每一像素走一次 setState 会让整棵虚拟化列表每帧重渲染一遍，
     // 真机上就是「过滚刷新非常非常卡」。state 只在静止/位移边界变化，回零必须同步隐藏图标。

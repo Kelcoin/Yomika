@@ -122,6 +122,24 @@ pub struct JobProgress {
     pub updated_ms: u64,
 }
 
+fn deadline_failure_message(progress: Option<&JobProgress>, now_ms: u64) -> String {
+    let detail = progress.map(|progress| {
+        let phase = if progress.stage_id != "upscale" { "处理阶段" }
+            else if progress.percent < 10.0 { "读取与解码原图" }
+            else if progress.percent < 14.0 { "校验模型" }
+            else if progress.percent < 18.0 { "编译硬件探测模型" }
+            else if progress.percent < 22.0 { "硬件探测推理" }
+            else if progress.percent < 24.0 { "加载 CPU 参照模型" }
+            else if progress.percent < 28.0 { "CPU 参照推理" }
+            else if progress.percent < 30.0 { "加载正式推理模型" }
+            else if progress.percent < 85.0 { "分块推理" }
+            else { "编码与写入产物" };
+        format!("{phase}，阶段进度 {:.0}%，已 {} 秒无进展", progress.percent,
+            now_ms.saturating_sub(progress.updated_ms) / 1000)
+    }).unwrap_or_else(|| "等待处理阶段开始".into());
+    format!("本地处理超过任务时限（{detail}），已请求停止并保留原图")
+}
+
 /// 宿主眼里 worker 的状态。**不撒谎**：没起来就是没起来，限制没生效就说没生效。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 // `rename_all` 只改**变体名**；结构体变体的**字段**要 `rename_all_fields` 才会跟着改。
@@ -1153,13 +1171,18 @@ impl Supervisor {
                 );
             }
             Message::Cancelled(reference) => {
-                self.finish_running(&reference.job_id);
-                self.apply(
+                let event = if self.deadline_failure(&reference.job_id) {
+                    WorkerEvent::Failed {
+                        job_id: reference.job_id.clone(),
+                        code: "COMPUTE_TIMEOUT".into(),
+                    }
+                } else {
                     WorkerEvent::Cancelled {
                         job_id: reference.job_id.clone(),
-                    },
-                    &reference.job_id,
-                );
+                    }
+                };
+                self.finish_running(&reference.job_id);
+                self.apply(event, &reference.job_id);
             }
             Message::Failed(failed) => {
                 let reset_required = failed.message.contains("DLSSNR_DEVICE_RESET_REQUIRED");
@@ -1223,7 +1246,9 @@ impl Supervisor {
         self.shared.with_state(|state| {
             // worker 那边的 10 ms 节流是它自己喘气用的；这里再按界面能承受的节奏压到 5 Hz。
             let fresh = state.progress.get(&job_id).is_none_or(|held| {
-                now_ms.saturating_sub(held.updated_ms) >= PROGRESS_MIN_INTERVAL_MS
+                held.stage_id != progress.stage_id
+                    || (held.percent != progress.percent && (progress.percent <= 30.0 || progress.percent >= 85.0))
+                    || now_ms.saturating_sub(held.updated_ms) >= PROGRESS_MIN_INTERVAL_MS
             });
             if !fresh {
                 return;
@@ -1438,13 +1463,21 @@ impl Supervisor {
         }
 
         if let Some(reason) = lose {
-            // 取消宽限用完而收族：在飞那件结算成「被取消」（而不是 worker_lost）。
-            let settle = self
+            // Preserve why cancellation began: a deadline is a timeout, while
+            // user cancellation/preemption remains cancellation.
+            let cancelled_job = self
                 .session
                 .as_ref()
                 .and_then(|session| session.running.as_ref())
                 .filter(|running| running.cancel_at.is_some())
-                .map(|_| JobState::Cancelled);
+                .map(|running| running.job_id.clone());
+            let settle = cancelled_job.map(|id| {
+                if self.deadline_failure(&id) {
+                    JobState::Failed { code: "COMPUTE_TIMEOUT".into() }
+                } else {
+                    JobState::Cancelled
+                }
+            });
             self.lose_session(&reason, settle);
             return;
         }
@@ -1533,6 +1566,20 @@ impl Supervisor {
         self.shared.with_state(|state| {
             state.scheduler.queued(Priority::Foreground) > 0
                 || state.scheduler.queued(Priority::Background) > 0
+        })
+    }
+
+    // A deadline uses cooperative cancellation internally, but its public result
+    // must remain a timeout. Otherwise clients silently retry a stuck executor.
+    fn deadline_failure(&self, job_id: &str) -> bool {
+        self.shared.with_state(|state| {
+            if state.cancel_reasons.get(job_id).is_some_and(|reason| reason == "超过 deadline") {
+                let message = deadline_failure_message(state.progress.get(job_id), self.shared.now_ms());
+                state.remember_failure_note(job_id, &message);
+                true
+            } else {
+                false
+            }
         })
     }
 
@@ -2839,6 +2886,17 @@ mod tests {
             Some("换了个说法"),
             "同一件任务的新说法要盖掉旧的"
         );
+    }
+
+    #[test]
+    fn timeout_diagnostics_identify_probe_and_tile_stalls_without_private_inputs() {
+        for (percent, label) in [(14.0, "编译硬件探测模型"), (18.0, "硬件探测推理"),
+            (24.0, "CPU 参照推理"), (28.0, "加载正式推理模型"), (50.0, "分块推理"), (85.0, "编码与写入产物")] {
+            let message = deadline_failure_message(Some(&JobProgress { stage_id: "upscale".into(), percent, updated_ms: 5000 }), 125000);
+            assert!(message.contains(label), "{message}");
+            assert!(message.contains("120 秒无进展"), "{message}");
+        }
+        assert!(deadline_failure_message(None, 0).contains("等待处理阶段开始"));
     }
 
     /// 读数要对「量不到」诚实：没有 worker 就没有提交读数（留空，不是 0——0 会被读成

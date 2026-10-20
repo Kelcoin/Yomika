@@ -167,6 +167,11 @@ pub fn frontend_ready(app: tauri::AppHandle) -> CommandResult<()> {
         #[cfg(target_os = "windows")]
         if std::env::args().any(|arg| arg == "--background") { return CommandResult::success(()); }
         if let Some(main) = app.get_webview_window("main") {
+            // A reload or delayed startup signal must not reveal a window
+            // which the user has already put in the tray.
+            if crate::MAIN_WINDOW_READY.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                return CommandResult::success(());
+            }
             let _ = main.show();
             let _ = main.set_focus();
         }

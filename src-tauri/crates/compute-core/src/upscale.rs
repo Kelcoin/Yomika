@@ -66,12 +66,19 @@ mod recovery_tests {
 /// Completed partial output is dropped before the smaller attempt, preserving seam padding.
 pub fn upscale_rgba_with_allocation_recovery(
     engine: &dyn UpscaleEngine, source: &[u8], width: u32, height: u32,
-    mut options: UpscaleOptions, min_edge: u32,
+    options: UpscaleOptions, min_edge: u32,
+) -> Result<UpscaledImage, ComputeError> {
+    upscale_rgba_with_recovery_progress(engine, source, width, height, options, min_edge, &|_, _| {})
+}
+
+pub fn upscale_rgba_with_recovery_progress(
+    engine: &dyn UpscaleEngine, source: &[u8], width: u32, height: u32,
+    mut options: UpscaleOptions, min_edge: u32, progress: &dyn Fn(usize, usize),
 ) -> Result<UpscaledImage, ComputeError> {
     let mut attempt = 0;
     loop {
         options.check_cancelled()?;
-        match upscale_rgba(engine, source, width, height, options.clone()) {
+        match upscale_rgba_with_progress(engine, source, width, height, options.clone(), progress) {
             Ok(output) => return Ok(output),
             Err(error) => {
                 let next = crate::resources::is_allocation_error(&error).then(||
@@ -300,6 +307,14 @@ pub fn upscale_rgba(
     height: u32,
     options: UpscaleOptions,
 ) -> Result<UpscaledImage, ComputeError> {
+    upscale_rgba_with_progress(engine, source, width, height, options, &|_, _| {})
+}
+
+/// Report completed tiles, including zero before the first native inference.
+pub fn upscale_rgba_with_progress(
+    engine: &dyn UpscaleEngine, source: &[u8], width: u32, height: u32,
+    options: UpscaleOptions, progress: &dyn Fn(usize, usize),
+) -> Result<UpscaledImage, ComputeError> {
     let native_scale = engine.scale();
     let scale = options.output_scale.unwrap_or(native_scale).min(native_scale);
     if width == 0 || height == 0 || scale == 0 || source.len() != width as usize * height as usize * 4
@@ -336,7 +351,8 @@ pub fn upscale_rgba(
         options.tile_padding.max(engine.tile_padding()),
     );
     let mut destination = vec![0_u8; pixels * 4];
-    for tile in &tiles {
+    progress(0, tiles.len());
+    for (index, tile) in tiles.iter().enumerate() {
         options.check_cancelled()?;
         let input = crop_rgba(
             source,
@@ -347,6 +363,7 @@ pub fn upscale_rgba(
             tile.padded_height,
         );
         let upscaled = engine.upscale_tile(&input, tile.padded_width, tile.padded_height)?;
+        options.check_cancelled()?;
         let expected_len = (tile.padded_width as usize).checked_mul(tile.padded_height as usize)
             .and_then(|n| n.checked_mul(native_scale as usize * native_scale as usize))
             .and_then(|n| n.checked_mul(4));
@@ -358,6 +375,7 @@ pub fn upscale_rgba(
                 tile.padded_height * native_scale, tile.padded_width, tile.padded_height, scale).0
         } else { upscaled };
         blit_tile(&mut destination, output_width, tile, scale, &upscaled)?;
+        progress(index + 1, tiles.len());
         if options.tile_sleep_ms > 0 {
             std::thread::sleep(std::time::Duration::from_millis(options.tile_sleep_ms));
         }

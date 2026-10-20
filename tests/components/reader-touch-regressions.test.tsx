@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, expect, it, vi } from 'vitest';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import * as platform from '../../src/bridge/platform';
@@ -160,4 +160,21 @@ it('auto hides a bottom bar after compatibility mouse movement', () => {
   act(() => vi.advanceTimersByTime(4_500));
   act(() => vi.advanceTimersByTime(300));
   expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
+});
+
+it('keeps the back control mounted during a press near the auto-hide deadline', () => {
+  vi.useFakeTimers();
+  render(<MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+    <Routes><Route path="/library" element={<p>back destination</p>} />
+      <Route path="/reader" element={<ReaderScreen archiveId="back" title="Back" pages={['blob:a']} />} />
+    </Routes>
+  </MemoryRouter>);
+  fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }), { clientY: 20 });
+  act(() => vi.advanceTimersByTime(4490));
+  const back = screen.getByRole('button', { name: '返回上一页' });
+  fireEvent.pointerDown(back, { pointerType: 'touch' });
+  act(() => vi.advanceTimersByTime(300));
+  expect(back).toBeInTheDocument();
+  fireEvent.click(back);
+  expect(screen.getByText('back destination')).toBeInTheDocument();
 });

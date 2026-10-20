@@ -10,6 +10,28 @@ import { RetainedPage } from '../../src/app/RetainedPage';
 /** 档案详情页与本地档案详情面板共用的那几块：事实网格、封面（含大图预览）、标签墙。
  * 抽出来的边界就在这里，页面级测试不一定会走到。 */
 describe('archive detail sections', () => {
+  it('returns a full preview into a cropped cover without distorting the artwork', () => {
+    const animate = vi.fn(() => ({ cancel: vi.fn() }));
+    const original = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'animate');
+    Object.defineProperty(HTMLImageElement.prototype, 'animate', { configurable: true, value: animate });
+    const bounds = vi.spyOn(HTMLImageElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLImageElement) {
+      return this.parentElement?.classList.contains('archive-detail-cover-trigger')
+        ? new DOMRect(20, 30, 100, 150) : new DOMRect(200, 100, 600, 600);
+    });
+    try {
+      render(<ArchiveDetailCover title="Crop" cover="blob:cropped" />);
+      (screen.getByAltText('Crop 封面') as HTMLElement).style.borderTopLeftRadius = '12px';
+      fireEvent.click(screen.getByRole('button', { name: '查看Crop大图' }));
+      const frames = animate.mock.calls as unknown as [Keyframe[], KeyframeAnimationOptions][];
+      expect(frames[0]?.[0][0]).toEqual({ transform: 'translate(-430px, -295px) scale(0.25, 0.25)', clipPath: 'inset(0px 100px round 48px)' });
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+      expect(frames[1]?.[0][1]).toEqual(frames[0]?.[0][0]);
+    } finally {
+      bounds.mockRestore();
+      if (original) Object.defineProperty(HTMLImageElement.prototype, 'animate', original);
+      else delete (HTMLImageElement.prototype as { animate?: unknown }).animate;
+    }
+  });
   it('closes a cover preview when the retained page hides', async () => {
     const user = userEvent.setup();
     const content = <ArchiveDetailCover title="A" cover="blob:a" />;
@@ -112,11 +134,11 @@ describe('archive detail sections', () => {
       render(<ArchiveDetailCover title="A" cover="blob:a" />);
       await user.click(screen.getByRole('button', { name: '查看A大图' }));
       expect(animate.mock.calls[0]?.[0]).toEqual([
-        { transform: 'translate(-330px, -295px) scale(0.25, 0.25)' }, { transform: 'none' },
+        { transform: 'translate(-330px, -295px) scale(0.25, 0.25)', clipPath: 'inset(0px 0px round 0px)' }, { transform: 'none', clipPath: 'inset(0px 0px round 0px)' },
       ]);
       await user.keyboard('{Escape}');
       expect(animate).toHaveBeenCalledTimes(2);
-      expect(animate.mock.calls[1]?.[0]?.[1]).toEqual({ transform: 'translate(-330px, -295px) scale(0.25, 0.25)' });
+      expect(animate.mock.calls[1]?.[0]?.[1]).toEqual({ transform: 'translate(-330px, -295px) scale(0.25, 0.25)', clipPath: 'inset(0px 0px round 0px)' });
       expect(cancel).toHaveBeenCalled();
       expect(screen.getByRole('dialog')).toHaveClass('is-closing');
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());

@@ -87,7 +87,10 @@ struct OpenedBuiltin {
 
 struct CachedSession {
     key: String,
-    engine: Arc<OnnxEngine>,
+    engine: AnyEngine,
+    device: String,
+    engine_id: &'static str,
+    version: String,
     /// 开这份会话时留下的回退交代（没有回退就是 `None`）。它跟会话一起缓存：同一份
     /// 会话第二次被用上时，报告里说的话必须与第一次一致。
     fallback: Option<EngineFallback>,
@@ -213,7 +216,9 @@ impl UpscaleEngine {
         max_pixels: usize,
         min_input_edge: u32,
         model_label: &str,
-    ) -> Result<(Arc<OnnxEngine>, Option<EngineFallback>), StageError> {
+        cancel: &yomika_compute_core::cancel::CancelToken,
+        progress: &dyn Fn(u32),
+    ) -> Result<(AnyEngine, String, &'static str, String, Option<EngineFallback>), StageError> {
         let key = format!(
             "{model_label}:{scale}:{max_pixels}:{min_input_edge}:{}",
             policy.as_str()
@@ -222,20 +227,46 @@ impl UpscaleEngine {
         let mut slot = self.session.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(cached) = slot.as_ref() {
             if cached.key == key {
-                return Ok((Arc::clone(&cached.engine), cached.fallback.clone()));
+                return Ok((Arc::clone(&cached.engine), cached.device.clone(), cached.engine_id, cached.version.clone(), cached.fallback.clone()));
+            }
+        }
+        #[cfg(target_os = "android")]
+        let mut vulkan_failure = None;
+        #[cfg(target_os = "android")]
+        if policy != EnginePolicy::Cpu {
+            check_cancelled(cancel)?;
+            progress(14);
+            match yomika_compute_core::ncnn::NcnnEngine::open(path, scale, max_pixels) {
+                Ok(Some(engine)) => {
+                    let device = engine.device.clone();
+                    let engine: AnyEngine = Arc::new(engine);
+                    let engine_id = yomika_compute_core::ncnn::ENGINE_ID;
+                    let version = yomika_compute_core::ncnn::VERSION.to_string();
+                    *slot = Some(CachedSession { key, engine: engine.clone(), device: device.clone(), engine_id, version: version.clone(), fallback: None });
+                    return Ok((engine, device, engine_id, version, None));
+                }
+                Ok(None) => {}, // Custom ONNX: never silently substitute shipped weights.
+                Err(error) if policy == EnginePolicy::Gpu => return Err(StageError::failed(GPU_BACKEND_UNAVAILABLE_CODE,error.to_string())),
+                Err(error) => {
+                    eprintln!("Vulkan unavailable, trying ONNX Runtime: {error}");
+                    vulkan_failure = Some(error.to_string());
+                },
             }
         }
         let (engine, fallback) = match policy {
-            EnginePolicy::Cpu => (
-                OnnxEngine::open_with_runtime(path, RuntimeId::Cpu, scale, max_pixels, min_input_edge)
-                    .map_err(to_stage_error)?,
-                // 本来就要 CPU：这不是回退，没什么可交代的。
-                None,
-            ),
+            EnginePolicy::Cpu => {
+                progress(28);
+                (
+                    OnnxEngine::open_with_runtime_cancel(path, RuntimeId::Cpu, scale, max_pixels, min_input_edge, cancel)
+                        .map_err(to_stage_error)?,
+                    // 本来就要 CPU：这不是回退，没什么可交代的。
+                    None,
+                )
+            },
             // 首选运行库 + 实测探针（结论按内容指纹记账，同一份模型不重探），
             // 探针不过就退 CPU 并把原因交出来（核心的 `open_choice`）。
             EnginePolicy::Auto => {
-                let (engine, choice) = OnnxEngine::open_choice(path, scale, max_pixels, min_input_edge)
+                let (engine, choice) = OnnxEngine::open_choice_observed(path, scale, max_pixels, min_input_edge, cancel, progress)
                     .map_err(to_stage_error)?;
                 (engine, fallback_of(&choice))
             }
@@ -245,13 +276,17 @@ impl UpscaleEngine {
                 None,
             ),
         };
-        let engine = Arc::new(engine);
+        #[cfg(target_os = "android")]
+        let fallback = vulkan_failure.map(|reason| EngineFallback {
+            requested: "ncnn-vulkan".into(), used: engine.runtime().as_str().into(), reason,
+        }).or(fallback);
+        let device = device_id(engine.runtime());
+        let engine: AnyEngine = Arc::new(engine);
+        let version = runtime::runtime_label();
         *slot = Some(CachedSession {
-            key,
-            engine: Arc::clone(&engine),
-            fallback: fallback.clone(),
+            key, engine: Arc::clone(&engine), device: device.clone(), engine_id: ENGINE_ID, version: version.clone(), fallback: fallback.clone(),
         });
-        Ok((engine, fallback))
+        Ok((engine, device, ENGINE_ID, version, fallback))
     }
 
     /// 丢掉缓存的那份 ONNX 会话（§12.4「idle30 秒释放模型/workspace」），返回交回了几份。
@@ -352,19 +387,20 @@ impl Engine for UpscaleEngine {
                 .map_err(|error| StageError::failed(error.code(), error.message()))?;
             inputs::verify_file(&model_path, &grant.content_hash, grant.byte_length)
                 .map_err(|error| StageError::failed(error.code(), error.message()))?;
-            let (onnx, fallback) = self.open_for(
+            let (onnx, device, engine_id, version, fallback) = self.open_for(
                 &model_path,
                 stage.engine_policy,
                 scale,
                 max_pixels,
                 min_input_edge,
                 &grant.relative_path,
+                request.cancel,
+                request.progress,
             )?;
-            let device = device_id(onnx.runtime());
             (
                 onnx as Arc<dyn UpscaleEngineTrait>,
-                ENGINE_ID,
-                runtime::runtime_label(),
+                engine_id,
+                version,
                 device,
                 fallback,
             )
@@ -398,7 +434,8 @@ impl Engine for UpscaleEngine {
             cancel: Some(request.cancel.clone()),
             ..UpscaleOptions::default()
         };
-        let upscaled = upscale::upscale_rgba_with_allocation_recovery(engine.as_ref(), rgba.as_raw(), width, height, options, min_input_edge)
+        let upscaled = upscale::upscale_rgba_with_recovery_progress(engine.as_ref(), rgba.as_raw(), width, height, options, min_input_edge,
+            &|completed, total| (request.progress)(30 + (completed * 54 / total.max(1)) as u32))
             .map_err(to_stage_error)?;
         check_cancelled(request.cancel)?;
         (request.progress)(85);

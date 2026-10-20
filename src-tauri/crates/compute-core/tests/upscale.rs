@@ -234,3 +234,20 @@ fn a_cancelled_task_stops_between_tiles() {
         "the fourth tile must not start"
     );
 }
+#[test]
+fn tile_progress_arrives_before_completion_and_can_cancel_remaining_work() {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}, Mutex};
+    use yomika_compute_core::cancel::CancelToken;
+    use yomika_compute_core::upscale::{upscale_rgba_with_progress, NearestNeighbourEngine};
+    let flag = Arc::new(AtomicBool::new(false));
+    let reports = Mutex::new(Vec::new());
+    let engine = NearestNeighbourEngine { scale: 2, max_pixels: 100_000 };
+    let options = UpscaleOptions { tile_size: 16, cancel: Some(CancelToken::watch(flag.clone())), ..Default::default() };
+    let result = upscale_rgba_with_progress(&engine, &vec![128; 32*32*4], 32, 32, options,
+        &|completed, total| {
+            reports.lock().unwrap().push((completed, total));
+            if completed == 1 { flag.store(true, Ordering::Relaxed); }
+        });
+    assert_eq!(result.unwrap_err(), yomika_compute_core::error::ComputeError::Cancelled);
+    assert_eq!(*reports.lock().unwrap(), vec![(0,4),(1,4)]);
+}

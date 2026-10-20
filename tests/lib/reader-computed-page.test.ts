@@ -138,6 +138,7 @@ function bridge(options: {
         });
     }),
     cancel: vi.fn(async () => ({ ok: true as const, value: 'alreadyTerminal' as const })),
+    jobGet: vi.fn(async () => ({ ok: true as const, value: snapshot('queued', 0) })),
     jobArtifacts: vi.fn(async () => ({ ok: true as const, value: options.artifacts ?? [] })),
     acquireArtifact: vi.fn(async (_jobId: string, artifactId: string) => ({ ok: true as const, value: lease(artifactId) })),
     releaseArtifact: vi.fn(async () => ({ ok: true as const, value: undefined })),
@@ -194,11 +195,86 @@ function flush(): Promise<void> {
 
 beforeEach(() => setImageDecoderForTests(async () => undefined));
 afterEach(() => {
+  vi.useRealTimers();
   setImageDecoderForTests(undefined);
   vi.restoreAllMocks();
 });
 
 describe('loadReaderComputedPage', () => {
+  it('recovers a completed job when its terminal event was lost', async () => {
+    vi.useFakeTimers();
+    const b = bridge({ artifacts: [artifact()] });
+    b.jobGet = vi.fn(async () => ({ ok: true as const, value: snapshot('completed', 3) }));
+    const { cache } = readonlyCache();
+    let handle: Awaited<ReturnType<typeof load>>;
+    void load(b, cache).then((value) => { handle = value; });
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(handle?.url).toBe('yomika-image://assets/artifact-1');
+    expect(b.listeners()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+    if (handle) cache.release(handle);
+  });
+
+  it('settles and returns its lease when decoding never completes', async () => {
+    vi.useFakeTimers();
+    setImageDecoderForTests(() => new Promise(() => {}));
+    const b = bridge({ artifacts: [artifact()], submit: () => success() });
+    const { cache } = readonlyCache();
+    const onFailure = vi.fn();
+    let ended = false;
+    const pending = loadReaderComputedPage({ repository: b, cache, stages: [claim()],
+      submit: (repo) => repo.submitReaderPage(PAYLOAD), onFailure });
+    void pending.then(() => { ended = true; });
+    await vi.advanceTimersByTimeAsync(150_001);
+    expect(ended).toBe(true);
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({ code: 'COMPUTE_TIMEOUT' }));
+    expect(b.releaseArtifact).toHaveBeenCalledWith('lease-artifact-1');
+    expect(b.listeners()).toBe(0);
+  });
+
+  it('returns immediately on abort even while submission is still pending', async () => {
+    vi.useFakeTimers();
+    let answer!: (value: Result<ComputeSubmitted>) => void;
+    const b = bridge({ submit: () => new Promise((resolve) => { answer = resolve; }) });
+    const { cache } = readonlyCache();
+    const controller = new AbortController();
+    let ended = false;
+    void load(b, cache, controller.signal).then(() => { ended = true; });
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(ended).toBe(true);
+    answer(await success());
+    await vi.advanceTimersByTimeAsync(1);
+    expect(b.cancel).toHaveBeenCalledWith('job-1', 3);
+  });
+
+  it('settles a completed job without a verified final artifact', async () => {
+    const b = bridge({ artifacts: [artifact({ verified: false })], submit: () => success() });
+    const { cache } = readonlyCache();
+    const onFailure = vi.fn();
+    await expect(loadReaderComputedPage({ repository: b, cache, stages: [claim()],
+      submit: (repo) => repo.submitReaderPage(PAYLOAD), onFailure })).resolves.toBeUndefined();
+    expect(onFailure).toHaveBeenCalledWith(expect.objectContaining({ code: 'COMPUTE_ARTIFACT_INVALID' }));
+    expect(b.acquireArtifact).not.toHaveBeenCalled();
+    expect(b.listeners()).toBe(0);
+  });
+
+  it('does not release a decoding lease twice when it finishes after timeout', async () => {
+    vi.useFakeTimers();
+    let finishDecode!: () => void;
+    setImageDecoderForTests(() => new Promise<void>((resolve) => { finishDecode = resolve; }));
+    const b = bridge({ artifacts: [artifact()], submit: () => success() });
+    const { cache } = readonlyCache();
+    const pending = load(b, cache);
+    await vi.advanceTimersByTimeAsync(150_001);
+    await expect(pending).resolves.toBeUndefined();
+    finishDecode();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(b.releaseArtifact).toHaveBeenCalledExactlyOnceWith('lease-artifact-1');
+    expect(b.acquireArtifact).toHaveBeenCalledTimes(1);
+    expect(peekCachedImage(cache, IDENTITY)).toBeUndefined();
+    expect(vi.getTimerCount()).toBe(0);
+  });
 
   it('settles a host-cancelled job without waiting for a local AbortSignal', async () => {
     const repo = bridge();
@@ -643,6 +719,17 @@ function local(
 }
 
 describe('loadLocalRenditions', () => {
+  it('returns host cancellation separately from a failed upscale stage', async () => {
+    const b = bridge();
+    const { cache } = readonlyCache();
+    const onFailure = vi.fn();
+    const pending = local(b, cache, { onFailure });
+    await flush();
+    b.emit(snapshot('cancelled', 2));
+    expect(await pending).toEqual({ cancelled: true });
+    expect(onFailure).not.toHaveBeenCalled();
+  });
+
   it('submits the upscale stage once and hands back the artifact it adopted', async () => {
     const b = bridge({
       artifacts: [artifact({ stageId: READER_UPSCALE_STAGE_ID, artifactId: 'upscale-1' })],

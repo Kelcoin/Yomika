@@ -68,7 +68,7 @@ yomika-compute-core = { path = "../crates/compute-core", features = ["directml",
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-yomika-compute-core = { path = "../crates/compute-core", features = ["nnapi"] }
+yomika-compute-core = { path = "../crates/compute-core", features = ["nnapi", "ncnn-vulkan"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 yomika-compute-core = { path = "../crates/compute-core", features = ["coreml"] }

@@ -47,9 +47,11 @@ let hostJobSequence = 0;
 let hostCommands: string[] = [];
 /** 宿主在这份产物上报的引擎交代（7-b-ix 的两栏）。默认「没交代」：老 worker 的形态。 */
 let hostEnginePolicy: 'auto' | 'cpu' | 'gpu' | null = null;
+let hostEngineDeviceId: string | undefined;
 let hostEngineFallback: { requested: string; used: string; reason: string } | null = null;
 /** 宿主让这次任务以这个码失败（`null` = 正常跑）。 */
 let hostFailCode: string | null = null;
+let hostCancelled = false;
 /** 宿主让这个阶段**跑起来之后再失败**（租借那一步答失败）：全任务级的 `failCode` 分不出阶段。 */
 let hostFailStage: HostStage | null = null;
 let hostFailStageCode = 'COMPUTE_INTERNAL';
@@ -70,9 +72,11 @@ function installHost(options: {
   acquireNeverLands?: boolean;
   /** 产物上写「被问的是哪条政策」以及真回退时想要谁 / 用了谁 / 为什么。 */
   enginePolicy?: 'auto' | 'cpu' | 'gpu' | null;
+  engineDeviceId?: string;
   engineFallback?: { requested: string; used: string; reason: string } | null;
   /** 任务以这个码失败（`GPU_OUTPUT_INVALID` 这类强制失败的码也走这里）。 */
   failCode?: string;
+  cancelled?: boolean;
   /** 只让这一个阶段失败（产物已经在列表里，租借那一步答失败）。 */
   failStage?: HostStage;
   failStageCode?: string;
@@ -81,8 +85,10 @@ function installHost(options: {
   hostSubmitFails = options.submitFails ?? false;
   hostAcquireNeverLands = options.acquireNeverLands ?? false;
   hostEnginePolicy = options.enginePolicy ?? null;
+  hostEngineDeviceId = options.engineDeviceId;
   hostEngineFallback = options.engineFallback ?? null;
   hostFailCode = options.failCode ?? null;
+  hostCancelled = options.cancelled ?? false;
   hostFailStage = options.failStage ?? null;
   hostFailStageCode = options.failStageCode ?? 'COMPUTE_INTERNAL';
   hostCommands = [];
@@ -114,7 +120,7 @@ function submitJob(args: Record<string, unknown> | undefined, stages: HostStage[
         jobId,
         priority: payload.priority,
         // 任务以失败告终的那一条：门是在提交应答自带的快照上看见它的（事件可能永远不来）。
-        state: hostFailCode === null
+        state: hostCancelled ? 'cancelled' : hostFailCode === null
           ? { running: { stage: stages[stages.length - 1]!, index: 0 } }
           : { failed: { code: hostFailCode } },
         subscribers: 1,
@@ -164,6 +170,7 @@ async function hostUpscaleAnswer(command: string, args?: Record<string, unknown>
           engineId: 'cpu',
           enginePrecision: 'Fp32',
           enginePolicy: hostEnginePolicy,
+          ...(hostEngineDeviceId ? { engineDeviceId: hostEngineDeviceId } : {}),
           engineFallback: hostEngineFallback,
           pipelineRevision: 'test',
           verified: true,
@@ -220,7 +227,7 @@ function enhancedReader(
   pageCount: number,
   lease: (pageIndex: number) => Promise<HostLease> = async (pageIndex) => ({ url: `blob:enhanced-${pageIndex}`, bytes: 1 }),
   /** 宿主这次怎么交代引擎、或者怎么失败（见 `installHost`），以及这本档案叫什么。 */
-  host: { archiveId?: string; enginePolicy?: 'auto' | 'cpu' | 'gpu' | null; engineFallback?: { requested: string; used: string; reason: string } | null; failCode?: string } = {},
+  host: { archiveId?: string; engineDeviceId?: string; enginePolicy?: 'auto' | 'cpu' | 'gpu' | null; engineFallback?: { requested: string; used: string; reason: string } | null; failCode?: string } = {},
 ) {
   const { archiveId = 'enhancement-test', ...hostOptions } = host;
   installHost({ ...hostOptions, lease });
@@ -248,6 +255,20 @@ afterEach(() => {
 });
 
 describe('reader route', () => {
+  it('does not label a displayed successful page as failed when speculative compute fails', async () => {
+    enhancedReader(2, async page => {
+      if (page === 0) hostFailCode = 'COMPUTE_RESOURCE_LIMIT';
+      return { url: `blob:enhanced-${page}`, bytes: 1 };
+    }, { archiveId: 'successful-visible-background-failed' });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    await waitFor(() => expect(hostJobs.size).toBeGreaterThan(1));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(screen.queryByText(/超分这一步没跑成/)).not.toBeInTheDocument();
+  });
+
   it('shows the initial page without waiting for a slow neighbour prefetch', async () => {
     const cache = getNativeImageCache();
     const pending: Array<() => void> = [];
@@ -1434,6 +1455,17 @@ describe('reader route', () => {
     expect(commands).not.toContain('compute_submit_reader_page');
   });
 
+  it('quietly displays successful hardware output without a late hardware toast', async () => {
+    enhancedReader(1, async (index) => ({ url: `blob:enhanced-${index}`, bytes: 1 }), {
+      archiveId: 'quiet-vulkan-output', enginePolicy: 'auto', engineDeviceId: 'vulkan:Adreno (TM) 750',
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(screen.queryByText(/超分正在使用/)).not.toBeInTheDocument();
+  });
+
   it('says out loud when the page was not computed by the runtime it asked for', async () => {
     // 「点的是显卡、跑的是 CPU」以前只有「成功」这一个结果，界面什么都不说（docs/71:126
     // 要求 auto 显式回退并展示原因）。交代来自产物上的那两栏，而且只说一次——同一台机器上
@@ -1972,6 +2004,7 @@ describe('reader route', () => {
     /** 前几次问能力清单先答不上（对面刚起、网络抖一下）：默认 0。 */
     probeFailures?: number;
     localModel?: string;
+    pageCount?: number;
   }): { calls: Array<[string, Record<string, unknown> | undefined]> } {
     const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     let probes = 0;
@@ -2022,7 +2055,7 @@ describe('reader route', () => {
         return options.process ? options.process(args) : [0x89, 0x50, 0x4e, 0x47];
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
-      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'remote-reader', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'remote-reader', title: 'Reader', pages: Array.from({ length: options.pageCount ?? 1 }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
       if (command === 'save_preferences') return { ok: true, value: (args?.input ?? {}) };
@@ -2088,6 +2121,45 @@ describe('reader route', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
   });
 
+  it('retries a transient remote failure without launching local inference', async () => {
+    installHost();
+    let requests = 0;
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false }, localModel: 'local-model',
+      process: () => ++requests === 1
+        ? { ok: false, error: { code: 'NETWORK', message: 'temporary connection loss', retryable: true } }
+        : [0x89, 0x50, 0x4e, 0x47],
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(requests).toBeGreaterThanOrEqual(2), { timeout: 7000 });
+    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
+  });
+
+  it('processes a newly visible remote page while the previous page waits to retry', async () => {
+    installHost();
+    const requested: number[] = [];
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false }, localModel: 'local-model', pageCount: 2,
+      process: (args) => {
+        const index = (args?.input as { pageIndex: number }).pageIndex;
+        requested.push(index);
+        return index === 0
+          ? { ok: false, error: { code: 'NETWORK', message: 'temporary failure', retryable: true } }
+          : [0x89, 0x50, 0x4e, 0x47];
+      },
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(requested).toEqual([0]));
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await waitFor(() => expect(requested).toContain(1));
+    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
+  });
+
   it('offers local upscale when the remote machine cannot provide it', async () => {
     installHost();
     const { calls } = remoteReader({ ready: { upscale: false, dlssnr: false }, localModel: 'local-model' });
@@ -2096,6 +2168,30 @@ describe('reader route', () => {
     fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(calls.filter(([name]) => name === 'compute_submit_reader_page')).toHaveLength(1));
     expect(calls.some(([name]) => name === 'remote_compute_process')).toBe(false);
+  });
+
+  it('stops retrying repeatedly cancelled local jobs and explains the failure', async () => {
+    installHost({ cancelled: true });
+    remoteReader({ ready: { upscale: false, dlssnr: false }, localModel: 'local-model' });
+    await screen.findByRole('img', { name: '第 1 页' });
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+      for (let index = 0; index < 2; index += 1) {
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      }
+      expect(hostCommands.filter((name) => name === 'compute_submit_reader_page')).toHaveLength(3);
+      expect(screen.getByText(/本地超分任务多次中断/)).toBeInTheDocument();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(screen.getByRole('img', { name: '第 1 页' })).not.toHaveAttribute('src', 'blob:enhanced-0');
+      expect(screen.queryByText(/处理中/)).not.toBeInTheDocument();
+      fireEvent.mouseMove(reader, { clientY: 30 });
+      // Reopening chrome must not silently restart an exhausted task.
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(hostCommands.filter((name) => name === 'compute_submit_reader_page')).toHaveLength(3);
+    } finally { vi.useRealTimers(); }
   });
 
   it('takes the reader controls from the list the remote machine reports', async () => {

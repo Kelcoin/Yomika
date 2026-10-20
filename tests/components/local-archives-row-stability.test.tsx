@@ -40,21 +40,43 @@ function installVirtualLayoutFake() {
   const offsetHeight = Object.getOwnPropertyDescriptor(proto, 'offsetHeight')!;
   const originalResizeObserver = window.ResizeObserver;
 
+  /** 一处尺寸口径，四个属性一起答：虚拟器读 `offset*`，可测性闸门读 `client*`。
+   * 只答一半的话 jsdom 会说「视口量到 0 高」，而 0 高在组件里等价于「面板被藏
+   * 起来了」——那个闸门会按设计冻结行窗口，于是滚动一条真实布局里该前进的列表
+   * 在测试里永远前进不了。 */
+  const describeHeight = function describeHeight(this: HTMLElement): number {
+    if (this.closest('[hidden]')) return 0;
+    if (this.classList.contains('local-archives-list') || this.classList.contains('workspace')) return VIEWPORT_HEIGHT;
+    if (this.classList.contains('archive-row-wrap')) return ARCHIVE_LIST_ROW_STRIDE;
+    return 0;
+  };
+  const describeWidth = function describeWidth(this: HTMLElement): number {
+    if (this.closest('[hidden]')) return 0;
+    if (this.classList.contains('local-archives-list') || this.classList.contains('workspace')) return VIEWPORT_WIDTH;
+    return 0;
+  };
   Object.defineProperty(proto, 'offsetHeight', {
     configurable: true,
     get(this: HTMLElement) {
-      if (this.closest('[hidden]')) return 0;
-      if (this.classList.contains('local-archives-list') || this.classList.contains('workspace')) return VIEWPORT_HEIGHT;
-      if (this.classList.contains('archive-row-wrap')) return ARCHIVE_LIST_ROW_STRIDE;
-      return 0;
+      return describeHeight.call(this);
+    },
+  });
+  Object.defineProperty(proto, 'clientHeight', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return describeHeight.call(this);
     },
   });
   Object.defineProperty(proto, 'offsetWidth', {
     configurable: true,
     get(this: HTMLElement) {
-      if (this.closest('[hidden]')) return 0;
-      if (this.classList.contains('local-archives-list') || this.classList.contains('workspace')) return VIEWPORT_WIDTH;
-      return 0;
+      return describeWidth.call(this);
+    },
+  });
+  Object.defineProperty(proto, 'clientWidth', {
+    configurable: true,
+    get(this: HTMLElement) {
+      return describeWidth.call(this);
     },
   });
 
@@ -86,6 +108,10 @@ function installVirtualLayoutFake() {
     observers.length = 0;
     Object.defineProperty(proto, 'offsetWidth', offsetWidth);
     Object.defineProperty(proto, 'offsetHeight', offsetHeight);
+    // client* 本来住在 Element.prototype 上，我们只是在这层加了自己的那一份：
+    // 删掉自有的那份，查找自然落回原型链上的原实现（jsdom 的 0）。
+    delete (proto as unknown as Record<string, unknown>).clientWidth;
+    delete (proto as unknown as Record<string, unknown>).clientHeight;
     window.ResizeObserver = originalResizeObserver;
   };
 }

@@ -45,6 +45,8 @@ android {
             }
         }
         getByName("release") {
+            // Opt-in local diagnostics; ordinary release packages stay non-debuggable.
+            isDebuggable = System.getenv("YOMIKA_ANDROID_DIAGNOSTICS") == "1"
             isMinifyEnabled = true
             if (releaseKeystore.exists() && releaseStorePassword != null && releaseKeyAlias != null && releaseKeyPassword != null) {
                 signingConfig = signingConfigs.create("release") {

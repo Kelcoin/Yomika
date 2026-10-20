@@ -3,7 +3,8 @@ import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { ArchiveCardTags, CardTagRows } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2 } from 'lucide-react';
+import { useStableVirtualRows } from '../lib/useStableVirtualRows';
+import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
@@ -308,19 +309,6 @@ interface LibraryWorkspaceProps {
   onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
-/** 页面被 `RetainedPage` 收起来时是 `display:none`：滚动容器量到的高度是 0，虚拟列表
- * 只剩最前面一两行（有时一行不剩），整屏的行跟着卸载——封面句柄一放手、URL 就被
- * 撤销，回到前台重新挂载只能从骨架开始。一整屏封面同时闪一下，就是用户报的那条。
- * 所以「同一个列表的行数没变、窗口里的行却突然塌了一大截」时不跟着塌：沿用上一次
- * 非空的那批行（藏起来时也不画，没有额外开销）。真空了（换了筛选、库里没有东西）
- * 或者只是窗口拖小了零星一行，就照实渲染，免得留着一批已经没有数据的卡片。 */
-function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): { items: T[]; totalSize: number } {
-  const previous = useRef({ items, totalSize, count });
-  if (items.length > 0) previous.current = { items, totalSize, count };
-  const collapsed = previous.current.count === count && previous.current.items.length - items.length >= 2;
-  return collapsed ? previous.current : { items, totalSize };
-}
-
 export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, peekThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortTimeLabel = '添加时间', archiveDateById, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
@@ -421,6 +409,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
    * 真实滚动就留在页面上——用户 2026-10-15 报的「顶部搜索框滚出视口」正是它。 */
   const overscrollScroller = useRef<HTMLElement | undefined>(undefined);
   const overscrollStartScrollTop = useRef<number | undefined>(undefined);
+  /** 上一条 move 的纵坐标。起手不在尽头的手势要靠它判断手指是不是在朝尽头方向走——
+   * 滚到尽头的那一刻就在同一次手势里接管（见 touchMove 的接管分支）。 */
+  const overscrollLastY = useRef<number | undefined>(undefined);
   /** 认领那一刻记下的滚动位置：之后它要是变了，说明浏览器在这段里自己滚了（真机上
    * preventDefault 有时已经拦不住），那这次过滚就让位，不能两套滚动叠着走。 */
   const overscrollClaimedScrollTop = useRef<number | undefined>(undefined);
@@ -463,6 +454,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     overscrollStartX.current = undefined;
     overscrollScroller.current = undefined;
     overscrollStartScrollTop.current = undefined;
+    overscrollLastY.current = undefined;
     overscrollClaimedScrollTop.current = undefined;
     paintPull(0);
     setOverscroll(0);
@@ -608,14 +600,34 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       // 真机上这段里页面已经滚了一点点（见 touchMove 的认领分支）。
       overscrollScroller.current = position;
       overscrollStartScrollTop.current = position.scrollTop;
+      overscrollLastY.current = event.touches[0]?.clientY ?? undefined;
     };
 
     const touchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 1) { cancelOverscroll(); return; }
+      const y = event.touches[0]?.clientY ?? overscrollStartY.current ?? 0;
+      const step = overscrollLastY.current === undefined ? 0 : y - overscrollLastY.current;
+      overscrollLastY.current = y;
+      // 起手不在尽头的手势：手指还按着，滚到尽头那一刻就当场接管，认定距离从这一刻
+      // 重新算。先前只在 touchstart 判一次边沿，于是「先滚到顶 → 松手 → 再往下拉」
+      // 成了唯一触发方式——用户 2026-10-19 报的就是这个。
+      if (!overscrollClaimed.current && overscrollEdge.current === undefined && step !== 0) {
+        const scroller = overscrollScroller.current;
+        if (scroller) {
+          const atTop = scroller.scrollTop <= 0;
+          const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+          const reached = atTop && step > 0 ? 'top' : atBottom && step < 0 ? 'bottom' : undefined;
+          if (reached) {
+            overscrollEdge.current = reached;
+            overscrollStartY.current = y;
+            overscrollStartX.current = event.touches[0]?.clientX ?? 0;
+            overscrollStartScrollTop.current = scroller.scrollTop;
+          }
+        }
+      }
       const edge = overscrollEdge.current;
       const start = overscrollStartY.current;
       if (!edge || start === undefined) return;
-      if (event.touches.length !== 1) { cancelOverscroll(); return; }
-      const y = event.touches[0]?.clientY ?? start;
       const dx = (event.touches[0]?.clientX ?? 0) - (overscrollStartX.current ?? 0);
       if (!overscrollClaimed.current && Math.max(Math.abs(dx), Math.abs(y - start)) < PULL_CLAIM_PX) return;
       if (!overscrollClaimed.current && Math.abs(dx) > Math.abs(y - start)) { cancelOverscroll(); return; }
@@ -623,25 +635,26 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       const travel = (y - start) * direction;
       if (overscrollClaimed.current) {
         // 认领之后那一层要是还在动，说明浏览器并没有真把这次手势交出来（真机上
-        // preventDefault 有时已经拦不住已经在跑的那次滚动）。两套滚动不能叠着走：
-        // 列表一边被 translate 顶下去、页面一边在滚，用户看到的就是「顶栏滚出视口 +
-        // 卡片与顶栏之间一大段空隙」（2026-10-15 报的档案库那一处）。这一刻让位，
-        // 把列表放回原位，剩下的交给浏览器。
+        // preventDefault 有时已经拦不住已经在跑的那次滚动）。离开端点时让位，
+        // 端点处的小数误差则不应取消这一轮过滚。
         const scroller = overscrollScroller.current;
         if (scroller && overscrollClaimedScrollTop.current !== undefined && scroller.scrollTop !== overscrollClaimedScrollTop.current) {
-          cancelOverscroll();
-          return;
+          const atEdge = direction === 1 ? scroller.scrollTop <= 1
+            : scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 1;
+          if (!atEdge) { cancelOverscroll(); return; }
+          overscrollClaimedScrollTop.current = scroller.scrollTop;
         }
         // 已经认领过：手指往回走就把列表送回原位，但这一档仍归下拉——浏览器那次
         // 手势已经在 preventDefault 里交出来了，中途还回去只会两套滚动打架。
-        event.preventDefault();
+        if (event.cancelable) event.preventDefault();
         applyOverscroll(direction * Math.max(0, travel));
         return;
       }
       if (travel < 0) {
-        // 手指先走的是「滚动页面」那一侧（向上推离顶部）。这一次手势就交给浏览器，
-        // 之后不再认领：先前的实现在这里只是清了端点，而下一次带向下分量的 move
-        // 又会 preventDefault，浏览器早已开始滚，于是内容从手指底下滑走。
+        // 手指先走的是「滚动页面」那一侧（向上推离顶部）。这一次手势就交给浏览器。
+        // 之后只有在**又滚回尽头**时才会重新接管（见上面那段）：那时浏览器已经没有
+        // 可滚的余量，接管是安全的；而先前这里只是清了端点，下一次带向下分量的 move
+        // 就会 preventDefault，浏览器早已开始滚，于是内容从手指底下滑走。
         overscrollEdge.current = undefined;
         overscrollStartY.current = undefined;
         return;
@@ -663,7 +676,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       // that starts it: once a touch browser has begun its own scroll it stops
       // honouring preventDefault for the rest of the gesture, and the content
       // would slide out from under the drag.
-      event.preventDefault();
+      if (event.cancelable) event.preventDefault();
       overscrollDirection.current = direction;
       setOverscrollGesture('touch');
       applyOverscroll(direction * travel);
@@ -920,8 +933,10 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   });
   // 藏起来时别把整屏的行塌掉（见 `useStableVirtualRows`）。两个虚拟列表各调一次，
   // 永远按同一个顺序调用，钩子位置是稳的。
-  const shownListRows = useStableVirtualRows(rows.getVirtualItems(), rows.getTotalSize(), filteredArchives.length);
-  const shownThumbnailRows = useStableVirtualRows(thumbnailRows.getVirtualItems(), thumbnailRows.getTotalSize(), gridRows.length);
+  const viewportMeasurable = pageActive && document.visibilityState !== 'hidden'
+    && (compact ? scrollHostElement?.clientHeight : scrollRef.current?.clientHeight) !== 0;
+  const shownListRows = useStableVirtualRows(rows.getVirtualItems(), rows.getTotalSize(), filteredArchives.length, viewportMeasurable);
+  const shownThumbnailRows = useStableVirtualRows(thumbnailRows.getVirtualItems(), thumbnailRows.getTotalSize(), gridRows.length, viewportMeasurable);
 
   /** What a shift click extends from: the last row the user touched. */
   const selectionAnchor = useRef<string>();
@@ -1120,6 +1135,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               updateSearchQuery(searchDraft);
             }}
           />
+          {searchDraft.length > 0 && <button type="button" className="search-clear" aria-label="清除搜索" title="清除搜索" onClick={() => updateSearchQuery('')}><X aria-hidden="true" /></button>}
           {!searchScope && <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />}
         </label>
         {onSavePreset && (

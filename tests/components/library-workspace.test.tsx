@@ -48,6 +48,35 @@ beforeEach(() => { vi.spyOn(window, 'requestAnimationFrame').mockImplementation(
 afterEach(() => vi.restoreAllMocks());
 
 describe('library workspace', () => {
+  it('continues a native card drag into bottom feedback without a second touch', () => {
+    renderWorkspace({ archives });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    scrollable(list, { scrollTop: 1000, clientHeight: 800, scrollHeight: 4000 });
+    fireEvent.resize(window);
+    const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+    fireEvent.touchStart(card, { touches: [{ clientX: 10, clientY: 300 }] });
+    list.scrollTop = 3200;
+    const move = (y: number) => {
+      const event = new Event('touchmove', { bubbles: true, cancelable: false });
+      Object.defineProperty(event, 'touches', { value: [{ clientX: 10, clientY: y }] });
+      fireEvent(card, event);
+    };
+    move(200);
+    move(160);
+    expect(pull.style.transform).toBe(`translateY(${rubberBand(-40, 72)}px)`);
+    move(140);
+    expect(pull.style.transform).toBe(`translateY(${rubberBand(-60, 72)}px)`);
+    fireEvent.touchEnd(card);
+    expect(pull).toHaveAttribute('data-overscroll', 'settle');
+  });
+  it('shows a clear search control without focusing the input', () => {
+    const change = vi.fn();
+    renderWorkspace({ archives: [], searchQuery: 'sample', onSearchQueryChange: change });
+    fireEvent.click(screen.getByRole('button', { name: '清除搜索' }));
+    expect(change).toHaveBeenCalledWith('');
+  });
+
   it('fades the first-load skeleton over the arriving cards', async () => {
     const view = renderWorkspace({ archives: [], listLoading: true });
     expect(screen.getByRole('status', { name: '正在读取档案' })).toBeInTheDocument();
@@ -732,6 +761,44 @@ describe('library workspace', () => {
     fireEvent.touchEnd(list);
     expect(onRefresh).toHaveBeenCalledTimes(1);
     // The list is already back where it belongs; the disc carries the request.
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+  });
+
+  it('takes over the end the finger reaches inside one gesture', () => {
+    // 用户的报法：得先滚到尽头、松手、再往尽头方向拉才触发。现在滚到尽头那一刻
+    // 就接管——同一次手势里把列表拖到顶、手指继续往下，下拉当场跟手。
+    const onRefresh = vi.fn();
+    renderWorkspace({ archives, onRefresh });
+    const list = screen.getByRole('list', { name: '档案' });
+    const pull = list.querySelector('.archive-list-pull') as HTMLElement;
+    // 起手时列表在中间：此刻哪一端都越不过去。
+    scrollable(list, { scrollTop: 900, clientHeight: 800, scrollHeight: 4000 });
+
+    fireEvent.touchStart(list, { touches: [{ clientY: 400, clientX: 0 }] });
+    // 手指往上推，列表自己滚（浏览器那一段）：还没到顶，不该下拉。
+    fireEvent.touchMove(list, { touches: [{ clientY: 300, clientX: 0 }] });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    // 滚到顶了（浏览器把 scrollTop 归零），手指还在往下走：这一刻接管，认定距离
+    // 从这一刻重新算，所以只走 2px（比 EDGE_CLAIM_PX 那 4px 还小）还不该动。
+    list.scrollTop = 0;
+    fireEvent.touchMove(list, { touches: [{ clientY: 330, clientX: 0 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 332, clientX: 0 }] });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+
+    // 手指反过来往上走够认定距离：这一档交还给浏览器（列表自己滚），下拉回到原位。
+    fireEvent.touchMove(list, { touches: [{ clientY: 320, clientX: 0 }] });
+    expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
+    expect(pull).not.toHaveAttribute('data-overscroll');
+
+    // 再往下拉：又回到尽头，同一次手势里重新接管并认领。
+    fireEvent.touchMove(list, { touches: [{ clientY: 360, clientX: 0 }] });
+    fireEvent.touchMove(list, { touches: [{ clientY: 520, clientX: 0 }] });
+    expect(pull).toHaveStyle({ transform: `translateY(${rubberBand(160, 104)}px)` });
+    expect(pull).toHaveAttribute('data-overscroll', 'touch');
+
+    fireEvent.touchEnd(list);
+    expect(onRefresh).toHaveBeenCalledTimes(1);
     expect(pull).toHaveStyle({ transform: 'translateY(0px)' });
   });
 

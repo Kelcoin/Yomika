@@ -417,6 +417,47 @@ fn a_remote_page_is_computed_by_the_worker_of_this_machine() {
     manager.shutdown();
 }
 
+#[test]
+fn a_remote_reader_gets_a_turn_under_local_reading_memory_pressure() {
+    use yomika_lib::compute::manager::{PressureGauge, PressureSource, SourceFile};
+    use yomika_lib::compute::reader::{self, ReaderPageRequest};
+    use yomika_lib::compute::resource_policy::{PressureReading, soft_commit_limit};
+    use yomika_lib::compute::scheduler::Priority;
+    let sandbox = Sandbox::new("reading-pressure");
+    sandbox.install_model(REMOTE_MODEL, "1", b"not an onnx file", 1, 2);
+    let mut config = config(&sandbox, Duration::from_millis(600));
+    let pressure = PressureGauge::new(PressureReading {
+        private_commit_bytes: Some(soft_commit_limit(config.physical_ram_bytes) + 1),
+        gpu_free_bytes: Some(16 * 1024 * 1024 * 1024),
+        gpu_total_bytes: Some(32 * 1024 * 1024 * 1024),
+    });
+    config.pressure_source = PressureSource::Injected(pressure);
+    let manager = ComputeManager::start(config, no_events()).unwrap();
+    let page = page_png();
+    let path = sandbox.root.join("local-page.png");
+    std::fs::write(&path, &page).unwrap();
+    let planned = reader::plan_reader_page(&sandbox.root, &ReaderPageRequest {
+        scope_id: "local".into(), archive_id: "reading".into(), page_index: 0,
+        model_id: REMOTE_MODEL.into(), generation: 1, priority: Priority::Foreground, deadline_ms: 0,
+    }).unwrap();
+    let local_input = planned.input_id.clone();
+    let local = manager.submit(reader::into_request(planned, SourceFile {
+        path, byte_length: page.len() as u64, content_hash: page_hash(&page),
+    })).unwrap();
+    wait_until("本机阅读开始处理", HANDOFF, || {
+        assert!(terminal_of(&manager, &local.job_id).is_none(), "本机任务提前结束：{:?}", manager.job(&local.job_id));
+        is_computing(&manager, &local_input).then_some(())
+    });
+    let (center, port) = center_with(&sandbox, &manager);
+    let response = raw_request(port, &process_request(&page));
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_eq!(state_of(&manager, &local.job_id), Some(JobState::Completed));
+    assert!(manager.all_jobs().iter().any(|job| job.key.input_id == input_id(&page)
+        && job.priority == Priority::Foreground && job.state == JobState::Completed));
+    center.stop();
+    manager.shutdown();
+}
+
 /// ② 认证与 `/v2/ping` 不等 GPU：那一页还在算的时候它们照样立刻答完。
 #[test]
 fn a_ping_answers_while_the_worker_is_busy_with_a_remote_page() {

@@ -737,19 +737,19 @@ describe('reader screen', () => {
   // 同一条路的手势入口：在末页往下一页方向甩一下也该退出。这条路走 `finishDrag`，
   // 它原来只在「页号真的变了」时才提交，末页那一甩连 `move()` 都到不了，手指划到头
   // 只是弹回去——同样是报告 13 说的那一下。
-  it('leaves the reader when a swipe past the last page is released', () => {
+  it.each(['ltr', 'rtl'] as const)('leaves the reader when a %s swipe past the last page is released', (direction) => {
     render(
       <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
         <Routes>
           <Route path="/library" element={<p>library list</p>} />
-          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} />} />
+          <Route path="/reader" element={<ReaderScreen archiveId="a1" title="Test archive" pages={pages} direction={direction} />} />
         </Routes>
       </MemoryRouter>,
     );
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const turnForward = () => {
-      fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 100 }] });
-      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 50, clientY: 100 }] });
+      fireEvent.touchStart(reader, { touches: [{ clientX: direction === 'ltr' ? 200 : 50, clientY: 100 }] });
+      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: direction === 'ltr' ? 50 : 200, clientY: 100 }] });
     };
 
     turnForward();
@@ -763,7 +763,65 @@ describe('reader screen', () => {
     expect(screen.getByText('library list')).toBeInTheDocument();
   });
 
+  it.each(['ltr', 'rtl'] as const)('shows the %s final-page exit cue and exits on release without waiting for spring-back', (direction) => {
+    const animate = vi.fn(() => ({ cancel: vi.fn(), onfinish: null }));
+    const original = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'animate');
+    Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: animate });
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { callback(0); return 1; });
+    try {
+      render(<MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+        <Routes><Route path="/library" element={<p>library list</p>} />
+          <Route path="/reader" element={<ReaderScreen archiveId="exit-cue" title="Final" pages={pages} layout="single" initialPage={2} direction={direction} />} />
+        </Routes>
+      </MemoryRouter>);
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      const startX = direction === 'ltr' ? 240 : 80;
+      const endX = direction === 'ltr' ? 80 : 240;
+      fireEvent.touchStart(reader, { touches: [{ clientX: startX, clientY: 300 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: endX, clientY: 300 }] });
+      const hint = document.querySelector('.reader-exit-hint');
+      expect(hint).toHaveAttribute('data-visible', 'true');
+      expect(hint).toHaveAttribute('data-ready', 'true');
+      expect(hint).toHaveAttribute('data-side', direction === 'ltr' ? 'right' : 'left');
+      expect(hint).toHaveTextContent('松手退出阅读');
+      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: endX, clientY: 300 }] });
+      expect(screen.getByText('library list')).toBeInTheDocument();
+      expect(animate).not.toHaveBeenCalled();
+    } finally {
+      vi.restoreAllMocks();
+      if (original) Object.defineProperty(HTMLElement.prototype, 'animate', original);
+      else delete (HTMLElement.prototype as { animate?: unknown }).animate;
+    }
+  });
+
+  it('hides the final-page exit cue when the gesture is cancelled', () => {
+    vi.useFakeTimers();
+    const view = render(<MemoryRouter><ReaderScreen archiveId="cancel-exit" title="Final" pages={pages} layout="single" initialPage={2} /></MemoryRouter>);
+    try {
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.touchStart(reader, { touches: [{ clientX: 400, clientY: 300 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: 150, clientY: 300 }] });
+      act(() => vi.advanceTimersByTime(32));
+      const hint = document.querySelector('.reader-exit-hint');
+      expect(hint).toHaveAttribute('data-visible', 'true');
+      fireEvent.touchCancel(reader);
+      expect(hint).toHaveAttribute('data-visible', 'false');
+      expect(hint).toHaveAttribute('aria-hidden', 'true');
+      expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
   // 反向的那一头只是停住，不是合上书：报告 13 说的是「往下一页方向」。
+  it('exits past the final page in right-to-left reading', () => {
+    render(<MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+      <Routes><Route path="/library" element={<p>library list</p>} />
+        <Route path="/reader" element={<ReaderScreen archiveId="rtl" title="RTL" pages={pages} direction="rtl" layout="single" initialPage={2} />} />
+      </Routes>
+    </MemoryRouter>);
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowLeft' });
+    expect(screen.getByText('library list')).toBeInTheDocument();
+  });
+
   it('stays put when paging backwards from the first page', () => {
     render(
       <MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
@@ -1077,10 +1135,12 @@ describe('reader screen', () => {
   it('coalesces a burst of pointer moves into one transform write per frame', () => {
     vi.useFakeTimers();
     const view = renderReader();
+    let restoreFrame = () => {};
     try {
       const reader = screen.getByRole('main', { name: '漫画阅读器' });
       fireEvent.mouseDown(reader, { button: 0, clientX: 640, clientY: 200 });
       const scheduled = vi.spyOn(window, 'requestAnimationFrame');
+      restoreFrame = () => scheduled.mockRestore();
       // 一只 1000Hz 的鼠标在两帧之间能塞进十几个 `mousemove`。每一次都排一帧的话，
       // 这一帧里就要往同一个 transform 上写十几遍——写一次和写十六次的画面一样，代价不一样。
       for (let step = 1; step <= 16; step += 1) {
@@ -1093,8 +1153,44 @@ describe('reader screen', () => {
       expect(track.style.transform).toBe('translate3d(-160px,0,0)');
     } finally {
       view.unmount();
+      restoreFrame();
       vi.useRealTimers();
     }
+  });
+
+  it.each(['ltr', 'rtl'] as const)('keeps %s book-end drags bounded and springs back only at the first page', async (direction) => {
+    vi.useFakeTimers();
+    const view = render(<MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+      <Routes><Route path="/library" element={<p>returned to library</p>} />
+        <Route path="/reader" element={<ReaderScreen archiveId="ends" title="Ends" pages={pages} direction={direction} layout="single" />} />
+      </Routes>
+    </MemoryRouter>);
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const track = reader.querySelector('.reader-track') as HTMLElement;
+    const animation = { cancel: vi.fn(), onfinish: undefined as (() => void) | undefined };
+    const animate = vi.fn((_frames: Keyframe[], _options?: KeyframeAnimationOptions) => animation);
+    Object.defineProperty(track, 'animate', { value: animate, configurable: true });
+    const backDx = direction === 'ltr' ? 1500 : -1500;
+    fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 300 }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: 200 + backDx, clientY: 300 }] });
+    act(() => vi.advanceTimersByTime(32));
+    const displacement = Number(track.style.transform.match(/translate3d\(([-\d.]+)px/)?.[1]);
+    expect(Math.abs(displacement)).toBeLessThanOrEqual(64);
+    expect(reader.querySelector('.reader-exit-hint')).toHaveAttribute('data-visible', 'false');
+    fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 200 + backDx, clientY: 300 }] });
+    expect(animate.mock.calls[0]![0][1]).toEqual({ transform: 'translate3d(0px,0,0)' });
+    act(() => animation.onfinish?.());
+    expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+    const key = direction === 'ltr' ? 'ArrowRight' : 'ArrowLeft';
+    fireEvent.keyDown(reader, { key }); fireEvent.keyDown(reader, { key });
+    fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 300 }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: 200 - backDx, clientY: 300 }] });
+    fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 200 - backDx, clientY: 300 }] });
+    expect(animate).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('returned to library')).toBeInTheDocument();
+    await act(async () => {});
+    view.unmount();
+    vi.useRealTimers();
   });
 
   it('finishes the slide before replacing the current page', () => {

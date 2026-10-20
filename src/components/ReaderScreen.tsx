@@ -1,5 +1,5 @@
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, Pause, Play, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, LogOut, Pause, Play, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
@@ -14,6 +14,7 @@ import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowCo
 import { getPlatformCapabilities, setStatusBarVisible } from '../bridge/platform';
 import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
+import { EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
@@ -1004,7 +1005,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * 阅读模式。」`advanceReader` 在边界上被 `clampPage` 夹住，`pageIndex` 原地不动，于是
    * 那一下翻页什么也没发生。现在它接到顶栏返回键的**同一条路径**（`goBack`，见本组件
    * 顶部那颗返回按钮）——连「有没有上一页可回」这种历史语义都跟着一起对，不再另造
-   * 一条退出。只在 `next` 方向上退出：往上一页翻到头应当停在第 1 页，不是合上书。
+   * 一条退出。只在阅读的前进方向上退出（RTL 为 `previous`）：往回翻到头停在第 1 页。
    *
    * `allowExit: false` 是自动翻页：读到最后一页它该停下来等读者，不能自己把书合上。
    * 条漫档（`webtoon`）不进来：连续滚动档的纵向手势根本到不了这里（wheel 监听在
@@ -1014,7 +1015,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (sliding.current) return;
     const current = readerStateRef.current;
     const advanced = advanceReader(current, intent);
-    if (allowExit && intent === 'next' && advanced.pageIndex === current.pageIndex && effectiveLayout !== 'webtoon') {
+    if (allowExit && intent === (current.direction === 'rtl' ? 'previous' : 'next') && advanced.pageIndex === current.pageIndex && effectiveLayout !== 'webtoon') {
       goBack();
       return;
     }
@@ -1023,6 +1024,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     setState(next);
     scrollToPage(next.pageIndex);
   }
+
+  // Touch handlers survive layout/direction changes; their exit must use the current route.
+  const moveRef = useRef(move);
+  moveRef.current = move;
 
   function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -1051,6 +1056,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * why it was impossible to tell whether a turn had been triggered. */
   const [drag, setDrag] = useState<{ dx: number; commits: boolean } | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  const exitHintRef = useRef<HTMLDivElement>(null);
+  const exitHintTextRef = useRef<HTMLSpanElement>(null);
+  const exitHintDrag = useRef<{ progress: number; ready: boolean; side: 'left' | 'right' }>();
+  const hideExitHint = useCallback(() => {
+    exitHintDrag.current = undefined;
+    if (exitHintRef.current) {
+      exitHintRef.current.dataset.visible = 'false';
+      exitHintRef.current.setAttribute('aria-hidden', 'true');
+    }
+  }, []);
   const dragOffset = useRef(0);
   const dragSample = useRef<{ dx: number; elapsed: number; velocity: number }>();
   const horizontalDrag = useRef(false);
@@ -1059,6 +1074,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const sliding = useRef(false);
   const reducedMotionRef = useRef(reduceMotion);
   reducedMotionRef.current = reduceMotion;
+
+  useEffect(() => {
+    if (!pageActive || effectiveLayout === 'webtoon') hideExitHint();
+  }, [effectiveLayout, hideExitHint, pageActive]);
 
   useEffect(() => () => {
     if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current);
@@ -1069,6 +1088,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, [archiveId]);
 
   function finishDrag(dx: number, elapsed: number) {
+    hideExitHint();
     if (sliding.current) return;
     if (dx === 0 && dragOffset.current === 0) return;
     if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current);
@@ -1083,11 +1103,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // `pageIndex !== current.pageIndex` 挡在门外，手指划到头只会弹回去；现在把这一档
     // 也算进 `commit`，由 `move()` 决定那一下是翻页还是退出（`move` 自己认边界）。
     // 条漫档到不了这里：`trackDrag` 在 `webtoon` 上提前返回。
-    const crossedLastPage = intent === 'next' && effectiveLayout !== 'webtoon'
-      && advanceReader(current, intent).pageIndex === current.pageIndex;
+    const boundary = advanceReader(current, intent).pageIndex === current.pageIndex;
+    const crossedLastPage = boundary && intent === (current.direction === 'rtl' ? 'previous' : 'next') && layoutRef.current !== 'webtoon';
     const commit = shouldCommitPageTurn(dx, elapsed, width, velocity)
       && (crossedLastPage || advanceReader(current, intent).pageIndex !== current.pageIndex);
-    const target = commit ? (dx < 0 ? -width : width) : 0;
+    // Only uncommitted boundary drags spring back. A committed final-page
+    // gesture exits on pointer-up instead of waiting for the spring to finish.
+    const target = commit && !boundary ? (dx < 0 ? -width : width) : 0;
     const finish = () => {
       slideAnimation.current?.cancel();
       slideAnimation.current = undefined;
@@ -1097,9 +1119,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (track) track.style.transform = 'translate3d(0,0,0)';
       flushSync(() => {
         setDrag(null);
-        if (commit) move(intent);
+        if (commit) moveRef.current(intent);
       });
     };
+    if (commit && crossedLastPage) { finish(); return; }
     // Keep both neighbouring frames mounted until the outgoing page has left.
     setDrag({ dx: 0, commits: false });
     if (!track?.animate || reducedMotionRef.current) { finish(); return; }
@@ -1107,7 +1130,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     slideAnimation.current = track.animate([
       { transform: `translate3d(${dragOffset.current}px,0,0)` },
       { transform: `translate3d(${target}px,0,0)` },
-    ], { duration: commit ? 240 : 200, easing: 'cubic-bezier(.22,.72,.2,1)', fill: 'forwards' });
+    ], { duration: boundary ? EDGE_SETTLE_MS : commit ? 240 : 200,
+      easing: boundary ? EDGE_SETTLE_EASING : 'cubic-bezier(.22,.72,.2,1)', fill: 'forwards' });
     slideAnimation.current.onfinish = finish;
   }
 
@@ -1115,6 +1139,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (sliding.current) return;
     // A vertical drag is a scroll, not a page turn, and zoomed-in drags pan.
     if (zoomScaleRef.current > 1 || layoutRef.current === 'webtoon' || (!horizontalDrag.current && (Math.abs(dy) > Math.abs(dx) || Math.abs(dx) <= TAP_SLOP))) {
+      hideExitHint();
       dragOffset.current = 0;
       if (trackRef.current) trackRef.current.style.transform = 'translate3d(0,0,0)';
       setDrag(null);
@@ -1127,13 +1152,31 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     dragSample.current = { dx, elapsed, velocity: dt > 0 ? (dx - (previous?.dx ?? 0)) / dt : (previous?.velocity ?? 0) };
     const current = readerStateRef.current;
     const boundary = advanceReader(current, dx < 0 ? 'next' : 'previous').pageIndex === current.pageIndex;
-    dragOffset.current = Math.max(-width, Math.min(width, dx * (boundary ? 0.22 : 1)));
+    const exits = boundary && (dx < 0 ? 'next' : 'previous') === (current.direction === 'rtl' ? 'previous' : 'next');
+    exitHintDrag.current = exits ? {
+      progress: Math.min(1, Math.abs(dx) / Math.min(180, width * 0.2)),
+      ready: shouldCommitPageTurn(dx, elapsed, width, dragSample.current.velocity),
+      side: dx < 0 ? 'right' : 'left',
+    } : undefined;
+    dragOffset.current = boundary ? rubberBand(dx, Math.min(64, width * 0.16)) : Math.max(-width, Math.min(width, dx));
     setDrag((currentDrag) => currentDrag ?? { dx: 0, commits: false });
     if (dragFrame.current === undefined) dragFrame.current = requestAnimationFrame(() => {
       dragFrame.current = undefined;
       if (trackRef.current) trackRef.current.style.transform = `translate3d(${dragOffset.current}px,0,0)`;
+      const hint = exitHintRef.current;
+      const cue = exitHintDrag.current;
+      if (hint) {
+        hint.dataset.visible = cue ? 'true' : 'false';
+        hint.setAttribute('aria-hidden', cue ? 'false' : 'true');
+        if (cue) {
+          hint.dataset.ready = String(cue.ready);
+          hint.dataset.side = cue.side;
+          hint.style.setProperty('--reader-exit-progress', String(cue.progress));
+          if (exitHintTextRef.current) exitHintTextRef.current.textContent = cue.ready ? '松手退出阅读' : '继续拖动退出';
+        }
+      }
     });
-  }, []);
+  }, [hideExitHint]);
 
   const handleTouchStart = useCallback((event: TouchEvent) => {
     // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
@@ -1147,6 +1190,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // Two fingers are a pinch, never a page turn: a zoom gesture used to leave a
     // drag offset behind and could commit a turn on release.
     if (event.touches.length > 1) {
+      hideExitHint();
       touchStartRef.current = null;
       // A second finger takes ownership immediately, including during a swipe's
       // settling animation. Starting another 200ms snap-back delayed the pinch.
@@ -1172,7 +1216,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       setPanning(true);
     }
     touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
-  }, [thumbnailPanelOpen]);
+  }, [hideExitHint, thumbnailPanelOpen]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
     const pinch = pinchStart.current;
@@ -1728,6 +1772,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         </div>
       )}
 
+      {effectiveLayout !== 'webtoon' && <div ref={exitHintRef} className="reader-exit-hint" data-visible="false" data-ready="false" data-side="right" role="status" aria-hidden="true">
+        <span className="reader-exit-hint-icon"><LogOut aria-hidden="true" />
+          <svg className="reader-exit-hint-progress" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="21" pathLength="100" /></svg>
+        </span>
+        <span ref={exitHintTextRef}>继续拖动退出</span>
+      </div>}
+
       {/* Two bars, two directions. They used to be one animated element, so the
           bottom bar slid in from the top of the screen — which is where it does
           not live. 出入场是纯 CSS（见 reader.css 那四条 keyframes），只留一个
@@ -1740,6 +1791,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           <header
             className={`reader-chrome-top${topPresence.leaving ? ' is-leaving' : ''}`}
             onClick={stopChromeToggle}
+            onPointerDown={stopChromeToggle}
             {...windowDrag}
           >
               <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
@@ -1761,6 +1813,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             className={`reader-toolbar${bottomPresence.leaving ? ' is-leaving' : ''}`}
             role="toolbar"
             aria-label="阅读控制"
+            onPointerDown={stopChromeToggle}
             onClick={stopChromeToggle}
           >
               {/* Re-mounted on every page turn: that is what replays the cue. Gated

@@ -13,6 +13,7 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
     let start: { x: number; y: number; edge: 1 | -1 | undefined } | undefined;
     let claimed = false;
     let claimedScrollTop = 0;
+    let lastY = 0;
     let settle: number | undefined;
     let frame: number | undefined;
     let queued = false;
@@ -77,6 +78,7 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
 
       host = scroller;
       start = { x, y, edge };
+      lastY = y;
     };
     const touchStart = (event: TouchEvent) => {
       if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
@@ -87,21 +89,32 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       if (!host || !start) return;
       const dx = x - start.x;
       const dy = y - start.y;
+      const step = y - lastY;
+      lastY = y;
       if (!start.edge) {
-        // Native scrolling may reach an edge during this gesture. Rebase there;
-        // if the browser can no longer cancel, leave the gesture native.
-        const edge = host.scrollTop <= 0 && dy > 0 ? 1 : host.scrollTop + host.clientHeight >= host.scrollHeight - 1 && dy < 0 ? -1 : undefined;
+        // Rebase at the edge reached during native scrolling. The remaining
+        // outward movement belongs to edge feedback, even if it is no longer
+        // possible to cancel the browser's already-running scroll gesture.
+        const edge = host.scrollTop <= 1 && step > 0 ? 1 : host.scrollTop + host.clientHeight >= host.scrollHeight - 1 && step < 0 ? -1 : undefined;
         if (!edge) return;
         start = { x, y, edge };
         return;
       }
-      if (claimed && (!event.cancelable || host.scrollTop !== claimedScrollTop)) { reset(); return; }
+      if (claimed && Math.abs(host.scrollTop - claimedScrollTop) > 1) {
+        // Once native scrolling has reached an edge, later touchmoves are
+        // noncancelable on Chromium. Edge feedback is still safe while the
+        // scrollport stays at that edge; abandon it only if content moves away.
+        const atEdge = start.edge === 1 ? host.scrollTop <= 1
+          : host.scrollTop + host.clientHeight >= host.scrollHeight - 1;
+        if (!atEdge) { reset(); return; }
+        claimedScrollTop = host.scrollTop;
+      }
       const travel = dy * start.edge;
       if (!claimed) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) < EDGE_CLAIM_PX) return;
-        if (Math.abs(dx) > Math.abs(dy) || travel < 0) { reset(); return; }
+        if (Math.abs(dx) > Math.abs(dy)) { reset(); return; }
+        if (travel < 0) { start = { x, y, edge: undefined }; return; }
         if (travel < EDGE_CLAIM_PX) return;
-        if (!event.cancelable) { reset(); return; }
         const children = Array.from(host.children).filter((element): element is HTMLElement => element instanceof HTMLElement && !element.hidden);
         if (children.length > MAX_BOUNCE_SURFACES) { reset(); return; }
         claimed = true;

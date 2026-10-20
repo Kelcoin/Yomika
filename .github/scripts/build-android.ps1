@@ -76,6 +76,10 @@ try {
     foreach ($property in $runtimeVariables.PSObject.Properties) {
         [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
     }
+    & python (Join-Path $PSScriptRoot "prepare-mobile-ncnn.py")
+    if ($LASTEXITCODE -ne 0) { throw "Android Vulkan runtime preparation failed." }
+    $ncnnEnvironment = Get-Content (Join-Path $repoRoot "src-tauri/target/mobile-ncnn/cargo-env.json") -Raw | ConvertFrom-Json
+    $env:YOMIKA_NCNN_LIB_DIR = $ncnnEnvironment.YOMIKA_NCNN_LIB_DIR
     $configuration = if ($Release) { "release" } else { "debug" }
     Write-Host "Building the $configuration APK for aarch64 (frontend first: tauri runs npm run build)."
     # 与 build-windows.ps1 同一个理由：`build.rs` 把编译时刻与

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "waifu2x-upconv7",
+    "onnxSha256": "3bd55b489f136c502dbedfd03d77b6912ac7dfb75c98d93ed2c9ab552f285272",
+    "paramSha256": "d00c443fe00c259e1f027df9a9c8e49abd3582c73a8ad6390fb3748446b99ba4",
+    "weightsSha256": "63e6d1bc37c79234cccc2f066a918b5f3ea86eb5d57c1fc0d37330a5bc0bfea0",
+    "input": "input",
+    "output": "output",
+    "edge": 128,
+    "scale": 2
+  },
+  {
+    "id": "realcugan-2x-denoise3x",
+    "onnxSha256": "931c20fa7e701e118e67602157bfa9fa97f8da0f9a74222ab2e16ea71172a833",
+    "paramSha256": "10f025be48a1efecf77002735fce50f1e650f97522de88dc6c57726fbf778719",
+    "weightsSha256": "f5bdaa4c3507337ad497aea3d5c054199dd738400c98adc31b85c5a85826c3fe",
+    "input": "input",
+    "output": "output",
+    "edge": 128,
+    "scale": 2
+  },
+  {
+    "id": "realcugan-2x-conservative",
+    "onnxSha256": "727f94a02e30bfbeffb9033e9cf8703ebc73757c87ed006095ca2769746e8a5f",
+    "paramSha256": "10f025be48a1efecf77002735fce50f1e650f97522de88dc6c57726fbf778719",
+    "weightsSha256": "101183c204661dbaf728fe47a8c55051aa2573657ed31a71d1dc05bc8514a723",
+    "input": "input",
+    "output": "output",
+    "edge": 128,
+    "scale": 2
+  }
+]

@@ -119,15 +119,33 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
     if (!image || !source || reducedMotion || !image.animate) return;
     // Read the visible position before cancelling an interrupted opening.
     const current = image.getBoundingClientRect();
+    const currentClip = getComputedStyle(image).clipPath;
     animation.current?.cancel();
     const target = image.getBoundingClientRect();
     const origin = source.getBoundingClientRect();
     if (!target.width || !target.height || !origin.width || !origin.height) return;
-    const transform = (rect: DOMRect) => `translate(${rect.left + rect.width / 2 - target.left - target.width / 2}px, ${rect.top + rect.height / 2 - target.top - target.height / 2}px) scale(${rect.width / target.width}, ${rect.height / target.height})`;
+    // The trigger uses `object-fit: cover` for portrait covers. Its box is
+    // therefore smaller than the visible source image in one axis. Scaling X
+    // and Y independently squeezed the full preview into that cropped box.
+    // Scale uniformly and animate a clip matching the trigger's visible crop.
+    const transform = (rect: DOMRect) => {
+      const scale = Math.max(rect.width / target.width, rect.height / target.height);
+      return `translate(${rect.left + rect.width / 2 - target.left - target.width / 2}px, ${rect.top + rect.height / 2 - target.top - target.height / 2}px) scale(${scale}, ${scale})`;
+    };
+    const originScale = Math.max(origin.width / target.width, origin.height / target.height);
+    const cropX = Math.max(0, (target.width - origin.width / originScale) / 2);
+    const cropY = Math.max(0, (target.height - origin.height / originScale) / 2);
+    // clip-path creates the visible edge on cropped covers, so its rounding
+    // must also match the thumbnail. Compensate for the uniform scale: 12px
+    // corners on a quarter-size thumbnail need a 48px radius before scaling.
+    const originRadius = (parseFloat(getComputedStyle(source).borderTopLeftRadius) || 0) / originScale;
+    const previewRadius = parseFloat(getComputedStyle(image).borderTopLeftRadius) || 0;
+    const originClip = `inset(${cropY}px ${cropX}px round ${originRadius}px)`;
+    const fullClip = `inset(0px 0px round ${previewRadius}px)`;
     animation.current = image.animate(
       preview === 'closing'
-        ? [{ transform: transform(current) }, { transform: transform(origin) }]
-        : [{ transform: transform(origin) }, { transform: 'none' }],
+        ? [{ transform: transform(current), clipPath: currentClip && currentClip !== 'none' ? currentClip : fullClip }, { transform: transform(origin), clipPath: originClip }]
+        : [{ transform: transform(origin), clipPath: originClip }, { transform: 'none', clipPath: fullClip }],
       { duration: 220, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'both' },
     );
   };

@@ -41,6 +41,20 @@ function renderDetail(detailBasePath?: string) {
 }
 
 describe('archive detail route', () => {
+  it('labels the final saved page as completed', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'load_reading_progress') return { ok: true, value: { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 11, pageCount: 12, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: false } };
+      if (command === 'read_favorites_category') return { ok: true, value: null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    expect(await screen.findByRole('link', { name: '已读完' })).toBeInTheDocument();
+  });
+
   it('refreshes retained progress, reading-list membership and metadata after synchronization', async () => {
     let pulled = false;
     setInvokeAdapterForTests(async command => {

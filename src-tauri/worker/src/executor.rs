@@ -150,7 +150,7 @@ fn execute_job<E, W>(
                     return;
                 }
                 if let Some(previous) = last.1 {
-                    if now.duration_since(previous) < PROGRESS_MIN_INTERVAL {
+                    if percent > 30 && percent < 85 && now.duration_since(previous) < PROGRESS_MIN_INTERVAL {
                         return;
                     }
                 }

@@ -87,6 +87,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(ngx_core)");
 
     require_mobile_ort();
+    link_mobile_ncnn();
 
     // 只对 Windows 目标编，而且只有开了 `dlssnr` 才有那个模块（没开时
     // `include_bytes!` 根本不会被求值，编了也没人要）。
@@ -145,4 +146,13 @@ fn require_mobile_ort() {
          装到设备上却加载失败。先跑 `.github/scripts/prepare-mobile-ort.py {target}`\
          （本地 Android 构建脚本已内置这一步）。"
     );
+}
+
+fn link_mobile_ncnn() {
+    println!("cargo:rerun-if-env-changed=YOMIKA_NCNN_LIB_DIR");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") || std::env::var_os("CARGO_FEATURE_NCNN_VULKAN").is_none() { return; }
+    let dir = std::env::var("YOMIKA_NCNN_LIB_DIR").expect("Run prepare-mobile-ncnn.py / build-android.ps1 before building Android");
+    assert!(Path::new(&dir).join("libyomika_ncnn.so").is_file(), "Missing Android Vulkan runtime");
+    println!("cargo:rustc-link-search=native={dir}");
+    println!("cargo:rustc-link-lib=dylib=yomika_ncnn");
 }

@@ -87,6 +87,9 @@ export function useHorizontalScroller() {
   const elementRef = useRef<HTMLElement | null>(null);
   const dragRef = useRef<DragState>({ active: false, element: null, startX: 0, startScrollLeft: 0, moved: false, suppressClickUntil: 0, previousUserSelect: '', lastX: 0, lastAt: 0, velocity: 0 });
   const coastRef = useRef<number>();
+  const touchRef = useRef(false);
+  const touchSettlingRef = useRef(false);
+  const touchIdleRef = useRef<number>();
   const snapRef = useRef<{ element: HTMLElement; value: string }>();
   const restoreSnap = useCallback(() => {
     if (snapRef.current) snapRef.current.element.style.scrollSnapType = snapRef.current.value;
@@ -97,6 +100,39 @@ export function useHorizontalScroller() {
     coastRef.current = undefined;
     restoreSnap();
   }, [restoreSnap]);
+  const finishTouch = useCallback(() => {
+    if (touchRef.current || !touchSettlingRef.current) return;
+    touchSettlingRef.current = false;
+    if (touchIdleRef.current !== undefined) window.clearTimeout(touchIdleRef.current);
+    touchIdleRef.current = undefined;
+    restoreSnap();
+  }, [restoreSnap]);
+  const settleTouch = useCallback(() => {
+    if (touchRef.current || !touchSettlingRef.current || !snapRef.current) return;
+    if (touchIdleRef.current !== undefined) window.clearTimeout(touchIdleRef.current);
+    // Do not turn snapping back on at finger-up: native inertia is still
+    // scrolling. scrollend is preferred; this idle timer supports older views.
+    touchIdleRef.current = window.setTimeout(finishTouch, 180);
+  }, [finishTouch]);
+  const beginTouch = useCallback(() => {
+    stopCoast();
+    if (touchIdleRef.current !== undefined) window.clearTimeout(touchIdleRef.current);
+    touchIdleRef.current = undefined;
+    touchRef.current = true;
+    touchSettlingRef.current = true;
+    const element = elementRef.current;
+    if (!element) return;
+    snapRef.current = { element, value: element.style.scrollSnapType };
+    element.style.scrollSnapType = 'none';
+  }, [stopCoast]);
+  const endTouch = useCallback(() => {
+    touchRef.current = false;
+    settleTouch();
+  }, [settleTouch]);
+  const cancelTouch = useCallback(() => {
+    touchRef.current = false;
+    finishTouch();
+  }, [finishTouch]);
   const pointerStyleRef = useRef<PointerStyleWatch | null>(null);
 
   const finishDrag = useCallback((event?: Event) => {
@@ -147,12 +183,12 @@ export function useHorizontalScroller() {
   }, []);
 
   useEffect(() => {
-    const cancel = () => { stopCoast(); finishDrag(); };
+    const cancel = () => { cancelTouch(); stopCoast(); finishDrag(); };
     const visibility = () => { if (document.visibilityState !== 'visible') cancel(); };
     window.addEventListener('blur', cancel);
     document.addEventListener('visibilitychange', visibility);
     return () => { cancel(); window.removeEventListener('blur', cancel); document.removeEventListener('visibilitychange', visibility); };
-  }, [finishDrag, stopCoast]);
+  }, [cancelTouch, finishDrag, stopCoast]);
 
   const handleWheel = useCallback((event: WheelEvent) => {
     stopCoast();
@@ -197,24 +233,37 @@ export function useHorizontalScroller() {
     if (previous) {
       finishDrag();
       previous.removeEventListener('wheel', handleWheel, true);
-      previous.removeEventListener('touchstart', stopCoast);
+      cancelTouch();
+      previous.removeEventListener('touchstart', beginTouch);
+      previous.removeEventListener('touchend', endTouch);
+      previous.removeEventListener('touchcancel', cancelTouch);
+      previous.removeEventListener('scroll', settleTouch);
+      previous.removeEventListener('scrollend', finishTouch);
       releasePointerStyle();
     }
     elementRef.current = element;
     if (!element) return;
     element.addEventListener('wheel', handleWheel, { capture: true, passive: false });
-    element.addEventListener('touchstart', stopCoast, { passive: true });
+    element.addEventListener('touchstart', beginTouch, { passive: true });
+    element.addEventListener('touchend', endTouch, { passive: true });
+    element.addEventListener('touchcancel', cancelTouch, { passive: true });
+    element.addEventListener('scroll', settleTouch, { passive: true });
+    element.addEventListener('scrollend', finishTouch, { passive: true });
     applyPointerStyle(element);
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia(COARSE_POINTER_QUERY);
     const listener = () => applyPointerStyle(element);
     media.addEventListener?.('change', listener);
     pointerStyleRef.current = { element, media, listener };
-  }, [applyPointerStyle, handleWheel, releasePointerStyle, stopCoast, finishDrag]);
+  }, [applyPointerStyle, handleWheel, releasePointerStyle, stopCoast, finishDrag, beginTouch, endTouch, cancelTouch, settleTouch, finishTouch]);
 
   useEffect(() => () => releasePointerStyle(), [releasePointerStyle]);
 
   const onMouseDown = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    // Android synthesizes mouse events after a tap. They are not a new mouse
+    // drag and must not interrupt the touch rail's settling or native inertia.
+    if ((event.nativeEvent as MouseEvent & { sourceCapabilities?: { firesTouchEvents: boolean } }).sourceCapabilities?.firesTouchEvents) return;
+    cancelTouch();
     stopCoast();
     if (event.button !== 0 || event.currentTarget.scrollWidth <= event.currentTarget.clientWidth + 1) return;
     const element = event.currentTarget;
@@ -228,7 +277,7 @@ export function useHorizontalScroller() {
     window.addEventListener('mousemove', handleWindowMouseMove, { passive: false });
     window.addEventListener('mouseup', finishDrag, { passive: true });
     window.addEventListener('blur', finishDrag, { passive: true });
-  }, [finishDrag, handleWindowMouseMove, stopCoast]);
+  }, [cancelTouch, finishDrag, handleWindowMouseMove, stopCoast]);
   const onClickCapture = useCallback((event: React.MouseEvent<HTMLElement>) => {
     const state = dragRef.current;
     if (state.suppressClickUntil === 0) return;
@@ -241,10 +290,11 @@ export function useHorizontalScroller() {
   const onDragStart = useCallback((event: React.DragEvent<HTMLElement>) => { if (event.cancelable) event.preventDefault(); }, []);
 
   const resetScroll = useCallback(() => {
+    cancelTouch();
     stopCoast();
     finishDrag();
     const element = elementRef.current;
     if (element) element.scrollLeft = 0;
-  }, [stopCoast, finishDrag]);
+  }, [cancelTouch, stopCoast, finishDrag]);
   return { ref: setRef, elementRef, resetScroll, onMouseDown, onClickCapture, onDragStart };
 }

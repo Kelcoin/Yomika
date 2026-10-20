@@ -58,3 +58,4 @@ pub mod runtime;
 pub mod resources;
 pub mod tensor;
 pub mod upscale;
+pub mod ncnn;

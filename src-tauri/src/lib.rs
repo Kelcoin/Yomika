@@ -142,6 +142,10 @@ use compute::commands::{
 };
 use tauri::Manager;
 
+#[cfg(desktop)]
+static MAIN_WINDOW_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -325,15 +329,23 @@ pub fn run() {
             // 移动端没有这个空窗（原生壳自带启动画面），保持直出。
             #[cfg(desktop)]
             {
+                MAIN_WINDOW_READY.store(false, std::sync::atomic::Ordering::Release);
                 builder = builder.visible(false);
                 let handle = app.handle().clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs(10));
                     #[cfg(target_os = "windows")]
                     if background_launch { return; }
-                    if let Some(main) = handle.get_webview_window("main") {
-                        let _ = main.show();
-                    }
+                    // Decide on the same event loop as close/frontend_ready:
+                    // neither a successful startup nor a close-to-tray may be
+                    // undone by this late watchdog.
+                    let reveal = handle.clone();
+                    let _ = handle.run_on_main_thread(move || {
+                        if let Some(main) = reveal.get_webview_window("main") {
+                            if MAIN_WINDOW_READY.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+                            let _ = main.show();
+                        }
+                    });
                 });
             }
 
@@ -401,6 +413,7 @@ pub fn run() {
                     return;
                 }
                 api.prevent_close();
+                MAIN_WINDOW_READY.store(true, std::sync::atomic::Ordering::Release);
                 // 这里**不能**去读库：`prevent_close()` 之后窗口还活着，等库锁或等阻塞
                 // 线程池的这段时间里用户还能去点最小化，随后迟到的 `hide()` 就会把已经
                 // 收进任务栏的窗口再收进托盘——用户看到的是「关闭按钮有时失效，接着点

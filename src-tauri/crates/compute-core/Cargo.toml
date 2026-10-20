@@ -98,8 +98,8 @@ cpu = ["ort"]
 directml = ["cpu", "ort/directml"]
 nnapi = ["cpu", "ort/nnapi"]
 coreml = ["cpu", "ort/coreml"]
-# CUDA / Vulkan 还没接（docs/71 §11 Task 7-b）：留着名字，但**不许**假装可用
-# ——`runtime::available_runtimes()` 只报构建里真的注册得上的那几条。
+# CUDA remains reserved. Android ncnn-vulkan uses verified conversions of known
+# ONNX weights; unknown models continue through ORT without substitution.
 cuda = ["cpu"]
 ncnn-vulkan = []
 # DLSSNR 的**引擎**：`docs/71` Task 8 的出口是「宿主无 ORT/NGX 资源」，而 NGX 只能在计算

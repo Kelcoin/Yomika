@@ -69,6 +69,27 @@ function setOverflow(element: HTMLElement, scrollWidth: number, clientWidth: num
 }
 
 describe('horizontal scroller', () => {
+  it('keeps native touch inertia unsnapped until scrolling has actually stopped', () => {
+    vi.useFakeTimers();
+    try {
+      render(<HorizontalScrollerHarness onOuterWheel={() => {}} />);
+      const rail = screen.getByTestId('rail');
+      setOverflow(rail, 2000, 500);
+      rail.style.scrollSnapType = 'x proximity';
+      fireEvent.touchStart(rail, { touches: [{ clientX: 400, clientY: 0 }] });
+      expect(rail.style.scrollSnapType).toBe('none');
+      fireEvent.touchEnd(rail);
+      vi.advanceTimersByTime(100);
+      fireEvent.scroll(rail);
+      vi.advanceTimersByTime(100);
+      expect(rail.style.scrollSnapType).toBe('none');
+      fireEvent(rail, new Event('scrollend'));
+      expect(rail.style.scrollSnapType).toBe('x proximity');
+      fireEvent.touchStart(rail, { touches: [{ clientX: 400, clientY: 0 }] });
+      fireEvent.touchCancel(rail);
+      expect(rail.style.scrollSnapType).toBe('x proximity');
+    } finally { vi.useRealTimers(); }
+  });
   it('hands a touch device the browser’s own scrolling and a mouse a grab cursor', () => {
     const touch = getTouchScrollStyle();
     // 触摸这一路整个交给浏览器：两个轴都由它按手势主方向择一，所以**不能**是
@@ -233,6 +254,8 @@ describe('mouse rail release motion', () => {
     expect(rail.scrollLeft - released - firstStep).toBeLessThan(firstStep);
     fireEvent.touchStart(rail);
     expect(frames.size).toBe(0);
+    expect(rail.style.scrollSnapType).toBe('none');
+    fireEvent.touchCancel(rail);
     expect(rail.style.scrollSnapType).toBe('x proximity');
     view.unmount();
     vi.restoreAllMocks();

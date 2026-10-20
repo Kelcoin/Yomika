@@ -15,6 +15,27 @@ function renderShell() {
   Object.defineProperties(host, { clientHeight: { configurable: true, value: 500 }, scrollHeight: { configurable: true, value: 1000 } });
   return host;
 }
+
+it('enters edge feedback in the same native gesture even after touchmove becomes noncancelable', () => {
+  const host = renderShell();
+  const content = screen.getByTestId('content');
+  host.scrollTop = 100;
+  fireEvent.touchStart(content, { touches: [{ clientY: 100, clientX: 10 }] });
+  host.scrollTop = 0;
+  const move = (y: number) => {
+    const event = new Event('touchmove', { bubbles: true, cancelable: false });
+    Object.defineProperty(event, 'touches', { value: [{ clientY: y, clientX: 10 }] });
+    fireEvent(content, event);
+  };
+  move(200);
+  move(240);
+  expect(host).toHaveAttribute('data-edge-bounce', 'dragging');
+  expect(content.style.translate).toBe(`0 ${rubberBand(40)}px`);
+  move(260);
+  expect(content.style.translate).toBe(`0 ${rubberBand(60)}px`);
+  fireEvent.touchEnd(content);
+  expect(host).toHaveAttribute('data-edge-bounce', 'settling');
+});
 it('places the top button alongside a measured floating bar only when it fits', () => {
   let right = 300;
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {

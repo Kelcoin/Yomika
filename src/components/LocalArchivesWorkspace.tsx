@@ -1,4 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { useStableVirtualRows } from '../lib/useStableVirtualRows';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
 import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
@@ -74,24 +75,6 @@ function downloadStats(task: TaskRecord): string {
   parts.push(task.totalBytes ? `${received} / ${formatByteSize(task.totalBytes)}` : received);
   if (task.status === 'running' && task.bytesPerSecond) parts.push(`${formatByteSize(task.bytesPerSecond)}/s`);
   return parts.join(' · ');
-}
-
-/** 页面被 `RetainedPage` 收起来时是 `display:none`：滚动容器量到的高度是 0，
- * 虚拟列表就连一行都不剩（真浏览器里也一样），整屏的行跟着卸载；切回来那一帧
- * 再从头建一遍行、封面、标签——这一下一上就是用户说的「固定闪烁」。
- *
- * 虚拟器量出来的窗口比上一次小掉两行以上、列表本身的行数又没变，就照上一次的
- * 窗口渲染：被收起来的这段时间里列表原样留在 DOM 上，回来时还是同一批节点，
- * 封面不用重取。真的空出一大截（筛掉了、删掉了）或者只是窗口拖小了零星一行，
- * 行数对不上或者差得不够多，照实渲染。
- *
- * 档案库（`src/components/LibraryWorkspace.tsx`）有同一份实现，但它没导出，
- * 这里不再为一个 5 行的兜底去动那个文件。 */
-function useStableVirtualRows<T>(items: T[], totalSize: number, count: number): { items: T[]; totalSize: number } {
-  const previous = useRef({ items, totalSize, count });
-  if (items.length > 0) previous.current = { items, totalSize, count };
-  const collapsed = previous.current.count === count && previous.current.items.length - items.length >= 2;
-  return collapsed ? previous.current : { items, totalSize };
 }
 
 /** 这一页展示、也被分类筛选用的那一个维度：档案自己的分类，没有就退回语言。
@@ -449,7 +432,9 @@ export function LocalArchivesWorkspace() {
     overscan: 6,
     initialRect: { width: 720, height: 560 },
   });
-  const shownRows = useStableVirtualRows(rowVirtualizer.getVirtualItems(), rowVirtualizer.getTotalSize(), listRows.length);
+  const viewport = compact ? listRef.current?.closest<HTMLElement>('.workspace') ?? listRef.current : listRef.current;
+  const shownRows = useStableVirtualRows(rowVirtualizer.getVirtualItems(), rowVirtualizer.getTotalSize(), listRows.length,
+    pageActive && document.visibilityState !== 'hidden' && viewport?.clientHeight !== 0);
 
   // Partial results can already render; a slower task read must not cover ready archives.
   const initialLoading = (loading || !archivesLoaded) && listRows.length === 0 && !error && !taskError;

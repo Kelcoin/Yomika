@@ -13,11 +13,12 @@ def verify_apk(path, readelf):
     with zipfile.ZipFile(path) as apk, tempfile.TemporaryDirectory() as temp:
         libraries = [name for name in apk.namelist() if name.endswith(".so")]
         ort = "lib/arm64-v8a/libonnxruntime.so"
+        assert "lib/arm64-v8a/libyomika_ncnn.so" in libraries, "APK omits Vulkan inference runtime"
         assert ort in libraries, "APK omits target ONNX Runtime"
         assert "lib/arm64-v8a/libc++_shared.so" in libraries, "APK omits C++ runtime"
         assert not any(name.endswith(".dll") for name in apk.namelist()), "Host DLL in APK"
         packaged = {Path(name).name for name in libraries}
-        system = {"libandroid.so", "liblog.so", "libm.so", "libdl.so", "libc.so", "libz.so", "libvulkan.so", "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libjnigraphics.so", "libmediandk.so", "libnativewindow.so"}
+        system = {"libandroid.so", "liblog.so", "libm.so", "libdl.so", "libc.so", "libz.so", "libvulkan.so", "libEGL.so", "libGLESv2.so", "libGLESv3.so", "libjnigraphics.so", "libmediandk.so", "libnativewindow.so", "libneuralnetworks.so"}
         for name in libraries:
             assert name.startswith("lib/arm64-v8a/"), f"Unexpected ABI: {name}"
             data = apk.read(name)
@@ -28,6 +29,7 @@ def verify_apk(path, readelf):
             report = subprocess.check_output([readelf, "-d", str(extracted)], text=True)
             dependencies = set(re.findall(r"\(NEEDED\).*?\[(.*?)\]", report))
             if Path(name).name == "libyomika_lib.so":
+                assert "libyomika_ncnn.so" in dependencies, "App is not linked to Vulkan inference runtime"
                 assert "libonnxruntime.so" in dependencies, (
                     "App library is not linked to ONNX Runtime; copying the runtime into the APK "
                     "does not fix an ort-sys build without ORT_LIB_PATH"

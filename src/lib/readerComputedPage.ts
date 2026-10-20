@@ -24,6 +24,7 @@ export interface ReaderComputedPageBridge {
   onJobChanged(handler: (event: ComputeJobSnapshot) => void): () => void;
   submitReaderPage(payload: ReaderPagePayload): Promise<CommandResult<ComputeSubmitted>>;
   cancel(jobId: string, subscriptionId: number): Promise<CommandResult<ComputeCancelOutcome>>;
+  jobGet(jobId: string): Promise<CommandResult<ComputeJobSnapshot | null>>;
   jobArtifacts(jobId: string): Promise<CommandResult<ComputeArtifactRecord[]>>;
   acquireArtifact(jobId: string, artifactId: string): Promise<CommandResult<ComputedImageLease>>;
   releaseArtifact(leaseId: string): Promise<CommandResult<void>>;
@@ -81,6 +82,7 @@ export interface LoadReaderComputedPageOptions {
   signal?: AbortSignal;
   /** 这一页没算成时的原因。给用户看的那条路（会弹提示），与 `onDiagnostic` 的日志不同。 */
   onFailure?: (failure: ReaderPageFailure) => void;
+  onCancelled?: () => void;
   onDiagnostic?: (message: string, detail?: Record<string, unknown>) => void;
 }
 
@@ -143,6 +145,24 @@ export async function loadReaderComputedPage(
   let detach: (() => void) | undefined;
   let jobId: string | undefined;
   let subscriptionId: number | undefined;
+  let terminal = false;
+  let picking = false;
+  let pickAgain = false;
+  let polling = false;
+  let phase = '提交任务';
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  // Before adoption, cancellation/timeout owns these leases, including a decode
+  // that never resolves. After adoption the cache alone owns their release.
+  const pendingLeases = new Set<string>();
+  const releasePending = (id: string) => {
+    if (pendingLeases.delete(id)) void repository.releaseArtifact(id).catch(() => {});
+  };
+  const cancelSubscription = () => {
+    if (jobId !== undefined && subscriptionId !== undefined) {
+      void repository.cancel(jobId, subscriptionId).catch(() => {});
+    }
+  };
   /** 宿主的单调事件序号：旧事件不许盖掉新的。 */
   let lastSequence = -1;
   /** 这一代里已经拿过的产物：进度会重复报，不能重复租。 */
@@ -153,12 +173,24 @@ export async function loadReaderComputedPage(
   const finish = (handle: ImageHandle | undefined) => {
     if (done) return;
     done = true;
+    clearTimeout(deadline);
+    clearInterval(poll);
+    detach?.();
+    detach = undefined;
+    for (const id of pendingLeases) releasePending(id);
     complete(handle);
   };
 
-  const pick = async () => {
+  const fail = (failure: ReaderPageFailure) => {
+    if (done) return;
+    failed(failure);
+    finish(undefined);
+  };
+
+  const pickArtifacts = async () => {
     const id = jobId;
     if (id === undefined || cancelled || done) return;
+    phase = '读取产物列表';
     const artifacts = await repository.jobArtifacts(id);
     if (cancelled || done) return;
     if (!artifacts.ok) {
@@ -181,9 +213,10 @@ export async function loadReaderComputedPage(
       if (newest === undefined || picked.has(newest.artifactId)) continue;
       picked.add(newest.artifactId);
 
+      phase = '租借处理结果';
       const acquired = await repository.acquireArtifact(id, newest.artifactId);
       if (cancelled || done) {
-        if (acquired.ok) void repository.releaseArtifact(acquired.value.leaseId);
+        if (acquired.ok) void repository.releaseArtifact(acquired.value.leaseId).catch(() => {});
         return;
       }
       if (!acquired.ok) {
@@ -194,13 +227,16 @@ export async function loadReaderComputedPage(
       }
 
       const lease = acquired.value;
+      pendingLeases.add(lease.leaseId);
+      phase = '解码处理结果';
       try {
         // 必须用**不吞失败**的那一版：取图地址打不开时（scheme 形状不对、租借过期、
         // 文件被清）要让下面的 catch 真的接住，页面留在手上那一版，而不是换上一张破图。
         await decodeImageStrict(lease.url);
       } catch (error) {
         // 解不开就不认领：已经显示的那一版留着（宁可旧，也不要黑闪或白图）。
-        void repository.releaseArtifact(lease.leaseId);
+        releasePending(lease.leaseId);
+        if (done) return;
         const message = error instanceof Error ? error.message : String(error);
         note('阅读器算图：产物解不开', { message });
         failed({ code: READER_ARTIFACT_UNDECODABLE, message });
@@ -208,7 +244,7 @@ export async function loadReaderComputedPage(
         return;
       }
       if (cancelled || done) {
-        void repository.releaseArtifact(lease.leaseId);
+        releasePending(lease.leaseId);
         return;
       }
 
@@ -229,6 +265,7 @@ export async function loadReaderComputedPage(
         estimatedDecodedBytes: lease.estimatedDecodedBytes,
         release: () => { void repository.releaseArtifact(lease.leaseId); },
       });
+      pendingLeases.delete(lease.leaseId);
 
       if (isAnswer) {
         finish(handle);
@@ -237,15 +274,40 @@ export async function loadReaderComputedPage(
       // 中间阶段：交出去先上屏，这一条请求继续等答案那一版。
       claim.onReady?.(handle);
     }
+    if (terminal && !pickAgain) {
+      const failure = { code: 'COMPUTE_ARTIFACT_INVALID', message: '任务已完成，但没有可用的最终产物' };
+      note('阅读器算图：最终产物缺失', failure);
+      fail(failure);
+    } else if (!done) phase = '等待原生推理完成';
   };
 
-  const handleEvent = (event: ComputeJobSnapshot) => {
+  const pick = async () => {
+    if (picking) { pickAgain = true; return; }
+    picking = true;
+    try {
+      do {
+        pickAgain = false;
+        await pickArtifacts();
+      } while (pickAgain && !done);
+    } catch (error) {
+      if (!done) {
+        const failure = { code: 'COMPUTE_INTERNAL', message: error instanceof Error ? error.message : String(error) };
+        note('阅读器算图：读取结果失败', { ...failure, phase });
+        fail(failure);
+      }
+    } finally {
+      picking = false;
+    }
+  };
+
+  const handleEvent = (event: ComputeJobSnapshot, reconcile = false) => {
     if (cancelled || done) return;
     // 订阅是全局的（同一代别的页也在跑），所以只认自己那一个任务；jobId 拿到之前先不看。
     if (jobId === undefined || event.jobId !== jobId) return;
-    if (event.sequence <= lastSequence) return;
+    if (event.sequence < lastSequence || (!reconcile && event.sequence === lastSequence)) return;
     lastSequence = event.sequence;
     const state = event.state;
+    terminal = state === 'completed';
     if (typeof state === 'object' && 'failed' in state) {
       note('阅读器算图：任务失败', { code: state.failed.code, message: event.failureMessage, jobId: event.jobId, inputId: event.key.inputId });
       failed({ code: state.failed.code, ...(event.failureMessage ? { message: event.failureMessage } : {}) });
@@ -253,52 +315,71 @@ export async function loadReaderComputedPage(
       return;
     }
     // 自己取消的不算失败，也不算成功：什么都不给。
-    if (state === 'cancelled') { finish(undefined); return; }
+    if (state === 'cancelled') { options.onCancelled?.(); finish(undefined); return; }
     if (state === 'completed' || (typeof state === 'object' && 'running' in state)) void pick();
   };
 
   const abort = () => {
     if (done) return;
     cancelled = true;
-    detach?.();
-    detach = undefined;
     // 任务已经建出来了就退掉这份订阅（幂等；取消一个已经结束的任务不是错误）。
-    if (jobId !== undefined && subscriptionId !== undefined) void repository.cancel(jobId, subscriptionId);
+    cancelSubscription();
     finish(undefined);
   };
   signal?.addEventListener('abort', abort, { once: true });
 
-  detach = repository.onJobChanged(handleEvent);
+  detach = repository.onJobChanged((event) => handleEvent(event));
+  // Events are the fast path; a native listener can miss a terminal event while
+  // registering or before submit returns. Reconcile only this outstanding job.
+  poll = setInterval(() => {
+    if (done || polling || jobId === undefined) return;
+    polling = true;
+    void repository.jobGet(jobId).then((result) => {
+      if (done) return;
+      if (result.ok && result.value) handleEvent(result.value, true);
+      else if (result.ok) fail({ code: 'COMPUTE_NOT_FOUND', message: '处理任务已失效，请重新开启超分' });
+    }).catch(() => { /* Total deadline still applies if the bridge is unavailable. */ })
+      .finally(() => { polling = false; });
+  }, 2_000);
+  // Native deadline is 120s, plus handshake/cancellation grace. This also covers
+  // queued work, IPC submission and image decoding, which have no native timer.
+  deadline = setTimeout(() => {
+    if (done) return;
+    const failure = { code: 'COMPUTE_TIMEOUT', message: `本地超分等待超时（${phase}），已保留原图，可重新开启超分重试` };
+    note('阅读器算图：等待超时', { ...failure, jobId });
+    cancelSubscription();
+    fail(failure);
+  }, 150_000);
 
-  const submitted = await submit(repository);
-  if (submitted.ok) {
-    jobId = submitted.value.jobId;
-    subscriptionId = submitted.value.subscriptionId;
-  }
-  if (!submitted.ok) {
-    if (!done && !cancelled) {
-      note('阅读器算图：提交没成功', { code: submitted.error.code, message: submitted.error.message });
-      failed({ code: submitted.error.code, message: submitted.error.message });
-      finish(undefined);
+  const acceptSubmission = (submitted: CommandResult<ComputeSubmitted>) => {
+    if (submitted.ok) {
+      jobId = submitted.value.jobId;
+      subscriptionId = submitted.value.subscriptionId;
     }
-  } else if (cancelled || done) {
-    // 取消赶在应答之前（`abort` 那会儿还不知道 jobId）：现在补退这份订阅。
-    void repository.cancel(submitted.value.jobId, submitted.value.subscriptionId);
-  } else {
-    // 提交回来时任务可能已经在跑（宿主把这次提交并进了已经在跑的那个），也可能已经完成
-    // （命中缓存）。两种都要立刻去问产物——更早阶段的产物可能已经发布了。
-    const snapshot = submitted.value.snapshot;
-    lastSequence = Math.max(lastSequence, snapshot.sequence);
-    const state = snapshot.state;
-    if (typeof state === 'object' && 'failed' in state) {
-      note('阅读器算图：任务失败', { code: state.failed.code, message: snapshot.failureMessage, jobId: snapshot.jobId, inputId: snapshot.key.inputId });
-      failed({ code: state.failed.code, ...(snapshot.failureMessage ? { message: snapshot.failureMessage } : {}) });
-      finish(undefined);
-    } else if (state === 'cancelled') {
-      finish(undefined);
-    } else if (state === 'completed' || (typeof state === 'object' && 'running' in state)) {
-      void pick();
+    if (!submitted.ok) {
+      if (!done && !cancelled) {
+        note('阅读器算图：提交没成功', { code: submitted.error.code, message: submitted.error.message });
+        failed({ code: submitted.error.code, message: submitted.error.message });
+        finish(undefined);
+      }
+    } else if (cancelled || done) {
+      // 取消赶在应答之前（`abort` 那会儿还不知道 jobId）：现在补退这份订阅。
+      cancelSubscription();
+    } else {
+      // 提交回来时任务可能已经在跑（宿主把这次提交并进了已经在跑的那个），也可能已经完成
+      // （命中缓存）。两种都要立刻去问产物——更早阶段的产物可能已经发布了。
+      phase = '等待任务完成';
+      handleEvent(submitted.value.snapshot);
     }
+  };
+  // Do not await submission here: leaving the reader must settle immediately,
+  // even when IPC has not replied yet. A late reply cancels its subscription.
+  try {
+    void submit(repository).then(acceptSubmission).catch((error: unknown) => {
+      fail({ code: 'COMPUTE_INTERNAL', message: error instanceof Error ? error.message : String(error) });
+    });
+  } catch (error) {
+    fail({ code: 'COMPUTE_INTERNAL', message: error instanceof Error ? error.message : String(error) });
   }
 
   const handle = await settled;
@@ -339,6 +420,7 @@ export interface LocalRenditionOptions {
 
 /** 本地这一档算出来的东西。没有就是没算成：页面照旧显示手上的那一版。 */
 export interface LocalRenditions {
+  cancelled?: boolean;
   enhanced?: ImageHandle;
 }
 
@@ -352,6 +434,7 @@ export async function loadLocalRenditions(options: LocalRenditionOptions): Promi
   let enhanced: ImageHandle | undefined;
   /** 最后一次尝试的失败码。跑起来了再失败是另一回事，这里只收「没算成」。 */
   let failure: ReaderPageFailure | undefined;
+  let cancelled = false;
 
   const handle = await loadReaderComputedPage({
     repository,
@@ -367,6 +450,7 @@ export async function loadLocalRenditions(options: LocalRenditionOptions): Promi
     // 要么这个键根本不在。少了这一条话就传不出去——那条链失败时日志里会一行都没有。
     ...(onDiagnostic ? { onDiagnostic } : {}),
     onFailure: (value) => { failure = value; },
+    onCancelled: () => { cancelled = true; },
   });
   if (handle !== undefined) enhanced = handle;
 
@@ -374,6 +458,7 @@ export async function loadLocalRenditions(options: LocalRenditionOptions): Promi
 
   return {
     ...(enhanced === undefined ? {} : { enhanced }),
+    ...(cancelled ? { cancelled: true } : {}),
   };
 }
 

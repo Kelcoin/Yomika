@@ -106,16 +106,21 @@ pub fn spawn(
                 runtimes: if echo {
                     vec![]
                 } else {
-                    yomika_compute_core::runtime::available_runtimes()
-                        .into_iter()
-                        .map(|id| id.as_str().into())
-                        .collect()
+                    let mut runtimes: Vec<String> = yomika_compute_core::runtime::available_runtimes()
+                        .into_iter().map(|id| id.as_str().into()).collect();
+                    #[cfg(target_os = "android")]
+                    if yomika_compute_core::ncnn::device_description().is_some() {
+                        runtimes.insert(0, "ncnn-vulkan".into());
+                    }
+                    runtimes
                 },
                 engines: if echo {
                     vec!["echo".into()]
                 } else {
                     vec![
                         "onnx".into(),
+                        #[cfg(target_os = "android")]
+                        yomika_compute_core::ncnn::ENGINE_ID.into(),
                         yomika_compute_protocol::ANIME4K_ENGINE_ID.into(),
                     ]
                 },

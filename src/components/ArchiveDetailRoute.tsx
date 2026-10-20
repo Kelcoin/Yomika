@@ -321,7 +321,7 @@ detailBasePath?: string | undefined }) {
    * 重来。窄容器里退成「继续」（`shell.css` 的 `detail-actions` 容器查询），再窄就只剩
    * 图标——和这一排其它动作同一套退化。 */
   const readPage = progress.pageIndex ?? 0;
-  const readLabel = progress.hasProgress && readPage > 0 ? `从 ${readPage + 1} 页继续` : '阅读';
+  const readLabel = progress.completed ? '已读完' : progress.hasProgress && readPage > 0 ? `从 ${readPage + 1} 页继续` : '阅读';
   const [downloading, setDownloading] = useState(false);
   const downloadOwner = useRef({ identity: readingIdentity, busy: false, active: true });
   if (downloadOwner.current.identity !== readingIdentity) downloadOwner.current = { identity: readingIdentity, busy: false, active: true };
@@ -413,7 +413,7 @@ detailBasePath?: string | undefined }) {
           onPointerCancel={cancelIncognitoPress}
           onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
-        ><BookOpen aria-hidden="true" /><span className="archive-action-label">{readLabel}</span>{progress.hasProgress && <span className="archive-action-label-short">继续</span>}</Link>}
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label">{readLabel}</span>{progress.hasProgress && <span className="archive-action-label-short">{progress.completed ? '已读完' : '继续'}</span>}</Link>}
         {detailActions.includes('readingList') && <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
           if (!scopeId || readingOwner.current.busy) return;
           const identity = readingIdentity;

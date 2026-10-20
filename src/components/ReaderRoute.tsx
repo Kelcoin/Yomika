@@ -414,6 +414,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const derivedHandlesRef = useRef(new Map<number, ImageHandle>());
   const retiredDerivedRef = useRef(new Map<number, ImageHandle[]>());
   const derivedAttemptedRef = useRef(new Set<number>());
+  // Native deadline cancellation is not a request from the reader to retry
+  // forever. Preserve a per-page budget across background/visible requeues.
+  const derivedFailuresRef = useRef(new Map<number, number>());
   const visiblePagesRef = useRef<ReadonlySet<number>>(new Set());
   /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分。三者是同一
    * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
@@ -421,7 +424,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    *
    * `remoteChain` 是交给远端的那一串（按顺序做哪几档），做几档由**阅读器里开着
    * 哪几档**决定，模型与参数不跟着走。 */
-  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier }>>([]);
+  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier; retryAt?: number; remoteFailures?: number }>>([]);
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
   const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController }>();
@@ -602,6 +605,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedBytesRef.current = 0;
     derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
+    derivedFailuresRef.current.clear();
     derivedQueueRef.current = [];
     derivedTierRef.current.clear();
     derivedSweepRef.current = undefined;
@@ -763,6 +767,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedBytesRef.current = 0;
     derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
+    derivedFailuresRef.current.clear();
     derivedQueueRef.current = [];
     derivedTierRef.current.clear();
     derivedSweepRef.current = undefined;
@@ -796,19 +801,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 原因，所以按内容去重而不是按页。 */
   const noticeEngineFallback = useCallback((model: string, engine: ReaderPageEngine) => {
     const fallback = engine.fallback;
-    if (!fallback) {
-      const label = engine.deviceId === 'accelerator:nnapi:gpu-or-npu'
-        ? 'NNAPI 硬件加速（GPU 或 NPU）'
-        : engine.deviceId === 'accelerator:coreml:cpu-and-gpu'
-          ? 'CoreML（CPU／GPU 自动调度）'
-          : undefined;
-      const key = `accelerator:${model}:${engine.deviceId}`;
-      if (label && !engineNoticeRef.current.has(key)) {
-        engineNoticeRef.current.add(key);
-        showToast(`超分正在使用 ${label}。`, 'info');
-      }
-      return;
-    }
+    if (!fallback) return;
     const key = `fallback:${model}:${fallback.requested}:${fallback.used}:${fallback.reason}`;
     if (engineNoticeRef.current.has(key)) return;
     engineNoticeRef.current.add(key);
@@ -821,6 +814,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 就直接失败，绝不能悄悄用 CPU 顶上——所以它的措辞必须与「后台这一步没跑成」不同，
    * 否则用户会以为只是慢了一档。 */
   const noticeUpscaleFailure = useCallback((model: string, failure: ReaderPageFailure) => {
+    if (failure.code === 'COMPUTE_TIMEOUT' || failure.code === 'COMPUTE_CANCELLED') {
+      const key = `upscale:${model}`;
+      if (upscaleFailureRef.current.has(key)) return;
+      upscaleFailureRef.current.add(key);
+      showToast(failure.message ?? '本地超分任务多次中断，已停止自动重试并保留原图，可重新开启超分重试。', 'error');
+      return;
+    }
     if (failure.code === 'GPU_BACKEND_UNAVAILABLE' || failure.code === 'GPU_OUTPUT_INVALID') {
       const key = `gpu:${model}:${failure.code}`;
       if (engineNoticeRef.current.has(key)) return;
@@ -873,8 +873,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (derivedQueueRef.current.length === 0) pumpSweep();
         if (derivedQueueRef.current.length === 0) break;
         derivedQueueRef.current.sort((a, b) => DERIVED_TIER_ORDER[a.tier] - DERIVED_TIER_ORDER[b.tier]);
-        if (derivedQueueRef.current[0]?.tier !== 'visible' && Date.now() < derivedBackgroundRetryAtRef.current) break;
-        const job = derivedQueueRef.current.shift();
+        const now = Date.now();
+        const readyIndex = derivedQueueRef.current.findIndex((job) => (job.retryAt ?? 0) <= now
+          && (job.tier === 'visible' || now >= derivedBackgroundRetryAtRef.current));
+        if (readyIndex < 0) break;
+        const [job] = derivedQueueRef.current.splice(readyIndex, 1);
         if (!job) break;
         const { pageIndex } = job;
         const context = contextRef.current;
@@ -961,6 +964,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             if (derived) imageCache.release(derived);
             continue;
           }
+          const transientRemoteFailure = job.engine === 'remote' && jobFailure !== undefined
+            && ['NETWORK', 'REMOTE_UNAVAILABLE', 'REMOTE_TIMEOUT', 'COMPUTE_TIMEOUT', 'TIMEOUT'].includes(jobFailure.code);
+          if (transientRemoteFailure && !controller.signal.aborted) {
+            // A transport failure is not evidence that the local device should run this model.
+            // Retry the same remote job with backoff; preserve the original in the meantime.
+            derivedAttemptedRef.current.delete(pageIndex);
+            const delay = Math.min(30_000, 3_000 * 2 ** Math.min(job.remoteFailures ?? 0, 4));
+            job.remoteFailures = (job.remoteFailures ?? 0) + 1;
+            job.retryAt = Date.now() + delay;
+            derivedBackgroundRetryAtRef.current = job.retryAt;
+            derivedQueueRef.current.push(job);
+            continue;
+          }
           if (!derived) {
             if (job.upscaleModel) setDerivingStage('upscale');
             const enhancedFromPageIdentity: ImageCacheIdentity = {
@@ -986,9 +1002,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               onDiagnostic: (message, detail) => logError('reader/compute', message, detail),
               onFailure: (_stage, model, failure) => {
                 jobFailure = failure;
-                noticeUpscaleFailure(model, failure);
+                if (!controller.signal.aborted && job.generation === derivedGenerationRef.current
+                    && visiblePagesRef.current.has(pageIndex) && failure.code !== 'COMPUTE_CANCELLED') {
+                  noticeUpscaleFailure(model, failure);
+                }
               },
             });
+            if (renditions.cancelled) jobFailure = { code: 'COMPUTE_CANCELLED' };
             const enhanced = renditions.enhanced;
             if (controller.signal.aborted) {
               if (enhanced) imageCache.release(enhanced);
@@ -998,9 +1018,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             if (enhanced && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
               retainDerived(pageIndex, enhanced);
             }
-            if (job.upscaleModel && !enhanced) {
-              noticeStageFailure('upscale', job.upscaleModel, upscaleFailureRef.current);
-            }
+
             // Local DLSSNR may build on local upscale. A remote request already
             // included DLSSNR, so a remote failure only falls back to local upscale.
             if (job.engine === 'dlssnr') {
@@ -1027,37 +1045,37 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 continue;
               }
               if (processed) derived = processed;
-              else noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
+              else if (visiblePagesRef.current.has(pageIndex)) noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
             }
           }
-          if (!controller.signal.aborted && job.generation === derivedGenerationRef.current
+          if (!derived && !controller.signal.aborted && job.generation === derivedGenerationRef.current
               && jobFailure && RETRYABLE_COMPUTE_ERROR_CODES.has(jobFailure.code)) {
+            const failures = (derivedFailuresRef.current.get(pageIndex) ?? 0) + 1;
+            derivedFailuresRef.current.set(pageIndex, failures);
+            // A hung native call can still own the mobile executor after its
+            // control session ends. Do not keep submitting behind that call.
+            const retry = failures < 3 && jobFailure.code !== 'COMPUTE_TIMEOUT';
             // Keep foreground navigation available, but stop asking the same
             // unavailable worker about every page in the background sweep.
-            derivedAttemptedRef.current.delete(pageIndex);
+            if (retry) derivedAttemptedRef.current.delete(pageIndex);
             // Let the idle release timer fire first. Retrying at exactly the
             // same deadline cancels that timer and keeps the cached pressure.
             const delay = jobFailure.code === 'COMPUTE_UNAVAILABLE' ? WORKSPACE_IDLE_RELEASE_MS + 1_000 : 5_000;
-            derivedBackgroundRetryAtRef.current = Date.now() + delay;
-            if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
-            if (derivedRetryTimerRef.current !== undefined) clearTimeout(derivedRetryTimerRef.current);
-            derivedRetryTimerRef.current = setTimeout(() => {
-              derivedRetryTimerRef.current = undefined;
-              if (mountedRef.current && pageActiveRef.current) void drainDerivedQueue();
-            }, delay);
+            if (retry) {
+              derivedBackgroundRetryAtRef.current = Date.now() + delay;
+              if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
+              else derivedQueueRef.current.push({ ...job, retryAt: Date.now() + delay });
+            } else {
+              logError('reader/compute', '阅读器算图：已停止自动重试', { code: jobFailure.code, attempts: failures });
+              if (visiblePagesRef.current.has(pageIndex)) noticeUpscaleFailure(job.upscaleModel, jobFailure);
+            }
           }
           if (!derived) {
-            // 一页什么都没落地，它就**不算「做过」**——但只对阵发性的失败这样算。worker 被杀、
-            // 队列满、超时都是现场问题（看门狗会把 worker 拉回来），而「做过」这个记号是给
-            // `requestDerived` 和整本预扫跳过用的：记上以后用户翻回去也只有原图，这一页在这
-            // 一次阅读里再也拿不到结果——那正是 docs/71:645 第四句要防的事。模型没装、输入
-            // 坏了这类再问一次还是同一个结果，记着才对（不然每翻一次就重撞一次）。同一件事
-            // 在「源页这一次没读出来」那条路上已经办过一次。
-            if (jobFailure !== undefined && RETRYABLE_COMPUTE_ERROR_CODES.has(jobFailure.code)) {
-              derivedAttemptedRef.current.delete(pageIndex);
-            }
+            // Keep the attempted marker after exhausting retries. Toggling the
+            // model/settings starts a new generation with a fresh budget.
             continue;
           }
+          derivedFailuresRef.current.delete(pageIndex);
           if (!mountedRef.current || contextRef.current?.generation !== context.generation || job.generation !== derivedGenerationRef.current) {
             imageCache.release(derived);
             continue;
@@ -1095,6 +1113,21 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
     } finally {
       derivedBusyRef.current = false;
+      if (derivedRetryTimerRef.current !== undefined) clearTimeout(derivedRetryTimerRef.current);
+      derivedRetryTimerRef.current = undefined;
+      // One wake-up for the earliest eligible job; a delayed page must not block
+      // a newly visible page or replace another page's earlier retry deadline.
+      const retryTimes = derivedQueueRef.current.map((job) => Math.max(job.retryAt ?? 0,
+        job.tier === 'visible' ? 0 : derivedBackgroundRetryAtRef.current));
+      if (derivedSweepRef.current?.order.length && derivedBackgroundRetryAtRef.current > Date.now()) {
+        retryTimes.push(derivedBackgroundRetryAtRef.current);
+      }
+      if (retryTimes.length > 0 && mountedRef.current && pageActiveRef.current && documentVisibleRef.current) {
+        derivedRetryTimerRef.current = setTimeout(() => {
+          derivedRetryTimerRef.current = undefined;
+          if (mountedRef.current && pageActiveRef.current) void drainDerivedQueue();
+        }, Math.max(1, Math.min(...retryTimes) - Date.now()));
+      }
       // 队列排空了（这一趟没有新的活进来）：过一会儿把 DLSSNR 的工作区交回。
       scheduleWorkspaceRelease();
     }

@@ -26,7 +26,10 @@ pub const PROTOCOL_MAJOR: u32 = 1;
 /// 手写的号会忘（`runtime_label` 当初不用手写常量正是这个理由），所以忘记不再是静默的：
 /// worker 启动时拿自己的 `runtime_label()` 与它比对，对不上就拒跑
 /// （`runtime_label_mismatch`），派生产物不会被按错误的版本号记进账。
+#[cfg(not(target_os = "android"))]
 pub const WORKER_RUNTIME_LABEL: &str = "ort-api27";
+#[cfg(target_os = "android")]
+pub const WORKER_RUNTIME_LABEL: &str = "ort-api27+ncnn-20260113-rgb128-v1";
 
 /// 产物**不是算出来的**、而是原样交回时那一阶段报的引擎名。
 ///
