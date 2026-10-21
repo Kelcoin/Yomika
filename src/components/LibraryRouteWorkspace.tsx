@@ -553,7 +553,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     // A background read is the entry refresh, and the list it is re-reading is
     // already on screen: neither the skeleton nor the list's busy state may take
     // over the page for a request nobody asked for.
-    if (!options.background) setPageLoading(true);
+    if (!options.background && !(options.silent && initialArchivesLoaded.current)) setPageLoading(true);
     // 「屏幕上到底有没有一份已经成型的列表」是这次失败该走哪条路的唯一判据。空屏
     // （骨架，或者最初那次还没成功过）时不能清掉错误页：一次静默/入场刷新失败会把
     // 它抹掉，用户只剩一个转不完的骨架和一条几秒后消失的 toast，无从知道发生了什么。

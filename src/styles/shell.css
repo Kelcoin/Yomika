@@ -6305,6 +6305,12 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   transition: border-color var(--motion-standard), background-color var(--motion-standard);
 }
 
+/* Both sources reserve the same grid track; switching cannot move the queue. */
+.upload-source-stage { display: grid; min-block-size: 264px; }
+.upload-source-stage > .upload-dropzone { align-content: center; }
+.upload-source-stage > * { grid-area: 1 / 1; min-width: 0; }
+.upload-source-stage > [hidden] { display: grid !important; visibility: hidden; pointer-events: none; }
+
 .upload-url-form, .upload-queue {
   padding: var(--space-4);
   border: 1px solid var(--outline-variant);

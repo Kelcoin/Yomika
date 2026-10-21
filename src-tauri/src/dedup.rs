@@ -3914,110 +3914,171 @@ async fn dedup_scan_impl(
         if archives.is_empty() {
             break;
         }
-        for (index, archive) in archives.iter().enumerate() {
-            progress.processed = checkpoint + index as i64 + 1;
-            registry.publish(&progress);
-            let identity =
-                crate::cache::CacheImageIdentity::new(&scope_id, &archive.archive_id, "cover", 0);
-            // 共用封面的档案跳过缓存：占位图藏在缓存里，只有重新抓才能换掉。
-            let trust_cache = !refetch_covers.contains(&archive.archive_id);
-            let (had_cache_entry, cached) = match database.connection.lock() {
-                Ok(connection) => {
-                    let key = crate::cache::image_cache_key(&identity);
-                    let existed = trust_cache
-                        && connection
-                            .query_row(
-                                "SELECT EXISTS(SELECT 1 FROM cache_entries WHERE key=?1)",
-                                [key],
-                                |row| row.get::<_, bool>(0),
-                            )
-                            .unwrap_or(false);
-                    (
-                        existed,
-                        if trust_cache {
-                            crate::cache::load_image_cache(&connection, &app_data, &identity)
-                        } else {
-                            Ok(None)
-                        },
+        // Keep only four decoded-response buffers in flight. LANraragi may
+        // queue extraction for one archive; it must not serialize all covers.
+        for (batch_index, batch) in archives.chunks(4).enumerate() {
+            let fetch = |index: usize| {
+                let archive = batch.get(index);
+                let database = database.clone();
+                let app = app.clone();
+                let server_id = server_id.clone();
+                let scope_id = &scope_id;
+                let app_data = &app_data;
+                let refetch_covers = &refetch_covers;
+                async move {
+                    let archive = archive?;
+                    let identity = crate::cache::CacheImageIdentity::new(
+                        scope_id,
+                        &archive.archive_id,
+                        "cover",
+                        0,
+                    );
+                    let use_cache = !refetch_covers.contains(&archive.archive_id);
+                    if use_cache
+                        && matches!(
+                            crate::cache::read_cached_image(&database, app_data, &identity),
+                            Ok(Some(image)) if crate::cache::sniff_image_mime("application/octet-stream", &image.bytes).is_some()
+                        )
+                    {
+                        return None;
+                    }
+                    let result = crate::commands::library::load_archive_thumbnail_bytes_with_cache(
+                        server_id,
+                        archive.archive_id.clone(),
+                        database,
+                        app,
+                        use_cache,
                     )
-                }
-                Err(_) => {
-                    return crate::domain::result::CommandResult::failure(
-                        "UNKNOWN",
-                        crate::cache::LOCK_FAILED,
-                        true,
-                    )
+                    .await;
+                    Some((archive.archive_id.clone(), result))
                 }
             };
-            let bytes = match cached {
-                Ok(Some(image)) => {
-                    progress.cache_hits += 1;
-                    Some(image.bytes)
-                }
-                Ok(None) => {
-                    if had_cache_entry {
+            let (a, b, c, d) = tokio::join!(fetch(0), fetch(1), fetch(2), fetch(3));
+            let mut fetched = [a, b, c, d]
+                .into_iter()
+                .flatten()
+                .collect::<BTreeMap<_, _>>();
+            for (offset, archive) in batch.iter().enumerate() {
+                let index = batch_index * 4 + offset;
+
+                progress.processed = checkpoint + index as i64 + 1;
+                registry.publish(&progress);
+                let identity = crate::cache::CacheImageIdentity::new(
+                    &scope_id,
+                    &archive.archive_id,
+                    "cover",
+                    0,
+                );
+                // 共用封面的档案跳过缓存：占位图藏在缓存里，只有重新抓才能换掉。
+                let trust_cache = !refetch_covers.contains(&archive.archive_id);
+                let (had_cache_entry, cached) = match database.connection.lock() {
+                    Ok(connection) => {
+                        let key = crate::cache::image_cache_key(&identity);
+                        let existed = trust_cache
+                            && connection
+                                .query_row(
+                                    "SELECT EXISTS(SELECT 1 FROM cache_entries WHERE key=?1)",
+                                    [key],
+                                    |row| row.get::<_, bool>(0),
+                                )
+                                .unwrap_or(false);
+                        (
+                            existed,
+                            if trust_cache {
+                                crate::cache::load_image_cache(&connection, &app_data, &identity)
+                            } else {
+                                Ok(None)
+                            },
+                        )
+                    }
+                    Err(_) => {
+                        return crate::domain::result::CommandResult::failure(
+                            "UNKNOWN",
+                            crate::cache::LOCK_FAILED,
+                            true,
+                        )
+                    }
+                };
+                // Downloads write the shared cache, but still count as downloads
+                // in this scan rather than newly discovered cache hits.
+                let downloaded = fetched.contains_key(&archive.archive_id);
+                let had_cache_entry = had_cache_entry && !downloaded;
+                let cached = if downloaded { Ok(None) } else { cached };
+                let bytes = match cached {
+                    Ok(Some(image)) => {
+                        progress.cache_hits += 1;
+                        Some(image.bytes)
+                    }
+                    Ok(None) => {
+                        if had_cache_entry {
+                            progress.invalid_covers += 1;
+                            progress.diagnostics.push(format!(
+                                "{}: corrupt cached cover replaced",
+                                archive.archive_id
+                            ));
+                        }
+                        let result = match fetched.remove(&archive.archive_id) {
+                            Some(result) => result,
+                            None => {
+                                crate::commands::library::load_archive_thumbnail_bytes(
+                                    server_id.clone(),
+                                    archive.archive_id.clone(),
+                                    database.clone(),
+                                    app.clone(),
+                                )
+                                .await
+                            }
+                        };
+                        match result {
+                            Ok(crate::domain::result::CommandResult::Success { value, .. }) => {
+                                progress.downloads += 1;
+                                Some(value)
+                            }
+                            Ok(crate::domain::result::CommandResult::Failure { error, .. }) => {
+                                progress.missing_covers += 1;
+                                progress
+                                    .diagnostics
+                                    .push(format!("{}: {}", archive.archive_id, error.message));
+                                None
+                            }
+                            Err(error) => {
+                                progress.missing_covers += 1;
+                                progress
+                                    .diagnostics
+                                    .push(format!("{}: {error}", archive.archive_id));
+                                None
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        progress.invalid_covers += 1;
+                        progress
+                            .diagnostics
+                            .push(format!("{}: {error}", archive.archive_id));
+                        None
+                    }
+                };
+                if let Some(bytes) = bytes {
+                    let feature = database
+                        .connection
+                        .lock()
+                        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
+                        .and_then(|connection| {
+                            load_or_compute_feature(
+                                &connection,
+                                &scope_id,
+                                archive,
+                                &input.algorithm_version,
+                                &bytes,
+                            )
+                        });
+                    if let Err(error) = feature {
                         progress.invalid_covers += 1;
                         progress.diagnostics.push(format!(
-                            "{}: corrupt cached cover replaced",
+                            "{}: cover decode failed ({error})",
                             archive.archive_id
                         ));
                     }
-                    match crate::commands::library::load_archive_thumbnail_bytes(
-                        server_id.clone(),
-                        archive.archive_id.clone(),
-                        database.clone(),
-                        app.clone(),
-                    )
-                    .await
-                    {
-                        Ok(crate::domain::result::CommandResult::Success { value, .. }) => {
-                            progress.downloads += 1;
-                            Some(value)
-                        }
-                        Ok(crate::domain::result::CommandResult::Failure { error, .. }) => {
-                            progress.missing_covers += 1;
-                            progress
-                                .diagnostics
-                                .push(format!("{}: {}", archive.archive_id, error.message));
-                            None
-                        }
-                        Err(error) => {
-                            progress.missing_covers += 1;
-                            progress
-                                .diagnostics
-                                .push(format!("{}: {error}", archive.archive_id));
-                            None
-                        }
-                    }
-                }
-                Err(error) => {
-                    progress.invalid_covers += 1;
-                    progress
-                        .diagnostics
-                        .push(format!("{}: {error}", archive.archive_id));
-                    None
-                }
-            };
-            if let Some(bytes) = bytes {
-                let feature = database
-                    .connection
-                    .lock()
-                    .map_err(|_| crate::cache::LOCK_FAILED.to_string())
-                    .and_then(|connection| {
-                        load_or_compute_feature(
-                            &connection,
-                            &scope_id,
-                            archive,
-                            &input.algorithm_version,
-                            &bytes,
-                        )
-                    });
-                if let Err(error) = feature {
-                    progress.invalid_covers += 1;
-                    progress.diagnostics.push(format!(
-                        "{}: cover decode failed ({error})",
-                        archive.archive_id
-                    ));
                 }
             }
         }

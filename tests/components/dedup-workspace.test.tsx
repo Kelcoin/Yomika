@@ -633,6 +633,9 @@ describe('dedup scan progress and saved results', () => {
     expect(entry.closest('.dedup-section')).not.toBeNull();
     await user.click(entry);
     const dialog = await screen.findByRole('dialog', { name: '不重复关系' });
+    expect(within(dialog).getByRole('textbox')).not.toHaveFocus();
+    expect(dialog).toHaveFocus();
+    expect(within(dialog).queryByRole('button', { name: '关闭' })).not.toBeInTheDocument();
     // 「已移除」的含义写在说明里：不再参与比对，但仍可恢复标记。
     expect(within(dialog).getByText(/有效 1 条，不再参与比对/)).toBeInTheDocument();
     expect(within(dialog).getByText(/已移除 0 条仍可恢复标记/)).toBeInTheDocument();
@@ -647,8 +650,12 @@ describe('dedup scan progress and saved results', () => {
 
     await user.click(titleButton);
     const overview = await screen.findByRole('dialog', { name: 'Archive A' });
+    expect(screen.queryByRole('dialog', { name: '不重复关系' })).not.toBeInTheDocument();
     expect(within(overview).getByLabelText('档案概览')).toBeInTheDocument();
     expect(within(overview).getByRole('button', { name: '第 1 页' })).toBeInTheDocument();
+    await user.click(within(overview).getByRole('button', { name: '关闭概览' }));
+    expect(await screen.findByRole('dialog', { name: '不重复关系' })).toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '搜索不重复关系' })).not.toHaveFocus();
   });
 
   it('lists saved scan results, loads one and deletes one', async () => {

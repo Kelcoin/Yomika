@@ -4176,6 +4176,16 @@ pub(crate) async fn load_archive_thumbnail_bytes(
     database: State<'_, Database>,
     app: tauri::AppHandle,
 ) -> Result<CommandResult<Vec<u8>>, String> {
+    load_archive_thumbnail_bytes_with_cache(server_id, archive_id, database, app, true).await
+}
+
+pub(crate) async fn load_archive_thumbnail_bytes_with_cache(
+    server_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+    app: tauri::AppHandle,
+    use_cache: bool,
+) -> Result<CommandResult<Vec<u8>>, String> {
     let (base_url, scope_id) = match database
         .connection
         .lock()
@@ -4196,10 +4206,18 @@ pub(crate) async fn load_archive_thumbnail_bytes(
         }
     };
     let cache_identity = crate::cache::CacheImageIdentity::new(&scope_id, &archive_id, "cover", 0);
-    match crate::cache::read_cached_image(&database, &app_data, &cache_identity) {
-        Ok(Some(image)) => return Ok(CommandResult::success(image.bytes)),
-        Ok(None) => {}
-        Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
+    if use_cache {
+        match crate::cache::read_cached_image(&database, &app_data, &cache_identity) {
+            Ok(Some(image))
+                if crate::cache::sniff_image_mime("application/octet-stream", &image.bytes)
+                    .is_some() =>
+            {
+                return Ok(CommandResult::success(image.bytes))
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {}
+            Err(error) => return Ok(CommandResult::failure("UNKNOWN", error, true)),
+        }
     }
     let api_key = match SystemCredentialStore.get_server_api_key(&scope_id) {
         Ok(value) => value,
@@ -4211,6 +4229,24 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             ))
         }
     };
+    let result = fetch_cover_thumbnail(&base_url, &archive_id, api_key).await?;
+    if let CommandResult::Success { value: bytes, .. } = &result {
+        let mime = crate::cache::sniff_image_mime("application/octet-stream", bytes)
+            .unwrap_or_else(|| "image/jpeg".into());
+        if let Err(error) =
+            crate::cache::write_cached_image(&database, &app_data, &cache_identity, &mime, bytes)
+        {
+            eprintln!("yomika: image cache write failed: {error}");
+        }
+    }
+    Ok(result)
+}
+
+async fn fetch_cover_thumbnail(
+    base_url: &str,
+    archive_id: &str,
+    api_key: String,
+) -> Result<CommandResult<Vec<u8>>, String> {
     // `no_fallback=true` 是必须的：不带它时，凡是缩略图尚未生成的档案都会拿到
     // 同一张占位图（HTTP 200），而那张图会被逐字节缓存下来——查重按封面比对时，
     // 所有待生成缩略图的档案封面完全相同，于是被判成一堆重复档案。带参数后
@@ -4224,14 +4260,16 @@ pub(crate) async fn load_archive_thumbnail_bytes(
     );
     let mut response = None;
     // 任务结束与文件落盘之间有窗口期，重取可能又拿到 202；最多轮 3 轮。
-    for _ in 0..3 {
+    for attempt in 0..3 {
         let candidate =
             match reader_request(reqwest::Method::GET, url.clone(), api_key.clone()).await {
                 Ok(value) => value,
-                Err(error) => {
-                    return Ok(CommandResult::failure(error.code, error.message, true))
-                }
+                Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
             };
+        if candidate.status().is_server_error() && attempt < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(150 * (attempt + 1))).await;
+            continue;
+        }
         if candidate.status().as_u16() != 202 {
             response = Some(candidate);
             break;
@@ -4240,7 +4278,8 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             Ok(body) => body,
             Err(error) => return Ok(reader_response_failure(error)),
         };
-        let job_id = serde_json::from_slice::<serde_json::Value>(&job_body).ok()
+        let job_id = serde_json::from_slice::<serde_json::Value>(&job_body)
+            .ok()
             .and_then(|value| {
                 let job = value.get("job").cloned().unwrap_or(value);
                 job.as_i64()
@@ -4257,7 +4296,9 @@ pub(crate) async fn load_archive_thumbnail_bytes(
                 let status =
                     match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
                         Ok(value) => value,
-                        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
+                        Err(error) => {
+                            return Ok(CommandResult::failure(error.code, error.message, true))
+                        }
                     };
                 let body = match status.bytes().await {
                     Ok(body) => body,
@@ -4265,9 +4306,18 @@ pub(crate) async fn load_archive_thumbnail_bytes(
                 };
                 let payload: serde_json::Value = match serde_json::from_slice(&body) {
                     Ok(payload) => payload,
-                    Err(error) => return Ok(CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)),
+                    Err(error) => {
+                        return Ok(CommandResult::failure(
+                            "INVALID_RESPONSE",
+                            error.to_string(),
+                            false,
+                        ))
+                    }
                 };
-                let state = payload.get("state").and_then(|state| state.as_str()).map(str::to_owned);
+                let state = payload
+                    .get("state")
+                    .and_then(|state| state.as_str())
+                    .map(str::to_owned);
                 if state.as_deref() == Some("finished") {
                     finished = true;
                     break;
@@ -4318,25 +4368,17 @@ pub(crate) async fn load_archive_thumbnail_bytes(
             response.status().is_server_error(),
         ));
     }
-    let mime = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
     match response.bytes().await {
-        Ok(bytes) => {
-            if let Err(error) = crate::cache::write_cached_image(
-                &database,
-                &app_data,
-                &cache_identity,
-                &mime,
-                &bytes,
-            ) {
-                eprintln!("yomika: image cache write failed: {error}");
-            }
+        Ok(bytes)
+            if crate::cache::sniff_image_mime("application/octet-stream", &bytes).is_some() =>
+        {
             Ok(CommandResult::success(bytes.to_vec()))
         }
+        Ok(_) => Ok(CommandResult::failure(
+            "INVALID_RESPONSE",
+            "LANraragi thumbnail response is not an image",
+            true,
+        )),
         Err(error) => Ok(reader_response_failure(error)),
     }
 }
@@ -8427,6 +8469,29 @@ mod tests {
             matches!(result, Ok(CommandResult::Failure { .. })),
             "unfinished thumbnail must fail: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cover_thumbnail_rejects_json_and_handles_generation_job() {
+        let (url, server) = test_http_server(vec![(200, r#"{"error":"missing"}"#.into())]).await;
+        let result = fetch_cover_thumbnail(&url, "archive", "key".into()).await.unwrap();
+        server.abort();
+        assert!(matches!(result, CommandResult::Failure { error, .. } if error.code == "INVALID_RESPONSE"));
+
+        let image = "GIF89a-test-image";
+        let (url, server) = test_http_server(vec![
+            (202, r#"{"job":"1"}"#.into()),
+            (200, r#"{"state":"finished"}"#.into()),
+            (200, image.into()),
+        ]).await;
+        let result = fetch_cover_thumbnail(&url, "archive", "key".into()).await.unwrap();
+        server.abort();
+        assert!(matches!(result, CommandResult::Success { value, .. } if value == image.as_bytes()));
+
+        let (url, server) = test_http_server(vec![(503, "busy".into()), (200, image.into())]).await;
+        let result = fetch_cover_thumbnail(&url, "archive", "key".into()).await.unwrap();
+        server.abort();
+        assert!(matches!(result, CommandResult::Success { value, .. } if value == image.as_bytes()));
     }
 
     #[tokio::test]

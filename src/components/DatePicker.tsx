@@ -48,8 +48,9 @@ export function DatePicker({ label, value, onChange }: { label: string; value: s
       const viewportWidth = viewport?.width ?? window.innerWidth;
       const bottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight) - 12;
       const rect = root.getBoundingClientRect();
+      const anchor = triggerRef.current?.getBoundingClientRect() ?? rect;
       const width = Math.min(280, Math.max(0, viewportWidth - 24));
-      const x = Math.max(left, Math.min(rect.left, left + viewportWidth - 24 - width));
+      const x = Math.max(left, Math.min(anchor.left + (anchor.width - width) / 2, left + viewportWidth - 24 - width));
       const below = Math.max(0, bottom - rect.bottom - 6);
       const above = Math.max(0, rect.top - top - 6);
       const flip = below < popover.scrollHeight && above > below;

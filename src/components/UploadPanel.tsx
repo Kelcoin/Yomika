@@ -155,8 +155,8 @@ export function UploadPanel() {
         </button>
       </div>
 
-      {mode === 'local' ? (
-        <div className={`upload-dropzone${dragging ? ' is-dragging' : ''}`}>
+      <div className="upload-source-stage">
+        <div hidden={mode !== 'local'} className={`upload-dropzone${dragging ? ' is-dragging' : ''}`}>
           <Upload aria-hidden="true" />
           <strong>{dragging ? '松手即加入队列' : '把压缩包拖到窗口，或点击选择'}</strong>
           <span>ZIP、CBZ、RAR、CBR、7Z、PDF</span>
@@ -164,8 +164,7 @@ export function UploadPanel() {
             <FolderOpen aria-hidden="true" />{picking ? '选择中…' : '选择文件'}
           </button>
         </div>
-      ) : (
-        <div className="upload-url-form">
+        <div hidden={mode !== 'url'} className="upload-url-form">
           <label className="upload-url-label" htmlFor="upload-urls">要下载的链接（一行一个）</label>
           <AutoTextarea
             id="upload-urls"
@@ -182,7 +181,7 @@ export function UploadPanel() {
             <button className="secondary-action" type="button" disabled={parsedUrls.valid.length === 0} onClick={queueUrls}><Plus aria-hidden="true" />加入队列</button>
           </div>
         </div>
-      )}
+      </div>
 
       <div className="upload-queue" aria-live="polite">
         <div className="upload-queue-heading">

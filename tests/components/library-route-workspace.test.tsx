@@ -912,6 +912,7 @@ describe('library route workspace', () => {
 
   it('answers a pull by re-reading the page on screen, not by rebuilding the whole index', async () => {
     let refreshCount = 0;
+    let pendingPage: Promise<unknown> | undefined;
     let probe = false;
     // The server owns the list, so what it answers on the first page is what the
     // user sees — no full-library pull stands between them.
@@ -919,7 +920,7 @@ describe('library route workspace', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_categories') return { ok: true, value: [] };
-      if (command === 'search_archives_page') return { ok: true, value: { items: served, total: served.length, hasMore: false } };
+      if (command === 'search_archives_page') return pendingPage ?? { ok: true, value: { items: served, total: served.length, hasMore: false } };
       if (command === 'probe_new_archives') return { ok: true, value: probe };
       if (command === 'refresh_archives') {
         refreshCount += 1;
@@ -940,10 +941,17 @@ describe('library route workspace', () => {
     });
 
     served = [{ serverId: 'scope-a', archiveId: 'a2', title: 'Fresh Archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' }];
+    let finishRefresh!: (value: unknown) => void;
+    pendingPage = new Promise(resolve => { finishRefresh = resolve; });
     fireEvent.wheel(screen.getByRole('list', { name: '档案' }), { deltaY: -300 });
+    expect(screen.getByRole('button', { name: /^Newest Archive\b/ })).toBeInTheDocument();
+    expect(document.querySelector('.archive-list-skeleton-layer:not(.is-exiting)')).toBeNull();
+    await act(async () => { finishRefresh({ ok: true, value: { items: served, total: served.length, hasMore: false } }); });
+    pendingPage = undefined;
 
     // One request, and the list is the new one — that is the whole refresh.
     expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Fresh Archive\b/ }).closest('.archive-row-wrap')).toHaveClass('is-fresh');
     // With nothing new to index, the offline mirror is left alone.
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('probe_new_archives', { serverId: 'scope-a' }));
     expect(refreshCount).toBe(0);

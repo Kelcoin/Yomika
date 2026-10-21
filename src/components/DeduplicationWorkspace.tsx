@@ -1,4 +1,5 @@
 import { ContentSkeleton } from './ContentSkeleton';
+import { WorkspaceLoadingSkeleton } from './WorkspaceLoadingSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePageActive } from '../app/RetainedPage';
@@ -183,6 +184,7 @@ export function DeduplicationWorkspace() {
   const pageActive = usePageActive();
   const { showToast } = useToast();
   const [servers, setServers] = useState<ServerRecord[]>([]);
+  const [initializing, setInitializing] = useState(true);
   const [server, setServer] = useState<ServerRecord>();
   const [archives, setArchives] = useState<ArchiveIdentity[]>([]);
   const [progress, setProgress] = useState<DedupScanProgress>();
@@ -207,12 +209,14 @@ export function DeduplicationWorkspace() {
   const [deleteSession, setDeleteSession] = useState<{ count: number }>();
   // 不重复关系面板：持久化的对（含历史墓碑）直接列出，可搜索、可撤销标记。
   const [relationsOpen, setRelationsOpen] = useState(false);
-  useOverlayBackGuard(relationsOpen, () => setRelationsOpen(false));
   const [relations, setRelations] = useState<DedupNonDuplicateRecord[]>([]);
   /** 从关系行打开的档案概览：就地看一眼，不离开查重页（筛选与选择都留着）。 */
   const [overviewArchiveId, setOverviewArchiveId] = useState<string>();
   /** 身份列表里没有概览弹窗要的全字段：打开时按 id 现取一条。 */
   const [overviewArchive, setOverviewArchive] = useState<ArchiveRecord>();
+  // Keep the logical parent on the back stack while only its visual surface
+  // is suspended. Back from the overview returns to these same relations.
+  useOverlayBackGuard(relationsOpen, () => setRelationsOpen(false));
   const [relationsQuery, setRelationsQuery] = useState('');
   // 扫描结果：会话本来就会落库，这个对话框把它们列出来供随时载入。
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -242,6 +246,7 @@ export function DeduplicationWorkspace() {
 
   useEffect(() => {
     void library.listServers().then((response) => {
+      setInitializing(false);
       if (!response.ok) { showToast(response.error.message, 'error'); return; }
       setServers(response.value);
       // 不再让用户挑服务器：当前启用的那台就是默认目标（pickServer 的既有语义）。
@@ -808,6 +813,7 @@ export function DeduplicationWorkspace() {
     ['已选档案', selected.size, true],
   ];
 
+  if (initializing) return <WorkspaceLoadingSkeleton path="/tools/dedup" />;
   return <div className="workspace-stack dedup-workspace">
     <h1 className="visually-hidden">查重工作区</h1>
     <section className="dedup-section dedup-scope" aria-label="检测范围">
@@ -931,11 +937,11 @@ export function DeduplicationWorkspace() {
       {moreRowsMounted && <div ref={sentinelRef} aria-hidden="true" className="dedup-list-sentinel" />}
       {!visibleGroups.length && !busy && <StatusLine>没有匹配当前筛选的重复组。</StatusLine>}
     </>}
-    <Dialog.Root open={relationsOpen} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
+    <Dialog.Root open={relationsOpen && !overviewArchive} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-relations-dialog">
-          <Dialog.Title>不重复关系</Dialog.Title>
+        <Dialog.Content className="dialog-content dedup-relations-dialog" tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); (event.target as HTMLElement).focus(); }} onCloseAutoFocus={(event) => event.preventDefault()}>
+          <Dialog.Title className="dialog-title"><Link2Off aria-hidden="true" />不重复关系</Dialog.Title>
           <Dialog.Description>
             {`有效 ${relations.filter((record) => !record.tombstoned).length} 条，不再参与比对；已移除 ${relations.filter((record) => record.tombstoned).length} 条仍可恢复标记。`}
           </Dialog.Description>
@@ -964,9 +970,6 @@ export function DeduplicationWorkspace() {
             </li>)}
             {!visibleRelations.length && <StatusLine as="li">没有匹配的关系记录。</StatusLine>}
           </ul>
-          <div className="dialog-actions">
-            <button className="secondary-action is-icon" type="button" aria-label="关闭" title="关闭" onClick={() => setRelationsOpen(false)}><X aria-hidden="true" /></button>
-          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
@@ -976,7 +979,7 @@ export function DeduplicationWorkspace() {
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content dedup-history-dialog">
-          <Dialog.Title>扫描结果</Dialog.Title>
+          <Dialog.Title className="dialog-title"><History aria-hidden="true" />扫描结果</Dialog.Title>
           <Dialog.Description>每次扫描都会连同命中对、选择与删除结果一起保存在本机，可以重新载入继续处理；删除只清理该次扫描的记录。</Dialog.Description>
           {/* 空态不再伪装成一条记录：它以前是列表里的一个 <li>，于是套上了记录的
               描边、底色和两端对齐，读起来像"有一条叫这个名字的扫描结果"。 */}

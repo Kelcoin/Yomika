@@ -38,6 +38,22 @@ function renderUpload() {
 }
 
 describe('archive upload', () => {
+  it('retains both intake forms in one sizing track when switching tabs', async () => {
+    setInvokeAdapterForTests(baseAdapter(() => undefined));
+    const user = userEvent.setup();
+    const view = render(<MemoryRouter><UploadPanel /></MemoryRouter>);
+    const stage = view.container.querySelector('.upload-source-stage')!;
+    expect(stage.children).toHaveLength(2);
+    const local = stage.children[0];
+    const internet = stage.children[1];
+    await user.click(screen.getByRole('tab', { name: '从互联网添加' }));
+    expect(local).toHaveAttribute('hidden');
+    expect(internet).not.toHaveAttribute('hidden');
+    await user.type(screen.getByRole('textbox'), 'https://example.com/archive');
+    await user.click(screen.getByRole('tab', { name: '从本地添加' }));
+    await user.click(screen.getByRole('tab', { name: '从互联网添加' }));
+    expect(screen.getByRole('textbox')).toHaveValue('https://example.com/archive');
+  });
   it('recovers from a failed file picker and permits another selection', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(baseAdapter(() => undefined));
