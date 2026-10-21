@@ -798,7 +798,7 @@ describe('native shell configuration', () => {
     expect(core, '没 DLL 时要留下能分辨的记号').toContain('跳过：没有找到 nvngx_dlssnr.dll');
     expect(core, '真跑不起来也要留下记号').toContain('跳过：DLSSNR 没跑起来');
     expect(device, 'COM 那条守卫的记号别改名').toContain('SKIP: no DLSSNR DLL');
-    const verify = read('../../scripts/compute/verify-round.ps1');
+    const verify = read('../../.github/scripts/verify-round.ps1');
     expect(verify, 'core-dlssnr 那一步要 --nocapture').toMatch(
       /Step "core-dlssnr" \{[^}]*--nocapture/,
     );
@@ -1117,7 +1117,7 @@ describe('native shell configuration', () => {
       '协议里的 layers 没有代码读；§12.4 的 1/3/5 层对应 DLSSNR 的 settings.passes，只有真 NGX + GPU 那条路跑得到',
     );
 
-    const trio = read('../../scripts/compute/verify-round.ps1');
+    const trio = read('../../.github/scripts/verify-round.ps1');
     expect(trio, '20 轮那条要进三连，不能只在手工跑里活着').toContain(
       'Step "restart-it" { cargo test --manifest-path $manifest --test compute_restart_storm -- --nocapture --test-threads=1 }',
     );
@@ -1171,7 +1171,7 @@ describe('native shell configuration', () => {
       '产品路径上 stage.tile 一直是 None，worker 于是用核心的 DEFAULT_TILE_SIZE=128',
     );
 
-    const trio = read('../../scripts/compute/verify-round.ps1');
+    const trio = read('../../.github/scripts/verify-round.ps1');
     expect(trio, '队列那个读数要进三连，而且必须 --nocapture').toContain(
       'Step "queue-ack" { cargo test --manifest-path $manifest --lib -- --exact --nocapture --test-threads=1 compute::scheduler::tests::the_acks_the_interface_waits_for_stay_under_the_ui_threshold }',
     );

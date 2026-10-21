@@ -581,11 +581,11 @@ describe('design system contract', () => {
 
   it('derives the approved reading mark everywhere from one master', () => {
     const master = read('assets/yomika-mark.svg');
-    // 这份设计稿是**契约的输入**，而 `docs/*` 按 `.gitignore:2` 默认不入库：它必须被
-    // 显式入库（`git add -f`，仓库里另外两份 superpowers 设计稿就是这么进去的），否则
-    // 干净检出与 CI 会在这一行读不到文件而红。它不能被挪进 `assets/`——本用例末尾那条
-    // 断言 `assets/` 下有且只有一份 svg。
-    const approved = read('docs/superpowers/specs/2026-10-14-yomika-reading-mark.svg');
+    // 这份设计稿是**契约的输入**，所以它必须在一个被追踪的路径上：`docs/*` 整个目录
+    // 不随仓库走（`.gitignore`），`assets/` 又不能收它——本用例末尾那条断言
+    // `assets/` 下有且只有一份 svg。2026-10-21 从 `docs/superpowers/specs/` 搬到
+    // `tests/fixtures/`：它本来就是测试的比对输入，放在夹具里名实相符。
+    const approved = read('tests/fixtures/yomika-reading-mark-spec.svg');
     const paths = (source: string) => [...source.matchAll(/d="(M[^"]+)"/g)].map(match => match[1]);
     expect(paths(master)).toEqual(paths(approved));
     expect(paths(master)).toHaveLength(4);

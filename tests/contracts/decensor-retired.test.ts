@@ -104,7 +104,7 @@ describe('去码这一档已经整条下线', () => {
   });
 
   it('整轮验证入口不再跑一条已经没有的套件', () => {
-    const script = read('scripts/compute/verify-round.ps1');
+    const script = read('.github/scripts/verify-round.ps1');
     expect(script).not.toMatch(/decensor/i);
   });
 

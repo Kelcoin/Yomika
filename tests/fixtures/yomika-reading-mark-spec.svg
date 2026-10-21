@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Yomika 阅读印记设计稿</title>
+  <desc id="desc">展开的双页汇聚为 Y 字书脊，主元素周围保留宽裕留白。</desc>
+  <rect width="512" height="512" rx="112" fill="#171717"/>
+  <path d="M112 130 Q181 132 236 174 L236 278 Q182 238 112 238 Z" fill="#F3EEE4"/>
+  <path d="M400 130 Q331 132 276 174 L276 278 Q330 238 400 238 Z" fill="#F3EEE4"/>
+  <path d="M127 264 Q193 268 256 313 Q319 268 385 264 L385 293 Q322 300 276 340 L276 390 L236 390 L236 340 Q190 300 127 293 Z" fill="#F3EEE4"/>
+  <path d="M340 142 Q360 135 378 133 L378 208 L359 194 L340 210 Z" fill="#B63A2E"/>
+</svg>

@@ -1,6 +1,4 @@
-# Local architecture and migration documents（架构、审计与迁移笔记只在本地）。
-# 唯一的例外是被契约测试读取的那份印记设计稿，例外写在 `/docs/superpowers/` 之后，
-# 否则会被那条再盖回去。
+# Local architecture and migration documents（架构、审计与迁移笔记只在本地，不随仓库走）。
 /docs/*
 
 # Planning state
@@ -27,8 +25,6 @@ CLAUDE.local.md
 /.skill-archive/
 /.superpowers/
 /docs/superpowers/
-# 例外：`tests/design-system-contract.test.ts` 读这份设计稿比对母版几何，它必须进远端。
-!/docs/superpowers/specs/2026-10-14-yomika-reading-mark.svg
 
 # Local build helpers: entrypoint, one-off packaging, model pipeline, and the
 # portable toolchain under tools/windows/toolchain/. The Windows build script is
@@ -82,9 +78,8 @@ Thumbs.db
 NVIDIA Corporation/
 /.agents/
 
-# scripts/ 里除「整轮验证入口」外，都是一次性的取证与变异检查脚本
-# （task*-mutation-check.ps1 之类），只在本地跑，不进远端。2026-10-21 已把此前被跟踪的
-# 那 59 个用 `git rm --cached` 请出仓库，所以这条规则从现在起对新旧文件都成立；唯一保留
-# 的是被四条契约条款读、并在 README 里当验证入口的那个脚本。
+# scripts/ 整个目录只在本地跑：里面是一次性的取证与变异检查脚本（task*-mutation-check.ps1
+# 之类），不随仓库走。2026-10-21 把此前被跟踪的那批请出了仓库（本地文件都还在）；整轮
+# 验证入口也搬到了 `.github/scripts/verify-round.ps1`（那四条读它的契约跟着改了路径），
+# 所以这里不再需要例外。
 /scripts/
-!/scripts/compute/verify-round.ps1

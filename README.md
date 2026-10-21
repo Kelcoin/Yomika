@@ -153,7 +153,7 @@ pwsh -File .github/scripts/build-android.ps1
 Windows 计算链路的整轮验证包含硬件与运行环境检查，需要相应 GPU、驱动和 DLL：
 
 ```powershell
-pwsh -File scripts/compute/verify-round.ps1 -RepoRoot (Get-Location).Path
+pwsh -File .github/scripts/verify-round.ps1 -RepoRoot (Get-Location).Path
 ```
 
 ### 代码导航
