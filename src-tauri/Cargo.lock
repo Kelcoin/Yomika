@@ -6103,6 +6103,7 @@ dependencies = [
  "base64 0.22.1",
  "blake3",
  "flate2",
+ "futures-util",
  "image",
  "keyring",
  "ort",

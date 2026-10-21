@@ -11,6 +11,21 @@ import { RetainedPage } from '../../src/app/RetainedPage';
 
 afterEach(resetInvokeAdapterForTests);
 describe('duplicate deletion confirmation', () => {
+  it('keeps the scan controls mounted while the server is loading', async () => {
+    let finish!: (value: unknown) => void;
+    setInvokeAdapterForTests(async command => command === 'list_servers'
+      ? new Promise(resolve => { finish = resolve; }) : { ok: true, value: [] });
+    const view = render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    const start = screen.getByRole('button', { name: '开始扫描' });
+    const date = screen.getByRole('button', { name: /起始日期/ });
+    expect(start).toBeDisabled();
+    expect(screen.getByLabelText('正在读取服务器')).toBeInTheDocument();
+    await act(async () => finish({ ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] }));
+    await waitFor(() => expect(start).toBeEnabled());
+    expect(screen.getByRole('button', { name: '开始扫描' })).toBe(start);
+    expect(screen.getByRole('button', { name: /起始日期/ })).toBe(date);
+    view.unmount();
+  });
   it('does not reopen an old overview lookup after leaving and returning', async () => {
     const record = { serverId: 's', archiveId: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 1, updatedAt: '2026-01-01' };
     let finish: ((value: unknown) => void) | undefined;
@@ -637,8 +652,8 @@ describe('dedup scan progress and saved results', () => {
     expect(dialog).toHaveFocus();
     expect(within(dialog).queryByRole('button', { name: '关闭' })).not.toBeInTheDocument();
     // 「已移除」的含义写在说明里：不再参与比对，但仍可恢复标记。
-    expect(within(dialog).getByText(/有效 1 条，不再参与比对/)).toBeInTheDocument();
-    expect(within(dialog).getByText(/已移除 0 条仍可恢复标记/)).toBeInTheDocument();
+    expect(within(dialog).getByPlaceholderText('在 1 条不重复关系中搜索')).toBeInTheDocument();
+    expect(within(dialog).queryByText(/不再参与比对/)).not.toBeInTheDocument();
     // 行内显示的是档案标题（按 ID 解析），解析不到才退回 ID 前缀。
     // 库里还有的档案，标题就是打开档案概览的入口（就地看，不跳阅读器），
     // 已删除的只显示文字。

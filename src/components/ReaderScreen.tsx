@@ -1679,6 +1679,17 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       className="reader-screen"
       style={{ touchAction: effectiveLayout === 'webtoon' ? 'pan-y' : 'none' }}
       ref={rootRef}
+      onTouchStartCapture={() => { chromeTouchAt.current = -Infinity; }}
+      onClickCapture={(event) => {
+        // touchend can reveal a control under the finger before WebView sends
+        // its compatibility click. Stop it BEFORE the button/link handler,
+        // not at the canvas's bubble handler after navigation has already run.
+        // A new touch clears the guard; keyboard activation (detail 0) works too.
+        if (event.detail > 0 && Date.now() - chromeTouchAt.current < 600) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
       onClick={(event) => {
         if (Date.now() - chromeTouchAt.current < 600) return;
         // A drag that turned the page, the second click of a double click, and a

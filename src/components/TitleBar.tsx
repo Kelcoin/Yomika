@@ -16,7 +16,11 @@ export function TitleBar() {
   const drag = useWindowDrag();
 
   return (
-    <header className="titlebar" {...drag}>
+    <header className="titlebar" {...drag}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onFocus={(event) => event.stopPropagation()}
+    >
       <span className="titlebar-mark">
         <YomikaMark size={18} />
       </span>

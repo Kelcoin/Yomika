@@ -162,6 +162,32 @@ it('auto hides a bottom bar after compatibility mouse movement', () => {
   expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
 });
 
+it('does not let a canvas touch activate the back button revealed under that finger', () => {
+  vi.useFakeTimers();
+  render(<MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>
+    <Routes><Route path="/library" element={<p>back destination</p>} />
+      <Route path="/reader" element={<ReaderScreen archiveId="back" title="Back" pages={['blob:a']} />} />
+    </Routes>
+  </MemoryRouter>);
+  const reader = screen.getByRole('main', { name: '漫画阅读器' });
+  const point = { clientX: 24, clientY: 24 };
+  fireEvent.touchStart(reader, { touches: [point] });
+  fireEvent.touchEnd(reader, { touches: [], changedTouches: [point] });
+  const back = screen.getByRole('button', { name: '返回上一页' });
+  // Android WebView may hit-test its delayed compatibility click against
+  // the newly mounted toolbar rather than the original canvas.
+  fireEvent.mouseDown(back, { ...point, button: 0 });
+  fireEvent.mouseUp(back, { ...point, button: 0 });
+  fireEvent.click(back, { ...point, detail: 1 });
+  expect(screen.queryByText('back destination')).not.toBeInTheDocument();
+  expect(reader).toBeInTheDocument();
+  // A distinct touch must work immediately, without waiting for a cooldown.
+  fireEvent.touchStart(back, { touches: [point] });
+  fireEvent.touchEnd(back, { touches: [], changedTouches: [point] });
+  fireEvent.click(back, { ...point, detail: 1 });
+  expect(screen.getByText('back destination')).toBeInTheDocument();
+});
+
 it('keeps the back control mounted during a press near the auto-hide deadline', () => {
   vi.useFakeTimers();
   render(<MemoryRouter initialEntries={['/library', '/reader']} initialIndex={1}>

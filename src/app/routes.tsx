@@ -12,6 +12,8 @@ import { HomeShell } from '../components/HomeShell';
 import { ShelfShell } from '../components/ShelfShell';
 import { LibraryWorkspace, type ShelfTimelineEntry } from '../components/LibraryWorkspace';
 import { WorkspaceLoadingSkeleton } from '../components/WorkspaceLoadingSkeleton';
+import { UploadPanel } from '../components/UploadPanel';
+import { DeduplicationWorkspace } from '../components/DeduplicationWorkspace';
 import { LoadingIndicator } from '../components/LoadingIndicator';
 import { pickServer } from '../domain/server';
 import { ServerRequiredPrompt } from '../components/ServerRequiredPrompt';
@@ -23,24 +25,21 @@ export const lazyPages = {
   reader: () => import('../components/ReaderRoute'),
   settings: () => import('../components/SettingsWorkspace'),
   localArchives: () => import('../components/LocalArchivesWorkspace'),
-  upload: () => import('../components/UploadPanel'),
   eh: () => import('../components/EhRouteWorkspace'),
   metadataEdit: () => import('../components/MetadataEditRoute'),
-  deduplication: () => import('../components/DeduplicationWorkspace'),
 } as const;
 
-/** The standalone pages load on first entry. Everything else — home, library
+/** Readers and larger editors load on first entry. Everything else — home, library
  * and the three shelves — stays in the main chunk: those five panels are the
  * app's shell, are kept mounted across visits, and would pay a Suspense flash
  * on every return for no further savings. The leaves were the bulk of the
- * parsed bytes on boot even though they are one route deep. */
+ * parsed bytes on boot even though they are one route deep. Upload and dedup
+ * keep their real frame eager to avoid swapping an approximate cold fallback. */
 const ReaderRouteScreen = lazy(() => lazyPages.reader().then((module) => ({ default: module.ReaderRoute })));
 const SettingsWorkspace = lazy(() => lazyPages.settings().then((module) => ({ default: module.SettingsWorkspace })));
 const LocalArchivesWorkspace = lazy(() => lazyPages.localArchives().then((module) => ({ default: module.LocalArchivesWorkspace })));
-const UploadPanel = lazy(() => lazyPages.upload().then((module) => ({ default: module.UploadPanel })));
 const EhRouteWorkspace = lazy(() => lazyPages.eh().then((module) => ({ default: module.EhRouteWorkspace })));
 const MetadataEditRoute = lazy(() => lazyPages.metadataEdit().then((module) => ({ default: module.MetadataEditRoute })));
-const DeduplicationWorkspace = lazy(() => lazyPages.deduplication().then((module) => ({ default: module.DeduplicationWorkspace })));
 
 /** Code warming never mounts a route or invokes its effects. */
 export function preloadLazyPages(getForegroundPath: () => string = () => '/'): () => void {

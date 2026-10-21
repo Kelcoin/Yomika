@@ -4618,6 +4618,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* .workspace-stack 本身没有样式，区块之间就会贴在一起：这里把工作区变成
    带行距的网格，每张卡片之间留出空隙。 */
 .dedup-workspace { display: grid; align-content: start; gap: var(--space-5); max-width: min(100%, 1680px); margin: 0 auto; }
+.dedup-server-skeleton { display: inline-block; width: 6em; height: 1em; vertical-align: middle; }
 /* 顶部三段式：检测范围 → 进度 → 本次扫描统计。每段一张卡，标题行右侧放动作，
    与 Readoshi 的「范围面板 / 进度面板 / 统计面板」一致；不再有页首小标题。 */
 .dedup-workspace .dedup-section { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }

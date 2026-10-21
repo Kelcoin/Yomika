@@ -58,6 +58,26 @@ async function clickDetailBack(to: string) {
 }
 
 describe('the detail page goes back to the page it belongs to', () => {
+  it.each(['new search', ''])('keeps the current search %j after opening and closing a detail', async (query) => {
+    answered();
+    renderAt('/library?server=scope-a&q=old%20search&keep=1');
+    const input = await screen.findByRole('combobox', { name: '搜索档案' });
+    await waitFor(() => expect(input).toHaveValue('old search'));
+    await waitFor(() => expect(new URLSearchParams(window.location.search).has('q')).toBe(false));
+    expect(new URLSearchParams(window.location.search).get('server')).toBe('scope-a');
+    expect(new URLSearchParams(window.location.search).get('keep')).toBe('1');
+    if (query) {
+      fireEvent.change(input, { target: { value: query } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+    }
+    else fireEvent.click(screen.getByRole('button', { name: '清除搜索' }));
+    await waitFor(() => expect(input).toHaveValue(query));
+    fireEvent.click(await screen.findByRole('button', { name: /^Probe Archive\b/ }));
+    await waitFor(() => expect(window.location.pathname).toBe('/library/archive-a'));
+    await clickDetailBack('/library');
+    expect(screen.getByRole('combobox', { name: '搜索档案' })).toHaveValue(query);
+  });
+
   it('lands on the library list, not the page the library was left from', async () => {
     answered();
     renderAt('/');

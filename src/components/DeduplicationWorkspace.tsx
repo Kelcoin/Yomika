@@ -1,5 +1,4 @@
 import { ContentSkeleton } from './ContentSkeleton';
-import { WorkspaceLoadingSkeleton } from './WorkspaceLoadingSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePageActive } from '../app/RetainedPage';
@@ -813,14 +812,13 @@ export function DeduplicationWorkspace() {
     ['已选档案', selected.size, true],
   ];
 
-  if (initializing) return <WorkspaceLoadingSkeleton path="/tools/dedup" />;
   return <div className="workspace-stack dedup-workspace">
     <h1 className="visually-hidden">查重工作区</h1>
     <section className="dedup-section dedup-scope" aria-label="检测范围">
       <div className="dedup-section-heading">
         <div>
           <strong>检测范围</strong>
-          <span>服务器：{server?.name ?? '未配置'}。按加入日期圈定参与比对的档案。</span>
+          <span>服务器：{initializing ? <span className="skeleton-line dedup-server-skeleton" aria-label="正在读取服务器" /> : (server?.name ?? '未配置')}。按加入日期圈定参与比对的档案。</span>
         </div>
         <div className="dedup-section-actions">
           {/* 与阅读器的工具栏、档案库的多选栏同一种语言：动作一律是纯图标，词放在
@@ -940,12 +938,9 @@ export function DeduplicationWorkspace() {
     <Dialog.Root open={relationsOpen && !overviewArchive} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-relations-dialog" tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); (event.target as HTMLElement).focus(); }} onCloseAutoFocus={(event) => event.preventDefault()}>
+        <Dialog.Content className="dialog-content dedup-relations-dialog" aria-describedby={undefined} tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); (event.target as HTMLElement).focus(); }} onCloseAutoFocus={(event) => event.preventDefault()}>
           <Dialog.Title className="dialog-title"><Link2Off aria-hidden="true" />不重复关系</Dialog.Title>
-          <Dialog.Description>
-            {`有效 ${relations.filter((record) => !record.tombstoned).length} 条，不再参与比对；已移除 ${relations.filter((record) => record.tombstoned).length} 条仍可恢复标记。`}
-          </Dialog.Description>
-          <input className="dedup-relations-search" aria-label="搜索不重复关系" value={relationsQuery} onChange={(event) => setRelationsQuery(event.target.value)} placeholder="搜索档案标题或 ID" spellCheck={false} autoComplete="off" />
+          <input className="dedup-relations-search" aria-label="搜索不重复关系" value={relationsQuery} onChange={(event) => setRelationsQuery(event.target.value)} placeholder={`在 ${relations.length} 条不重复关系中搜索`} spellCheck={false} autoComplete="off" />
           <ul className="dedup-relations-list">
             {visibleRelations.map((record) => <li key={record.pairKey} className={record.tombstoned ? 'is-tombstoned' : ''}>
               <div className="dedup-relation-pair">

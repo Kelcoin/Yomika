@@ -42,6 +42,45 @@ mod tests {
         connection
     }
 
+    #[tokio::test]
+    async fn slow_cover_does_not_block_following_covers() {
+        use futures_util::StreamExt;
+        let jobs = (0..12).map(|index| async move {
+            if index == 0 { std::future::pending::<()>().await; }
+            index
+        }).collect();
+        let mut pool = cover_scan_pool(jobs);
+        let mut completed = Vec::new();
+        for _ in 0..11 {
+            completed.push(tokio::time::timeout(std::time::Duration::from_secs(1), pool.next()).await.unwrap().unwrap());
+        }
+        completed.sort_unstable();
+        assert_eq!(completed, (1..12).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn scan_feature_reuses_matching_bytes_and_replaces_changed_version() {
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection()) };
+        let archive = DedupScanArchive {
+            archive_id: "a".into(), path: "a".into(), title: None,
+            filename: "a".into(), page_count: None, size: None,
+        };
+        let bytes = test_png();
+        compute_scan_feature(&database, "scope", &archive, "v1", &bytes).unwrap();
+        // A sentinel signature proves that matching bytes skip decoding/write.
+        database.connection.lock().unwrap().execute("UPDATE dedup_features SET dhash='sentinel'", []).unwrap();
+        compute_scan_feature(&database, "scope", &archive, "v1", &bytes).unwrap();
+        let read = || database.connection.lock().unwrap().query_row("SELECT dhash FROM dedup_features", [], |row| row.get::<_, String>(0)).unwrap();
+        assert_eq!(read(), "sentinel");
+        compute_scan_feature(&database, "scope", &archive, "v2", &bytes).unwrap();
+        assert_ne!(read(), "sentinel");
+        database.connection.lock().unwrap().execute("UPDATE dedup_features SET dhash='sentinel'", []).unwrap();
+        let mut changed = bytes;
+        changed.push(0);
+        compute_scan_feature(&database, "scope", &archive, "v2", &changed).unwrap();
+        assert_ne!(read(), "sentinel");
+    }
+
     fn scan_input(version: &str) -> DedupStartScanInput {
         DedupStartScanInput {
             session_id: "scan-1".into(),
@@ -2244,6 +2283,33 @@ fn should_skip_cheap_pair(
     low_information_pair(left, right, options)
 }
 
+fn compute_scan_feature(
+    database: &crate::db::Database,
+    scope_id: &str,
+    archive: &DedupScanArchive,
+    algorithm_version: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let content_hash = exact_hash(bytes);
+    let exists: bool = database.connection.lock()
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())?
+        .query_row("SELECT EXISTS(SELECT 1 FROM dedup_features WHERE scope_id=?1 AND path=?2 AND exact_hash=?3 AND algorithm_version=?4 AND dhash IS NOT NULL)",
+            params![scope_id, archive.archive_id, content_hash, algorithm_version], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if exists { return Ok(()); }
+    // This expensive decode deliberately runs with no database lock held.
+    let signature = match decoded_cover_signature(bytes) {
+        Ok(value) => value,
+        Err(error) if error == "low-information cover" => String::new(),
+        Err(error) => return Err(error),
+    };
+    database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.to_string())?
+        .execute("INSERT INTO dedup_features (scope_id,path,exact_hash,dhash,algorithm_version,size) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(scope_id,path) DO UPDATE SET exact_hash=excluded.exact_hash,dhash=excluded.dhash,algorithm_version=excluded.algorithm_version,size=excluded.size,updated_at=CURRENT_TIMESTAMP",
+            params![scope_id, archive.archive_id, content_hash, signature, algorithm_version, bytes.len() as i64])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn load_or_compute_feature(
     connection: &Connection,
     scope_id: &str,
@@ -3751,6 +3817,13 @@ pub fn dedup_import_readoshi(
     )
 }
 
+fn cover_scan_pool<F: std::future::Future>(
+    jobs: Vec<F>,
+) -> impl futures_util::Stream<Item = F::Output> + Unpin {
+    use futures_util::StreamExt;
+    futures_util::stream::iter(jobs).buffer_unordered(6)
+}
+
 async fn dedup_scan_impl(
     input: DedupScanInput,
     app: tauri::AppHandle,
@@ -3914,174 +3987,71 @@ async fn dedup_scan_impl(
         if archives.is_empty() {
             break;
         }
-        // Keep only four decoded-response buffers in flight. LANraragi may
-        // queue extraction for one archive; it must not serialize all covers.
-        for (batch_index, batch) in archives.chunks(4).enumerate() {
-            let fetch = |index: usize| {
-                let archive = batch.get(index);
-                let database = database.clone();
-                let app = app.clone();
-                let server_id = server_id.clone();
-                let scope_id = &scope_id;
-                let app_data = &app_data;
-                let refetch_covers = &refetch_covers;
-                async move {
-                    let archive = archive?;
-                    let identity = crate::cache::CacheImageIdentity::new(
-                        scope_id,
-                        &archive.archive_id,
-                        "cover",
-                        0,
-                    );
-                    let use_cache = !refetch_covers.contains(&archive.archive_id);
-                    if use_cache
-                        && matches!(
-                            crate::cache::read_cached_image(&database, app_data, &identity),
-                            Ok(Some(image)) if crate::cache::sniff_image_mime("application/octet-stream", &image.bytes).is_some()
-                        )
-                    {
-                        return None;
-                    }
-                    let result = crate::commands::library::load_archive_thumbnail_bytes_with_cache(
-                        server_id,
-                        archive.archive_id.clone(),
-                        database,
-                        app,
-                        use_cache,
-                    )
-                    .await;
-                    Some((archive.archive_id.clone(), result))
-                }
-            };
-            let (a, b, c, d) = tokio::join!(fetch(0), fetch(1), fetch(2), fetch(3));
-            let mut fetched = [a, b, c, d]
-                .into_iter()
-                .flatten()
-                .collect::<BTreeMap<_, _>>();
-            for (offset, archive) in batch.iter().enumerate() {
-                let index = batch_index * 4 + offset;
-
-                progress.processed = checkpoint + index as i64 + 1;
-                registry.publish(&progress);
-                let identity = crate::cache::CacheImageIdentity::new(
-                    &scope_id,
-                    &archive.archive_id,
-                    "cover",
-                    0,
-                );
-                // 共用封面的档案跳过缓存：占位图藏在缓存里，只有重新抓才能换掉。
-                let trust_cache = !refetch_covers.contains(&archive.archive_id);
-                let (had_cache_entry, cached) = match database.connection.lock() {
-                    Ok(connection) => {
-                        let key = crate::cache::image_cache_key(&identity);
-                        let existed = trust_cache
-                            && connection
-                                .query_row(
-                                    "SELECT EXISTS(SELECT 1 FROM cache_entries WHERE key=?1)",
-                                    [key],
-                                    |row| row.get::<_, bool>(0),
-                                )
-                                .unwrap_or(false);
-                        (
-                            existed,
-                            if trust_cache {
-                                crate::cache::load_image_cache(&connection, &app_data, &identity)
-                            } else {
-                                Ok(None)
-                            },
-                        )
-                    }
-                    Err(_) => {
-                        return crate::domain::result::CommandResult::failure(
-                            "UNKNOWN",
-                            crate::cache::LOCK_FAILED,
-                            true,
-                        )
-                    }
+        // A rolling pool: one queued thumbnail must not hold completed covers
+        // behind a four-item join barrier. Keep bytes bounded to six requests.
+        use futures_util::StreamExt;
+        let jobs = archives.clone().into_iter().map(|archive| {
+            let database = database.clone();
+            let app = app.clone();
+            let server_id = server_id.clone();
+            let scope_id = &scope_id;
+            let app_data = &app_data;
+            let refetch_covers = &refetch_covers;
+            let version = input.algorithm_version.clone();
+            async move {
+                let identity = crate::cache::CacheImageIdentity::new(scope_id, &archive.archive_id, "cover", 0);
+                let cached = if !refetch_covers.contains(&archive.archive_id) {
+                    crate::cache::read_cached_image(&database, app_data, &identity)
+                        .ok().flatten()
+                        .filter(|image| crate::cache::sniff_image_mime("application/octet-stream", &image.bytes).is_some())
+                } else { None };
+                // Reuse the bytes directly: neither cache hits nor downloads
+                // need a second disk read/hash/timestamp update.
+                let (cached, result) = if let Some(image) = cached {
+                    (true, Ok(crate::domain::result::CommandResult::success(image.bytes)))
+                } else {
+                    (false, crate::commands::library::load_archive_thumbnail_bytes_with_cache(
+                        server_id, archive.archive_id.clone(), database, app.clone(), false,
+                    ).await)
                 };
-                // Downloads write the shared cache, but still count as downloads
-                // in this scan rather than newly discovered cache hits.
-                let downloaded = fetched.contains_key(&archive.archive_id);
-                let had_cache_entry = had_cache_entry && !downloaded;
-                let cached = if downloaded { Ok(None) } else { cached };
-                let bytes = match cached {
-                    Ok(Some(image)) => {
-                        progress.cache_hits += 1;
-                        Some(image.bytes)
+                let (code, feature_failed) = match result {
+                    Ok(crate::domain::result::CommandResult::Success { value: bytes, .. }) => {
+                        let scope = scope_id.clone();
+                        let entry = archive.clone();
+                        // Decode concurrently on the blocking pool, outside the
+                        // DB lock. The same six slots bound download and decode.
+                        let feature = tokio::task::spawn_blocking(move || {
+                            use tauri::Manager;
+                            compute_scan_feature(&app.state::<crate::db::Database>(), &scope, &entry, &version, &bytes)
+                        }).await;
+                        (None, !matches!(feature, Ok(Ok(()))))
                     }
-                    Ok(None) => {
-                        if had_cache_entry {
-                            progress.invalid_covers += 1;
-                            progress.diagnostics.push(format!(
-                                "{}: corrupt cached cover replaced",
-                                archive.archive_id
-                            ));
-                        }
-                        let result = match fetched.remove(&archive.archive_id) {
-                            Some(result) => result,
-                            None => {
-                                crate::commands::library::load_archive_thumbnail_bytes(
-                                    server_id.clone(),
-                                    archive.archive_id.clone(),
-                                    database.clone(),
-                                    app.clone(),
-                                )
-                                .await
-                            }
-                        };
-                        match result {
-                            Ok(crate::domain::result::CommandResult::Success { value, .. }) => {
-                                progress.downloads += 1;
-                                Some(value)
-                            }
-                            Ok(crate::domain::result::CommandResult::Failure { error, .. }) => {
-                                progress.missing_covers += 1;
-                                progress
-                                    .diagnostics
-                                    .push(format!("{}: {}", archive.archive_id, error.message));
-                                None
-                            }
-                            Err(error) => {
-                                progress.missing_covers += 1;
-                                progress
-                                    .diagnostics
-                                    .push(format!("{}: {error}", archive.archive_id));
-                                None
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        progress.invalid_covers += 1;
-                        progress
-                            .diagnostics
-                            .push(format!("{}: {error}", archive.archive_id));
-                        None
-                    }
+                    Ok(crate::domain::result::CommandResult::Failure { error, .. }) => (Some(error.code), false),
+                    Err(_) => (Some("TRANSPORT_FAILED".into()), false),
                 };
-                if let Some(bytes) = bytes {
-                    let feature = database
-                        .connection
-                        .lock()
-                        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
-                        .and_then(|connection| {
-                            load_or_compute_feature(
-                                &connection,
-                                &scope_id,
-                                archive,
-                                &input.algorithm_version,
-                                &bytes,
-                            )
-                        });
-                    if let Err(error) = feature {
-                        progress.invalid_covers += 1;
-                        progress.diagnostics.push(format!(
-                            "{}: cover decode failed ({error})",
-                            archive.archive_id
-                        ));
-                    }
-                }
+                (archive, cached, code, feature_failed)
             }
+        }).collect::<Vec<_>>();
+        let mut pending = cover_scan_pool(jobs);
+        let mut completed = 0;
+        while let Some((archive, cached, error_code, feature_failed)) = pending.next().await {
+            completed += 1;
+            if let Some(code) = error_code {
+                progress.missing_covers += 1;
+                progress.diagnostics.push(format!("{}: {}", archive.archive_id, code));
+            } else if cached {
+                progress.cache_hits += 1;
+            } else {
+                progress.downloads += 1;
+            }
+            if feature_failed {
+                progress.invalid_covers += 1;
+                progress.diagnostics.push("cover feature computation failed".into());
+            }
+            progress.processed = checkpoint + completed;
+            registry.publish(&progress);
         }
+        drop(pending);
         checkpoint += archives.len() as i64;
         let snapshots = archives
             .into_iter()

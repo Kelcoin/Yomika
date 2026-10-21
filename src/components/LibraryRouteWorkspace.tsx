@@ -117,7 +117,7 @@ export function LibraryRouteWorkspace({ showDetail = true }: { showDetail?: bool
 
 function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDetail: boolean; onServerResolved: (id: string, isDefault: boolean) => void }) {
   const { showToast } = useToast();
-  const [urlSearchParams] = useSearchParams();
+  const [urlSearchParams, setUrlSearchParams] = useSearchParams();
   const requestedQuery = urlSearchParams.has('q') ? (urlSearchParams.get('q') ?? '').trim() : undefined;
   /** Which server the library browses: the linking `?server=` id wins over the
    * default (first configured) server. */
@@ -538,7 +538,15 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     if (requestedQuery === undefined) return;
     setSearchQuery(requestedQuery);
     setCategoryFilter('');
-  }, [requestedQuery]);
+    // A linked query is an input to this retained workspace, not a persistent
+    // override. Otherwise returning from a detail reapplies the old URL query
+    // over later edits/clears (and clears the user's category again).
+    setUrlSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.delete('q');
+      return next;
+    }, { replace: true });
+  }, [requestedQuery, setUrlSearchParams]);
 
   const loadFirstPage = useCallback(async (currentServerId: string, options: { clear?: boolean; silent?: boolean; background?: boolean } = {}) => {
     const request = ++pageRequest.current;

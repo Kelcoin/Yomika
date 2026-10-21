@@ -247,7 +247,7 @@ describe('design system contract', () => {
     expect(controls).toContain('void api?.toggleMaximize()');
 
     // 外壳标题栏改用手势件，不再自己抄一遍；阅读器两条栏都铺上它。
-    expect(read('src/components/TitleBar.tsx')).toContain('<header className="titlebar" {...drag}>');
+    expect(read('src/components/TitleBar.tsx')).toContain('<header className="titlebar" {...drag}');
     expect(read('src/components/ReaderScreen.tsx')).toContain('{...windowDrag}');
     // 窗口按钮只在**桌面**上画：Tauri 的桥在 Android/iOS 上一样存在，只看桥会把
     // 「最大化」画到手机上（`plugin:window|toggle_maximize` 在那边是空操作，点了
