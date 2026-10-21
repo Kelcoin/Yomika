@@ -17,7 +17,7 @@
 | 平台 | 分发形式 | 说明 |
 | --- | --- | --- |
 | Windows x64 | 便携 ZIP | 解压运行 `yomika.exe`；包含 DirectML 运行库与随包模型，需要 WebView2 运行时 |
-| Android arm64 | APK | 使用签名版本安装；与桌面端共用书架、阅读进度和同步协议 |
+| Android arm64 | APK | 使用签名版本安装；与桌面端共用书架、阅读进度和同步协议。安装包内带 ONNX Runtime 与 ncnn 运行库，体积约 85 MB |
 | iOS arm64 | 未签名 IPA | 仅提供构建产物，需要自行签名，尚未提供完整维护的使用体验 |
 
 macOS 与 Linux 暂不在维护范围内。
@@ -64,9 +64,10 @@ Yomika 不包含 LANraragi 服务端。使用服务器档案库前，请准备�
 
 ### 图像增强与算力中心
 
-- **Anime4K**：内置着色器链，通过 GPU 计算后端执行，可按设置在设备不可用时回退到 CPU。
+- **Anime4K**：内置着色器链，桌面端通过 GPU 计算后端（wgpu）执行，显卡不可用时回退到 CPU；Android 端同一档模型改走 ncnn（Vulkan）。
 - **超分模型**：随包提供 waifu2x-upconv7，也可安装 Real-CUGAN 2x 等支持的模型及 DirectML 变体。
-- **DLSSNR**：使用 NVIDIA DLSS 光线重建 DLL。除应用内下载外，也允许本地导入 `nvngx_dlssnr.dll`，无需来自指定模型仓库；导入时在独立计算进程中验证当前环境是否可用。
+- **DLSSNR**：使用 NVIDIA DLSS 光线重建片段（`nvngx_dlssnr.dll`）。可选官方原版、社区 Lecram 版与 SF 版三档（各自支持的显卡代次不同，见设置内说明），已安装的多份片段可以共存并随时切换；也允许导入本地片段，应用只按 PE 结构与必需导出判断能否加载，不要求 NVIDIA 签名。导入与首次启用都在独立计算进程里验证当前环境是否可用，失败会写清片段名、字节数与选中的显示适配器。
+- **移动端本地计算**：Android 走 NNAPI 或 ncnn（Vulkan），iOS 走 CoreML；计算进程内嵌在应用里，因此移动端安装包比桌面端大得多。
 - **资源调度**：根据可用资源调整分块和处理规模。可用能力受显卡、驱动、模型、DLL 版本与页面尺寸共同影响，可通过内置诊断检查。
 - **自动超分**：平均每页体积**低于**设定阈值，并满足配置的标签规则时自动开启；无法确定有效体积时不自动启用。
 - **远端计算**：桌面端可开启算力中心，手机或其他客户端配对后，将需要处理的页面交给该设备计算。
@@ -81,7 +82,7 @@ Yomika 不包含 LANraragi 服务端。使用服务器档案库前，请准备�
 
 ### 外观与诊断
 
-- 浅色、深色与跟随系统主题，基础配色、自定义 CSS，以及可配置的详情页操作按钮。
+- 浅色、深色与跟随系统主题，多套基础配色（默认、青瓷、黛蓝、紫檀、绯樱、琥珀、子夜、深林、天青）、自定义 CSS，以及可配置的详情页操作按钮。
 - SFW 封面模糊，桌面侧边栏折叠，移动端悬浮底栏与导航项目配置。
 - 「设置 → 高级」查看封面、缩略图、阅读页及增强缓存占用，设置空间上限或手动清理。
 - 「设置 → 关于 → 错误日志」查看、导出本次及上次运行的脱敏诊断记录；预期的取消与队列退让不会作为故障堆积。
@@ -107,7 +108,7 @@ Windows 迁移时可复制程序与 `data/`，但系统凭据不会随目录复�
 
 - Node.js **22.12+**、npm 与 Rust stable。
 - Windows：MSVC C++ Build Tools、Windows SDK、WebView2，以及执行构建脚本所需的 PowerShell 7。
-- Android：额外准备 JDK 17+、Android SDK 36、NDK `28.2.13676358`，配置 `ANDROID_HOME`，并安装 Rust 目标 `aarch64-linux-android`。
+- Android：额外准备 **JDK 21**（Zulu 21 实测可用；JDK 25 在配置 `:buildSrc` 时就会失败）、Android SDK 36、NDK `28.2.13676358`，配置 `ANDROID_HOME`，并安装 Rust 目标 `aarch64-linux-android`。首次构建移动端还需要 Python、Git、CMake、Ninja 与 Python 的 `numpy`、`packaging`：构建脚本会用它们现场编译并暂存 ONNX Runtime（NNAPI）与 ncnn（Vulkan）运行库。
 
 原生工具链安装方法见 [Tauri 环境准备文档](https://v2.tauri.app/start/prerequisites/)。以下命令均在仓库根目录执行。
 
@@ -147,6 +148,8 @@ pwsh -File .github/scripts/build-android.ps1
 
 发布构建加 `-Release`，并按 [Android 构建脚本](.github/scripts/build-android.ps1) 配置签名文件与 `ANDROID_KEYSTORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。缺少签名配置时生成的未签名发布 APK 不能直接安装。
 
+移动端第一次构建会先准备 ONNX Runtime（NNAPI）与 ncnn（Vulkan）两份运行库，明显慢于之后（`--reuse-if-valid` 会复用已有产物）。构建收尾会自动跑 [verify-mobile-runtime.py](.github/scripts/verify-mobile-runtime.py) 检查 APK 里主库的依赖闭包：缺运行库时构建直接失败，而不是装到手机上才报错。
+
 Windows 计算链路的整轮验证包含硬件与运行环境检查，需要相应 GPU、驱动和 DLL：
 
 ```powershell
@@ -160,7 +163,7 @@ pwsh -File scripts/compute/verify-round.ps1 -RepoRoot (Get-Location).Path
 | [src](src) | React 界面、阅读交互与前端数据访问 |
 | [src-tauri/src](src-tauri/src) | Tauri 命令、数据库、LANraragi 集成、同步与任务管理 |
 | [src-tauri/worker](src-tauri/worker) | 独立计算进程，承载 ONNX / DirectML / NGX 推理 |
-| [src-tauri/crates](src-tauri/crates) | 计算核心、协议等共享 Rust 模块 |
+| [src-tauri/crates](src-tauri/crates) | 共享 Rust 模块：与平台无关的计算核心（分块、Anime4K 着色器链、ONNX 与 ncnn 后端）与 worker 协议 |
 | [tests](tests) | 前端与契约测试 |
 | [.github/scripts](.github/scripts) | 构建、打包、冒烟检查与发布脚本 |
 
