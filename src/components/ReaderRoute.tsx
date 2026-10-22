@@ -1038,6 +1038,15 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 if (code !== undefined) {
                   jobFailure = error instanceof Error ? { code, message: error.message } : { code };
                 }
+                // 用户报「错误日志里没有任何有用的信息」就出在这条路上：这一档失败从前只弹一次
+                // toast，细节寄望于 `nativeImageCache` 那条 `image/dlssnr`——而闸门、租约、
+                // 引擎初始化这几类失败根本不经过它。这里按页记一条，把码、页码与模型写全。
+                logError('image/dlssnr', 'DLSSNR 这一页没跑成', {
+                  code: code ?? 'UNKNOWN',
+                  page: pageIndex + 1,
+                  model: job.upscaleModel || 'dlssnr',
+                  detail: error instanceof Error ? error.message : String(error),
+                });
                 return undefined;
               });
               if (controller.signal.aborted) {

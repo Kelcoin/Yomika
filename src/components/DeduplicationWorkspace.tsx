@@ -85,6 +85,7 @@ function chunkRows<T>(items: readonly T[], size: number): T[][] {
 const STAGE_LABELS: Record<DedupScanProgress['stage'], string> = {
   enumerating: '正在枚举档案',
   covers: '正在读取封面',
+  'waiting-covers': '等待服务器生成封面',
   comparing: '正在比较封面',
   completed: '扫描完成',
   cancelled: '扫描已取消',
@@ -792,8 +793,9 @@ export function DeduplicationWorkspace() {
   const coverless = (progress?.missingCovers ?? 0) + (progress?.invalidCovers ?? 0);
   const progressDetail = !progress ? '' : [
     progressTotal > 0 ? `${formatCount(progress.processed)} / ${formatCount(progressTotal)}` : '正在统计范围内的档案',
-    progress.status === 'running' && progress.stage === 'covers' ? `缓存 ${formatCount(progress.cacheHits)} · 下载 ${formatCount(progress.downloads)}` : '',
+    progress.status === 'running' && (progress.stage === 'covers' || progress.stage === 'waiting-covers') ? `缓存 ${formatCount(progress.cacheHits)} · 下载 ${formatCount(progress.downloads)}` : '',
     coverless > 0 ? `缺失或无效封面 ${formatCount(coverless)}` : '',
+    progress.stage === 'waiting-covers' ? `剩余 ${formatCount(Math.max(0, progress.total - progress.processed))} 张封面等待 LANraragi 生成` : '',
     progress.pairCount > 0 ? `命中 ${formatCount(progress.pairCount)} 组疑似重复` : '',
     progress.degraded ? '结果不完整' : '',
   ].filter(Boolean).join(' · ');

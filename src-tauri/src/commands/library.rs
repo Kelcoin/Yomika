@@ -4242,11 +4242,162 @@ pub(crate) async fn load_archive_thumbnail_bytes_with_cache(
     Ok(result)
 }
 
+#[derive(Debug)]
+pub(crate) enum CoverThumbnail {
+    Ready(Vec<u8>),
+    Queued(i64),
+}
+
 async fn fetch_cover_thumbnail(
     base_url: &str,
     archive_id: &str,
     api_key: String,
 ) -> Result<CommandResult<Vec<u8>>, String> {
+    match fetch_cover_thumbnail_inner(base_url, archive_id, api_key, false, None).await? {
+        CommandResult::Success {
+            value: CoverThumbnail::Ready(bytes),
+            ..
+        } => Ok(CommandResult::success(bytes)),
+        CommandResult::Failure { error, .. } => Ok(CommandResult::Failure { ok: false, error }),
+        _ => unreachable!("waiting fetch never defers a job"),
+    }
+}
+
+async fn fetch_cover_thumbnail_deferred(
+    base_url: &str,
+    archive_id: &str,
+    api_key: String,
+) -> Result<CommandResult<CoverThumbnail>, String> {
+    fetch_cover_thumbnail_inner(base_url, archive_id, api_key, true, None).await
+}
+
+/// Scan probes release their download slot as soon as LRR queues generation.
+/// The deferred pass retains the original job ID rather than enqueueing it again.
+pub(crate) async fn load_scan_thumbnail(
+    server_id: &str,
+    archive_id: &str,
+    database: &Database,
+    app_data: &std::path::Path,
+    pending_job: Option<(i64, tokio::time::Instant)>,
+) -> Result<CommandResult<CoverThumbnail>, String> {
+    let (base_url, scope_id) = {
+        let connection = database
+            .connection
+            .lock()
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
+        server_connection(&connection, server_id)?
+    };
+    let api_key = SystemCredentialStore.get_server_api_key(&scope_id)?;
+    if let Some((job, deadline)) = pending_job {
+        if let Some(error) =
+            wait_for_cover_thumbnail_job(&base_url, job, &api_key, Some(deadline)).await
+        {
+            return Ok(CommandResult::Failure { ok: false, error });
+        }
+    }
+    let result = if pending_job.is_some() {
+        fetch_cover_thumbnail_inner(&base_url, archive_id, api_key, false, pending_job.map(|(_, deadline)| deadline)).await?
+    } else {
+        fetch_cover_thumbnail_deferred(&base_url, archive_id, api_key).await?
+    };
+    if let CommandResult::Success {
+        value: CoverThumbnail::Ready(bytes),
+        ..
+    } = &result
+    {
+        let identity = crate::cache::CacheImageIdentity::new(&scope_id, archive_id, "cover", 0);
+        let mime = crate::cache::sniff_image_mime("application/octet-stream", bytes)
+            .unwrap_or_else(|| "image/jpeg".into());
+        if let Err(error) =
+            crate::cache::write_cached_image(database, app_data, &identity, &mime, bytes)
+        {
+            eprintln!("yomika: image cache write failed: {error}");
+        }
+    }
+    Ok(result)
+}
+
+async fn wait_for_cover_thumbnail_job(
+    base_url: &str,
+    job_id: i64,
+    api_key: &str,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<crate::domain::result::DomainError> {
+    let deadline = deadline
+        .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(120));
+    let failure = |code, message: String, retryable| crate::domain::result::DomainError {
+        code,
+        message,
+        retryable,
+    };
+    let mut finished = false;
+    // 2 分钟上限，和 Readoshi 等缩略图任务的口径一致。
+    // 先查再等：任务常常转瞬就绪，上来先睡半秒是白付的；
+    // 查重扫描会串行经过每个缺封面的档案，这笔就是 N×500ms。
+    for _ in 0..240 {
+        let status_url = format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
+        let status =
+            match reader_request(reqwest::Method::GET, status_url, api_key.to_string()).await {
+                Ok(value) => value,
+                Err(error) => return Some(failure(error.code, error.message, true)),
+            };
+        let body = match status.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                return Some(match reader_response_failure::<Vec<u8>>(error) {
+                    CommandResult::Failure { error, .. } => error,
+                    _ => unreachable!(),
+                })
+            }
+        };
+        let payload: serde_json::Value = match serde_json::from_slice(&body) {
+            Ok(payload) => payload,
+            Err(error) => return Some(failure("INVALID_RESPONSE", error.to_string(), false)),
+        };
+        let state = payload
+            .get("state")
+            .and_then(|state| state.as_str())
+            .map(str::to_owned);
+        if state.as_deref() == Some("finished") {
+            finished = true;
+            break;
+        }
+        if matches!(state.as_deref(), Some("failed") | Some("error")) {
+            return Some(failure(
+                "REMOTE_UNAVAILABLE",
+                "LANraragi 缩略图生成失败".into(),
+                true,
+            ));
+        }
+        // Probe once even after the deadline: a job may have finished
+        // while other ready covers were being processed. Inactive jobs
+        // do not get a fresh two-minute budget when their slot opens.
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep_until(
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_millis(500)),
+        )
+        .await;
+    }
+    if !finished {
+        return Some(failure(
+            "REMOTE_UNAVAILABLE",
+            "LANraragi 缩略图生成超时".into(),
+            true,
+        ));
+    }
+    None
+}
+
+async fn fetch_cover_thumbnail_inner(
+    base_url: &str,
+    archive_id: &str,
+    api_key: String,
+    defer_generation: bool,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<CommandResult<CoverThumbnail>, String> {
+    let deadline = deadline.unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(120));
     // `no_fallback=true` 是必须的：不带它时，凡是缩略图尚未生成的档案都会拿到
     // 同一张占位图（HTTP 200），而那张图会被逐字节缓存下来——查重按封面比对时，
     // 所有待生成缩略图的档案封面完全相同，于是被判成一堆重复档案。带参数后
@@ -4286,57 +4437,13 @@ async fn fetch_cover_thumbnail(
                     .or_else(|| job.as_str().and_then(|value| value.parse::<i64>().ok()))
             });
         if let Some(job_id) = job_id {
-            let mut finished = false;
-            // 2 分钟上限，和 Readoshi 等缩略图任务的口径一致。
-            // 先查再等：任务常常转瞬就绪，上来先睡半秒是白付的；
-            // 查重扫描会串行经过每个缺封面的档案，这笔就是 N×500ms。
-            for _ in 0..240 {
-                let status_url =
-                    format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
-                let status =
-                    match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
-                        Ok(value) => value,
-                        Err(error) => {
-                            return Ok(CommandResult::failure(error.code, error.message, true))
-                        }
-                    };
-                let body = match status.bytes().await {
-                    Ok(body) => body,
-                    Err(error) => return Ok(reader_response_failure(error)),
-                };
-                let payload: serde_json::Value = match serde_json::from_slice(&body) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        return Ok(CommandResult::failure(
-                            "INVALID_RESPONSE",
-                            error.to_string(),
-                            false,
-                        ))
-                    }
-                };
-                let state = payload
-                    .get("state")
-                    .and_then(|state| state.as_str())
-                    .map(str::to_owned);
-                if state.as_deref() == Some("finished") {
-                    finished = true;
-                    break;
-                }
-                if matches!(state.as_deref(), Some("failed") | Some("error")) {
-                    return Ok(CommandResult::failure(
-                        "REMOTE_UNAVAILABLE",
-                        "LANraragi 缩略图生成失败",
-                        true,
-                    ));
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if defer_generation {
+                return Ok(CommandResult::success(CoverThumbnail::Queued(job_id)));
             }
-            if !finished {
-                return Ok(CommandResult::failure(
-                    "REMOTE_UNAVAILABLE",
-                    "LANraragi 缩略图生成超时",
-                    true,
-                ));
+            if let Some(error) =
+                wait_for_cover_thumbnail_job(base_url, job_id, &api_key, Some(deadline)).await
+            {
+                return Ok(CommandResult::Failure { ok: false, error });
             }
         } else {
             return Ok(CommandResult::failure(
@@ -4372,7 +4479,9 @@ async fn fetch_cover_thumbnail(
         Ok(bytes)
             if crate::cache::sniff_image_mime("application/octet-stream", &bytes).is_some() =>
         {
-            Ok(CommandResult::success(bytes.to_vec()))
+            Ok(CommandResult::success(CoverThumbnail::Ready(
+                bytes.to_vec(),
+            )))
         }
         Ok(_) => Ok(CommandResult::failure(
             "INVALID_RESPONSE",
@@ -8469,6 +8578,59 @@ mod tests {
             matches!(result, Ok(CommandResult::Failure { .. })),
             "unfinished thumbnail must fail: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_cover_deadline_still_checks_completion_without_waiting_again() {
+        let expired = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
+        for (state, succeeds) in [("inactive", false), ("finished", true), ("failed", false)] {
+            let (url, server) = test_http_server(vec![(200, format!(r#"{{"state":"{state}"}}"#))]).await;
+            let result = tokio::time::timeout(std::time::Duration::from_millis(500),
+                wait_for_cover_thumbnail_job(&url, 42, "key", Some(expired))).await.unwrap();
+            server.abort();
+            assert_eq!(result.is_none(), succeeds);
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_thumbnail_probes_continue_past_queued_generation_in_multiple_chunks() {
+        use futures_util::{stream, StreamExt};
+        let responses = (0..64).map(|index| {
+            if index % 32 == 0 { (202, format!(r#"{{"job":{}}}"#, index + 1)) }
+            else { (200, "GIF89a-test-image".into()) }
+        }).collect();
+        let (url, server) = test_http_server(responses).await;
+        let work = async {
+            let mut ready = 0;
+            let mut queued = 0;
+            for _ in 0..2 {
+                let jobs = (0..32).map(|_| fetch_cover_thumbnail_deferred(&url, "archive", "key".into()));
+                let mut pool = stream::iter(jobs).buffer_unordered(6);
+                while let Some(result) = pool.next().await {
+                    match result.unwrap() {
+                        CommandResult::Success { value: CoverThumbnail::Ready(_), .. } => ready += 1,
+                        CommandResult::Success { value: CoverThumbnail::Queued(_), .. } => queued += 1,
+                        other => panic!("unexpected probe result: {other:?}"),
+                    }
+                }
+            }
+            (ready, queued)
+        };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), work).await;
+        server.abort();
+        assert_eq!(result.unwrap(), (62, 2));
+    }
+
+    #[tokio::test]
+    async fn scan_thumbnail_defers_generation_without_polling() {
+        let (url, server) = test_http_server(vec![
+            (202, r#"{"job":42}"#.into()),
+            (200, r#"{"state":"inactive"}"#.into()),
+        ]).await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500),
+            fetch_cover_thumbnail_deferred(&url, "archive", "key".into())).await;
+        server.abort();
+        assert!(matches!(result, Ok(Ok(CommandResult::Success { value: CoverThumbnail::Queued(42), .. }))));
     }
 
     #[tokio::test]

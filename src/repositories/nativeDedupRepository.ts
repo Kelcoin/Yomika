@@ -52,7 +52,7 @@ export type DedupScanChunkInput = {
 export const DedupScanProgressSchema = z.object({
   sessionId: z.string().min(1), scopeId: z.string().min(1),
   status: z.enum(['running', 'cancelled', 'completed']),
-  stage: z.enum(['enumerating', 'covers', 'comparing', 'completed', 'cancelled']), processed: z.number().int().nonnegative(), total: z.number().int().nonnegative(),
+  stage: z.enum(['enumerating', 'covers', 'waiting-covers', 'comparing', 'completed', 'cancelled']), processed: z.number().int().nonnegative(), total: z.number().int().nonnegative(),
   cacheHits: z.number().int().nonnegative(), downloads: z.number().int().nonnegative(),
   missingCovers: z.number().int().nonnegative(), invalidCovers: z.number().int().nonnegative(),
   pairCount: z.number().int().nonnegative(), degraded: z.boolean(), checkpoint: z.number().int().nonnegative(),

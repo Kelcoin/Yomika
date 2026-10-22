@@ -59,6 +59,92 @@ mod tests {
     }
 
     #[test]
+    fn scan_checkpoint_does_not_skip_deferred_covers() {
+        let mut cursor = CoverScanCheckpoint::new(10);
+        for index in 11..80 { cursor.complete(index); }
+        assert_eq!(cursor.checkpoint, 10);
+        cursor.complete(10);
+        assert_eq!(cursor.checkpoint, 80);
+        cursor.complete(80);
+        assert_eq!(cursor.checkpoint, 81);
+    }
+
+    /// Opt-in live profiling: credentials stay in the system store; all writes
+    /// go to a temporary database/cache, never the application's data directory.
+    #[tokio::test]
+    #[ignore = "requires YOMIKA_COVER_PROFILE_DATA and configured LANraragi access"]
+    async fn profile_cover_scan_chain() {
+        use futures_util::StreamExt;
+        use crate::commands::library::{load_scan_thumbnail, CoverThumbnail};
+        use crate::domain::result::CommandResult;
+        let source_dir = std::path::PathBuf::from(std::env::var("YOMIKA_COVER_PROFILE_DATA").unwrap());
+        let source = Connection::open_with_flags(source_dir.join("yomika.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let copy_path = temporary.path().join("profile.sqlite3");
+        source.backup(rusqlite::DatabaseName::Main, &copy_path, None).unwrap();
+        let connection = Connection::open(copy_path).unwrap();
+        connection.execute_batch("PRAGMA journal_mode=WAL;").unwrap();
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+        if version < 31 {
+            connection.execute_batch(include_str!("../migrations/0031_cache_quota_covering_index.sql")).unwrap();
+        }
+        let (server_id, scope): (String, String) = connection.query_row("SELECT id,scope_id FROM servers LIMIT 1", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        let archives = enumerate_scan_archives(&connection, &server_id, i64::MIN / 2, i64::MAX / 2, 0, 64).unwrap();
+        let database = crate::db::Database { connection: std::sync::Mutex::new(connection) };
+        let start = std::time::Instant::now();
+        let jobs = archives.into_iter().map(|archive| {
+            let database = &database;
+            let server_id = &server_id;
+            let scope = &scope;
+            let data = temporary.path();
+            async move {
+                let fetch_start = std::time::Instant::now();
+                let result = load_scan_thumbnail(server_id, &archive.archive_id, database, data, None).await.unwrap();
+                let fetch_ms = fetch_start.elapsed().as_millis();
+                match result {
+                    CommandResult::Success { value: CoverThumbnail::Ready(bytes), .. } => {
+                        let feature_start = std::time::Instant::now();
+                        compute_scan_feature(database, scope, &archive, "readoshi-v3", &bytes).unwrap();
+                        (true, fetch_ms, feature_start.elapsed().as_millis())
+                    }
+                    CommandResult::Success { value: CoverThumbnail::Queued(_), .. } => (false, fetch_ms, 0),
+                    CommandResult::Failure { error, .. } => panic!("cover profile failed: {}", error.code),
+                }
+            }
+        }).collect();
+        let results: Vec<_> = cover_scan_pool(jobs).collect().await;
+        eprintln!("profile covers={} ready={} queued={} elapsed_ms={} network_cache_total_ms={} feature_total_ms={}",
+            results.len(), results.iter().filter(|r| r.0).count(), results.iter().filter(|r| !r.0).count(), start.elapsed().as_millis(),
+            results.iter().map(|r| r.1).sum::<u128>(), results.iter().map(|r| r.2).sum::<u128>());
+    }
+
+    #[test]
+    fn deferred_cover_snapshots_remain_resumable_until_the_gap_finishes() {
+        let mut connection = connection();
+        start_scan(&mut connection, scan_input("v1")).unwrap();
+        let mut cursor = CoverScanCheckpoint::new(0);
+        cursor.complete(1);
+        cursor.complete(2);
+        let snapshots = ["a", "b", "c"].into_iter().map(|id| DedupArchiveSnapshotInput {
+            archive_id: id.into(), path: id.into(), title: None, page_count: None, size: None,
+            feature_version: "v1".into(),
+        }).collect();
+        let persist = |connection: &mut Connection, checkpoint, archives| scan_chunk(connection, DedupScanChunkInput {
+            session_id: "scan-1".into(), algorithm_version: "v1".into(), checkpoint,
+            archives, pairs: vec![], selected_archive_ids: vec![],
+        }).unwrap();
+        let state = persist(&mut connection, cursor.checkpoint, snapshots);
+        assert_eq!((state.status.as_str(), state.checkpoint), ("running", 0));
+        cancel_scan(&mut connection, "scan-1".into()).unwrap();
+        assert_eq!(start_scan(&mut connection, scan_input("v1")).unwrap().checkpoint, 0);
+        cursor.complete(0);
+        let state = persist(&mut connection, cursor.checkpoint, vec![]);
+        assert_eq!((state.status.as_str(), state.checkpoint), ("completed", 3));
+        let count: i64 = connection.query_row("SELECT COUNT(*) FROM dedup_archive_snapshots", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
     fn scan_feature_reuses_matching_bytes_and_replaces_changed_version() {
         let database = crate::db::Database { connection: std::sync::Mutex::new(connection()) };
         let archive = DedupScanArchive {
@@ -3824,6 +3910,153 @@ fn cover_scan_pool<F: std::future::Future>(
     futures_util::stream::iter(jobs).buffer_unordered(6)
 }
 
+// A completed cover beyond a queued job must not advance the restart cursor.
+struct CoverScanCheckpoint {
+    checkpoint: i64,
+    completed: BTreeSet<i64>,
+}
+impl CoverScanCheckpoint {
+    fn new(checkpoint: i64) -> Self {
+        Self {
+            checkpoint,
+            completed: BTreeSet::new(),
+        }
+    }
+    fn complete(&mut self, index: i64) {
+        if index < self.checkpoint {
+            return;
+        }
+        self.completed.insert(index);
+        while self.completed.remove(&self.checkpoint) {
+            self.checkpoint += 1;
+        }
+    }
+}
+
+enum ScanCoverResult {
+    Queued(i64),
+    Complete {
+        cached: bool,
+        error_code: Option<String>,
+        feature_failed: bool,
+    },
+}
+
+async fn load_scan_cover(
+    app: tauri::AppHandle,
+    server_id: &str,
+    scope_id: &str,
+    app_data: &std::path::Path,
+    archive: &DedupScanArchive,
+    version: &str,
+    refetch: bool,
+    pending_job: Option<(i64, tokio::time::Instant)>,
+) -> ScanCoverResult {
+    use crate::commands::library::CoverThumbnail;
+    use crate::domain::result::CommandResult;
+    use tauri::Manager;
+    let database = app.state::<crate::db::Database>();
+    let identity = crate::cache::CacheImageIdentity::new(scope_id, &archive.archive_id, "cover", 0);
+    let cached = if !refetch && pending_job.is_none() {
+        crate::cache::read_cached_image(&database, app_data, &identity)
+            .ok()
+            .flatten()
+            .filter(|image| {
+                crate::cache::sniff_image_mime("application/octet-stream", &image.bytes).is_some()
+            })
+    } else {
+        None
+    };
+    let (cached, result) = if let Some(image) = cached {
+        (
+            true,
+            Ok(CommandResult::success(CoverThumbnail::Ready(image.bytes))),
+        )
+    } else {
+        (
+            false,
+            crate::commands::library::load_scan_thumbnail(
+                server_id,
+                &archive.archive_id,
+                &database,
+                app_data,
+                pending_job,
+            )
+            .await,
+        )
+    };
+    match result {
+        Ok(CommandResult::Success {
+            value: CoverThumbnail::Queued(job),
+            ..
+        }) => ScanCoverResult::Queued(job),
+        Ok(CommandResult::Success {
+            value: CoverThumbnail::Ready(bytes),
+            ..
+        }) => {
+            let scope = scope_id.to_string();
+            let archive = archive.clone();
+            let version = version.to_string();
+            let feature = tokio::task::spawn_blocking(move || {
+                compute_scan_feature(
+                    &app.state::<crate::db::Database>(),
+                    &scope,
+                    &archive,
+                    &version,
+                    &bytes,
+                )
+            })
+            .await;
+            ScanCoverResult::Complete {
+                cached,
+                error_code: None,
+                feature_failed: !matches!(feature, Ok(Ok(()))),
+            }
+        }
+        Ok(CommandResult::Failure { error, .. }) => ScanCoverResult::Complete {
+            cached,
+            error_code: Some(error.code.into()),
+            feature_failed: false,
+        },
+        Err(_) => ScanCoverResult::Complete {
+            cached,
+            error_code: Some("TRANSPORT_FAILED".into()),
+            feature_failed: false,
+        },
+    }
+}
+
+fn record_scan_cover(
+    progress: &mut DedupScanProgress,
+    archive: &DedupScanArchive,
+    result: ScanCoverResult,
+) {
+    if let ScanCoverResult::Complete {
+        cached,
+        error_code,
+        feature_failed,
+    } = result
+    {
+        if let Some(code) = error_code {
+            progress.missing_covers += 1;
+            progress
+                .diagnostics
+                .push(format!("{}: {}", archive.archive_id, code));
+        } else if cached {
+            progress.cache_hits += 1;
+        } else {
+            progress.downloads += 1;
+        }
+        if feature_failed {
+            progress.invalid_covers += 1;
+            progress
+                .diagnostics
+                .push("cover feature computation failed".into());
+        }
+        progress.processed += 1;
+    }
+}
+
 async fn dedup_scan_impl(
     input: DedupScanInput,
     app: tauri::AppHandle,
@@ -3945,6 +4178,9 @@ async fn dedup_scan_impl(
         .ok()
         .and_then(|connection| cover_hashes_shared_by_multiple(&connection, &scope_id).ok())
         .unwrap_or_default();
+    let mut cursor = CoverScanCheckpoint::new(checkpoint);
+    let mut deferred = Vec::new();
+    // checkpoint is the enumeration offset here; cursor tracks durable completion.
     while checkpoint < total {
         let cancelled = database
             .connection
@@ -3955,7 +4191,7 @@ async fn dedup_scan_impl(
         if cancelled {
             progress.status = "cancelled".into();
             progress.stage = "cancelled".into();
-            progress.checkpoint = checkpoint;
+            progress.checkpoint = cursor.checkpoint;
             registry.publish(&progress);
             return crate::domain::result::CommandResult::success(progress);
         }
@@ -3987,69 +4223,43 @@ async fn dedup_scan_impl(
         if archives.is_empty() {
             break;
         }
-        // A rolling pool: one queued thumbnail must not hold completed covers
-        // behind a four-item join barrier. Keep bytes bounded to six requests.
         use futures_util::StreamExt;
-        let jobs = archives.clone().into_iter().map(|archive| {
-            let database = database.clone();
-            let app = app.clone();
-            let server_id = server_id.clone();
-            let scope_id = &scope_id;
-            let app_data = &app_data;
-            let refetch_covers = &refetch_covers;
-            let version = input.algorithm_version.clone();
-            async move {
-                let identity = crate::cache::CacheImageIdentity::new(scope_id, &archive.archive_id, "cover", 0);
-                let cached = if !refetch_covers.contains(&archive.archive_id) {
-                    crate::cache::read_cached_image(&database, app_data, &identity)
-                        .ok().flatten()
-                        .filter(|image| crate::cache::sniff_image_mime("application/octet-stream", &image.bytes).is_some())
-                } else { None };
-                // Reuse the bytes directly: neither cache hits nor downloads
-                // need a second disk read/hash/timestamp update.
-                let (cached, result) = if let Some(image) = cached {
-                    (true, Ok(crate::domain::result::CommandResult::success(image.bytes)))
-                } else {
-                    (false, crate::commands::library::load_archive_thumbnail_bytes_with_cache(
-                        server_id, archive.archive_id.clone(), database, app.clone(), false,
-                    ).await)
-                };
-                let (code, feature_failed) = match result {
-                    Ok(crate::domain::result::CommandResult::Success { value: bytes, .. }) => {
-                        let scope = scope_id.clone();
-                        let entry = archive.clone();
-                        // Decode concurrently on the blocking pool, outside the
-                        // DB lock. The same six slots bound download and decode.
-                        let feature = tokio::task::spawn_blocking(move || {
-                            use tauri::Manager;
-                            compute_scan_feature(&app.state::<crate::db::Database>(), &scope, &entry, &version, &bytes)
-                        }).await;
-                        (None, !matches!(feature, Ok(Ok(()))))
-                    }
-                    Ok(crate::domain::result::CommandResult::Failure { error, .. }) => (Some(error.code), false),
-                    Err(_) => (Some("TRANSPORT_FAILED".into()), false),
-                };
-                (archive, cached, code, feature_failed)
-            }
-        }).collect::<Vec<_>>();
+        let jobs = archives
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(offset, archive)| {
+                let app = app.clone();
+                let server_id = &server_id;
+                let scope_id = &scope_id;
+                let app_data = &app_data;
+                let refetch = refetch_covers.contains(&archive.archive_id);
+                let version = &input.algorithm_version;
+                let index = checkpoint + offset as i64;
+                async move {
+                    let result = load_scan_cover(
+                        app, server_id, scope_id, app_data, &archive, version, refetch, None,
+                    )
+                    .await;
+                    (index, archive, result)
+                }
+            })
+            .collect();
         let mut pending = cover_scan_pool(jobs);
-        let mut completed = 0;
-        while let Some((archive, cached, error_code, feature_failed)) = pending.next().await {
-            completed += 1;
-            if let Some(code) = error_code {
-                progress.missing_covers += 1;
-                progress.diagnostics.push(format!("{}: {}", archive.archive_id, code));
-            } else if cached {
-                progress.cache_hits += 1;
-            } else {
-                progress.downloads += 1;
+        while let Some((index, archive, result)) = pending.next().await {
+            match result {
+                ScanCoverResult::Queued(job) => deferred.push((
+                    index,
+                    archive,
+                    job,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(120),
+                )),
+                result => {
+                    cursor.complete(index);
+                    record_scan_cover(&mut progress, &archive, result);
+                    registry.publish(&progress);
+                }
             }
-            if feature_failed {
-                progress.invalid_covers += 1;
-                progress.diagnostics.push("cover feature computation failed".into());
-            }
-            progress.processed = checkpoint + completed;
-            registry.publish(&progress);
         }
         drop(pending);
         checkpoint += archives.len() as i64;
@@ -4074,7 +4284,7 @@ async fn dedup_scan_impl(
                     DedupScanChunkInput {
                         session_id: input.session_id.clone(),
                         algorithm_version: input.algorithm_version.clone(),
-                        checkpoint,
+                        checkpoint: cursor.checkpoint,
                         archives: snapshots,
                         pairs: vec![],
                         selected_archive_ids: vec![],
@@ -4084,8 +4294,91 @@ async fn dedup_scan_impl(
         if let Err(error) = persisted {
             return crate::domain::result::CommandResult::failure("INVALID_RESPONSE", error, false);
         }
-        progress.processed = checkpoint;
-        progress.checkpoint = checkpoint;
+        progress.checkpoint = cursor.checkpoint;
+    }
+    // Only generated covers wait for Minion. Ready covers anywhere in the library
+    // have already completed, regardless of how many generation jobs are queued.
+    {
+        use futures_util::StreamExt;
+        if !deferred.is_empty() {
+            progress.stage = "waiting-covers".into();
+            registry.publish(&progress);
+        }
+        let jobs = deferred
+            .into_iter()
+            .map(|(index, archive, job, deadline)| {
+                let app = app.clone();
+                let server_id = &server_id;
+                let scope_id = &scope_id;
+                let app_data = &app_data;
+                let version = &input.algorithm_version;
+                async move {
+                    let result = load_scan_cover(
+                        app,
+                        server_id,
+                        scope_id,
+                        app_data,
+                        &archive,
+                        version,
+                        true,
+                        Some((job, deadline)),
+                    )
+                    .await;
+                    (index, archive, result)
+                }
+            })
+            .collect();
+        let mut pending = cover_scan_pool(jobs);
+        // Poll cancellation while waiting, instead of waiting two minutes for a job.
+        loop {
+            let next = tokio::select! {
+                value = pending.next() => value,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(250)) => {
+                    let cancelled = database.connection.lock().ok()
+                        .and_then(|connection| session(&connection, &input.session_id).ok())
+                        .is_some_and(|current| current.status == "cancelled");
+                    if cancelled {
+                        progress.status = "cancelled".into();
+                        progress.stage = "cancelled".into();
+                        progress.checkpoint = cursor.checkpoint;
+                        registry.publish(&progress);
+                        return crate::domain::result::CommandResult::success(progress);
+                    }
+                    continue;
+                }
+            };
+            let Some((index, archive, result)) = next else {
+                break;
+            };
+            cursor.complete(index);
+            record_scan_cover(&mut progress, &archive, result);
+            let persisted = database
+                .connection
+                .lock()
+                .map_err(|_| crate::cache::LOCK_FAILED.to_string())
+                .and_then(|mut connection| {
+                    scan_chunk(
+                        &mut connection,
+                        DedupScanChunkInput {
+                            session_id: input.session_id.clone(),
+                            algorithm_version: input.algorithm_version.clone(),
+                            checkpoint: cursor.checkpoint,
+                            archives: vec![],
+                            pairs: vec![],
+                            selected_archive_ids: vec![],
+                        },
+                    )
+                });
+            if let Err(error) = persisted {
+                return crate::domain::result::CommandResult::failure(
+                    "INVALID_RESPONSE",
+                    error,
+                    false,
+                );
+            }
+            progress.checkpoint = cursor.checkpoint;
+            registry.publish(&progress);
+        }
     }
     if total == 0 {
         let completed = database

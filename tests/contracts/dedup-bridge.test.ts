@@ -162,4 +162,15 @@ describe('native dedup bridge', () => {
       sessionId: 'scan-1', scopeId: 'scope-a', algorithmVersion: 'v2', chunkSize: 2,
     })).toEqual({ ok: false, error: { code: 'INVALID_RESPONSE', message: 'Native command returned an invalid response', retryable: false } });
   });
+
+  it('accepts waiting for generated covers with a checkpoint behind completed covers', async () => {
+    const progress = {
+      sessionId: 'scan-1', scopeId: 'scope-a', status: 'running', stage: 'waiting-covers',
+      processed: 62, total: 64, cacheHits: 60, downloads: 2, missingCovers: 0,
+      invalidCovers: 0, pairCount: 0, degraded: false, checkpoint: 10,
+      diagnostics: [], pairs: [],
+    };
+    setInvokeAdapterForTests(async () => ({ ok: true, value: progress }));
+    expect(await new NativeDedupRepository().scanProgress('scan-1')).toEqual({ ok: true, value: progress });
+  });
 });

@@ -308,8 +308,9 @@ function Invoke-Round([int] $index, [int] $port) {
         Note "run${index}-seed-backup" ([bool] ($backupReading -and $backupReading.version -eq 10 -and $backupReading.archive -and $backupReading.setting)) "升级前的备份$(if ($backupReading) { "在：档位 $($backupReading.version)、档案「$($backupReading.archive)」、读到第 $($backupReading.readingPage) 页、设置 $($backupReading.setting)" } else { "不在：$backupPath" })"
         # 主库要升到这一版的档位，那些行要原样还在，后面几档才有的列/表也得出现
         # （列在、行在，才说明这个库真的被迁移过，而不是原样放着）。
+        # 档位跟着最新迁移走：现在到 0031，所以升完是 31；再往后加迁移就把这个数一起跟。
         $upgraded = Get-LegacyReading $dbPath
-        Note "run${index}-seed-upgraded" ([bool] ($upgraded -and $upgraded.version -eq 30 -and $upgraded.archive -eq '这台机器上原来就有的档案' -and $upgraded.readingPage -eq 7 -and $upgraded.setting -eq '{"left_over":"这台机器上原来就有"}' -and $upgraded.addedAtColumn -eq 1 -and $upgraded.localArchivesTable -eq 1)) "升完：档位 $(if ($upgraded) { $upgraded.version } else { '读不到' })、档案「$(if ($upgraded) { $upgraded.archive } else { '' })」、读到第 $(if ($upgraded) { $upgraded.readingPage } else { '' }) 页、后加的列/表 $(if ($upgraded) { "$($upgraded.addedAtColumn)/$($upgraded.localArchivesTable)" } else { '' })、设置 $(if ($upgraded) { $upgraded.setting } else { '' })"
+        Note "run${index}-seed-upgraded" ([bool] ($upgraded -and $upgraded.version -eq 31 -and $upgraded.archive -eq '这台机器上原来就有的档案' -and $upgraded.readingPage -eq 7 -and $upgraded.setting -eq '{"left_over":"这台机器上原来就有"}' -and $upgraded.addedAtColumn -eq 1 -and $upgraded.localArchivesTable -eq 1)) "升完：档位 $(if ($upgraded) { $upgraded.version } else { '读不到' })、档案「$(if ($upgraded) { $upgraded.archive } else { '' })」、读到第 $(if ($upgraded) { $upgraded.readingPage } else { '' }) 页、后加的列/表 $(if ($upgraded) { "$($upgraded.addedAtColumn)/$($upgraded.localArchivesTable)" } else { '' })、设置 $(if ($upgraded) { $upgraded.setting } else { '' })"
         $markerNow = if (Test-Path -LiteralPath $seedMarkerPath) { Get-Content -LiteralPath $seedMarkerPath -Raw } else { $null }
         Note "run${index}-seed-marker" ($markerNow -eq $seedMarkerText) "data/notes-from-the-old-machine.txt $(if ($markerNow -eq $seedMarkerText) { '一字没动' } else { '被动过或者没了' })"
     }

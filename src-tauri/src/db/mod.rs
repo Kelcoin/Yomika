@@ -115,6 +115,10 @@ const MIGRATIONS: &[(i64, &str)] = &[
         30,
         include_str!("../../migrations/0030_hot_path_indexes.sql"),
     ),
+    (
+        31,
+        include_str!("../../migrations/0031_cache_quota_covering_index.sql"),
+    ),
 ];
 
 fn run_migrations(connection: &mut Connection, path: &Path) -> Result<(), String> {
@@ -173,6 +177,17 @@ mod tests {
     use rusqlite::OpenFlags;
 
     use super::*;
+
+    #[test]
+    fn cache_quota_uses_a_covering_index_after_migrations() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::open_path(directory.path().join("quota.sqlite3")).unwrap();
+        let connection = database.connection.lock().unwrap();
+        let mut statement = connection.prepare("EXPLAIN QUERY PLAN SELECT COALESCE(SUM(size),0) FROM (SELECT path,MAX(size) AS size FROM cache_entries GROUP BY path)").unwrap();
+        let plan = statement.query_map([], |row| row.get::<_, String>(3)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap().join("\n");
+        assert!(plan.contains("COVERING INDEX cache_entries_path_size_idx"), "{plan}");
+    }
 
     #[test]
     fn open_path_applies_all_migrations_and_can_reopen_idempotently() {
@@ -280,7 +295,7 @@ mod tests {
                     local_archive_metadata_columns
                 ),
                 (
-                    30,
+                    31,
                     1,
                     "servers",
                     "sync_accounts",
@@ -309,7 +324,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 27);
+        assert_eq!(migration_count, 28);
         let recovered_status: String = reopened
             .connection
             .lock()
@@ -392,7 +407,7 @@ mod tests {
         {
             let connection = database.connection.lock().expect("database lock");
             let (version, marker) = version_and_marker(&connection);
-            assert_eq!(version, 30, "升完该是这一版的档位");
+            assert_eq!(version, 31, "升完该是这一版的档位");
             assert_eq!(marker, left_over, "那台机器上的数据要跟着一起升上来");
         }
         drop(database);
