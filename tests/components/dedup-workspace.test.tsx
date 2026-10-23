@@ -56,6 +56,46 @@ describe('duplicate deletion confirmation', () => {
     expect(screen.queryByRole('button', { name: '关闭页数差警告' })).not.toBeInTheDocument();
   });
 
+  it.each([
+    ['a', 'b', 'c'],
+    ['b', 'c', 'a'],
+    ['a', 'c', 'b'],
+    ['b', 'a', 'c'],
+  ])('keeps chain candidates %s and %s selected while protecting %s', async (first, second, survivor) => {
+    const base = scanFixture(['a', 'b', 'c'].map((id) => ({ id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 24 })));
+    const pairs = [
+      { leftArchiveId: 'a', rightArchiveId: 'b', source: 'image' },
+      { leftArchiveId: 'b', rightArchiveId: 'c', source: 'filename' },
+    ];
+    const adapter = vi.fn(async (command: string, args?: Parameters<typeof base>[1]) => {
+      const response = await base(command, args) as { ok: boolean; value: unknown };
+      return command === 'dedup_load_result' ? { ok: true, value: { ...(response.value as object), pairs } } : response;
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    await screen.findByRole('checkbox', { name: '选择 A' });
+    const cards = (id: string) => screen.getAllByRole('checkbox', { name: '选择 ' + id.toUpperCase() });
+    fireEvent.click(cards(first)[0]!);
+    fireEvent.click(cards(second)[0]!);
+    cards(first).forEach((card) => expect(card).toHaveAttribute('aria-checked', 'true'));
+    cards(second).forEach((card) => expect(card).toHaveAttribute('aria-checked', 'true'));
+    cards(survivor).forEach((card) => expect(card).toBeDisabled());
+    await waitFor(() => expect(adapter).toHaveBeenLastCalledWith('dedup_save_selection', { sessionId: expect.any(String), selectedArchiveIds: [first, second] }));
+    // Filtering out an edge must not change the connected-component invariant.
+    fireEvent.change(screen.getByRole('combobox', { name: '来源' }), { target: { value: 'image' } });
+    if (survivor !== 'c') cards(survivor).forEach((card) => expect(card).toBeDisabled());
+    fireEvent.change(screen.getByRole('combobox', { name: '来源' }), { target: { value: 'all' } });
+    fireEvent.change(screen.getByRole('combobox', { name: '视图' }), { target: { value: 'chains' } });
+    cards(first).forEach((card) => expect(card).toHaveAttribute('aria-checked', 'true'));
+    cards(survivor).forEach((card) => expect(card).toBeDisabled());
+    fireEvent.click(cards(second)[0]!);
+    cards(survivor).forEach((card) => expect(card).toBeEnabled());
+    fireEvent.click(cards(survivor)[0]!);
+    await waitFor(() => expect(adapter).toHaveBeenLastCalledWith('dedup_save_selection', { sessionId: expect.any(String), selectedArchiveIds: [first, survivor] }));
+  });
+
   it('switches a pair candidate directly and clears both member and group selections', async () => {
     setInvokeAdapterForTests(scanFixture([
       { id: 'a', title: 'Archive A', tags: [], fileSize: 2, pageCount: 24 },

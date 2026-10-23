@@ -128,11 +128,12 @@ function selectionSignals(archive: DedupeArchive): Array<{ label: string; tone: 
 }
 
 /** 一个待处理档案：封面、标签与元信息。整张卡是勾选框，底色表示多选状态。 */
-const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverId, selected, pageGap, onToggle }: {
+const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverId, selected, disabled, pageGap, onToggle }: {
   member: DedupMember;
   scopeId?: string | undefined;
   serverId?: string | undefined;
   selected: boolean;
+  disabled: boolean;
   /** 与同组档案页数差过大：页数本身被标出来，代替组标题上的提醒。 */
   pageGap: boolean;
   onToggle: (archiveId: string) => void;
@@ -150,7 +151,8 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
     role="checkbox"
     aria-checked={selected}
     aria-label={`选择 ${member.title || member.archiveId}`}
-    title={member.archiveId}
+    title={disabled ? '每条关联重复链至少保留一个档案' : member.archiveId}
+    disabled={disabled}
     className={`dedup-member${selected ? ' is-selected' : ''}`}
     onClick={() => onToggle(member.archiveId)}
   >
@@ -300,6 +302,23 @@ export function DeduplicationWorkspace() {
   const sourceByGroupKey = useMemo(() => Object.fromEntries((result?.pairs ?? []).map((pair) => [[pair.leftArchiveId, pair.rightArchiveId].sort().join('|'), pair.source as DuplicateSource])), [result?.pairs]);
   const filtered = useMemo(() => getDedupeGroupFilterData(groups, sourceByGroupKey), [groups, sourceByGroupKey]);
   const selected = useMemo(() => new Set(result?.selectedArchiveIds ?? []), [result?.selectedArchiveIds]);
+  // Membership comes from all pairs, including edges hidden by the current filter.
+  const selectionComponents = useMemo(() => filtered.allChains.map((chain) => new Set(chain.flatMap((group) => group.map((member) => member.archiveId)))), [filtered.allChains]);
+  const standalonePairArchiveIds = useMemo(() => new Set(selectionComponents.filter((ids) => ids.size === 2).flatMap((ids) => [...ids])), [selectionComponents]);
+  const selectionDisabledIds = useMemo(() => {
+    const disabled = new Set<string>();
+    for (const ids of selectionComponents) {
+      // Independent pairs retain direct candidate switching. A chain adds
+      // candidates until only one archive remains, exactly like Readoshi.
+      if (ids.size <= 2) continue;
+      let selectedCount = 0;
+      for (const id of ids) if (selected.has(id)) selectedCount += 1;
+      if (selectedCount >= ids.size - 1) {
+        for (const id of ids) if (!selected.has(id)) disabled.add(id);
+      }
+    }
+    return disabled;
+  }, [selectionComponents, selected]);
   /** 这一组是否已经有选择：整组标记过，或组内有档案被勾选。 */
   const groupHasSelection = useCallback((group: readonly DedupMember[]) => selectedGroupKeys.has(groupKeyOf(group)) || group.some((member) => selected.has(member.archiveId)), [selected, selectedGroupKeys]);
   // 关联链要按「全部组」算连通性：先过滤再分链会把同一串重复关系拆散。用
@@ -512,6 +531,7 @@ export function DeduplicationWorkspace() {
 
   async function toggleSelected(archiveId: string, checked: boolean) {
     if (!result) return;
+    if (checked && selectionDisabledIds.has(archiveId)) return;
     // 手动触碰的组受智能选择保护；选择经不变式归一化（每条链至少保留一个）。
     const ownerGroupKeys = new Set(groups.filter((group) => group.some((item) => item.archiveId === archiveId)).map(groupKeyOf));
     setManuallyTouchedGroupKeys((current) => new Set([...current, ...ownerGroupKeys]));
@@ -522,10 +542,12 @@ export function DeduplicationWorkspace() {
     });
     const next = new Set(selectedRef.current);
     if (checked) {
-      // Clicking the alternative replaces the current candidate in that pair.
-      groups.filter((group) => group.some((item) => item.archiveId === archiveId)).forEach((group) => {
-        group.forEach((item) => next.delete(item.archiveId));
-      });
+      // Replace a candidate only in a standalone pair, never within a chain.
+      if (standalonePairArchiveIds.has(archiveId)) {
+        groups.filter((group) => group.some((item) => item.archiveId === archiveId)).forEach((group) => {
+          group.forEach((item) => next.delete(item.archiveId));
+        });
+      }
       next.add(archiveId);
     } else next.delete(archiveId);
     await applySelection(normalizeDuplicateSelection(groups, [...next]));
@@ -838,6 +860,7 @@ export function DeduplicationWorkspace() {
           scopeId={server?.scopeId}
           serverId={server?.id}
           selected={selected.has(archive.archiveId)}
+          disabled={selectionDisabledIds.has(archive.archiveId)}
           pageGap={pageGapIds.has(archive.archiveId)}
           onToggle={handleMemberToggle}
         />
