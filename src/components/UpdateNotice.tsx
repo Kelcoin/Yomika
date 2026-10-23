@@ -119,7 +119,7 @@ export function UpdateNotice() {
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content">
-          <Dialog.Title>{prompt.title}</Dialog.Title>
+          <Dialog.Title className="dialog-title"><Download aria-hidden="true" />{prompt.title}</Dialog.Title>
           <Dialog.Description>{prompt.description}</Dialog.Description>
           <div className="dialog-actions">
             {/* 跳过记的是「这个版本」，不是「永远别再问」：下一版还会来说一声。 */}

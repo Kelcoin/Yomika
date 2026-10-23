@@ -473,7 +473,7 @@ detailBasePath?: string | undefined }) {
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
           <Dialog.Content className="dialog-content">
-            <Dialog.Title>无痕阅读</Dialog.Title>
+            <Dialog.Title className="dialog-title"><EyeOff aria-hidden="true" />无痕阅读</Dialog.Title>
             <Dialog.Description>本次阅读不会记录进度，也不会写入历史。</Dialog.Description>
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="secondary-action" type="button"><X aria-hidden="true" />取消</button></Dialog.Close>

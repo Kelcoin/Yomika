@@ -11,13 +11,7 @@ import { Check, Lock } from 'lucide-react';
  * choose the wording now; the drawing lives here.
  */
 
-/** The drawn switch: track, handle, role and checked state.
- *
- * `onToggle` is optional because one caller needs the switch as a picture only.
- * The delete dialog states its option as a sentence with the switch in front of
- * it, and the sentence is the hit target — a handler here as well would toggle
- * twice per click.
- */
+/** The shared accessible switch. Its owning row supplies wording and layout. */
 export function SwitchControl({ label, checked, disabled, tabIndex, onToggle }: {
   label: string;
   checked: boolean;
@@ -58,7 +52,7 @@ export function SettingsSwitch({ icon, label, hint, checked, disabled, action, o
 }) {
   const control = <SwitchControl label={label} checked={checked} disabled={disabled} onToggle={onToggle} />;
   return (
-    <div className={`settings-row settings-switch-row${disabled ? ' is-disabled' : ''}`}>
+    <div className={`settings-row settings-switch-row${icon ? '' : ' is-iconless'}${disabled ? ' is-disabled' : ''}`}>
       {icon && <span className="settings-row-icon" aria-hidden="true">{icon}</span>}
       <span className="settings-row-copy">
         <span className="settings-row-label">{label}</span>

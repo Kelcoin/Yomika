@@ -30,8 +30,8 @@ const dedup = new NativeDedupRepository();
 // v3：块级证据 + Wilson 聚合（imsearch 的「多特征匹配 → 按图聚合 → Wilson 下
 // 界」思想）+ dhash 预筛 + 平移搜索；比较层对齐 imsearch 的评分思想。
 const ALGORITHM_VERSION = 'readoshi-v3';
-/** 结果列表渐进挂载：首批行数与每次追加的行数。 */
-const DEMOUNT_ROW_CHUNK = 60;
+/** 结果列表渐进挂载：首批组数与每次追加的组数，重复链内部同样受限。 */
+const DEMOUNT_GROUP_CHUNK = 24;
 
 type DedupMember = DedupeArchive & { archiveId: string };
 
@@ -206,7 +206,6 @@ export function DeduplicationWorkspace() {
   // 不重复关系面板、扫描结果历史。
   useOverlayBackGuard(smartSelectPending, () => setSmartSelectPending(false));
   const [includeFilenameOnly, setIncludeFilenameOnly] = useState(false);
-  const [pageGapWarningCount, setPageGapWarningCount] = useState(0);
   const [deleteSession, setDeleteSession] = useState<{ count: number }>();
   // 不重复关系面板：持久化的对（含历史墓碑）直接列出，可搜索、可撤销标记。
   const [relationsOpen, setRelationsOpen] = useState(false);
@@ -325,10 +324,24 @@ export function DeduplicationWorkspace() {
   }, [chainSections, selectionFilter, groupHasSelection]);
   const visibleGroups = useMemo(() => visibleSections.flatMap((section) => section.groups), [visibleSections]);
   // 每条链独占一整行；零散组按列数分行，行内放不满时由 CSS 居中。
+  const [mountedGroupCount, setMountedGroupCount] = useState(DEMOUNT_GROUP_CHUNK);
+  useEffect(() => { setMountedGroupCount(DEMOUNT_GROUP_CHUNK); }, [sourceFilter, selectionFilter, view, result?.session.sessionId]);
+  const mountedSections = useMemo(() => {
+    let remaining = mountedGroupCount;
+    const sections = view === 'chains' ? visibleSections.filter((section) => section.groups.length > 1) : visibleSections;
+    return sections.flatMap((section) => {
+      if (remaining <= 0) return [];
+      const shown = section.groups.slice(0, remaining);
+      remaining -= shown.length;
+      // Keep the full chain for its selection action, but mount only the current window.
+      return [{ ...section, groups: shown, fullGroups: section.groups }];
+    });
+  }, [visibleSections, mountedGroupCount, view]);
+  const moreRowsMounted = mountedSections.reduce((count, section) => count + section.groups.length, 0) < (view === 'chains' ? visibleSections.filter((section) => section.groups.length > 1) : visibleSections).reduce((count, section) => count + section.groups.length, 0);
   const groupColumns = groupColumnsFor(groupsWidth);
   const chainColumns = groupColumnsFor(groupsWidth - 2 * 16 - 2);
   const resultRows = useMemo(() => {
-    type Row = { kind: 'groups'; key: string; groups: DedupMember[][] } | { kind: 'chain'; key: string; number: number; chain: DedupMember[][] };
+    type Row = { kind: 'groups'; key: string; groups: DedupMember[][] } | { kind: 'chain'; key: string; number: number; chain: DedupMember[][]; fullChain: DedupMember[][] };
     const rows: Row[] = [];
     let pending: DedupMember[][] = [];
     const flush = () => {
@@ -336,28 +349,22 @@ export function DeduplicationWorkspace() {
       rows.push({ kind: 'groups', key: `row-${rows.length}`, groups: pending });
       pending = [];
     };
-    visibleSections.forEach((section) => {
-      if (section.groups.length > 1) { flush(); rows.push({ kind: 'chain', key: section.key, number: section.number, chain: section.groups }); return; }
+    mountedSections.forEach((section) => {
+      if (section.fullGroups.length > 1) { flush(); rows.push({ kind: 'chain', key: section.key, number: section.number, chain: section.groups, fullChain: section.fullGroups }); return; }
       pending.push(section.groups[0]!);
       if (pending.length >= groupColumns) flush();
     });
     flush();
     return rows;
-  }, [visibleSections, groupColumns]);
-  /** 结果行渐进挂载：1.5 万对快照能铺出几千行卡片，一进页面就全部挂上
-   * 会让首屏卡一下。先挂一小段，滚动哨兵再追加；布局与交互不变。 */
-  const [mountedRowCount, setMountedRowCount] = useState(DEMOUNT_ROW_CHUNK);
-  useEffect(() => { setMountedRowCount(DEMOUNT_ROW_CHUNK); }, [sourceFilter, selectionFilter, view, result?.session.sessionId]);
-  const mountedRows = useMemo(() => resultRows.slice(0, mountedRowCount), [resultRows, mountedRowCount]);
-  const mountedSections = useMemo(() => visibleSections.slice(0, mountedRowCount), [visibleSections, mountedRowCount]);
-  const moreRowsMounted = view === 'groups' ? mountedRows.length < resultRows.length : mountedSections.length < visibleSections.length;
+  }, [mountedSections, groupColumns]);
+  const mountedRows = resultRows;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (!moreRowsMounted) return undefined;
+    if (!pageActive || !moreRowsMounted) return undefined;
     const node = sentinelRef.current;
     if (!node) return undefined;
-    return observeOnceInScroll(node, () => setMountedRowCount((current) => current + DEMOUNT_ROW_CHUNK), '600px');
-  }, [moreRowsMounted, mountedRowCount]);
+    return observeOnceInScroll(node, () => setMountedGroupCount((current) => current + DEMOUNT_GROUP_CHUNK), '600px');
+  }, [pageActive, moreRowsMounted, mountedGroupCount]);
   /** 组序号按完整列表（含被筛掉的）编号，筛选时也不会跳号。 */
   const groupNumberByKey = useMemo(() => new Map(groups.map((group, index) => [groupKeyOf(group), index + 1])), [groups]);
 
@@ -385,20 +392,21 @@ export function DeduplicationWorkspace() {
           setResult((current) => current?.session.sessionId === targetSession ? { ...current, selectedArchiveIds: confirmed.ids } : current);
         }
       }
+      return response.ok;
     });
-    selectionWrites.current = write.catch(() => undefined);
-    await write;
+    selectionWrites.current = write.then(() => undefined, () => undefined);
+    return write;
   }
 
   useEffect(() => {
     const element = groupsRef.current;
-    if (!element || typeof ResizeObserver === 'undefined') return undefined;
+    if (!pageActive || !element || typeof ResizeObserver === 'undefined') return undefined;
     const measure = () => setGroupsWidth(element.clientWidth);
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [result]);
+  }, [pageActive, Boolean(result)]);
 
   async function persistSelection(nextSelected: string[]) {
     await applySelection(nextSelected);
@@ -465,7 +473,7 @@ export function DeduplicationWorkspace() {
     setManuallyTouchedGroupKeys(new Set());
     setProcessedNonDuplicatePairKeys(new Set());
     setProcessedDeletedArchiveIds(new Set());
-    setPageGapWarningCount(0);
+
     const id = resume && sessionId ? sessionId : `dedup-${Date.now()}`;
     setSessionId(id);
     if (!resume) setSavedSessionId(undefined);
@@ -572,8 +580,10 @@ export function DeduplicationWorkspace() {
     // 文件名来源仅在确认时纳入；每组只选一个待删除档案。
     const selection = mergeSmartDuplicateSelection(groups, manuallyTouchedGroupKeys, result.selectedArchiveIds, selectedGroupKeys, sourceByGroupKey, { includeFilenameOnly: includeFilenameOnlySelection });
     setSelectedGroupKeys(new Set(selection.groupKeys));
-    await applySelection(selection.archiveIds);
-    setPageGapWarningCount(countDuplicateGroupsWithLargePageGap(groups));
+    const applied = await applySelection(selection.archiveIds);
+    if (!applied) return;
+    const warningCount = countDuplicateGroupsWithLargePageGap(groups);
+    showToast(warningCount > 0 ? `智能选择完成，${warningCount} 组页数差超过 10 页，请人工确认后再执行。` : '智能选择完成，请复核后执行。', warningCount > 0 ? 'info' : 'success');
   }
 
   function requestExecuteSelected() {
@@ -847,7 +857,7 @@ export function DeduplicationWorkspace() {
           {progress?.status === 'cancelled' && !busy && <button className="secondary-action has-action-label" type="button" aria-label="恢复扫描" title="恢复扫描" disabled={!server} onClick={() => void runScan(true)}><CirclePlay aria-hidden="true" /><span className="action-label">恢复扫描</span></button>}
           {busy
             ? <button className="secondary-action has-action-label" type="button" aria-label="取消扫描" title="取消扫描" onClick={() => void cancelScan()}><CircleStop aria-hidden="true" /><span className="action-label">取消扫描</span></button>
-            : <button className="primary-action" type="button" disabled={!server} onClick={() => void runScan()}><Play aria-hidden="true" />开始扫描</button>}
+            : <button className="primary-action has-action-label" type="button" aria-label="开始扫描" title="开始扫描" disabled={!server} onClick={() => void runScan()}><Play aria-hidden="true" /><span className="action-label">开始扫描</span></button>}
         </div>
       </div>
       {/* 服务器不再让用户选：总是当前启用的那台（见 pickServer），名字放在说明里。 */}
@@ -885,7 +895,7 @@ export function DeduplicationWorkspace() {
           {progress?.stage === 'cancelled' && <span>扫描已取消，下面是已完成部分的结果。</span>}
         </div>
         <div className="dedup-section-actions">
-          <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'}</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存结果'}</span></button>
           <button className="secondary-action has-action-label" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /><span className="action-label">智能选择</span></button>
           <button className="secondary-action has-action-label" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><ListChecks aria-hidden="true" /><span className="action-label">{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</span></button>
           {/* 主按钮样式与「开始扫描」一致：都是这一步的主动作，删除的危险性由确认
@@ -906,16 +916,14 @@ export function DeduplicationWorkspace() {
             和上面两个筛选用同一种控件，三格看起来是一排。 */}
         <label>选择<SelectField name="dedupSelection" aria-label="选择" value={selectionFilter} options={[{ value: 'all', label: '全部' }, { value: 'selected', label: '已选择' }, { value: 'pending', label: '待选择' }]} onChange={(value) => setSelectionFilter(value as typeof selectionFilter)} /></label>
       </div>
-      {pageGapWarningCount > 0 && <div className="progress-line is-warning" role="status">{pageGapWarningCount} 组页数差超过 10 页，请人工确认后再执行。<button className="icon-button" type="button" aria-label="关闭页数差警告" onClick={() => setPageGapWarningCount(0)}><X aria-hidden="true" /></button></div>}
     </section>}
     {deleteSession && <ArchiveDeletionConfirmation description={`将标记 ${selectedGroupKeys.size} 组为不重复，并永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => setDeleteSession(undefined)} onConfirm={executeSelected} />}
     <Dialog.Root open={smartSelectPending} onOpenChange={setSmartSelectPending}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-smart-dialog">
+        <Dialog.Content className="dialog-content dedup-smart-dialog" aria-describedby={undefined}>
           <Dialog.Title className="dialog-title"><WandSparkles aria-hidden="true" />智能选择确认</Dialog.Title>
-          <Dialog.Description>自动保留每组中更合适的档案，并选择另一份待删除。手动调整过的分组保持原选择，执行前仍可复核。</Dialog.Description>
-          <SettingsSwitch label="纳入仅文件名匹配的重复组" hint="默认跳过，仅在确认文件名足以判断重复时启用。" checked={includeFilenameOnly} onToggle={() => setIncludeFilenameOnly((value) => !value)} />
+          <SettingsSwitch label="包含仅文件名匹配的组" hint="默认跳过，仅在确认文件名足以判断重复时启用。" checked={includeFilenameOnly} onToggle={() => setIncludeFilenameOnly((value) => !value)} />
           <div className="dialog-actions">
             <button className="secondary-action" type="button" onClick={() => setSmartSelectPending(false)}>取消</button>
             <button className="primary-action" type="button" aria-label="执行智能选择" onClick={() => void smartSelect(includeFilenameOnly)}><WandSparkles aria-hidden="true" />开始智能选择</button>
@@ -947,7 +955,7 @@ export function DeduplicationWorkspace() {
             <li className="dedup-chain">
               <div className="dedup-chain-heading">
                 {/* 图标 + 链号：这枚按钮的身份就是那个号，号是数据不是标签，所以它留下。 */}
-                <button className="secondary-action is-compact" type="button" aria-pressed={row.chain.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${row.number}`} title={`关联重复链 ${row.number}`} onClick={() => void toggleChainSelection(row.chain)}><Link2 aria-hidden="true" />{row.number}</button>
+                <button className="secondary-action is-compact" type="button" aria-pressed={row.fullChain.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${row.number}`} title={`关联重复链 ${row.number}`} onClick={() => void toggleChainSelection(row.fullChain)}><Link2 aria-hidden="true" />{row.number}</button>
               </div>
               <div className="dedup-group-rows">
                 {chunkRows(row.chain, chainColumns).map((chainRow, chainRowIndex) => <ul className="dedup-group-row" key={`${row.key}-row-${chainRowIndex}`} style={{ '--group-columns': chainColumns } as CSSProperties}>
@@ -961,9 +969,9 @@ export function DeduplicationWorkspace() {
           </ul>)}
       </div>}
       {view === 'chains' && <div className="dedup-chains" aria-label="重复链">
-        {mountedSections.filter((section) => section.groups.length > 1).map((section) => <section className="dedup-chain" key={`chain-only-${section.key}`}>
+        {mountedSections.filter((section) => section.fullGroups.length > 1).map((section) => <section className="dedup-chain" key={`chain-only-${section.key}`}>
           <div className="dedup-chain-heading">
-            <button className="secondary-action is-compact" type="button" aria-pressed={section.groups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${section.number}`} title={`关联重复链 ${section.number}`} onClick={() => void toggleChainSelection(section.groups)}><Link2 aria-hidden="true" />{section.number}</button>
+            <button className="secondary-action is-compact" type="button" aria-pressed={section.fullGroups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${section.number}`} title={`关联重复链 ${section.number}`} onClick={() => void toggleChainSelection(section.fullGroups)}><Link2 aria-hidden="true" />{section.number}</button>
           </div>
           <div className="dedup-group-rows">
             {chunkRows(section.groups, chainColumns).map((chainRow, chainRowIndex) => <ul className="dedup-group-row" key={`chain-only-${section.key}-row-${chainRowIndex}`} style={{ '--group-columns': chainColumns } as CSSProperties}>

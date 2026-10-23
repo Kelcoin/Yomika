@@ -9,8 +9,53 @@ import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/
 import { translateRawTag } from '../../src/lib/tags';
 import { RetainedPage } from '../../src/app/RetainedPage';
 
-afterEach(resetInvokeAdapterForTests);
+afterEach(() => { resetInvokeAdapterForTests(); vi.unstubAllGlobals(); });
 describe('duplicate deletion confirmation', () => {
+  it('bounds mounted cards even when every pair belongs to one large chain', async () => {
+    vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
+    const records = Array.from({ length: 301 }, (_, index) => ({ id: String(index), title: 'Archive ' + index, tags: [], fileSize: 1, pageCount: 24 }));
+    const base = scanFixture(records);
+    const pairs = records.slice(1).map((record, index) => ({ leftArchiveId: String(index), rightArchiveId: record.id, source: 'image' }));
+    setInvokeAdapterForTests(async (command, payload) => {
+      const response = await base(command, payload) as { ok: boolean; value: unknown };
+      if (command === 'dedup_load_result') return { ok: true, value: { ...(response.value as object), pairs } };
+      return response;
+    });
+    const content = <ToastProvider><DeduplicationWorkspace /></ToastProvider>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    await screen.findByRole('checkbox', { name: '选择 Archive 0' });
+    const count = view.container.querySelectorAll('.dedup-member').length;
+    const start = performance.now();
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    view.rerender(<RetainedPage active>{content}</RetainedPage>);
+    console.info('dedup retained reentry:', Math.round(performance.now() - start), 'ms; mounted cards:', count);
+    expect(count).toBe(48);
+    expect(view.container.querySelectorAll('.dedup-member')).toHaveLength(48);
+    fireEvent.click(screen.getByRole('button', { name: '关联重复链 1' }));
+    await waitFor(() => expect(screen.getByText('Archive 0').closest('.dedup-group')).toHaveClass('is-selected'));
+    fireEvent.click(screen.getByRole('button', { name: '执行所选' }));
+    await screen.findByRole('dialog', { name: '确认删除' });
+    expect(screen.getByText(/将标记 300 组为不重复/)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: '确认删除' })).toHaveClass('dialog-title');
+  });
+
+  it('reports smart selection page gaps only as a completion toast', async () => {
+    setInvokeAdapterForTests(scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 2, pageCount: 24 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 60 },
+    ]));
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    await screen.findByRole('checkbox', { name: '选择 Archive A' });
+    fireEvent.click(screen.getByRole('button', { name: '智能选择' }));
+    const toast = await screen.findByText('智能选择完成，1 组页数差超过 10 页，请人工确认后再执行。');
+    expect(toast.closest('.toast-card')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: '关闭页数差警告' })).not.toBeInTheDocument();
+  });
+
   it('keeps the scan controls mounted while the server is loading', async () => {
     let finish!: (value: unknown) => void;
     setInvokeAdapterForTests(async command => command === 'list_servers'
@@ -393,10 +438,15 @@ describe('duplicate deletion confirmation', () => {
     expect(adapter.mock.calls.filter(([command]) => command === 'dedup_save_selection').length).toBe(0);
     const dialog = screen.getByRole('dialog', { name: '智能选择确认' });
     expect(dialog.closest('.dedup-confirm')).toBeNull();
-    await user.click(within(dialog).getByRole('switch', { name: '纳入仅文件名匹配的重复组' }));
+    expect(within(dialog).queryByText(/自动保留每组中更合适的档案/)).not.toBeInTheDocument();
+    expect(within(dialog).getByRole('heading')).toHaveClass('dialog-title');
+    expect(within(dialog).getByRole('switch').closest('.settings-row')).toHaveClass('is-iconless');
+    await user.click(within(dialog).getByRole('switch', { name: '包含仅文件名匹配的组' }));
     await user.click(within(dialog).getByRole('button', { name: '执行智能选择' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_save_selection', expect.objectContaining({ selectedArchiveIds: expect.any(Array) })));
     expect(screen.getByRole('checkbox', { name: '选择 Archive B' })).toHaveAttribute('aria-checked', 'true');
+    expect(await screen.findByText('智能选择完成，请复核后执行。')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '关闭页数差警告' })).not.toBeInTheDocument();
   });
 
   it('folds linked groups into a chain block and counts the excluded relations', async () => {

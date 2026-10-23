@@ -8,7 +8,7 @@ import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useToast } from './Toast';
-import { SwitchControl } from './SettingsControls';
+import { SettingsSwitch } from './SettingsControls';
 
 type ArchiveDeleteDialogProps = {
   archive: Pick<ArchiveRecord, 'serverId' | 'archiveId' | 'title'>;
@@ -96,7 +96,7 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
     <Dialog.Portal>
       <Dialog.Overlay className="dialog-overlay" />
       <Dialog.Content className="dialog-content archive-delete-dialog">
-        <Dialog.Title>确认删除</Dialog.Title>
+        <Dialog.Title className="dialog-title"><Trash2 aria-hidden="true" />确认删除</Dialog.Title>
         <Dialog.Description>{description}</Dialog.Description>
         {loadError && <div role="alert">
           <p>{loadError}</p>
@@ -105,14 +105,7 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
         {/* 没登录 E-Hentai 就整行不出现（Readoshi 也这么做）：摆一个按不动的开关
             只会让人以为功能坏了，而这次删除确实没有收藏可同步。 */}
         {syncAvailable && (
-          /* The whole row toggles: a label cannot activate a button, so the
-             handler lives on the label and the shared switch is its control. It
-             carries no aria-label of its own here — the label text next to it is
-             the name, and two names for one control is one too many. */
-          <label className="preference-toggle" onClick={() => { if (!busy) setSyncFavorite(!syncFavorite); }}>
-            <SwitchControl label="本次同步删除 E-Hentai 收藏" checked={Boolean(syncFavorite)} disabled={busy} tabIndex={-1} />
-            <span>同步删除 E-Hentai 收藏</span>
-          </label>
+          <SettingsSwitch label="本次同步删除 E-Hentai 收藏" checked={Boolean(syncFavorite)} disabled={busy} onToggle={() => setSyncFavorite(!syncFavorite)} />
         )}
         <div className="dialog-actions">
           <button className="secondary-action" type="button" disabled={busy} onClick={onClose}><X aria-hidden="true" />取消</button>

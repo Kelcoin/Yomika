@@ -628,7 +628,7 @@ export function LocalArchivesWorkspace() {
           <Dialog.Portal>
             <Dialog.Overlay className="dialog-overlay" />
             <Dialog.Content className="dialog-content local-delete-dialog">
-              <Dialog.Title>删除本地档案</Dialog.Title>
+              <Dialog.Title className="dialog-title"><Trash2 aria-hidden="true" />删除本地档案</Dialog.Title>
               <Dialog.Description>
                 将从磁盘删除{deletePaths.length > 1 ? `选中的 ${deletePaths.length} 个文件` : '这个本地文件'}，服务器上的档案不受影响。此操作不可撤销。
               </Dialog.Description>

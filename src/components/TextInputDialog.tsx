@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Check, X } from 'lucide-react';
+import { Check, PencilLine, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
 
@@ -83,7 +83,7 @@ function TextInputDialogContent({
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content" {...(!description ? { 'aria-describedby': undefined } : {})}>
-          <Dialog.Title>{title}</Dialog.Title>
+          <Dialog.Title className="dialog-title"><PencilLine aria-hidden="true" />{title}</Dialog.Title>
           {description && <Dialog.Description>{description}</Dialog.Description>}
           <label className="text-input-dialog-field">
             {label}

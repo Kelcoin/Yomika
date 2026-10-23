@@ -1,5 +1,5 @@
 import * as Dialog from '@radix-ui/react-dialog';
-import { Check, X } from 'lucide-react';
+import { Check, CircleHelp, Trash2, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
 
@@ -52,7 +52,7 @@ function ConfirmDialogContent({ title, description, confirmLabel = '确认', dan
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content">
-          <Dialog.Title>{title}</Dialog.Title>
+          <Dialog.Title className="dialog-title">{danger ? <Trash2 aria-hidden="true" /> : <CircleHelp aria-hidden="true" />}{title}</Dialog.Title>
           <Dialog.Description>{description}</Dialog.Description>
           <div className="dialog-actions">
             <button className="secondary-action" type="button" disabled={busy} onClick={close}><X aria-hidden="true" />取消</button>
