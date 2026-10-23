@@ -34,6 +34,32 @@ function repository(bytes = new Uint8Array([1, 2, 3])): ImageCacheRepository & {
 afterEach(() => vi.restoreAllMocks());
 
 describe('UnifiedImageCache', () => {
+  it('frees a cover fetch slot even when native IPC ignores cancellation', async () => {
+    const urls = blobUrlFactory();
+    let started!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+    const data = { bytes: new Uint8Array([1]), mime: 'image/png' };
+    const repo: ImageCacheRepository = {
+      read: async () => null,
+      fetch: async (identity) => {
+        if (identity.archiveId === 'stalled') { started(); return new Promise<CachedImageData>(() => {}); }
+        return data;
+      },
+      store: async () => undefined,
+    };
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024, maxConcurrentFetches: 1 });
+    const controller = new AbortController();
+    const base = { scopeId: 's', serverId: 'server', pageIndex: 0, rendition: 'cover' as const };
+    const first = cache.load({ ...base, archiveId: 'stalled' }, { signal: controller.signal });
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await firstStarted;
+    controller.abort();
+    await rejected;
+    const second = await cache.load({ ...base, archiveId: 'ready' });
+    expect(second.url).toMatch(/^blob:/);
+    cache.release(second);
+  });
+
   it('loads a raw page while the derived image worker is stalled', async () => {
     const urls = blobUrlFactory();
     let finishDerived!: (data: CachedImageData) => void;

@@ -2,7 +2,7 @@ import { ContentSkeleton } from './ContentSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePageActive } from '../app/RetainedPage';
-import { Ban, Check, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, Save, ListChecks, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
+import { Ban, Check, Eraser, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, Save, ListChecks, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
 import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -191,7 +191,7 @@ export function DeduplicationWorkspace() {
   const [endDate, setEndDate] = useState(() => toDedupeDayString());
   const [sourceFilter, setSourceFilter] = useState<'all' | DuplicateSource>('all');
   const [selectionFilter, setSelectionFilter] = useState<'all' | 'selected' | 'pending'>('all');
-  const [view, setView] = useState<'groups' | 'chains'>('groups');
+  const [view, setView] = useState<'groups' | 'chains' | 'page-gap'>('groups');
   const [busy, setBusy] = useState(false);
   const [selectedGroupKeys, setSelectedGroupKeys] = useState<Set<string>>(new Set());
   const [manuallyTouchedGroupKeys, setManuallyTouchedGroupKeys] = useState<Set<string>>(new Set());
@@ -316,12 +316,13 @@ export function DeduplicationWorkspace() {
   }, [filtered.allChains, sourceByGroupKey, sourceFilter]);
   /** 已选择 / 待选择视图：按组筛，链里留下的组仍连在原来的链区块里。 */
   const visibleSections = useMemo(() => {
-    if (selectionFilter === 'all') return chainSections;
+    const sections = view === 'page-gap' ? chainSections.map((section) => ({ ...section, groups: section.groups.filter((group) => pageGapArchiveIds(group).size > 0) })).filter((section) => section.groups.length > 0) : chainSections;
+    if (selectionFilter === 'all') return sections;
     const wanted = selectionFilter === 'selected';
-    return chainSections
+    return sections
       .map((section) => ({ ...section, groups: section.groups.filter((group) => groupHasSelection(group) === wanted) }))
       .filter((section) => section.groups.length > 0);
-  }, [chainSections, selectionFilter, groupHasSelection]);
+  }, [chainSections, selectionFilter, groupHasSelection, view]);
   const visibleGroups = useMemo(() => visibleSections.flatMap((section) => section.groups), [visibleSections]);
   // 每条链独占一整行；零散组按列数分行，行内放不满时由 CSS 居中。
   const [mountedGroupCount, setMountedGroupCount] = useState(DEMOUNT_GROUP_CHUNK);
@@ -375,6 +376,7 @@ export function DeduplicationWorkspace() {
     if (!result) return;
     const targetSession = result.session.sessionId;
     const revision = ++selectionRevision.current;
+    setSavedSessionId(undefined);
     if (confirmedSelection.current?.sessionId !== targetSession) {
       confirmedSelection.current = { sessionId: targetSession, ids: result.selectedArchiveIds };
     }
@@ -519,7 +521,13 @@ export function DeduplicationWorkspace() {
       return next;
     });
     const next = new Set(selectedRef.current);
-    if (checked) next.add(archiveId); else next.delete(archiveId);
+    if (checked) {
+      // Clicking the alternative replaces the current candidate in that pair.
+      groups.filter((group) => group.some((item) => item.archiveId === archiveId)).forEach((group) => {
+        group.forEach((item) => next.delete(item.archiveId));
+      });
+      next.add(archiveId);
+    } else next.delete(archiveId);
     await applySelection(normalizeDuplicateSelection(groups, [...next]));
   }
 
@@ -560,6 +568,13 @@ export function DeduplicationWorkspace() {
     const nextSelected = new Set(selectedRef.current);
     chain.flat().forEach((item) => nextSelected.delete(item.archiveId));
     await applySelection([...nextSelected]);
+  }
+
+  async function clearSelection() {
+    if (busy) return;
+    setSelectedGroupKeys(new Set());
+    setManuallyTouchedGroupKeys(new Set());
+    await applySelection([]);
   }
 
   function requestSmartSelect() {
@@ -650,6 +665,10 @@ export function DeduplicationWorkspace() {
     } else if (markCount > 0) {
       showToast(`已标记 ${markCount} 组为不重复`, 'success');
     }
+    if (markCount > 0 || actuallyDeleted.size > 0) {
+      selectionRevision.current += 1;
+      setSavedSessionId(undefined);
+    }
     setProcessedDeletedArchiveIds((current) => new Set([...current, ...actuallyDeleted]));
     setSelectedGroupKeys(new Set());
     setManuallyTouchedGroupKeys(new Set());
@@ -710,12 +729,14 @@ export function DeduplicationWorkspace() {
   async function saveCurrentResult() {
     if (!result || busy || savingResult) return;
     const id = result.session.sessionId;
+    const revision = selectionRevision.current;
     setSavingResult(true);
     await selectionWrites.current;
     const saved = await dedup.saveSession(id);
     setSavingResult(false);
     if (!saved.ok) { showToast(saved.error.message, 'error'); return; }
-    setSavedSessionId(id);
+    // A selection made while IPC is pending still needs its own explicit save.
+    if (revision === selectionRevision.current) setSavedSessionId(id);
     showToast('扫描结果已保存', 'success');
   }
 
@@ -732,6 +753,7 @@ export function DeduplicationWorkspace() {
     setHistoryBusy(false);
     if (!response.ok) { showToast(response.error.message, 'error'); return; }
     scanGeneration.current += 1;
+    selectionRevision.current += 1;
     setResult(response.value);
     setSessionId(summary.sessionId);
     setSavedSessionId(summary.saved ? summary.sessionId : undefined);
@@ -752,16 +774,27 @@ export function DeduplicationWorkspace() {
   async function removeSession(summary: DedupSessionSummary) {
     if (historyBusy) return;
     setHistoryBusy(true);
+    // Finish any pending checkpoint before deleting its parent session.
+    await selectionWrites.current;
     const response = await dedup.deleteSession(summary.sessionId);
     if (!response.ok) showToast(response.error.message, 'error');
-    else if (summary.sessionId === sessionId) {
-      // 删掉的正是当前结果：视图回到未扫描状态，免得继续对着幽灵档案操作。
-      setResult(undefined);
-      setProgress(undefined);
-      setSessionId(undefined);
+    else {
+      setSessions((current) => current.filter((item) => item.sessionId !== summary.sessionId));
+      if (summary.sessionId === sessionId) {
+        // 最后一条也直接进入空态，不用再次读取历史来决定删除是否完成。
+        setResult(undefined);
+        setProgress(undefined);
+        setSessionId(undefined);
+        setSavedSessionId(undefined);
+        setSelectedGroupKeys(new Set());
+        setManuallyTouchedGroupKeys(new Set());
+        setProcessedNonDuplicatePairKeys(new Set());
+        setProcessedDeletedArchiveIds(new Set());
+        scanGeneration.current += 1;
+        selectionRevision.current += 1;
+      }
     }
     setHistoryBusy(false);
-    await loadSessions();
   }
 
   useEffect(() => {
@@ -897,6 +930,7 @@ export function DeduplicationWorkspace() {
         <div className="dedup-section-actions">
           <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存结果'}</span></button>
           <button className="secondary-action has-action-label" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /><span className="action-label">智能选择</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label="清除选择" title="清除选择" disabled={busy || (!selected.size && !selectedGroupKeys.size)} onClick={() => void clearSelection()}><Eraser aria-hidden="true" /><span className="action-label">清除选择</span></button>
           <button className="secondary-action has-action-label" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><ListChecks aria-hidden="true" /><span className="action-label">{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</span></button>
           {/* 主按钮样式与「开始扫描」一致：都是这一步的主动作，删除的危险性由确认
               弹窗承担，不靠按钮颜色提前喊。 */}
@@ -911,7 +945,7 @@ export function DeduplicationWorkspace() {
       </dl>
       <div className="dedup-filters">
         <label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部来源' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label>
-        <label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }]} onChange={(value) => setView(value as typeof view)} /></label>
+        <label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }, { value: 'page-gap', label: '页数差距大' }]} onChange={(value) => setView(value as typeof view)} /></label>
         {/* 已选择 / 待选择：检查这批重复还有哪些没定，或复核已经定下的那些。
             和上面两个筛选用同一种控件，三格看起来是一排。 */}
         <label>选择<SelectField name="dedupSelection" aria-label="选择" value={selectionFilter} options={[{ value: 'all', label: '全部' }, { value: 'selected', label: '已选择' }, { value: 'pending', label: '待选择' }]} onChange={(value) => setSelectionFilter(value as typeof selectionFilter)} /></label>
@@ -949,7 +983,7 @@ export function DeduplicationWorkspace() {
     {result && <>
       {/* 默认视图也把关联链划出来（Readoshi 的 renderChain）：多个组属于同一条
           重复关系链时，它们围在一个带标题的区块里，而不是散落在网格中。 */}
-      {view === 'groups' && <div className="dedup-group-rows" aria-label="重复结果" ref={groupsRef}>
+      {view !== 'chains' && <div className="dedup-group-rows" aria-label="重复结果" ref={groupsRef}>
         {mountedRows.map((row) => row.kind === 'chain'
           ? <ul className="dedup-group-row is-chain-row" key={row.key} style={{ '--group-columns': chainColumns } as CSSProperties}>
             <li className="dedup-chain">
@@ -1033,7 +1067,7 @@ export function DeduplicationWorkspace() {
               </div>
               <div className="dedup-history-actions">
                 <button className="secondary-action is-icon" type="button" aria-label={`载入 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="载入" disabled={historyBusy || item.sessionId === sessionId} onClick={() => void loadSession(item)}><FolderOpen aria-hidden="true" /></button>
-                <button className="secondary-action is-danger is-icon" type="button" aria-label={`删除 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="删除" disabled={historyBusy} onClick={() => void removeSession(item)}><Trash2 aria-hidden="true" /></button>
+                <button className="secondary-action is-danger is-icon" type="button" aria-label={`删除 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="删除" disabled={historyBusy || savingResult} onClick={() => void removeSession(item)}><Trash2 aria-hidden="true" /></button>
               </div>
             </li>)}
           </ul> : historyBusy

@@ -1,0 +1,24 @@
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, expect, it, vi } from 'vitest';
+vi.hoisted(() => vi.resetModules());
+const cache = vi.hoisted(() => ({ load: vi.fn(), release: vi.fn(), peekUrl: vi.fn() }));
+const observe = vi.hoisted(() => vi.fn((node: Element, load: () => void) => { load(); return () => {}; }));
+vi.mock('../../src/lib/nativeImageCache', () => ({ getNativeImageCache: () => cache }));
+vi.mock('../../src/lib/sharedIntersectionObserver', () => ({ observeOnceInScroll: observe }));
+import { ArchiveThumbMedia } from '../../src/components/ArchiveThumbnailCard';
+afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
+it('observes the laid-out dedup card and terminates a stalled cover with retry', async () => {
+  vi.useFakeTimers();
+  cache.load.mockImplementationOnce(() => new Promise(() => {})).mockResolvedValueOnce({ key: 'cover', url: 'blob:ready', bytes: 1 });
+  const { container, unmount } = render(<div className="dedup-member"><ArchiveThumbMedia scopeId="s" serverId="server" archiveId="a" /></div>);
+  await act(async () => {});
+  expect(observe.mock.calls[0]?.[0]).toBe(container.querySelector('.dedup-member'));
+  await act(async () => { vi.advanceTimersByTime(30_000); });
+  expect(cache.load.mock.calls[0]?.[1].signal.aborted).toBe(true);
+  expect(container.querySelector('.archive-thumb-card-skeleton')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: '重新加载封面' }));
+  await act(async () => {});
+  expect(container.querySelector('img')).toHaveAttribute('src', 'blob:ready');
+  unmount();
+  expect(cache.release).toHaveBeenCalledTimes(1);
+});

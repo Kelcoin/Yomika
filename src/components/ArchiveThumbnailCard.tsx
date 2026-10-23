@@ -107,10 +107,14 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
    * 属主线程每帧重画，一屏几十张失败的封面就是几十个元素一直在画，而它们永远不会
    * 变成图。 */
   const [failed, setFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
   const [node, setNode] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!node) return undefined;
     const controller = new AbortController();
+    let timeout: number | undefined;
+    setFailed(false);
+    setSrc(peekCachedImageUrl(imageCache, identity));
     let handle: import('../lib/unifiedImageCache').ImageHandle | undefined;
     /** 只还一次：取图可能在 cleanup 之后才落地（那时由它自己还），cleanup 也会试着还一次，
      * 两次都还就等于扣掉别人的引用。 */
@@ -118,23 +122,28 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
     const releaseHandle = () => { if (released || !handle) return; released = true; imageCache.release(handle); };
     // retain: 最后一个消费者放手后这张封面继续留在缓存里，重新挂载的第一帧才有东西可同步拿
     // （见上面的 useState 初值）。它照样受缓存自己的 96MiB / 256 条预算约束，超了就被挤出去。
-    const load = () => void imageCache.load(identity, { signal: controller.signal, retain: true }).then((value) => {
-      handle = value;
-      // 图落地时这张卡已经卸载了：这次引用没人接手，只能当场还掉——不还的话
-      // `evictMemory` 会因为 refs > 0 永远跳过这一条，它就再也不会被回收。
-      if (controller.signal.aborted) { releaseHandle(); return; }
-      setSrc(value.url);
-    }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
+    const load = () => {
+      timeout = window.setTimeout(() => { setFailed(true); controller.abort(); }, 30_000);
+      void imageCache.load(identity, { signal: controller.signal, retain: true }).then((value) => {
+        handle = value;
+        // 图落地时这张卡已经卸载了：这次引用没人接手，只能当场还掉——不还的话
+        // `evictMemory` 会因为 refs > 0 永远跳过这一条，它就再也不会被回收。
+        if (controller.signal.aborted) { releaseHandle(); return; }
+        setSrc(value.url);
+      }).catch(() => { if (!controller.signal.aborted) setFailed(true); }).finally(() => window.clearTimeout(timeout));
+    };
     // 观察器按 rootMargin 分桶共享：书架/去重页一屏就是几十上百张卡，
     // 每卡一个 observer 实例的开销跟着页数走。
-    const stopObserving = observeOnceInScroll(node, load, '480px');
-    return () => { stopObserving(); controller.abort(); releaseHandle(); };
-  }, [identity, node]);
+    const stopObserving = observeOnceInScroll(node.closest('.dedup-member') ?? node, load, '480px');
+    return () => { stopObserving(); window.clearTimeout(timeout); controller.abort(); releaseHandle(); };
+  }, [identity, node, retry]);
   return <div className="archive-thumb-card-media" ref={setNode}>
-    {src ? <img src={src} alt="" loading="lazy" decoding="async" onLoad={(event) => {
+    {src && !failed ? <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} onLoad={(event) => {
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
-    }} /> : <span className={`archive-thumb-card-skeleton${failed ? ' is-failed' : ''}`} aria-hidden="true" />}
+    }} /> : failed ? <span className="archive-cover-retry" role="button" tabIndex={0} aria-label="重新加载封面" title="封面加载失败，点击重试" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }} onKeyDown={(event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }
+    }}><RefreshCw aria-hidden="true" /></span> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}
     {children}
   </div>;
 }

@@ -1171,14 +1171,15 @@ describe('library cover flashes between pages', () => {
     expect(media?.querySelector('img')?.getAttribute('src')).toBe(url);
   });
 
-  it('leaves an unavailable cover on the placeholder it showed before', async () => {
-    // 取不到图（离线、服务器 202、图已删）时必须和从前一样：停在失败的占位块上，
-    // 不因为「记下来的宽窄」而先排成宽卡。
+  it('leaves an unavailable cover on the retryable placeholder it showed before', async () => {
+    // 取不到图（离线、服务器 202、图已删）时必须停在可重试的终态上——不是永远转下去的
+    // 骨架——也不因为「记下来的宽窄」而先排成宽卡。
     setInvokeAdapterForTests(async () => ({ ok: false, error: { code: 'UNKNOWN', message: '离线', retryable: true } }));
 
     const view = render(card(archives[1]!));
 
-    await waitFor(() => expect(view.container.querySelector('.archive-thumb-card-skeleton.is-failed')).not.toBeNull());
+    await waitFor(() => expect(view.container.querySelector('.archive-cover-retry')).not.toBeNull());
+    expect(view.container.querySelector('.archive-thumb-card-skeleton')).toBeNull();
     expect(view.container.querySelector('.archive-thumb-card-media img')).toBeNull();
     expect(view.container.querySelector('a.archive-thumb-card')?.className).not.toContain('is-wide');
   });

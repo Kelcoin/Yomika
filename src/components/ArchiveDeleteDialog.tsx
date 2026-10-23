@@ -97,7 +97,7 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
       <Dialog.Overlay className="dialog-overlay" />
       <Dialog.Content className="dialog-content archive-delete-dialog">
         <Dialog.Title className="dialog-title"><Trash2 aria-hidden="true" />确认删除</Dialog.Title>
-        <Dialog.Description>{description}</Dialog.Description>
+        <Dialog.Description className="visually-hidden">{description}</Dialog.Description>
         {loadError && <div role="alert">
           <p>{loadError}</p>
           <button className="secondary-action" type="button" onClick={() => { setLoadError(undefined); setReload((value) => value + 1); }}>重新加载设置</button>

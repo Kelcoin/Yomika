@@ -56,6 +56,55 @@ describe('duplicate deletion confirmation', () => {
     expect(screen.queryByRole('button', { name: '关闭页数差警告' })).not.toBeInTheDocument();
   });
 
+  it('switches a pair candidate directly and clears both member and group selections', async () => {
+    setInvokeAdapterForTests(scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 2, pageCount: 24 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 60 },
+    ]));
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    const a = await screen.findByRole('checkbox', { name: '选择 Archive A' });
+    const b = screen.getByRole('checkbox', { name: '选择 Archive B' });
+    fireEvent.click(a);
+    expect(a).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(b);
+    expect(a).toHaveAttribute('aria-checked', 'false');
+    expect(b).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('button', { name: '清除选择' }));
+    expect(b).toHaveAttribute('aria-checked', 'false');
+    fireEvent.click(screen.getByRole('button', { name: '全选分组' }));
+    fireEvent.click(screen.getByRole('button', { name: '清除选择' }));
+    expect(screen.getByRole('button', { name: '执行所选' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: '智能选择' }));
+    await waitFor(() => expect(b).toHaveAttribute('aria-checked', 'true'));
+  });
+
+  it('filters the page-gap view strictly above ten pages', async () => {
+    const records = [
+      { id: 'a', title: 'Wide A', tags: [], fileSize: 1, pageCount: 24 },
+      { id: 'b', title: 'Wide B', tags: [], fileSize: 1, pageCount: 35 },
+      { id: 'c', title: 'Close C', tags: [], fileSize: 1, pageCount: 24 },
+      { id: 'd', title: 'Close D', tags: [], fileSize: 1, pageCount: 34 },
+    ];
+    const base = scanFixture(records);
+    setInvokeAdapterForTests(async (command, payload) => {
+      const response = await base(command, payload) as { ok: boolean; value: unknown };
+      if (command === 'dedup_load_result') return { ok: true, value: { ...(response.value as object), pairs: [
+        { leftArchiveId: 'a', rightArchiveId: 'b', source: 'image' },
+        { leftArchiveId: 'c', rightArchiveId: 'd', source: 'image' },
+      ] } };
+      return response;
+    });
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    await screen.findByRole('checkbox', { name: '选择 Close C' });
+    fireEvent.change(screen.getByRole('combobox', { name: '视图' }), { target: { value: 'page-gap' } });
+    expect(screen.getByRole('checkbox', { name: '选择 Wide A' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: '选择 Close C' })).not.toBeInTheDocument();
+  });
+
   it('keeps the scan controls mounted while the server is loading', async () => {
     let finish!: (value: unknown) => void;
     setInvokeAdapterForTests(async command => command === 'list_servers'
@@ -635,6 +684,69 @@ describe('duplicate deletion confirmation', () => {
     expect(screen.getByRole('checkbox', { name: '选择 B1' })).toBeInTheDocument();
   });
 
+  it('makes a loaded saved result editable and preserves edits made during a save', async () => {
+    const user = userEvent.setup();
+    const base = scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 2, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ]);
+    let completeSave: (() => void) | undefined;
+    const adapter = vi.fn(async (command: string, args?: Parameters<typeof base>[1]) => {
+      if (command === 'dedup_list_sessions') return { ok: true, value: [{ sessionId: 'scan', scopeId: 'scope', status: 'completed', archiveCount: 2, pairCount: 1, createdAt: '2026-10-23', updatedAt: '2026-10-23', saved: true }] };
+      if (command === 'dedup_save_session') {
+        await new Promise<void>((resolve) => { completeSave = resolve; });
+        return { ok: true, value: null };
+      }
+      return base(command, args);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await user.click(await screen.findByRole('button', { name: '扫描结果' }));
+    await user.click(await screen.findByRole('button', { name: /^载入 / }));
+    expect(await screen.findByRole('button', { name: '已保存' })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: '选择 Archive A' }));
+    await user.click(screen.getByRole('button', { name: '保存扫描结果' }));
+    await waitFor(() => expect(completeSave).toBeDefined());
+    await user.click(screen.getByRole('checkbox', { name: '选择 Archive B' }));
+    await act(async () => { completeSave!(); });
+    expect(await screen.findByRole('button', { name: '保存扫描结果' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: '保存扫描结果' }));
+    await act(async () => { completeSave!(); });
+    expect(await screen.findByRole('button', { name: '已保存' })).toBeDisabled();
+  });
+
+  it('deletes the only saved result after its pending selection checkpoint', async () => {
+    const user = userEvent.setup();
+    const base = scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 2, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ]);
+    let completeSelection: (() => void) | undefined;
+    let deleted = false;
+    const adapter = vi.fn(async (command: string, args?: Parameters<typeof base>[1]) => {
+      if (command === 'dedup_list_sessions') return { ok: true, value: deleted ? [] : [{ sessionId: 'scan', scopeId: 'scope', status: 'completed', archiveCount: 2, pairCount: 1, createdAt: '2026-10-23', updatedAt: '2026-10-23', saved: true }] };
+      if (command === 'dedup_save_selection') await new Promise<void>((resolve) => { completeSelection = resolve; });
+      if (command === 'dedup_delete_session') { deleted = true; return { ok: true, value: null }; }
+      return base(command, args);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await user.click(await screen.findByRole('button', { name: '扫描结果' }));
+    await user.click(await screen.findByRole('button', { name: /^载入 / }));
+    await user.click(await screen.findByRole('checkbox', { name: '选择 Archive A' }));
+    await waitFor(() => expect(completeSelection).toBeDefined());
+    await user.click(screen.getByRole('button', { name: '扫描结果' }));
+    await user.click(await screen.findByRole('button', { name: /^删除 / }));
+    expect(deleted).toBe(false);
+    await act(async () => { completeSelection!(); });
+    expect(await screen.findByText('还没有保存的扫描结果')).toBeInTheDocument();
+    expect(deleted).toBe(true);
+    expect(screen.queryByRole('region', { name: '本次扫描' })).not.toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    await user.click(screen.getByRole('button', { name: '扫描结果' }));
+    expect(await screen.findByText('还没有保存的扫描结果')).toBeInTheDocument();
+  });
+
   it('does not save after scanning, and saves explicitly on request', async () => {
     const user = userEvent.setup();
     const base = scanFixture([
@@ -652,6 +764,11 @@ describe('duplicate deletion confirmation', () => {
     await user.click(save);
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_save_session', expect.objectContaining({ sessionId: expect.any(String) })));
     expect(await screen.findByRole('button', { name: '已保存' })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: '选择 Archive A' }));
+    expect(await screen.findByRole('button', { name: '保存扫描结果' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: '保存扫描结果' }));
+    expect(await screen.findByRole('button', { name: '已保存' })).toBeDisabled();
+    expect(adapter.mock.calls.filter(([command]) => command === 'dedup_save_session')).toHaveLength(2);
   });
 });
 

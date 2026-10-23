@@ -53,7 +53,7 @@ function ConfirmDialogContent({ title, description, confirmLabel = '确认', dan
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content">
           <Dialog.Title className="dialog-title">{danger ? <Trash2 aria-hidden="true" /> : <CircleHelp aria-hidden="true" />}{title}</Dialog.Title>
-          <Dialog.Description>{description}</Dialog.Description>
+          <Dialog.Description className={danger ? 'visually-hidden' : undefined}>{description}</Dialog.Description>
           <div className="dialog-actions">
             <button className="secondary-action" type="button" disabled={busy} onClick={close}><X aria-hidden="true" />取消</button>
             <button

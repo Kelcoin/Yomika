@@ -546,7 +546,7 @@ body::-webkit-scrollbar,
     color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)),
     color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))
   );
-  background-size: 220% 100%;
+  background-size: 200% 100%;
   animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite;
 }
 .skeleton-line { width: 100%; height: 22px; border-radius: var(--radius-control); }
@@ -2134,15 +2134,15 @@ body::-webkit-scrollbar,
 .archive-detail-cover-placeholder.is-skeleton,
 .archive-row-thumb.is-skeleton,
 .archive-page-thumbnail.is-skeleton,
-.archive-thumb-card-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 220% 100%; animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite; }
+.archive-thumb-card-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 200% 100%; animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite; }
 
 /* 封面确定取不回来之后，占位块停在静止的表面上。
    `skeleton-shimmer` 动的是 `background-position`——不是合成器动画，而是主线程每帧
-   重画。它本来只在「还在加载」这一段出现，但失败的封面会一直留在占位态：一屏几十张
-   取不回来的封面就是几十个元素永远在画，跟窗口拖动/缩放抢同一个线程。 */
+   重画。它本来只在「还在加载」这一段出现，但失败的占位会一直留在原处：一屏几十张
+   取不回来的封面就是几十个元素永远在画，跟窗口拖动/缩放抢同一个线程。
+   书架卡片的封面失败后换成可重试的终态（.archive-cover-retry），不再走这条。 */
 .archive-row-thumb.is-skeleton.is-failed,
-.archive-page-thumbnail.is-skeleton.is-failed,
-.archive-thumb-card-skeleton.is-failed { background: var(--surface-container); animation: none; }
+.archive-page-thumbnail.is-skeleton.is-failed { background: var(--surface-container); animation: none; }
 
 .archive-detail-overview {
   display: grid;
@@ -4498,15 +4498,11 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
 .archive-rail-item > .archive-thumb-card { scroll-snap-align: none; }
-.archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
+.archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
-/* 悬停只换颜色，不再把卡片提起来。这条 `translateY(-2px)` 换来的是一张合成层，
-   封面在设备像素取整上会贴着媒体下沿越出一线、正落在进度条下沿（用户报的「鼠标
-   移上去时进度条底部闪出一丝封面」），于是进度条只能靠「多压住接缝 1px + 抬
-   z-index」去挡——挡住了看得到的，挡不住它其实画到了自己的盒子外面。用户本轮
-   又报「部分 hover 效果会盖住下面的元素」，这一条就是其中之一：悬停不再改变任何
-   几何。 */
+/* Hover scales the whole clipped card, so the cover cannot cross the progress bar.
+   Rail snap targets stay on the stationary archive-rail-item wrapper. */
 @media (hover: hover) {
   .archive-thumb-card:hover:not([aria-current='page']) { background: var(--surface-container-highest); }
 }
@@ -7228,3 +7224,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .dedup-workspace .date-picker-trigger { gap: 4px; padding-inline: 8px; font-size: clamp(12px, 3.2vw, 14px); white-space: nowrap; }
   .dedup-workspace .date-picker-trigger svg { width: 14px; height: 14px; flex-shrink: 0; }
 }
+
+/* A failed cover is a terminal, retryable state, never an endless shimmer. */
+.archive-cover-retry { display: grid; place-items: center; width: 100%; height: 100%; min-height: 44px; background: var(--surface-container); color: var(--on-surface-variant); cursor: pointer; }
+.archive-cover-retry svg { width: 20px; height: 20px; }
+.archive-cover-retry:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }

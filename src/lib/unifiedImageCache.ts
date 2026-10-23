@@ -260,7 +260,16 @@ export class UnifiedImageCache {
     const gate = derived ? this.computeGate : this.fetchGate;
     const fetched = await gate.run(() => {
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      return this.repository.fetch(identity, signal);
+      const request = this.repository.fetch(identity, signal);
+      if (derived) return request;
+      // Native thumbnail IPC may ignore AbortSignal. A cancelled consumer must
+      // still free its ordinary-image slot so other ready covers can proceed.
+      return new Promise<CachedImageData>((resolve, reject) => {
+        const abort = () => reject(new DOMException('Aborted', 'AbortError'));
+        signal.addEventListener('abort', abort, { once: true });
+        if (signal.aborted) abort();
+        request.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+      });
     });
     if (fetched.bytes.byteLength === 0) throw new Error('Image response was empty');
     await this.repository.store(identity, fetched);

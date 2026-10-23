@@ -2312,7 +2312,7 @@ describe('design system contract', () => {
     expect(workspace).not.toMatch(/measureElement/);
     // 封面那层只剩悬停的放大：按下的缩放已经移到盒子上。
     expect(polish).not.toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \.archive-thumb-card-media/);
-    expect(polish).toMatch(/\.archive-thumb-card:hover \.archive-thumb-card-media,\s*\.archive-row:hover \.archive-row-thumb \{\s*transform: scale\(1\.02\);/);
+    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\),\s*\.archive-row:hover \.archive-row-thumb \{\s*transform: scale\(1\.02\);/);
     // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-copy \{\s*transform-origin: left center;/);
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
