@@ -183,6 +183,8 @@ pub struct InstalledVariant {
     pub active: bool,
     /// 库里的文件名（不含目录）。
     pub file: String,
+    pub sha256: Option<String>,
+    pub version: Option<String>,
 }
 
 /// 库里装过的每一种，按文件名排序（顺序稳定，设置页不用自己排）。
@@ -218,9 +220,13 @@ pub fn installed_variants(data_dir: &std::path::Path) -> Vec<InstalledVariant> {
             bytes,
             active: in_use,
             file: name,
+            sha256: digest,
+            version: super::dll_version(&path),
         });
     }
     variants.sort_by(|left, right| left.file.cmp(&right.file));
+    let mut seen = std::collections::HashSet::new();
+    variants.retain(|variant| variant.sha256.as_ref().is_none_or(|sha| seen.insert(sha.clone())));
     variants
 }
 
@@ -252,21 +258,36 @@ fn library_asset_name(bytes: u64, digest: Option<&str>, preferred: Option<&str>)
     }
 }
 
+// Keep legacy names readable, but never replace different bytes at the same name.
+// Downloads, imports and older installations all share this identity rule.
+fn library_target(source: &std::path::Path, data_dir: &std::path::Path, preferred: Option<&str>) -> Result<std::path::PathBuf, String> {
+    let digest = file_sha256(source).ok_or_else(|| "无法读取 DLL 指纹".to_string())?;
+    for installed in installed_variants(data_dir) {
+        if installed.sha256.as_deref() == Some(digest.as_str()) {
+            return Ok(library_file(data_dir, &installed.file));
+        }
+    }
+    let bytes = std::fs::metadata(source).map_err(|error| error.to_string())?.len();
+    let name = library_asset_name(bytes, Some(&digest), preferred);
+    let target = library_file(data_dir, &name);
+    if !target.exists() { return Ok(target); }
+    Ok(library_file(data_dir, &format!("{}--{digest}.dll", name.trim_end_matches(".dll"))))
+}
+
 /// 把校验过的暂存文件**改名**进库（下载那条路：暂存文件不留），返回库里的路径。
 fn move_into_library(
     staged: &std::path::Path,
     data_dir: &std::path::Path,
     preferred: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
-    let bytes = std::fs::metadata(staged)
-        .map_err(|error| format!("读不了 {}：{error}", staged.display()))?
-        .len();
-    let digest = file_sha256(staged);
-    let target = library_file(data_dir, &library_asset_name(bytes, digest.as_deref(), preferred));
+    let target = library_target(staged, data_dir, preferred)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
     }
-    // 同名的那份（重下一遍同一条变体）直接换掉——`rename` 在 Windows 上是替换语义。
+    if target.exists() {
+        std::fs::remove_file(staged).map_err(|error| error.to_string())?;
+        return Ok(target);
+    }
     std::fs::rename(staged, &target)
         .map_err(|error| format!("收进变体库失败：{error}（{}）", target.display()))?;
     Ok(target)
@@ -277,12 +298,9 @@ pub fn copy_into_library(
     source: &std::path::Path,
     data_dir: &std::path::Path,
 ) -> Result<std::path::PathBuf, String> {
-    let bytes = std::fs::metadata(source)
-        .map_err(|error| format!("读不了 {}：{error}", source.display()))?
-        .len();
-    let digest = file_sha256(source);
     let preferred = source.file_name().and_then(|value| value.to_str());
-    let target = library_file(data_dir, &library_asset_name(bytes, digest.as_deref(), preferred));
+    let target = library_target(source, data_dir, preferred)?;
+    if target.exists() { return Ok(target); }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|error| format!("建目录失败：{error}"))?;
     }
@@ -347,6 +365,7 @@ pub fn activate_variant(
             }
         ));
     };
+    if dll_path(data_dir).is_file() { copy_into_library(&dll_path(data_dir), data_dir)?; }
     copy_into_place(&library_file(data_dir, &found.file), data_dir)?;
     // 文件名没变、内容变了：进程内记住的那份指纹要作废（与安装那条路同一条理由）。
     super::forget_fingerprint();
@@ -454,6 +473,7 @@ pub fn download_variant<F: FnMut(u64, Option<u64>)>(
                 verify_file(&staged, variant.size, &variant.sha256)?;
                 return install_staged(&staged, data_dir);
             }
+            Err(error) if error == "download cancelled" => return Err(error),
             Err(error) => errors.push(format!("{url}: {error}")),
         }
     }
@@ -913,6 +933,27 @@ mod tests {
             listed[0].bytes,
             std::fs::metadata(&community).expect("社区包").len()
         );
+    }
+
+    #[test]
+    fn unknown_dll_versions_coexist_and_switch_by_exact_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("nvngx_dlssnr.dll");
+        std::fs::write(&source, b"custom DLL version one").unwrap();
+        let first = copy_into_library(&source, dir.path()).unwrap();
+        std::fs::write(&source, b"custom DLL version two").unwrap();
+        let second = copy_into_library(&source, dir.path()).unwrap();
+        assert_ne!(first, second, "different DLL contents must never overwrite each other");
+        assert_eq!(std::fs::read(&first).unwrap(), b"custom DLL version one");
+        assert_eq!(installed_variants(dir.path()).len(), 2);
+        let again = copy_into_library(&source, dir.path()).unwrap();
+        assert_eq!(again, second, "importing identical bytes should reuse the library entry");
+        for file in [&first, &second] {
+            activate_variant(dir.path(), file.file_name().unwrap().to_str().unwrap()).unwrap();
+            assert_eq!(std::fs::read(dll_path(dir.path())).unwrap(), std::fs::read(file).unwrap());
+        }
+        std::fs::copy(&first, library_file(dir.path(), "nvngx_dlssnr--duplicate.dll")).unwrap();
+        assert_eq!(installed_variants(dir.path()).len(), 2, "legacy copies of identical bytes should not create duplicate choices");
     }
 
     /// 整条下载路径，对着真仓库的那一份：清单取得到、解析得动，写在上面的资产名与

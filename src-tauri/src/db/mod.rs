@@ -119,6 +119,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         31,
         include_str!("../../migrations/0031_cache_quota_covering_index.sql"),
     ),
+    (32, include_str!("../../migrations/0032_dedup_manual_save.sql")),
 ];
 
 fn run_migrations(connection: &mut Connection, path: &Path) -> Result<(), String> {
@@ -295,7 +296,7 @@ mod tests {
                     local_archive_metadata_columns
                 ),
                 (
-                    31,
+                    32,
                     1,
                     "servers",
                     "sync_accounts",
@@ -324,7 +325,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 28);
+        assert_eq!(migration_count, 29);
         let recovered_status: String = reopened
             .connection
             .lock()
@@ -407,7 +408,7 @@ mod tests {
         {
             let connection = database.connection.lock().expect("database lock");
             let (version, marker) = version_and_marker(&connection);
-            assert_eq!(version, 31, "升完该是这一版的档位");
+            assert_eq!(version, 32, "升完该是这一版的档位");
             assert_eq!(marker, left_over, "那台机器上的数据要跟着一起升上来");
         }
         drop(database);

@@ -177,7 +177,6 @@ function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onT
       {archive.scopeId && archive.serverId && archive.archiveId
         ? <ArchiveThumbMedia scopeId={archive.scopeId} serverId={archive.serverId} archiveId={archive.archiveId} />
         : <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><FileArchive /></div>}
-      {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
       <span className="archive-row-copy">
         <strong>{archive.title}</strong>
         <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
@@ -529,15 +528,15 @@ export function LocalArchivesWorkspace() {
         <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
           <span className="archive-selection-count" role="status" aria-live="polite">已选 {selected.size} 个</span>
           {/* 与档案库那一条同形：纯图标 + 可访问名/提示，两个列表的多选栏是同一套。 */}
-          <button className="secondary-action is-icon" type="button" aria-pressed={selectAll} aria-label={selectAll ? '取消全选' : '全选当前'} title={selectAll ? '取消全选' : '全选当前'} disabled={visibleArchives.length === 0} onClick={toggleAll}>
+          <button className="secondary-action has-action-label" type="button" aria-pressed={selectAll} aria-label={selectAll ? '取消全选' : '全选当前'} title={selectAll ? '取消全选' : '全选当前'} disabled={visibleArchives.length === 0} onClick={toggleAll}>
             <SquareCheckBig aria-hidden="true" />
-          </button>
-          <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setDeletePaths([...selected])}>
+          <span className="action-label">{selectAll ? '取消全选' : '全选当前'}</span></button>
+          <button className="secondary-action is-danger has-action-label" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setDeletePaths([...selected])}>
             <Trash2 aria-hidden="true" />
-          </button>
-          <button className="secondary-action is-icon archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
+          <span className="action-label">删除所选</span></button>
+          <button className="secondary-action has-action-label archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
             <Check aria-hidden="true" />
-          </button>
+          <span className="action-label">完成</span></button>
         </div>
       </div>
       {error && <div className="form-error" role="alert">{error}<button className="secondary-action" type="button" onClick={() => void loadArchives()}>重试读取本地档案</button></div>}

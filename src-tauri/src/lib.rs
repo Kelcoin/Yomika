@@ -103,7 +103,7 @@ use credentials::{export_data, import_data};
 use db::Database;
 use dedup::{
     dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_delete_session,
-    dedup_find_exact, dedup_import_readoshi, dedup_list_non_duplicates, dedup_list_sessions,
+    dedup_find_exact, dedup_import_readoshi, dedup_list_non_duplicates, dedup_list_sessions, dedup_save_session,
     dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature,
     dedup_save_non_duplicate, dedup_save_non_duplicates, dedup_save_selection,
     dedup_scan, dedup_scan_chunk,
@@ -618,6 +618,7 @@ pub fn run() {
             dedup_scan_progress,
             dedup_save_selection,
             dedup_list_sessions,
+            dedup_save_session,
             dedup_delete_session,
             dedup_cancel_scan,
             dedup_resume_scan,

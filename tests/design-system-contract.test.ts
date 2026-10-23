@@ -1741,7 +1741,7 @@ describe('design system contract', () => {
     // 曾经写成 inset: 1px + 半径 - 1px，那是「往里缩一格」而不是「同一条环」：在
     // DPR 1.5 上两条 1px 描边各自吸附设备像素，左/下并成一条、上/右中间空出一个设备
     // 像素的背景，于是选中态看起来是两条线（用户报「顶部和右侧会有两条」）。
-    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row:is(.is-selected, [aria-checked='true'], [aria-pressed='true'])::after,\n.archive-thumb-card:is(.is-selected, [aria-checked='true'], [aria-pressed='true'], [aria-current='page'])::after");
+    const overlay = ruleBody(shell, ".archive-list.is-wide .archive-row[aria-pressed='true']::after,\n.archive-thumb-card:is([aria-pressed='true'], [aria-current='page'])::after");
     expect(overlay).toMatch(/inset:\s*0/);
     expect(overlay).toMatch(/z-index:\s*1/);
     expect(overlay).toMatch(/border:\s*1px solid var\(--primary\)/);
@@ -2188,7 +2188,7 @@ describe('design system contract', () => {
     expect(read('src/components/SettingsValueControls.tsx')).toMatch(/export function SettingsChoice\(/);
     // The selection is a mode with its own bar, not a checkbox glued to a card.
     expect(shell).toMatch(/\.archive-selection-bar \{/);
-    expect(shell).toMatch(/\.archive-card-check \{/);
+    expect(workspace).not.toContain('className="archive-card-check"');
     expect(workspace).toMatch(/role: 'checkbox', 'aria-checked': isSelected/);
     expect(workspace).toMatch(/modifiers.shiftKey && anchor >= 0/);
   });
@@ -2980,20 +2980,14 @@ describe('design system contract', () => {
     expect(source).toMatch(/className="select-option-download"/);
   });
 
-  it('gives the installed-snippet library the shared row and the mirrored switch slot', () => {
-    // 用户 2026-10-18 报「dlssnr多个版本没法共存，导致下了一个版本就会顶掉其他版本」：库里
-    // 每一种都要看得见、换得回去。这一段不能自造行式——行体走共享的 `.settings-choice-option-main`，
-    // 行尾动作必须挂在 `.select-option-download` 上：shell.css 那条
-    // `:has(> .select-option-download)` 的镜像留白只认这个类，换成 `.secondary-action`（约 50px）
-    // 会让「切换」那一行的字比「正在用」那行偏左几个像素，正是那条规则注释里用户报过的毛病。
+  it('keeps downloaded DLL versions in one shared choice list with exact-file switching', () => {
     const source = read('src/components/DlssnrSettingsGroup.tsx');
-    expect(source).toMatch(/aria-label="已安装的片段"/);
-    // 切换按钮自己带上是哪一条（无障碍名），动作本身也走上面那个镜像槽。
-    expect(source).toMatch(/aria-label=\{`切换到\$\{name\}`\}/);
-    expect(source).toMatch(/className="select-option-download"[\s\S]{0,400}?切换/);
-    // 库里的行不许自造类名（自造就意味着脱离共享行式与那条镜像留白）。
+    expect(source).not.toContain('aria-label="已安装的片段"');
+    expect(source).not.toContain('这台机器上装了这些片段');
+    expect(source).toContain('repository.activateVariant(variant.file)');
+    expect(source).toContain('if (local) void activateVariant(local)');
+    expect(source).toContain('settings-choice-option-main');
     expect(source).not.toContain('dlssnr-library');
-    expect(read('src/styles/shell.css')).toMatch(/\.settings-choice-option:has\(> \.select-option-download\)/);
   });
 
   it('packs choice rows with no phantom second line and centres their labels', () => {

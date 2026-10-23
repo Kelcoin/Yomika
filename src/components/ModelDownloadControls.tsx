@@ -29,6 +29,7 @@ export function ModelDownloadSlot({ open, label, progress }: { open: boolean; la
         percent={percent ?? 0}
         indeterminate={percent === undefined}
         cornerAware
+        composited
         label={`${label}下载进度`}
       />
     </div>

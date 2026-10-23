@@ -39,11 +39,12 @@ export function cardProgressWidth(percent: number, trackWidth: number, cornerAwa
  * 不会留下「槽宽更新了、内容还是旧值」的陈旧读数。
  *
  * `indeterminate`：源没报总长时用扫光条（宽度交给 CSS，见 base.css 那条）。 */
-export function CardProgressBar({ percent, label, cornerAware = false, indeterminate = false, className = '' }: {
+export function CardProgressBar({ percent, label, cornerAware = false, indeterminate = false, composited = false, className = '' }: {
   percent: number;
   label: string;
   cornerAware?: boolean;
   indeterminate?: boolean;
+  composited?: boolean;
   className?: string;
 }) {
   const trackRef = useRef<HTMLSpanElement>(null);
@@ -61,7 +62,8 @@ export function CardProgressBar({ percent, label, cornerAware = false, indetermi
     return () => observer.disconnect();
   }, []);
   const complete = percent >= 100;
-  const modifier = `${complete && !indeterminate ? ' is-complete' : ''}${indeterminate ? ' is-indeterminate' : ''}${className ? ` ${className}` : ''}`;
+  const modifier = `${complete && !indeterminate ? ' is-complete' : ''}${indeterminate ? ' is-indeterminate' : ''}${composited ? ' is-composited' : ''}${className ? ` ${className}` : ''}`;
+  const width = cardProgressWidth(Math.max(0, Math.min(100, percent)), trackWidth, cornerAware);
   return <span
     ref={trackRef}
     className={`archive-card-progress${modifier}`}
@@ -71,6 +73,8 @@ export function CardProgressBar({ percent, label, cornerAware = false, indetermi
     aria-valuemax={100}
     {...(indeterminate ? {} : { 'aria-valuenow': percent })}
   >
-    <span className="archive-card-progress-fill" style={indeterminate ? undefined : { width: cardProgressWidth(percent, trackWidth, cornerAware) }} />
+    <span className="archive-card-progress-fill" style={indeterminate ? undefined : composited
+      ? { width: '100%', clipPath: `inset(0 max(0px, calc(100% - ${width})) 0 0 round 0 2px 2px 0)` }
+      : { width }} />
   </span>;
 }

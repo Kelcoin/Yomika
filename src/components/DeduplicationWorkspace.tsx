@@ -2,7 +2,7 @@ import { ContentSkeleton } from './ContentSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { usePageActive } from '../app/RetainedPage';
-import { Ban, Check, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, SquareCheckBig, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
+import { Ban, Check, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, Save, ListChecks, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
 import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -23,6 +23,7 @@ import { pickServer } from '../domain/server';
 import { parseArchiveTagString } from '../lib/tags';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { DatePicker } from './DatePicker';
+import { SettingsSwitch } from './SettingsControls';
 
 const library = new NativeLibraryRepository();
 const dedup = new NativeDedupRepository();
@@ -126,10 +127,7 @@ function selectionSignals(archive: DedupeArchive): Array<{ label: string; tone: 
   ].filter(Boolean) as Array<{ label: string; tone: string }>;
 }
 
-/** 一个待处理档案：封面 + 标题 + 标签胶囊 + 体积/页数 + 判定徽标。整张卡就是
- * 勾选框（与档案库多选一致的 role/aria-checked），角上的圆盘标记也用同一个
- * `.archive-card-check`——之前这里渲染的是裸 checkbox，被全局 input 样式拉成
- * 一整行宽的 44px 方块，卡片布局就是这样被撑坏的。 */
+/** 一个待处理档案：封面、标签与元信息。整张卡是勾选框，底色表示多选状态。 */
 const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverId, selected, pageGap, onToggle }: {
   member: DedupMember;
   scopeId?: string | undefined;
@@ -160,7 +158,6 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
       {scopeId && serverId
         ? <ArchiveThumbMedia scopeId={scopeId} serverId={serverId} archiveId={member.archiveId} />
         : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}
-      <span className="archive-card-check" aria-hidden="true" />
     </span>
     <span className="dedup-member-copy">
       <strong className="dedup-member-title">{member.title || member.archiveId}</strong>
@@ -200,6 +197,10 @@ export function DeduplicationWorkspace() {
   const [manuallyTouchedGroupKeys, setManuallyTouchedGroupKeys] = useState<Set<string>>(new Set());
   const [processedNonDuplicatePairKeys, setProcessedNonDuplicatePairKeys] = useState<Set<string>>(new Set());
   const [processedDeletedArchiveIds, setProcessedDeletedArchiveIds] = useState<Set<string>>(new Set());
+  const [helpOpen, setHelpOpen] = useState(false);
+  useOverlayBackGuard(helpOpen, () => setHelpOpen(false));
+  const [savedSessionId, setSavedSessionId] = useState<string>();
+  const [savingResult, setSavingResult] = useState(false);
   const [smartSelectPending, setSmartSelectPending] = useState(false);
   // 这个文件里的三处浮层都先吃返回手势（规矩见 lib/overlayBackGuard）：智能选择确认、
   // 不重复关系面板、扫描结果历史。
@@ -442,7 +443,7 @@ export function DeduplicationWorkspace() {
   useEffect(() => {
     if (!server || busy || sessionId) return;
     let active = true;
-    void dedup.listSessions(server.scopeId).then((response) => {
+    void dedup.listSessions(server.scopeId, true).then((response) => {
       if (!active || !response.ok) return;
       const running = response.value.find((item) => item.status === 'running');
       if (!running) return;
@@ -467,6 +468,7 @@ export function DeduplicationWorkspace() {
     setPageGapWarningCount(0);
     const id = resume && sessionId ? sessionId : `dedup-${Date.now()}`;
     setSessionId(id);
+    if (!resume) setSavedSessionId(undefined);
     // 立刻画出进度条：枚举与第一个分块的封面下载都要时间，空等会让人以为卡死。
     setProgress({
       sessionId: id, scopeId: server.scopeId, status: 'running', stage: 'enumerating',
@@ -553,7 +555,7 @@ export function DeduplicationWorkspace() {
   }
 
   function requestSmartSelect() {
-    if (!result) return;
+    if (!result || busy) return;
     const hasFilenameOnlyGroups = groups.some((group) => sourceByGroupKey[groupKeyOf(group)] === 'filename');
     if (!hasFilenameOnlyGroups) {
       void smartSelect(false);
@@ -569,6 +571,7 @@ export function DeduplicationWorkspace() {
     // 与 Readoshi 相同：手动触碰过的组保留手动选择；封面来源总是纳入，
     // 文件名来源仅在确认时纳入；每组只选一个待删除档案。
     const selection = mergeSmartDuplicateSelection(groups, manuallyTouchedGroupKeys, result.selectedArchiveIds, selectedGroupKeys, sourceByGroupKey, { includeFilenameOnly: includeFilenameOnlySelection });
+    setSelectedGroupKeys(new Set(selection.groupKeys));
     await applySelection(selection.archiveIds);
     setPageGapWarningCount(countDuplicateGroupsWithLargePageGap(groups));
   }
@@ -690,8 +693,20 @@ export function DeduplicationWorkspace() {
     setHistoryBusy(true);
     const response = await dedup.listSessions(server.scopeId);
     setHistoryBusy(false);
-    if (response.ok) setSessions(response.value);
+    if (response.ok) setSessions(response.value.filter((item) => item.saved));
     else showToast(response.error.message, 'error');
+  }
+
+  async function saveCurrentResult() {
+    if (!result || busy || savingResult) return;
+    const id = result.session.sessionId;
+    setSavingResult(true);
+    await selectionWrites.current;
+    const saved = await dedup.saveSession(id);
+    setSavingResult(false);
+    if (!saved.ok) { showToast(saved.error.message, 'error'); return; }
+    setSavedSessionId(id);
+    showToast('扫描结果已保存', 'success');
   }
 
   function openHistory() {
@@ -709,6 +724,7 @@ export function DeduplicationWorkspace() {
     scanGeneration.current += 1;
     setResult(response.value);
     setSessionId(summary.sessionId);
+    setSavedSessionId(summary.saved ? summary.sessionId : undefined);
     setProgress({
       sessionId: summary.sessionId, scopeId: summary.scopeId, status: 'completed', stage: 'completed',
       processed: summary.archiveCount, total: summary.archiveCount, cacheHits: 0, downloads: 0,
@@ -820,17 +836,17 @@ export function DeduplicationWorkspace() {
       <div className="dedup-section-heading">
         <div>
           <strong>检测范围</strong>
-          <span>服务器：{initializing ? <span className="skeleton-line dedup-server-skeleton" aria-label="正在读取服务器" /> : (server?.name ?? '未配置')}。按加入日期圈定参与比对的档案。</span>
+          {initializing && <span className="skeleton-line dedup-server-skeleton" aria-label="正在读取服务器" />}
         </div>
         <div className="dedup-section-actions">
-          {/* 与阅读器的工具栏、档案库的多选栏同一种语言：动作一律是纯图标，词放在
-              可访问名与提示里；只有「开始扫描」保留文字，它是这一页的主动作。 */}
-          <button className="secondary-action is-icon" type="button" aria-label="不重复关系" title="不重复关系" disabled={!server} onClick={openRelations}><Link2Off aria-hidden="true" /></button>
-          <button className="secondary-action is-icon" type="button" aria-label="重置" title="重置" disabled={busy} onClick={() => { setStartDate('2000-01-01'); setEndDate(toDedupeDayString()); }}><RotateCcw aria-hidden="true" /></button>
-          <button className="secondary-action is-icon" type="button" aria-label="扫描结果" title="扫描结果" disabled={!server || busy} onClick={openHistory}><History aria-hidden="true" /></button>
-          {progress?.status === 'cancelled' && !busy && <button className="secondary-action is-icon" type="button" aria-label="恢复扫描" title="恢复扫描" disabled={!server} onClick={() => void runScan(true)}><CirclePlay aria-hidden="true" /></button>}
+          {/* 空间足够时显示动作名称，窄面板由容器查询收为图标。 */}
+          <button className="secondary-action has-action-label" type="button" aria-label="使用说明" title="使用说明" onClick={() => setHelpOpen(true)}><CircleHelp aria-hidden="true" /><span className="action-label">使用说明</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label="不重复关系" title="不重复关系" disabled={!server} onClick={openRelations}><Link2Off aria-hidden="true" /><span className="action-label">不重复关系</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label="重置" title="重置" disabled={busy} onClick={() => { setStartDate('2000-01-01'); setEndDate(toDedupeDayString()); }}><RotateCcw aria-hidden="true" /><span className="action-label">重置</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label="扫描结果" title="扫描结果" disabled={!server || busy} onClick={openHistory}><History aria-hidden="true" /><span className="action-label">扫描结果</span></button>
+          {progress?.status === 'cancelled' && !busy && <button className="secondary-action has-action-label" type="button" aria-label="恢复扫描" title="恢复扫描" disabled={!server} onClick={() => void runScan(true)}><CirclePlay aria-hidden="true" /><span className="action-label">恢复扫描</span></button>}
           {busy
-            ? <button className="secondary-action is-icon" type="button" aria-label="取消扫描" title="取消扫描" onClick={() => void cancelScan()}><CircleStop aria-hidden="true" /></button>
+            ? <button className="secondary-action has-action-label" type="button" aria-label="取消扫描" title="取消扫描" onClick={() => void cancelScan()}><CircleStop aria-hidden="true" /><span className="action-label">取消扫描</span></button>
             : <button className="primary-action" type="button" disabled={!server} onClick={() => void runScan()}><Play aria-hidden="true" />开始扫描</button>}
         </div>
       </div>
@@ -865,15 +881,16 @@ export function DeduplicationWorkspace() {
       <div className="dedup-section-heading">
         <div>
           <strong>本次扫描</strong>
-          {/* 结果已经落库，条数就在下面这排统计里：不再重复一句「扫描完成」。 */}
+          {/* 条数在下方统计中；结果需用户主动保存到扫描历史。 */}
           {progress?.stage === 'cancelled' && <span>扫描已取消，下面是已完成部分的结果。</span>}
         </div>
         <div className="dedup-section-actions">
-          <button className="secondary-action is-icon" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /></button>
-          <button className="secondary-action is-icon" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><SquareCheckBig aria-hidden="true" /></button>
+          <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'}</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /><span className="action-label">智能选择</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><ListChecks aria-hidden="true" /><span className="action-label">{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</span></button>
           {/* 主按钮样式与「开始扫描」一致：都是这一步的主动作，删除的危险性由确认
               弹窗承担，不靠按钮颜色提前喊。 */}
-          <button className="primary-action is-icon" type="button" aria-label={busy ? '执行中' : '执行所选'} title={busy ? '执行中' : '执行所选'} disabled={(!selectedGroupKeys.size && !selected.size) || busy} aria-busy={busy} onClick={requestExecuteSelected}>{busy ? <LoadingIndicator inline /> : <Trash2 aria-hidden="true" />}</button>
+          <button className="primary-action has-action-label" type="button" aria-label={busy ? '执行中' : '执行所选'} title={busy ? '执行中' : '执行所选'} disabled={(!selectedGroupKeys.size && !selected.size) || busy} aria-busy={busy} onClick={requestExecuteSelected}>{busy ? <LoadingIndicator inline /> : <CirclePlay aria-hidden="true" />}<span className="action-label">{busy ? '执行中' : '执行所选'}</span></button>
         </div>
       </div>
       <dl className="dedup-stats">
@@ -892,14 +909,35 @@ export function DeduplicationWorkspace() {
       {pageGapWarningCount > 0 && <div className="progress-line is-warning" role="status">{pageGapWarningCount} 组页数差超过 10 页，请人工确认后再执行。<button className="icon-button" type="button" aria-label="关闭页数差警告" onClick={() => setPageGapWarningCount(0)}><X aria-hidden="true" /></button></div>}
     </section>}
     {deleteSession && <ArchiveDeletionConfirmation description={`将标记 ${selectedGroupKeys.size} 组为不重复，并永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => setDeleteSession(undefined)} onConfirm={executeSelected} />}
-    {smartSelectPending && <div className="dedup-confirm" role="dialog" aria-label="智能选择确认">
-      <p>只按文件名判定的组默认跳过。</p>
-      <label><input type="checkbox" checked={includeFilenameOnly} onChange={(event) => setIncludeFilenameOnly(event.target.checked)} />把文件名来源的重复组一并纳入</label>
-      <div className="dedup-confirm-actions">
-        <button className="primary-action is-icon" type="button" aria-label="执行智能选择" title="执行智能选择" onClick={() => void smartSelect(includeFilenameOnly)}><Check aria-hidden="true" /></button>
-        <button className="secondary-action is-icon" type="button" aria-label="取消" title="取消" onClick={() => setSmartSelectPending(false)}><X aria-hidden="true" /></button>
-      </div>
-    </div>}
+    <Dialog.Root open={smartSelectPending} onOpenChange={setSmartSelectPending}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content dedup-smart-dialog">
+          <Dialog.Title className="dialog-title"><WandSparkles aria-hidden="true" />智能选择确认</Dialog.Title>
+          <Dialog.Description>自动保留每组中更合适的档案，并选择另一份待删除。手动调整过的分组保持原选择，执行前仍可复核。</Dialog.Description>
+          <SettingsSwitch label="纳入仅文件名匹配的重复组" hint="默认跳过，仅在确认文件名足以判断重复时启用。" checked={includeFilenameOnly} onToggle={() => setIncludeFilenameOnly((value) => !value)} />
+          <div className="dialog-actions">
+            <button className="secondary-action" type="button" onClick={() => setSmartSelectPending(false)}>取消</button>
+            <button className="primary-action" type="button" aria-label="执行智能选择" onClick={() => void smartSelect(includeFilenameOnly)}><WandSparkles aria-hidden="true" />开始智能选择</button>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+    <Dialog.Root open={helpOpen} onOpenChange={setHelpOpen}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content dedup-help-dialog">
+          <Dialog.Title className="dialog-title"><CircleHelp aria-hidden="true" />查重使用说明</Dialog.Title>
+          <Dialog.Description>查重仅辅助筛选；请复核版本、页数和内容后再执行删除。</Dialog.Description>
+          <ol className="dedup-help-steps">
+            <li><strong>选择范围并扫描</strong><p>按档案加入日期限定范围，结合封面相似度与文件名查找疑似重复档案。</p></li>
+            <li><strong>检查重复组</strong><p>点击档案卡选择待删除项；点击分组标题标记整组为不重复，两类操作会在执行时分别处理。</p></li>
+            <li><strong>智能选择并复核</strong><p>优先保留汉语、非渣翻、无修正、无外部广告、体积较大的版本；手动调整过的组不会被覆盖。仅文件名匹配的组默认跳过，页数差较大时会提醒。</p></li>
+            <li><strong>执行或保存</strong><p>执行会保存不重复关系并删除勾选的档案；删除需再次确认。点击“本次扫描”的保存按钮可保留结果供以后处理。</p></li>
+          </ol>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
     {result && <>
       {/* 默认视图也把关联链划出来（Readoshi 的 renderChain）：多个组属于同一条
           重复关系链时，它们围在一个带标题的区块里，而不是散落在网格中。 */}
@@ -975,9 +1013,8 @@ export function DeduplicationWorkspace() {
     <Dialog.Root open={historyOpen} onOpenChange={(open) => { if (!open) setHistoryOpen(false); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-history-dialog">
+        <Dialog.Content className="dialog-content dedup-history-dialog" aria-describedby={undefined}>
           <Dialog.Title className="dialog-title"><History aria-hidden="true" />扫描结果</Dialog.Title>
-          <Dialog.Description>每次扫描都会连同命中对、选择与删除结果一起保存在本机，可以重新载入继续处理；删除只清理该次扫描的记录。</Dialog.Description>
           {/* 空态不再伪装成一条记录：它以前是列表里的一个 <li>，于是套上了记录的
               描边、底色和两端对齐，读起来像"有一条叫这个名字的扫描结果"。 */}
           {sessions.length > 0 ? <ul className="dedup-history-list">
@@ -996,11 +1033,8 @@ export function DeduplicationWorkspace() {
             : <EmptyState
               icon={History}
               title="还没有保存的扫描结果"
-              description="扫描完成后会连同命中对、选择与删除结果一起保存在本机，回到这里可以重新载入继续处理。"
+              description="在本次扫描中点击保存，即可在这里重新载入结果。"
             />}
-          <div className="dialog-actions">
-            <button className="secondary-action is-icon" type="button" aria-label="关闭" title="关闭" onClick={() => setHistoryOpen(false)}><X aria-hidden="true" /></button>
-          </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>

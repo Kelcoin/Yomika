@@ -1052,7 +1052,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       >
         <div className="archive-thumb-card-media">
           {cover}
-          {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
         </div>
         <ArchiveThumbCardBody
           title={archive.title}
@@ -1075,7 +1074,6 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         type="button"
       >
         {cover}
-        {selectionMode && <span className="archive-card-check" aria-hidden="true" />}
         <span className="archive-row-copy">
           <strong>{archive.title}</strong>
           <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
@@ -1220,16 +1218,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             {/* Icon-only, like the reader's toolbar: the words live in the
                 accessible name and the tooltip, so a row of actions reads as one
                 row of symbols whatever the language. */}
-            <button className="secondary-action is-icon" type="button" aria-pressed={allVisibleSelected} aria-label={allVisibleSelected ? '取消全选' : '全选当前'} title={allVisibleSelected ? '取消全选' : '全选当前'} onClick={toggleAllVisible} disabled={archives.length === 0}>
+            <button className="secondary-action has-action-label" type="button" aria-pressed={allVisibleSelected} aria-label={allVisibleSelected ? '取消全选' : '全选当前'} title={allVisibleSelected ? '取消全选' : '全选当前'} onClick={toggleAllVisible} disabled={archives.length === 0}>
               <SquareCheckBig aria-hidden="true" />
-            </button>
+            <span className="action-label">{allVisibleSelected ? '取消全选' : '全选当前'}</span></button>
             {finishedArchiveIds && (
-              <button className="secondary-action is-icon" type="button" aria-pressed={allFinishedSelected} aria-label={allFinishedSelected ? '取消全选已读完' : '全选已读完'} title={allFinishedSelected ? '取消全选已读完' : '全选已读完'} onClick={toggleAllFinished} disabled={finishedVisible.length === 0}>
+              <button className="secondary-action has-action-label" type="button" aria-pressed={allFinishedSelected} aria-label={allFinishedSelected ? '取消全选已读完' : '全选已读完'} title={allFinishedSelected ? '取消全选已读完' : '全选已读完'} onClick={toggleAllFinished} disabled={finishedVisible.length === 0}>
                 <ListTodo aria-hidden="true" />
-              </button>
+              <span className="action-label">{allFinishedSelected ? '取消全选已读完' : '全选已读完'}</span></button>
             )}
             {selectionActions}
-            <button className="secondary-action is-icon archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => onSelectionModeChange?.(false)}><Check aria-hidden="true" /></button>
+            <button className="secondary-action has-action-label archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => onSelectionModeChange?.(false)}><Check aria-hidden="true" /><span className="action-label">完成</span></button>
           </div>
         </div>
       )}

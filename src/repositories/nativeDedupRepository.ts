@@ -74,6 +74,7 @@ const DedupSessionSummarySchema = z.object({
   pairCount: z.number().int().nonnegative(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  saved: z.boolean().optional().default(true),
 });
 /** 已落库的扫描结果（保存/读取扫描结果用）：会话本身一直是持久的，这份摘要
  * 让工作区能把它们列出来重新载入。 */
@@ -113,8 +114,11 @@ export class NativeDedupRepository {
   scanProgress(sessionId: string): Promise<CommandResult<DedupScanProgress | null>> {
     return invokeCommand('dedup_scan_progress', { sessionId }, DedupScanProgressSchema.nullable());
   }
-  listSessions(scopeId: string): Promise<CommandResult<DedupSessionSummary[]>> {
-    return invokeCommand('dedup_list_sessions', { scopeId }, z.array(DedupSessionSummarySchema));
+  listSessions(scopeId: string, includeUnsaved = false): Promise<CommandResult<DedupSessionSummary[]>> {
+    return invokeCommand('dedup_list_sessions', { scopeId, ...(includeUnsaved ? { includeUnsaved: true } : {}) }, z.array(DedupSessionSummarySchema));
+  }
+  saveSession(sessionId: string): Promise<CommandResult<void>> {
+    return invokeCommand('dedup_save_session', { sessionId }, VoidResponseSchema);
   }
   deleteSession(sessionId: string): Promise<CommandResult<void>> {
     return invokeCommand('dedup_delete_session', { sessionId }, VoidResponseSchema);

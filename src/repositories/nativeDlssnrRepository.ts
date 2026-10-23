@@ -12,7 +12,7 @@ export const DlssnrGpuSchema = z.object({
 
 /** 库里的一种已装片段（`data/dlssnr/variants/` 里的一个文件）。
  *
- * 下载不再顶掉别的版本：每一个变体各占库里的一个文件，固定名那份才是阅读器真正用的。
+ * 下载不再顶掉别的版本：不同内容分别留在库里，同一变体的不同版本也能共存，固定名那份才是阅读器真正用的。
  * `id` / `label` 为空代表这份文件的字节认不出是哪一条目录里的变体（自己塞进来的、
  * 改过的、目录里已经下架的）；`active` 是**此刻**正在用的那一种。
  */
@@ -25,6 +25,8 @@ export const DlssnrInstalledVariantSchema = z.object({
   active: z.boolean(),
   /** 库目录里的文件名，认不出的片段靠它才叫得出来。 */
   file: z.string(),
+  sha256: z.string().nullable().optional(),
+  version: z.string().nullable().optional(),
 });
 
 export type DlssnrInstalledVariant = z.output<typeof DlssnrInstalledVariantSchema>;
@@ -41,7 +43,7 @@ export const DlssnrStatusSchema = z.object({
   /** 盘上这份片段的 SHA-256。**不能拿字节数代替**：官方原版与Lecram 版都是
    * 165,840,496 字节，只有哈希分得开。老版本后端没有这个字段，所以是可选的。 */
   dllSha256: z.string().nullable().optional(),
-  /** 这台机器上装过的每一种（一个变体一个文件），按文件名排。认不出的文件也在里面，
+  /** 这台机器上装过的每个版本（不同指纹各占一份），按文件名排。认不出的文件也在里面，
    * 这样设置页才看得见「为什么下了一个版本会顶掉别的」已经不再发生。
    * 老版本后端没有这个字段，所以是可选的。 */
   installedVariants: z.array(DlssnrInstalledVariantSchema).optional(),

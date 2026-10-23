@@ -35,6 +35,7 @@ mod tests {
         connection
             .execute_batch(include_str!("../migrations/0015_dedup_sessions.sql"))
             .expect("dedup session schema");
+        connection.execute_batch(include_str!("../migrations/0032_dedup_manual_save.sql")).unwrap();
         // 同步日志的落地/写入要比对逻辑时钟，那一列由 0021 加进这张表。
         connection
             .execute_batch(include_str!("../migrations/0021_sync_pull_state.sql"))
@@ -1506,6 +1507,16 @@ mod tests {
         assert_eq!(sessions[0].session_id, "scan-1");
         assert_eq!((sessions[0].archive_count, sessions[0].pair_count), (3, 1));
         assert!(list_sessions(&connection, "server-b", 10).unwrap().is_empty());
+        assert!(!sessions[0].saved, "completed scans must remain working sessions until explicitly saved");
+        assert!(list_sessions_filtered(&connection, "server-a", 1, true).unwrap().is_empty());
+        assert!(save_session(&connection, "scan-1").is_err(), "a running session cannot be saved");
+        connection.execute("UPDATE dedup_sessions SET status='cancelled' WHERE id='scan-1'", []).unwrap();
+        save_session(&connection, "scan-1").unwrap();
+        assert!(list_sessions(&connection, "server-a", 10).unwrap()[0].saved);
+        connection.execute("INSERT INTO dedup_sessions (id,scope_id,algorithm_version,status,saved) VALUES ('zzz','server-a','v1','completed',0)", []).unwrap();
+        assert_eq!(list_sessions_filtered(&connection, "server-a", 1, true).unwrap()[0].session_id, "scan-1");
+        delete_session(&connection, "zzz").unwrap();
+        assert!(save_session(&connection, "missing").is_err());
 
         delete_session(&connection, "scan-1").unwrap();
         let rows: (i64, i64, i64) = connection
@@ -1695,6 +1706,7 @@ pub struct DedupSessionSummary {
     pub pair_count: i64,
     pub created_at: String,
     pub updated_at: String,
+    pub saved: bool,
 }
 
 pub fn list_sessions(
@@ -1702,18 +1714,27 @@ pub fn list_sessions(
     scope_id: &str,
     limit: i64,
 ) -> Result<Vec<DedupSessionSummary>, String> {
+    list_sessions_filtered(connection, scope_id, limit, false)
+}
+
+fn list_sessions_filtered(
+    connection: &Connection,
+    scope_id: &str,
+    limit: i64,
+    saved_only: bool,
+) -> Result<Vec<DedupSessionSummary>, String> {
     required_text(scope_id)?;
     let mut statement = connection
         .prepare(
             "SELECT s.id,s.scope_id,s.status,s.archive_count,
                     (SELECT COUNT(*) FROM dedup_pairs p WHERE p.session_id=s.id),
-                    s.created_at,s.updated_at
-             FROM dedup_sessions s WHERE s.scope_id=?1
+                    s.created_at,s.updated_at,s.saved
+             FROM dedup_sessions s WHERE s.scope_id=?1 AND (?3=0 OR s.saved=1)
              ORDER BY s.updated_at DESC, s.id DESC LIMIT ?2",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![scope_id, limit.clamp(1, 200)], |row| {
+        .query_map(params![scope_id, limit.clamp(1, 200), saved_only], |row| {
             Ok(DedupSessionSummary {
                 session_id: row.get(0)?,
                 scope_id: row.get(1)?,
@@ -1722,6 +1743,7 @@ pub fn list_sessions(
                 pair_count: row.get(4)?,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
+                saved: row.get(7)?,
             })
         })
         .map_err(|error| error.to_string())?;
@@ -1738,6 +1760,16 @@ pub fn delete_session(connection: &Connection, session_id: &str) -> Result<(), S
     if removed == 0 {
         return Err("Dedup session not found".into());
     }
+    Ok(())
+}
+
+pub fn save_session(connection: &Connection, session_id: &str) -> Result<(), String> {
+    required_text(session_id)?;
+    let changed = connection.execute(
+        "UPDATE dedup_sessions SET saved=1 WHERE id=?1 AND status != 'running'",
+        [session_id],
+    ).map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("扫描尚未完成或结果不存在".into()); }
     Ok(())
 }
 
@@ -3166,7 +3198,7 @@ pub fn start_scan(
             .map_err(|error| error.to_string())?;
     }
     transaction.execute(
-        "INSERT INTO dedup_sessions (id,scope_id,algorithm_version,status,checkpoint,archive_count) VALUES (?1,?2,?3,'running',0,?4) ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id, archive_count=excluded.archive_count, status='running', updated_at=CURRENT_TIMESTAMP",
+        "INSERT INTO dedup_sessions (id,scope_id,algorithm_version,status,checkpoint,archive_count,saved) VALUES (?1,?2,?3,'running',0,?4,0) ON CONFLICT(id) DO UPDATE SET scope_id=excluded.scope_id, archive_count=excluded.archive_count, status='running', updated_at=CURRENT_TIMESTAMP",
         params![input.session_id, input.scope_id, input.algorithm_version, input.archive_count],
     ).map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
@@ -4501,6 +4533,7 @@ pub fn dedup_scan_progress(
 #[tauri::command(async)]
 pub fn dedup_list_sessions(
     scope_id: String,
+    include_unsaved: Option<bool>,
     database: tauri::State<'_, crate::db::Database>,
 ) -> crate::domain::result::CommandResult<Vec<DedupSessionSummary>> {
     command_error(
@@ -4508,8 +4541,18 @@ pub fn dedup_list_sessions(
             .connection
             .lock()
             .map_err(|_| crate::cache::LOCK_FAILED.to_string())
-            .and_then(|connection| list_sessions(&connection, &scope_id, 50)),
+            .and_then(|connection| list_sessions_filtered(&connection, &scope_id, 50, !include_unsaved.unwrap_or(false))),
     )
+}
+
+#[tauri::command(async)]
+pub fn dedup_save_session(
+    session_id: String,
+    database: tauri::State<'_, crate::db::Database>,
+) -> crate::domain::result::CommandResult<()> {
+    command_error(database.connection.lock()
+        .map_err(|_| crate::cache::LOCK_FAILED.to_string())
+        .and_then(|connection| save_session(&connection, &session_id)))
 }
 
 #[tauri::command(async)]

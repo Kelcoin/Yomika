@@ -78,6 +78,19 @@ describe('card progress bar', () => {
     expect(fill?.style.width).toBe('calc(var(--radius-card) + (500px - 2 * var(--radius-card)) * 0.2)');
   });
 
+  it('updates download progress by clipping a stable fill layer', () => {
+    installMeasure();
+    const { container, rerender } = render(<CardProgressBar percent={10} label="下载进度" cornerAware composited />);
+    const fill = container.querySelector<HTMLElement>('.archive-card-progress-fill')!;
+    const before = fill.style.clipPath;
+    expect(fill.style.width).toBe('100%');
+    expect(before).toContain('inset(');
+    rerender(<CardProgressBar percent={80} label="下载进度" cornerAware composited />);
+    expect(fill.style.width).toBe('100%');
+    expect(fill.style.clipPath).not.toBe(before);
+    expect(container.querySelector('.archive-card-progress')).toHaveClass('is-composited');
+  });
+
   it('draws an indeterminate bar without a value, and a complete one without the round head', () => {
     installMeasure();
     const { container, rerender } = render(<CardProgressBar percent={0} label="下载进度" indeterminate cornerAware />);

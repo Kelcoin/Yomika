@@ -1134,14 +1134,17 @@ describe('settings workspace', () => {
     expect(status).not.toHaveAttribute('aria-valuenow');
     expect(status).toHaveClass('is-indeterminate');
 
-    // 报了总数就是定量条：填充宽度跟着走，仍然不写数字。
+    // 报了总数就是定量条：填充跟着走，仍然不写数字。
     await act(async () => emitTauriEvent('model-download-progress', { path: 'realcugan-2x-denoise3x', completed: 50, total: 200 }));
     expect(status).toHaveAttribute('aria-valuenow', '25');
-    // jsdom 里没有排版引擎（轨道宽度量出来是 0），所以宽度落在「半径 + 直边」的 calc
-    // 形式上；真宽度由工装页去量（debug_outputs/progress-bar/），真渲染引擎里的读数
-    // 见 tests/design-system-contract.test.ts 那一条的形状判据。
+    // 下载条走合成层模式：填充层宽度钉死 100%，进度靠 clip-path 的右边缘往里收——每帧只改
+    // 合成属性，不重排整行（阅读进度那条仍按绝对宽度走，见 tests/components/card-progress-bar.test.tsx）。
+    // jsdom 里没有排版引擎（轨道宽度量出来是 0），右边缘落在「半径 + 直边」的 calc 形式上；
+    // 真宽度由工装页去量（debug_outputs/progress-bar/）。
     const fill = menu.querySelector<HTMLElement>('.archive-card-progress-fill');
-    expect(fill?.style.width).toBe('calc(var(--radius-card) + (100% - 2 * var(--radius-card)) * 0.25)');
+    expect(status).toHaveClass('is-composited');
+    expect(fill?.style.width).toBe('100%');
+    expect(fill?.style.clipPath).toContain('calc(var(--radius-card) + (100% - 2 * var(--radius-card)) * 0.25)');
     expect(status).not.toHaveClass('is-indeterminate');
 
     // 下载收尾：槽收回去（内容还在，动画由 is-open 驱动）。

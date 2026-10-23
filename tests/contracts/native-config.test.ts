@@ -302,7 +302,7 @@ describe('native shell configuration', () => {
     // 两个显示点都用**认出来的那一条**的名字：社区把同一条重发之后内置表认不出它，
     // 名字得由清单按哈希说（`installedLabel`），不能退回 `status.variantLabel` 的空。
     expect(group).toContain(
-      "installedDllLabel(installedLabel, status.dllPresent ? '认不出的片段' : '未安装', status.dllVersion)",
+      "installedDllLabel(installedLabel, status.dllPresent ? '自定义 DLL' : '未安装', status.dllVersion)",
     );
     expect(group).toContain("installedDllLabel(installedLabel, 'nvngx_dlssnr', status.dllVersion)");
     expect(read('../../src/components/SettingsWorkspace.tsx')).toContain(
@@ -1921,7 +1921,7 @@ describe('native shell configuration', () => {
     );
     expect(cold, '摆进去的那一份得真是第 10 档').toContain('--make $seedPath --up-to 10');
     expect(cold, '备份里该还是升级前那一档').toContain('$backupReading.version -eq 10');
-    expect(cold, '主库升到本版档位，行都还在').toContain('$upgraded.version -eq 30');
+    expect(cold, '主库升到本版档位，行都还在').toContain('$upgraded.version -eq 32');
     expect(cold, '升级那一半也是冷启动的一条').toContain('[switch] $SeedLegacy,');
     expect(cold, '用户自己的文件一字没动').toContain(
       'Note "run${index}-seed-marker" ($markerNow -eq $seedMarkerText)',
@@ -2136,7 +2136,7 @@ describe('native shell configuration', () => {
     expect(group, '哪一条装了：按哈希认，不再比 id 字面量').toContain('const installedVariant = installedVariantId(status, catalog);');
     expect(group, '换过资产的那一条是「有更新」的那一条').toContain('const outdated = outdatedVariants.has(variant.id);');
     expect(group, '行尾动作跟着改叫更新').toContain('outdated={outdated}');
-    expect(group, '文件在却不认识时不许说「未安装」').toContain("status.dllPresent ? '认不出的片段' : '未安装'");
+    expect(group, '文件在却不认识时不许说「未安装」').toContain("status.dllPresent ? '自定义 DLL' : '未安装'");
 
     expect(row, '标记跟着名字走，不占控件那一格').toContain('mark?: ReactNode | undefined;');
     expect(row, '画的还是那一枚 pill（一处定义）').toContain('<span className="settings-row-mark">{mark}</span>');

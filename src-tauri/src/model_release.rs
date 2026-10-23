@@ -289,27 +289,49 @@ pub const MIRROR_PRESETS: &[(&str, &str)] = &[
 /// 「谁先吐字节」，又不必为了测速把整份东西拉下来。
 const SPEED_PROBE_RANGE: &str = "bytes=0-65535";
 
-/// 一个候选地址的测速预算。四个候选是**并发**量的，所以最坏也就等这么久，不是四倍。
+/// 候选地址并发测速，限制采样时间和每次 I/O 等待，不逐个累加。
 const SPEED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const SOURCE_ORDER_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// 量一个地址的首字节耗时；连不上、超时、状态码不是 2xx、或者一个字节都没吐出来就是 `None`。
+fn download_client() -> Result<&'static reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<Result<reqwest::blocking::Client, String>> = OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        // Blocking reqwest applies this to each I/O wait, so large downloads
+        // can keep running while a stalled source still yields to fallback.
+        .timeout(std::time::Duration::from_secs(45))
+        .pool_max_idle_per_host(4)
+        .build().map_err(|error| error.to_string())).as_ref().map_err(Clone::clone)
+}
+
+struct SourceOrder {
+    origins: Vec<String>,
+    indices: Vec<usize>,
+    measured_at: std::time::Instant,
+}
+
+/// 读取最多 64 KiB，以采样吞吐量排序；不是只比较第一个小数据包。
 fn probe_source_speed(url: &str) -> Option<std::time::Duration> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(SPEED_PROBE_TIMEOUT)
-        .build()
-        .ok()?;
+    let client = download_client().ok()?;
     let started = std::time::Instant::now();
     let mut response = client
         .get(url)
+        .timeout(SPEED_PROBE_TIMEOUT)
         .header(reqwest::header::RANGE, SPEED_PROBE_RANGE)
         .send()
         .ok()?;
     if !(200..300).contains(&response.status().as_u16()) {
         return None;
     }
-    let mut first = [0u8; 1024];
-    let read = std::io::Read::read(&mut response, &mut first).ok()?;
-    (read > 0).then(|| started.elapsed())
+    let mut sample = Vec::with_capacity(65_536);
+    let mut chunk = [0u8; 8192];
+    while sample.len() < 65_536 && started.elapsed() < SPEED_PROBE_TIMEOUT {
+        let limit = chunk.len().min(65_536 - sample.len());
+        let read = response.read(&mut chunk[..limit]).ok()?;
+        if read == 0 { break; }
+        sample.extend_from_slice(&chunk[..read]);
+    }
+    (!sample.is_empty()).then(|| started.elapsed().mul_f64(65_536.0 / sample.len() as f64))
 }
 
 /// 把候选地址按**实测快慢**排队：快的先上，量不通的按原顺序排在最后。
@@ -321,7 +343,29 @@ fn probe_source_speed(url: &str) -> Option<std::time::Duration> {
 /// 测速只决定**顺序**，不决定可用性：真下载仍然逐个回退，所以量失败的那条照样有机会被试到；
 /// 一个地址都没量通时顺序退回原样，行为与从前完全一致。
 pub fn order_sources_by_speed(urls: Vec<String>) -> Vec<String> {
-    order_sources_by(urls, probe_source_speed)
+    static ORDER: OnceLock<Mutex<Option<SourceOrder>>> = OnceLock::new();
+    order_sources_cached(urls, probe_source_speed, ORDER.get_or_init(|| Mutex::new(None)))
+}
+
+fn order_sources_cached(
+    urls: Vec<String>,
+    probe: fn(&str) -> Option<std::time::Duration>,
+    cache: &Mutex<Option<SourceOrder>>,
+) -> Vec<String> {
+    if urls.len() < 2 { return urls; }
+    let origins: Vec<_> = urls.iter().map(|url| reqwest::Url::parse(url)
+        .map(|url| url.origin().ascii_serialization()).unwrap_or_else(|_| url.clone())).collect();
+    if let Ok(guard) = cache.lock() {
+        if let Some(order) = guard.as_ref().filter(|order| order.origins == origins && order.measured_at.elapsed() < SOURCE_ORDER_TTL) {
+            return order.indices.iter().map(|index| urls[*index].clone()).collect();
+        }
+    }
+    let ordered = order_sources_by(urls.clone(), probe);
+    let indices = ordered.iter().map(|url| urls.iter().position(|candidate| candidate == url).unwrap()).collect();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(SourceOrder { origins, indices, measured_at: std::time::Instant::now() });
+    }
+    ordered
 }
 
 /// 排序本身（测速函数由调用方给）：抽出来是为了让判据能**确定性地**钉住顺序规则——
@@ -416,6 +460,7 @@ fn download_asset_with_fallback_progress<F: FnMut(u64, Option<u64>)>(
     for url in urls {
         match download_asset_with_progress(&url, asset, destination, &mut progress) {
             Ok(()) => return Ok(()),
+            Err(error) if error == "download cancelled" => return Err(error),
             Err(error) => errors.push(format!("{url}: {error}")),
         }
     }
@@ -565,7 +610,9 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
 ) -> Result<(), String> {
     let key = destination.to_string_lossy().to_string();
     cancelled().lock().unwrap().clear(&key);
-    let mut response = reqwest::blocking::get(url).map_err(|e| format!("download failed: {e}"))?;
+    let mut response = download_client()?.get(url)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
+        .send().map_err(|e| format!("download failed: {e}"))?;
     if !response.status().is_success() {
         return Err(format!("download HTTP {}", response.status()));
     }
@@ -575,11 +622,14 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let temp = destination.with_extension("part");
     let result = (|| {
-        let mut file = std::fs::File::create(&temp).map_err(|e| format!("create {}: {e}", temp.display()))?;
+        let file = std::fs::File::create(&temp).map_err(|e| format!("create {}: {e}", temp.display()))?;
+        let mut file = std::io::BufWriter::with_capacity(1024 * 1024, file);
         let mut hasher = Sha256::new();
         let mut total = 0u64;
         let mut buffer = [0u8; 1024 * 128];
-        let length = response.content_length();
+        let length = Some(asset.size);
+        let mut last_progress = std::time::Instant::now();
+        progress(0, length);
         loop {
             if cancelled().lock().unwrap().take(&key) {
                 return Err("download cancelled".into());
@@ -591,7 +641,10 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
             file.write_all(&buffer[..read]).map_err(|e| format!("write {}: {e}", temp.display()))?;
             hasher.update(&buffer[..read]);
             total += read as u64;
-            progress(total, length);
+            if last_progress.elapsed() >= std::time::Duration::from_millis(100) {
+                progress(total, length);
+                last_progress = std::time::Instant::now();
+            }
         }
         if total != asset.size {
             return Err(format!("size mismatch for {}", asset.path));
@@ -599,7 +652,11 @@ pub fn download_asset_with_progress<F: FnMut(u64, Option<u64>)>(
         if format!("{:x}", hasher.finalize()) != asset.sha256.to_ascii_lowercase() {
             return Err(format!("sha256 mismatch for {}", asset.path));
         }
-        rename_with_retry(&temp, destination)
+        file.flush().map_err(|error| format!("flush {}: {error}", temp.display()))?;
+        drop(file);
+        rename_with_retry(&temp, destination)?;
+        progress(total, length);
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
@@ -1112,6 +1169,68 @@ pub fn model_release_activate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_order_is_reused_for_other_assets_on_the_same_sources() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn sample(url: &str) -> Option<std::time::Duration> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Some(std::time::Duration::from_millis(if url.contains("fast.test") { 1 } else { 10 }))
+        }
+        let cache = Mutex::new(None);
+        let urls = vec!["https://slow.test/one".into(), "https://fast.test/one".into()];
+        assert_eq!(order_sources_cached(urls, sample, &cache)[0], "https://fast.test/one");
+        let urls = vec!["https://slow.test/two".into(), "https://fast.test/two".into()];
+        assert_eq!(order_sources_cached(urls, sample, &cache)[0], "https://fast.test/two");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+        cache.lock().unwrap().as_mut().unwrap().measured_at -= SOURCE_ORDER_TTL;
+        order_sources_cached(vec!["https://slow.test/three".into(), "https://fast.test/three".into()], sample, &cache);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 4);
+    }
+
+    fn serve_download(bytes: Vec<u8>) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model", listener.local_addr().unwrap());
+        let task = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                if stream.read(&mut byte).unwrap_or(0) == 0 { return; }
+                request.push(byte[0]);
+            }
+            let headers = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len());
+            if stream.write_all(headers.as_bytes()).is_ok() { let _ = stream.write_all(&bytes); }
+        });
+        (url, task)
+    }
+
+    #[test]
+    fn buffered_download_verifies_bytes_and_reports_start_and_completion() {
+        let bytes = vec![42; 2 * 1024 * 1024];
+        let asset = ReleaseAsset { size: bytes.len() as u64, sha256: format!("{:x}", Sha256::digest(&bytes)), ..asset() };
+        let (url, server) = serve_download(bytes.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("model.onnx");
+        let mut events = Vec::new();
+        let started = std::time::Instant::now();
+        download_asset_with_progress(&url, &asset, &target, |done, _| events.push((done, started.elapsed()))).unwrap();
+        server.join().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        assert_eq!(events.first().unwrap().0, 0);
+        assert_eq!(events.last().unwrap().0, asset.size);
+        for pair in events[..events.len()-1].windows(2) {
+            assert!(pair[1].1 - pair[0].1 >= std::time::Duration::from_millis(100));
+        }
+        assert!(!target.with_extension("part").exists());
+        let (url, server) = serve_download(vec![43; bytes.len()]);
+        assert!(download_asset_with_progress(&url, &asset, &target, |_, _| {}).unwrap_err().contains("sha256 mismatch"));
+        server.join().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), bytes, "bad downloads cannot replace an installed model");
+        assert!(!target.with_extension("part").exists());
+    }
     fn asset() -> ReleaseAsset {
         ReleaseAsset {
             role: "detector".into(),

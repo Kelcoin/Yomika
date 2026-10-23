@@ -393,7 +393,7 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     const row = within(group).getByRole('button', { name: 'DLSSNR 组件' });
-    expect(row.textContent).toContain('认不出的片段');
+    expect(row.textContent).toContain('自定义 DLL');
   });
 
   it('keeps the installed variant as a selectable row instead of a disabled one', async () => {
@@ -434,38 +434,20 @@ describe('DLSS5 settings group', () => {
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_download_variant', { variantId: 'official' }));
   });
 
-  it('lists the snippets already in the library and marks the one in use', async () => {
-    // 用户 2026-10-18 报「dlssnr多个版本没法共存，导致下了一个版本就会顶掉其他版本」。
-    // 后端现在一个变体一个文件，设置页要把库里这些都列出来：认得出的用清单里的名字，
-    // 认不出的念文件名——165 MB 就在盘上，不能因为认不出是什么变体就不给换回去。
+  it('shows installed and downloadable versions in one list without a redundant library panel', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({
       dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ installedVariants: DLSSNR_LIBRARY }) }),
     }));
     renderDlssnr();
-
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
-    const library = await screen.findByRole('group', { name: '已安装的片段' });
-    const rows = [...library.querySelectorAll<HTMLElement>('.settings-choice-option')];
-    expect(rows).toHaveLength(DLSSNR_LIBRARY.length);
-
-    // 正在用的那一条由高亮 + aria-pressed 说；它行尾没有「切换」（没有要换的东西）。
-    const inUse = rows.filter((row) => row.classList.contains('is-active'));
-    expect(inUse).toHaveLength(1);
-    expect(inUse[0]!.textContent).toContain('SF 版');
-    expect(inUse[0]!.querySelector('.settings-choice-option-main')!.getAttribute('aria-pressed')).toBe('true');
-    expect(inUse[0]!.querySelector('button.select-option-download')).toBeNull();
-
-    // 其余每一条都能换回去：行尾那个按钮的文案就是「切换」，无障碍名带上是哪一条。
-    expect(within(library).getByRole('button', { name: '切换到Lecram 版' })).toBeTruthy();
-    const switches = [...library.querySelectorAll<HTMLButtonElement>('button.select-option-download')];
-    expect(switches).toHaveLength(DLSSNR_LIBRARY.length - 1);
-    switches.forEach((button) => expect(button.textContent).toBe('切换'));
-
-    // 认不出的那一份也在列表里：没有名字就拿文件名当名字，另起一行小字说明它不是坏掉了。
-    expect(within(library).getByText('nvngx_dlssnr--custom.dll')).toBeTruthy();
-    expect(within(library).getByText('认不出的片段')).toBeTruthy();
+    const versions = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    expect(versions.querySelectorAll('.settings-choice-option')).toHaveLength(4);
+    expect(versions.querySelectorAll('.settings-choice-option.is-active')).toHaveLength(1);
+    expect(within(versions).getByRole('button', { name: 'nvngx_dlssnr--custom.dll' })).toBeEnabled();
+    expect(screen.queryByRole('group', { name: '已安装的片段' })).toBeNull();
+    expect(screen.queryByText(/这台机器上装了这些片段/)).toBeNull();
   });
 
   it('switches to a snippet already in the library without downloading it again', async () => {
@@ -481,18 +463,41 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
-    const library = await screen.findByRole('group', { name: '已安装的片段' });
+    const library = await screen.findByRole('group', { name: 'DLSSNR 组件' });
     const before = adapter.mock.calls.filter(([command]) => command === 'dlssnr_status').length;
 
-    await user.click(within(library).getByRole('button', { name: '切换到Lecram 版' }));
+    await user.click(within(library).getByRole('button', { name: /^Lecram 版/ }));
 
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_activate_variant', { variantId: 'community' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_activate_variant', { variantId: 'nvngx_dlssnr--community-rtx40-50.dll' }));
     // 没重新下载：库里那份原样留着，只是放回了固定名。
     expect(adapter.mock.calls.filter(([command]) => command === 'dlssnr_download_variant')).toHaveLength(0);
     // 盘上那一份换了，状态得重新读一遍。
     await waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'dlssnr_status').length).toBeGreaterThan(before));
     expect(await screen.findByText(/已切换到：Lecram 版/)).toBeTruthy();
     expect(screen.getByText(/计算进程已重启/)).toBeTruthy();
+  });
+
+  it('keeps older releases of the same variant selectable by exact file', async () => {
+    const user = userEvent.setup();
+    const olderFile = 'nvngx_dlssnr--community--older.dll';
+    const installedVariants = [
+      { ...DLSSNR_LIBRARY[0]!, sha256: DLSSNR_CATALOG.variants[1]!.sha256 },
+      { ...DLSSNR_LIBRARY[0]!, sha256: 'ab'.repeat(32), version: '310.8.2', file: olderFile },
+      { ...DLSSNR_LIBRARY[1]!, sha256: DLSSNR_CATALOG.variants[2]!.sha256 },
+    ];
+    const adapter = adapterFor({
+      dlssnr_status: () => ({ ok: true, value: dlssnrStatus({ installedVariants }) }),
+      dlssnr_activate_variant: () => ({ ok: true, value: { bytes: 165_840_496, variant: 'community', variantLabel: 'Lecram 版' } }),
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDlssnr();
+    const group = await screen.findByRole('region', { name: 'DLSSNR' });
+    await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
+    const versions = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    expect(versions.querySelectorAll('.settings-choice-option')).toHaveLength(4);
+    await user.click(within(versions).getByTitle(olderFile));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_activate_variant', { variantId: olderFile }));
+    expect(adapter.mock.calls.some(([command]) => command === 'dlssnr_download_variant')).toBe(false);
   });
 
   it('switches a file the backend cannot name by its file name', async () => {
@@ -508,8 +513,8 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
-    const library = await screen.findByRole('group', { name: '已安装的片段' });
-    await user.click(within(library).getByRole('button', { name: '切换到nvngx_dlssnr--custom.dll' }));
+    const library = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    await user.click(within(library).getByRole('button', { name: 'nvngx_dlssnr--custom.dll' }));
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('dlssnr_activate_variant', { variantId: 'nvngx_dlssnr--custom.dll' }));
   });
@@ -529,8 +534,8 @@ describe('DLSS5 settings group', () => {
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: 'DLSSNR 组件' }));
-    const library = await screen.findByRole('group', { name: '已安装的片段' });
-    await user.click(within(library).getByRole('button', { name: '切换到Lecram 版' }));
+    const library = await screen.findByRole('group', { name: 'DLSSNR 组件' });
+    await user.click(within(library).getByRole('button', { name: /^Lecram 版/ }));
 
     expect(await screen.findByText(/算力进程没能退休/)).toBeTruthy();
     expect(screen.queryByText(/已切换到：/)).toBeNull();

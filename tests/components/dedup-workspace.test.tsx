@@ -286,7 +286,7 @@ describe('duplicate deletion confirmation', () => {
     expect(meta('选择 Archive B')).toBe('1.2 MB24页');
   });
 
-  it('draws every duplicate member as a card with a cover, tag chips and the shared selection marker', async () => {
+  it('draws every duplicate member as a card with a cover, tag chips and accessible selection states', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(scanFixture([
       { id: 'a', title: 'Archive A', tags: ['other:mosaic censorship', 'language:chinese'], fileSize: 2_500_000, pageCount: 24 },
@@ -296,11 +296,11 @@ describe('duplicate deletion confirmation', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
     await user.click(screen.getByRole('button', { name: '开始扫描' }));
 
-    // 整张卡就是勾选框，角标复用档案库多选的 .archive-card-check。
+    // 整张卡就是勾选框，通过底色表示状态，不再遮挡封面。
     const card = await screen.findByRole('checkbox', { name: '选择 Archive A' });
     expect(card).toHaveClass('dedup-member');
     expect(card).toHaveAttribute('aria-checked', 'false');
-    expect(card.querySelector('.archive-card-check')).not.toBeNull();
+    expect(card.querySelector('.archive-card-check')).toBeNull();
     // 封面槽与档案信息（标签胶囊、判定徽标、体积页数）都在卡里。
     expect(card.querySelector('.archive-thumb-card-media')).not.toBeNull();
     // 胶囊读取的是可见行（测量行是 aria-hidden 的副本，按文本查会重复命中）。
@@ -340,7 +340,7 @@ describe('duplicate deletion confirmation', () => {
     for (const name of ['重置', '扫描结果', '不重复关系']) {
       const button = screen.getByRole('button', { name });
       expect(button.querySelector('svg')).not.toBeNull();
-      expect(button.textContent?.trim()).toBe('');
+      expect(button.querySelector('.action-label')?.textContent?.trim()).toBe(name);
       expect(button).toHaveAttribute('title', name);
     }
     // 「开始扫描」是这一页的主动作，保留文字。
@@ -391,6 +391,12 @@ describe('duplicate deletion confirmation', () => {
     await user.click(screen.getByRole('button', { name: '智能选择' }));
     expect(await screen.findByRole('dialog', { name: '智能选择确认' })).toBeInTheDocument();
     expect(adapter.mock.calls.filter(([command]) => command === 'dedup_save_selection').length).toBe(0);
+    const dialog = screen.getByRole('dialog', { name: '智能选择确认' });
+    expect(dialog.closest('.dedup-confirm')).toBeNull();
+    await user.click(within(dialog).getByRole('switch', { name: '纳入仅文件名匹配的重复组' }));
+    await user.click(within(dialog).getByRole('button', { name: '执行智能选择' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_save_selection', expect.objectContaining({ selectedArchiveIds: expect.any(Array) })));
+    expect(screen.getByRole('checkbox', { name: '选择 Archive B' })).toHaveAttribute('aria-checked', 'true');
   });
 
   it('folds linked groups into a chain block and counts the excluded relations', async () => {
@@ -579,6 +585,24 @@ describe('duplicate deletion confirmation', () => {
     expect(screen.getByRole('checkbox', { name: '选择 B1' })).toBeInTheDocument();
   });
 
+  it('does not save after scanning, and saves explicitly on request', async () => {
+    const user = userEvent.setup();
+    const base = scanFixture([
+      { id: 'a', title: 'Archive A', tags: ['language:chinese'], fileSize: 2, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ]);
+    const adapter = vi.fn(async (command: string, args?: Parameters<typeof base>[1]) => command === 'dedup_save_session'
+      ? { ok: true, value: null } : base(command, args));
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '开始扫描' }));
+    const save = await screen.findByRole('button', { name: '保存扫描结果' });
+    expect(adapter.mock.calls.some(([command]) => command === 'dedup_save_session')).toBe(false);
+    await user.click(save);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_save_session', expect.objectContaining({ sessionId: expect.any(String) })));
+    expect(await screen.findByRole('button', { name: '已保存' })).toBeDisabled();
+  });
 });
 
 describe('dedup scan progress and saved results', () => {
@@ -709,4 +733,6 @@ describe('dedup scan progress and saved results', () => {
     expect(await screen.findByText('还没有保存的扫描结果')).toBeInTheDocument();
     expect(document.querySelector('.dedup-history-list')).toBeNull();
   });
+
+
 });

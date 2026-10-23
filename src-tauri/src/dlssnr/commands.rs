@@ -278,6 +278,9 @@ fn commit_candidate(
     let candidate = candidate.to_path_buf();
     let data = data.to_path_buf();
     let install = move || {
+        if super::dll_path(&data).is_file() {
+            release::copy_into_library(&super::dll_path(&data), &data)?;
+        }
         // 先收进变体库再动固定名：库那份收不下就整件事失败，用户手上那份**原样留着**。
         // 收下了再装，装到哪一步都不回退——库里多一份不碍事，用户随时切得回去。
         release::copy_into_library(&candidate, &data)?;

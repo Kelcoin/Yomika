@@ -103,20 +103,20 @@ export function useArchiveSelection(options: {
   const actions = (
     <>
       {membership ? (
-        <button className="secondary-action is-icon" type="button" aria-label={membershipLabel} title={membershipLabel} disabled={selected.length === 0 || busy} onClick={() => void changeMembership(!membership.present)}>
+        <button className="secondary-action has-action-label" type="button" aria-label={membershipLabel} title={membershipLabel} disabled={selected.length === 0 || busy} onClick={() => void changeMembership(!membership.present)}>
           {membership.present ? <BookmarkMinus aria-hidden="true" /> : <BookmarkPlus aria-hidden="true" />}
-        </button>
+        <span className="action-label">{membershipLabel}</span></button>
       ) : (
-        <button className="secondary-action is-icon" type="button" aria-label="加入收藏" title="加入收藏" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(true)}>
+        <button className="secondary-action has-action-label" type="button" aria-label="加入收藏" title="加入收藏" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(true)}>
           <BookmarkPlus aria-hidden="true" />
-        </button>
+        <span className="action-label">加入收藏</span></button>
       )}
       {/* 删除也用同一颗按钮的形状——危险只体现在色调上，底色加文字与其它
           动作一致，不再是一圈红描边。 */}
       {allowDelete && (
-        <button className="secondary-action is-danger is-icon" type="button" aria-label="删除所选" title="删除所选" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
+        <button className="secondary-action is-danger has-action-label" type="button" aria-label="删除所选" title="删除所选" disabled={selected.length === 0 || busy} onClick={() => setPendingDelete(true)}>
           <Trash2 aria-hidden="true" />
-        </button>
+        <span className="action-label">删除所选</span></button>
       )}
     </>
   );
