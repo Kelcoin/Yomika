@@ -4,6 +4,33 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn current_result_removes_missing_archives_and_preserves_a_chain_survivor() {
+        let mut connection = connection();
+        connection.execute_batch("CREATE TABLE archives (server_id TEXT,archive_id TEXT,is_deleted INTEGER);
+            INSERT INTO archives VALUES ('server-a','b',0),('server-a','c',0),('server-a','d',1),('server-b','a',0);").unwrap();
+        start_scan(&mut connection, scan_input("v1")).unwrap();
+        scan_chunk(&mut connection, DedupScanChunkInput {
+            session_id: "scan-1".into(), algorithm_version: "v1".into(), checkpoint: 3,
+            archives: ["a","b","c","d"].into_iter().map(|id| DedupArchiveSnapshotInput {
+                archive_id: id.into(), path: format!("cover:{id}"), title: None,
+                page_count: None, size: None, feature_version: "v1".into(),
+            }).collect(),
+            pairs: [("a","b"),("b","c"),("c","d")].into_iter().map(|(a,b)| DedupPairInput {
+                left_archive_id: a.into(), right_archive_id: b.into(), source: "image".into(), diagnostics: None,
+            }).collect(), selected_archive_ids: vec!["b".into(),"c".into()],
+        }).unwrap();
+        let loaded = load_current_result(&mut connection, "scan-1", "server-a").unwrap();
+        assert_eq!(loaded.archives.iter().map(|a| a.archive_id.as_str()).collect::<Vec<_>>(), vec!["b","c"]);
+        assert_eq!(loaded.pairs.len(), 1);
+        assert_eq!(loaded.pairs[0].left_archive_id, "b");
+        assert!(loaded.selected_archive_ids.len() < 2, "removed survivor must not enable deleting the whole remaining chain");
+        assert!(selected_component_rejections(&connection,"scan-1").unwrap().is_empty());
+        let again = load_result(&connection,"scan-1").unwrap();
+        assert_eq!(again.pairs.len(), 1, "stale edges must not reappear on the next load");
+        assert_eq!(again.archives.len(), 2);
+    }
+
+    #[test]
     fn exact_hash_uses_blake3_and_is_deterministic() {
         assert_eq!(
             exact_hash(b"hello"),
@@ -3562,6 +3589,41 @@ pub fn load_result(connection: &Connection, session_id: &str) -> Result<DedupLoa
     })
 }
 
+/// Remove only records absent from this server's current directory. Callers
+/// requesting remote validation must finish it successfully before entering here.
+fn load_current_result(
+    connection: &mut Connection,
+    session_id: &str,
+    server_id: &str,
+) -> Result<DedupLoadResult, String> {
+    session(connection, session_id)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction.execute(
+        "DELETE FROM dedup_archive_snapshots WHERE session_id=?1 AND NOT EXISTS
+         (SELECT 1 FROM archives WHERE server_id=?2 AND archive_id=dedup_archive_snapshots.archive_id AND is_deleted=0)",
+        params![session_id,server_id],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "DELETE FROM dedup_pairs WHERE session_id=?1 AND
+         (NOT EXISTS (SELECT 1 FROM dedup_archive_snapshots WHERE session_id=?1 AND archive_id=left_archive_id)
+          OR NOT EXISTS (SELECT 1 FROM dedup_archive_snapshots WHERE session_id=?1 AND archive_id=right_archive_id))",
+        [session_id],
+    ).map_err(|error| error.to_string())?;
+    transaction.execute(
+        "DELETE FROM dedup_selection WHERE session_id=?1 AND NOT EXISTS
+         (SELECT 1 FROM dedup_archive_snapshots WHERE session_id=?1 AND archive_id=dedup_selection.archive_id)",
+        [session_id],
+    ).map_err(|error| error.to_string())?;
+    // Removing an old survivor can split a chain or leave every remaining member
+    // selected. Conservatively deselect such components before deletion is offered.
+    for id in selected_component_rejections(&transaction, session_id)? {
+        transaction.execute("DELETE FROM dedup_selection WHERE session_id=?1 AND archive_id=?2",params![session_id,id])
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_result(connection, session_id)
+}
+
 fn command_error<T>(result: Result<T, String>) -> crate::domain::result::CommandResult<T> {
     match result {
         Ok(value) => crate::domain::result::CommandResult::success(value),
@@ -3623,18 +3685,29 @@ pub fn dedup_resume_scan(
             .and_then(|mut connection| resume_scan(&mut connection, session_id)),
     )
 }
-#[tauri::command(async)]
-pub fn dedup_load_result(
+#[tauri::command]
+pub async fn dedup_load_result(
     session_id: String,
+    refresh_index: Option<bool>,
     database: tauri::State<'_, crate::db::Database>,
-) -> crate::domain::result::CommandResult<DedupLoadResult> {
-    command_error(
-        database
-            .connection
-            .lock()
-            .map_err(|_| crate::cache::LOCK_FAILED.into())
-            .and_then(|connection| load_result(&connection, &session_id)),
-    )
+) -> Result<crate::domain::result::CommandResult<DedupLoadResult>, String> {
+    use crate::domain::result::CommandResult;
+    let resolved = database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.to_string())
+        .and_then(|connection| {
+            let current = session(&connection, &session_id)?;
+            resolve_scan_scope(&connection, &current.scope_id)
+        });
+    let (server_id, _) = match resolved {
+        Ok(value) => value,
+        Err(error) => return Ok(command_error(Err(error))),
+    };
+    if refresh_index.unwrap_or(false) {
+        if let CommandResult::Failure { error, .. } = crate::commands::library::refresh_dedup_archive_index(&server_id, &database).await {
+            return Ok(CommandResult::Failure { ok: false, error });
+        }
+    }
+    Ok(command_error(database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.into())
+        .and_then(|mut connection| load_current_result(&mut connection, &session_id, &server_id))))
 }
 #[tauri::command(async)]
 pub fn dedup_save_non_duplicate(
@@ -4134,6 +4207,30 @@ async fn dedup_scan_impl(
             false,
         );
     }
+    // Never scan a partial/offline mirror: the library only upserts the pages
+    // visited by the user, so server-deleted archives can otherwise live forever.
+    let resolved = database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.to_string())
+        .and_then(|mut connection| {
+            let (server_id, scope_id) = resolve_scan_scope(&connection, &input.scope_id)?;
+            let count = count_scan_archives(&connection, &server_id, start_epoch, end_epoch)?;
+            start_scan(&mut connection, DedupStartScanInput {
+                session_id: input.session_id.clone(), scope_id: scope_id.clone(),
+                algorithm_version: input.algorithm_version.clone(), archive_count: count,
+            })?;
+            Ok((server_id, scope_id))
+        });
+    let (refresh_server, _) = match resolved {
+        Ok(value) => value,
+        Err(error) => return command_error(Err(error)),
+    };
+    if let crate::domain::result::CommandResult::Failure { error, .. } =
+        crate::commands::library::refresh_dedup_archive_index(&refresh_server, &database).await
+    {
+        if let Ok(mut connection) = database.connection.lock() {
+            let _ = cancel_scan(&mut connection, input.session_id.clone());
+        }
+        return crate::domain::result::CommandResult::Failure { ok: false, error };
+    }
     let chunk_size = input.chunk_size.unwrap_or(32).clamp(1, 256) as i64;
     let (server_id, scope_id, total, mut checkpoint) = {
         let mut connection = match database.connection.lock() {
@@ -4162,7 +4259,16 @@ async fn dedup_scan_impl(
                 return crate::domain::result::CommandResult::failure("UNKNOWN", error, true)
             }
         };
-        let current = match start_scan(
+        if session(&connection, &input.session_id).is_ok_and(|value| value.status == "cancelled") {
+            return crate::domain::result::CommandResult::success(DedupScanProgress {
+                session_id: input.session_id.clone(), scope_id: scope_id.clone(),
+                status: "cancelled".into(), stage: "cancelled".into(),
+                processed: 0, total, cache_hits: 0, downloads: 0, missing_covers: 0,
+                invalid_covers: 0, pair_count: 0, degraded: false, checkpoint: 0,
+                diagnostics: vec![], pairs: vec![],
+            });
+        }
+        let _current = match start_scan(
             &mut connection,
             DedupStartScanInput {
                 session_id: input.session_id.clone(),
@@ -4180,7 +4286,20 @@ async fn dedup_scan_impl(
                 )
             }
         };
-        (server_id, scope_id, total, current.checkpoint)
+        // Re-enumerate the refreshed directory, including on resume. Feature
+        // caches remain reusable, but offsets/edges from the old directory do not.
+        let reset = (|| -> Result<(), String> {
+            let transaction = connection.transaction().map_err(|error| error.to_string())?;
+            for table in ["dedup_pairs", "dedup_selection", "dedup_archive_snapshots", "dedup_deletion_outcomes"] {
+                transaction.execute(&format!("DELETE FROM {table} WHERE session_id=?1"), [&input.session_id])
+                    .map_err(|error| error.to_string())?;
+            }
+            transaction.execute("UPDATE dedup_sessions SET checkpoint=0 WHERE id=?1", [&input.session_id])
+                .map_err(|error| error.to_string())?;
+            transaction.commit().map_err(|error| error.to_string())
+        })();
+        if let Err(error) = reset { return command_error(Err(error)); }
+        (server_id, scope_id, total, 0)
     };
     let mut progress = DedupScanProgress {
         session_id: input.session_id.clone(),

@@ -125,7 +125,7 @@ export class NativeDedupRepository {
   }
   cancelScan(sessionId: string) { return invokeCommand('dedup_cancel_scan', { sessionId }, DedupScanSessionSchema); }
   resumeScan(sessionId: string) { return invokeCommand('dedup_resume_scan', { sessionId }, DedupScanSessionSchema); }
-  loadResult(sessionId: string) { return invokeCommand('dedup_load_result', { sessionId }, DedupLoadResultSchema); }
+  loadResult(sessionId: string, refreshIndex = false) { return invokeCommand('dedup_load_result', { sessionId, ...(refreshIndex ? { refreshIndex: true } : {}) }, DedupLoadResultSchema); }
   saveNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_save_non_duplicate', { input }, VoidResponseSchema); }
   /** 整组执行用：一把锁内逐条落库，按输入顺序回每条成败。 */
   saveNonDuplicates(entries: DedupNonDuplicateInput[]): Promise<CommandResult<boolean[]>> {

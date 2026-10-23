@@ -5521,16 +5521,27 @@ async fn fetch_all_search_pages(
 ) -> Result<Vec<RemoteArchive>, SearchFailure> {
     let mut collected: Vec<RemoteArchive> = Vec::new();
     let mut page_size: Option<usize> = None;
+    let mut expected_count = None;
+    let mut seen = std::collections::HashSet::new();
     for _ in 0..MAX_SYNC_PAGES {
         let mut page_params = params.clone();
         page_params.start = Some(collected.len() as i64);
         let (archives, filtered, _) = fetch_search_page(base_url, api_key, &page_params).await?;
         let received = archives.len();
+        if expected_count.is_some_and(|count| count != filtered)
+            || archives.iter().any(|archive| !seen.insert(archive.archive_id.clone()))
+        {
+            return Err(("REMOTE_UNAVAILABLE", "LANraragi directory changed during synchronization; retry the scan".into(), true));
+        }
+        expected_count = Some(filtered);
         collected.extend(archives);
         // `max(1)` keeps an empty first page from recording a size of zero, which
         // would read as "no page is ever short" and never end the walk.
         let size = *page_size.get_or_insert(received.max(1));
         if search_walk_is_done(received, size, collected.len() as i64, filtered) {
+            if collected.len() as i64 != filtered {
+                return Err(("REMOTE_UNAVAILABLE", "LANraragi returned an incomplete directory; local archives were kept unchanged".into(), true));
+            }
             return Ok(collected);
         }
     }
@@ -5559,6 +5570,13 @@ pub async fn refresh_archives(
     input: RefreshArchivesInput,
     database: State<'_, Database>,
 ) -> Result<CommandResult<Vec<ArchiveRecord>>, String> {
+    refresh_archives_impl(input, &database).await
+}
+
+async fn refresh_archives_impl(
+    input: RefreshArchivesInput,
+    database: &Database,
+) -> Result<CommandResult<Vec<ArchiveRecord>>, String> {
     let (base_url, scope_id) = match database
         .connection
         .lock()
@@ -5578,34 +5596,61 @@ pub async fn refresh_archives(
             ))
         }
     };
-    let archives = match fetch_all_search_pages(&base_url, &api_key, &input.params).await {
+    Ok(refresh_archive_index_from_remote(database, &input.server_id, &base_url, &api_key, &input.params).await)
+}
+
+async fn refresh_archive_index_from_remote(
+    database: &Database,
+    server_id: &str,
+    base_url: &str,
+    api_key: &str,
+    params: &RefreshSearchParams,
+) -> CommandResult<Vec<ArchiveRecord>> {
+    let archives = match fetch_all_search_pages(base_url, api_key, params).await {
         Ok(value) => value,
         Err((code, message, retryable)) => {
-            return Ok(CommandResult::failure(code, message, retryable))
+            return CommandResult::failure(code, message, retryable)
         }
     };
     let mut connection = match database.connection.lock() {
         Ok(conn) => conn,
         Err(_) => {
-            return Ok(CommandResult::failure(
-                "UNKNOWN",
-                crate::cache::LOCK_FAILED.to_string(),
-                true,
-            ))
+            return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true)
         }
     };
     // Tombstoning happens once, after every page is in hand: doing it per page
     // would mark the rest of the library deleted between requests.
-    match replace_server_archives(&mut connection, &input.server_id, &archives) {
+    match replace_server_archives(&mut connection, server_id, &archives) {
         Ok(records) => {
             // A complete walk is the one moment the whole index is known to be
             // current, so it is also the cheapest moment to clean out the records
             // that point at archives the walk did not find — no per-id request, and
             // it covers ids a shelf visit never got round to verifying.
-            let _ = prune_dangling_records_for_server(&mut connection, &input.server_id);
-            Ok(CommandResult::success(records))
+            let _ = prune_dangling_records_for_server(&mut connection, server_id);
+            CommandResult::success(records)
         }
-        Err(error) => Ok(CommandResult::failure("LOCAL_DATABASE", error, true)),
+        Err(error) => CommandResult::failure("LOCAL_DATABASE", error, true),
+    }
+}
+
+/// Dedup must enumerate an authoritative, unfiltered directory, never the
+/// partial mirror populated by the library's server-side pages.
+pub(crate) async fn refresh_dedup_archive_index(
+    server_id: &str,
+    database: &Database,
+) -> CommandResult<()> {
+    let input = RefreshArchivesInput {
+        server_id: server_id.into(),
+        params: RefreshSearchParams {
+            filter: None, start: None, sortby: Some("title".into()), order: Some("asc".into()),
+            newonly: Some(false), untaggedonly: Some(false), hidecompleted: Some(false),
+            category: None, groupby_tanks: Some(false),
+        },
+    };
+    match refresh_archives_impl(input, database).await {
+        Ok(CommandResult::Success { .. }) => CommandResult::success(()),
+        Ok(CommandResult::Failure { error, .. }) => CommandResult::Failure { ok: false, error },
+        Err(error) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
     }
 }
 
@@ -8670,6 +8715,58 @@ mod tests {
             matches!(result, Ok(CommandResult::Failure { .. })),
             "accepted JSON must fail: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn directory_refresh_is_complete_scoped_and_failure_safe() {
+        let connection = migrated_connection();
+        connection.execute_batch("INSERT INTO servers (id,name,base_url,scope_id) VALUES
+            ('server-a','A','https://example.com','scope-a'), ('server-b','B','https://example.org','scope-b');").unwrap();
+        for server in ["server-a","server-b"] {
+            for id in ["a","b"] {
+                connection.execute("INSERT INTO archives (server_id,archive_id,title,title_sort,tags_json,page_count,is_deleted) VALUES (?1,?2,'Archive','archive','[]',1,0)",params![server,id.repeat(40)]).unwrap();
+            }
+        }
+        let database = Database { connection: Mutex::new(connection) };
+        let params: RefreshSearchParams = serde_json::from_str("{}").unwrap();
+        for (status,body) in [(503,"busy".to_string()), (200,serde_json::json!({"data":[],"recordsFiltered":2,"recordsTotal":2}).to_string())] {
+            let (url,server) = test_http_server(vec![(status,body)]).await;
+            assert!(matches!(refresh_archive_index_from_remote(&database,"server-a",&url,"key",&params).await, CommandResult::Failure { .. }));
+            server.abort();
+            assert_eq!(database.connection.lock().unwrap().query_row("SELECT COUNT(*) FROM archives WHERE is_deleted=0",[],|row|row.get::<_,i64>(0)).unwrap(),4);
+        }
+        let body = serde_json::json!({"data":[{"arcid":"b".repeat(40),"title":"Current","tags":"","pagecount":9,"size":1}],"recordsFiltered":1,"recordsTotal":1}).to_string();
+        let (url,server) = test_http_server(vec![(200,body)]).await;
+        assert!(matches!(refresh_archive_index_from_remote(&database,"server-a",&url,"key",&params).await, CommandResult::Success { .. }));
+        server.abort();
+        let connection = database.connection.lock().unwrap();
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM archives WHERE server_id='server-a' AND is_deleted=0",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM archives WHERE server_id='server-b' AND is_deleted=0",[],|row|row.get::<_,i64>(0)).unwrap(),2);
+    }
+
+    #[tokio::test]
+    async fn full_search_rejects_a_premature_empty_page() {
+        let body = serde_json::json!({
+            "data": [], "recordsFiltered": 2, "recordsTotal": 2,
+        }).to_string();
+        let (url, server) = test_http_server(vec![(200, body)]).await;
+        let params: RefreshSearchParams = serde_json::from_str("{}").unwrap();
+        let result = fetch_all_search_pages(&url, "key", &params).await;
+        server.abort();
+        assert!(result.is_err(), "an incomplete directory must never tombstone live archives");
+    }
+
+    #[tokio::test]
+    async fn full_search_rejects_repeated_ids_between_pages() {
+        let page = serde_json::json!({
+            "data": [{ "arcid": "a".repeat(40), "title": "Archive", "tags": "", "pagecount": 1, "size": 1 }],
+            "recordsFiltered": 2, "recordsTotal": 2,
+        }).to_string();
+        let (url, server) = test_http_server(vec![(200, page.clone()), (200, page)]).await;
+        let params: RefreshSearchParams = serde_json::from_str("{}").unwrap();
+        let result = fetch_all_search_pages(&url, "key", &params).await;
+        server.abort();
+        assert!(result.is_err(), "a repeated page must never stand in for the missing part of the directory");
     }
 
     #[tokio::test]

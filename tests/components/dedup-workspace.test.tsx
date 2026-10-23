@@ -215,7 +215,8 @@ describe('duplicate deletion confirmation', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, tagTranslationEnabled: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archive_identities' || command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
+      if (command === 'list_archive_identities') return { ok: true, value: ['a','b'].map((id) => ({ id, archiveId: id, title: id, tags: [], pageCount: 1, fileSize: 1 })) };
+      if (command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
       if (command === 'dedup_list_sessions') return { ok: true, value: [{ ...session, pairCount: 1, createdAt: 'now', updatedAt: 'now' }] };
       if (command === 'dedup_scan_progress') return { ok: true, value: { ...session, status: ++polls > 1 ? 'completed' : 'running', stage: polls > 1 ? 'completed' : 'covers', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs } };
       if (command === 'dedup_load_result') return new Promise((resolve) => { finish = resolve; });
@@ -322,7 +323,7 @@ describe('duplicate deletion confirmation', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: false } };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
-      if (command === 'list_archive_identities') return { ok: true, value: [] };
+      if (command === 'list_archive_identities') return { ok: true, value: ['a','b'].map((id) => ({ id, archiveId: id, title: id, tags: [], pageCount: 1, fileSize: 1 })) };
       if (command === 'dedup_scan') return { ok: true, value: { ...session, stage: 'completed', processed: 2, total: 2, cacheHits: 0, downloads: 0, missingCovers: 0, invalidCovers: 0, pairCount: 1, degraded: false, diagnostics: [], pairs: [pair] } };
       if (command === 'dedup_load_result') return { ok: true, value: { session, archives: [], pairs: [pair], selectedArchiveIds: [], outcomes: [] } };
       throw new Error(command);
@@ -904,6 +905,59 @@ describe('dedup scan progress and saved results', () => {
     expect(screen.getByRole('textbox', { name: '搜索不重复关系' })).not.toHaveFocus();
   });
 
+  it('renders saved results only after refreshed identities and never invents missing archive cards', async () => {
+    const user = userEvent.setup();
+    const session = { sessionId: 'saved-live', scopeId: 'scope', algorithmVersion: 'v1', status: 'completed', checkpoint: 3, archiveCount: 3 };
+    let validated = false;
+    let finish!: (value: unknown) => void;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
+      if (command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
+      if (command === 'list_archive_identities') return { ok: true, value: (validated ? ['a','b'] : ['ghost','a']).map((id) => ({ id, archiveId: id, title: validated ? 'Current ' + id : 'Old ' + id, tags: [], pageCount: 1, fileSize: 1 })) };
+      if (command === 'dedup_list_sessions') return { ok: true, value: [{ ...session, pairCount: 2, createdAt: 'now', updatedAt: 'now' }] };
+      if (command === 'dedup_load_result') return new Promise((resolve) => { finish = resolve; });
+      throw new Error(command);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await user.click(await screen.findByRole('button', { name: '扫描结果' }));
+    await user.click(await screen.findByRole('button', { name: /^载入 / }));
+    expect(adapter).toHaveBeenCalledWith('dedup_load_result', { sessionId: 'saved-live', refreshIndex: true });
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    await act(async () => {
+      validated = true;
+      finish({ ok: true, value: { session, archives: [], pairs: [
+        { leftArchiveId: 'a', rightArchiveId: 'b', source: 'image' },
+        { leftArchiveId: 'ghost', rightArchiveId: 'b', source: 'image' },
+      ], selectedArchiveIds: [], outcomes: [] } });
+    });
+    expect(await screen.findByRole('checkbox', { name: '选择 Current b' })).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: '选择 Current a' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox', { name: /ghost/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('Old a')).not.toBeInTheDocument();
+  });
+
+  it('keeps saved history open when current directory validation fails', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
+      if (command === 'list_archive_identities' || command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
+      if (command === 'dedup_list_sessions') return { ok: true, value: [{ sessionId: 'saved', scopeId: 'scope', status: 'completed', archiveCount: 2, pairCount: 1, createdAt: 'now', updatedAt: 'now' }] };
+      if (command === 'dedup_load_result') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '目录验证失败，请重试', retryable: true } };
+      throw new Error(command);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await user.click(await screen.findByRole('button', { name: '扫描结果' }));
+    await user.click(await screen.findByRole('button', { name: /^载入 / }));
+    expect(await screen.findByText('目录验证失败，请重试')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: '扫描结果' })).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(adapter.mock.calls.filter(([command]) => command === 'list_archive_identities')).toHaveLength(1);
+  });
+
   it('lists saved scan results, loads one and deletes one', async () => {
     const user = userEvent.setup();
     const session = { sessionId: 'saved-1', scopeId: 'scope', algorithmVersion: 'v1', status: 'completed', checkpoint: 15226, archiveCount: 15226 };
@@ -929,8 +983,9 @@ describe('dedup scan progress and saved results', () => {
     expect(await screen.findByText(/15,226 档案 · 37 组疑似重复/)).toBeInTheDocument();
     // 纯图标按钮：可访问名带上这是哪一次结果，免得一排「载入」分不出谁是谁。
     await user.click(screen.getByRole('button', { name: /^载入 / }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_load_result', { sessionId: 'saved-1' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('dedup_load_result', { sessionId: 'saved-1', refreshIndex: true }));
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(await screen.findByText('已载入扫描结果：0 组疑似重复')).toBeInTheDocument();
 
     // 同一个结果再删一次：命令带会话 id，删除后列表刷新。
     await user.click(screen.getByRole('button', { name: '扫描结果' }));

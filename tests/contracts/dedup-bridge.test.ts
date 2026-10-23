@@ -85,6 +85,8 @@ describe('native dedup bridge', () => {
     expect(await repository.loadResult('scan-1')).toEqual({ ok: true, value: loaded });
     expect(adapter).toHaveBeenNthCalledWith(1, 'dedup_start_scan', { input });
     expect(adapter).toHaveBeenNthCalledWith(2, 'dedup_load_result', { sessionId: 'scan-1' });
+    await repository.loadResult('scan-1', true);
+    expect(adapter).toHaveBeenLastCalledWith('dedup_load_result', { sessionId: 'scan-1', refreshIndex: true });
   });
 
   it('bridges exclusions, imports, and partial deletion outcomes', async () => {

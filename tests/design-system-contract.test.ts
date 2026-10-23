@@ -2841,8 +2841,11 @@ describe('design system contract', () => {
     // Wired into both: the per-id verification, and the complete library walk.
     const verify = rust.slice(rust.indexOf('pub async fn verify_archives_exist'), rust.indexOf('pub fn save_reading_progress'));
     expect(verify).toMatch(/prune_dangling_records_for_server\(&mut connection, &server_id\)/);
+    // 全量目录刷新抽成了 refresh_archive_index_from_remote（查重扫描也走它），所以
+    // 这里钉的是那条函数里的清理，而不是 refresh_archives 自己的函数体。
     const refresh = rust.slice(rust.indexOf('pub async fn refresh_archives'), rust.indexOf('fn search_status_failure'));
-    expect(refresh).toMatch(/prune_dangling_records_for_server\(&mut connection, &input\.server_id\)/);
+    expect(refresh).toMatch(/async fn refresh_archive_index_from_remote\(/);
+    expect(refresh).toMatch(/prune_dangling_records_for_server\(&mut connection, server_id\)/);
     // And reachable from the bridge, so it can be triggered by hand.
     expect(read('src-tauri/src/lib.rs')).toMatch(/prune_dangling_records,/);
 

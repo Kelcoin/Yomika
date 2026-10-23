@@ -285,17 +285,15 @@ export function DeduplicationWorkspace() {
 
   const groups = useMemo<DedupMember[][]>(() => {
     const resolve = (archiveId: string): DedupMember => {
-      const record = archiveById.get(archiveId);
-      // 兜底也要带 id：域里的 archiveId() 读的是 arcid/id，缺了它这条档案在
-      // 分链（buildDuplicateSelectionModel）时会被当成无效项整组丢掉。
-      return record ? { ...dedupeArchiveOf(record), archiveId: record.archiveId } : { id: archiveId, archiveId, title: archiveId };
+      const record = archiveById.get(archiveId)!;
+      return { ...dedupeArchiveOf(record), archiveId: record.archiveId };
     };
     // 已删除的档案（processedDeletedArchiveIds）与已标记的对一起从视图移除，
     // 与 Readoshi 的 filterGroupsByProcessedState 一致。
     return (result?.pairs ?? [])
       .map((pair) => [pair.leftArchiveId, pair.rightArchiveId] as const)
       .filter((ids) => !processedNonDuplicatePairKeys.has(toPairKey(ids[0], ids[1])))
-      .filter((ids) => ids.every((id) => !processedDeletedArchiveIds.has(id)))
+      .filter((ids) => ids.every((id) => !processedDeletedArchiveIds.has(id) && archiveById.has(id)))
       .map(([left, right]) => [resolve(left), resolve(right)]);
   }, [archiveById, result?.pairs, processedNonDuplicatePairKeys, processedDeletedArchiveIds]);
 
@@ -456,10 +454,13 @@ export function DeduplicationWorkspace() {
         if (response.value.status !== 'running') {
           const generation = scanGeneration.current;
           setBusy(false);
-          void dedup.loadResult(sessionId).then((loaded) => {
+          void loadVerifiedResult(sessionId).then((loaded) => {
             // 停止轮询会清理本 effect；结果读取属于扫描本身，不能被这次清理丢掉。
             if (generation !== scanGeneration.current) return;
-            if (loaded.ok) setResult((current) => current?.session.sessionId === sessionId ? current : loaded.value);
+            if (loaded.ok) {
+              setArchives(loaded.identities);
+              setResult((current) => current?.session.sessionId === sessionId ? current : loaded.value);
+            }
             else showToast(loaded.error.message, 'error');
           });
         }
@@ -486,6 +487,17 @@ export function DeduplicationWorkspace() {
     return () => { active = false; };
   }, [server, busy, sessionId]);
 
+  async function loadVerifiedResult(id: string, refreshIndex = false) {
+    const loaded = await dedup.loadResult(id, refreshIndex);
+    if (!loaded.ok) return loaded;
+    if (!server) return { ok: false as const, error: { code: 'LRR_NOT_FOUND' as const, message: '未连接档案库', retryable: false } };
+    // Scan/load can replace the offline index. Read identities afterwards, never
+    // in parallel with validation, and publish both states in the same render.
+    const identities = await library.listArchiveIdentities(server.id);
+    if (!identities.ok) return identities;
+    return { ...loaded, identities: identities.value };
+  }
+
   function runScan(resume = false) {
     if (!server) return;
     const generation = ++scanGeneration.current;
@@ -504,16 +516,16 @@ export function DeduplicationWorkspace() {
       processed: 0, total: archives.length, cacheHits: 0, downloads: 0, missingCovers: 0,
       invalidCovers: 0, pairCount: 0, degraded: false, checkpoint: 0, diagnostics: [], pairs: [],
     });
-    void dedup.scan({ sessionId: id, scopeId: server.scopeId, algorithmVersion: ALGORITHM_VERSION, startDate, endDate, chunkSize: 32 }).then((response) => {
+    void dedup.scan({ sessionId: id, scopeId: server.scopeId, algorithmVersion: ALGORITHM_VERSION, startDate, endDate, chunkSize: 32 }).then(async (response) => {
       // A cancel bumps the generation; a late scan result must not resurrect
       // the "scanning" state or overwrite the cancelled progress line.
       if (generation !== scanGeneration.current) return;
-      if (!response.ok) showToast(response.error.message, 'error');
+      if (!response.ok) { setProgress(undefined); showToast(response.error.message, 'error'); }
       else {
         setProgress(response.value);
-        void dedup.loadResult(id).then((loaded) => {
+        await loadVerifiedResult(id).then((loaded) => {
           if (generation !== scanGeneration.current) return;
-          if (loaded.ok) setResult(loaded.value);
+          if (loaded.ok) { setArchives(loaded.identities); setResult(loaded.value); }
           else showToast(loaded.error.message, 'error');
         });
       }
@@ -771,18 +783,19 @@ export function DeduplicationWorkspace() {
   async function loadSession(summary: DedupSessionSummary) {
     if (historyBusy) return;
     setHistoryBusy(true);
-    const response = await dedup.loadResult(summary.sessionId);
+    const response = await loadVerifiedResult(summary.sessionId, true);
     setHistoryBusy(false);
     if (!response.ok) { showToast(response.error.message, 'error'); return; }
     scanGeneration.current += 1;
     selectionRevision.current += 1;
+    setArchives(response.identities);
     setResult(response.value);
     setSessionId(summary.sessionId);
     setSavedSessionId(summary.saved ? summary.sessionId : undefined);
     setProgress({
       sessionId: summary.sessionId, scopeId: summary.scopeId, status: 'completed', stage: 'completed',
       processed: summary.archiveCount, total: summary.archiveCount, cacheHits: 0, downloads: 0,
-      missingCovers: 0, invalidCovers: 0, pairCount: summary.pairCount, degraded: false,
+      missingCovers: 0, invalidCovers: 0, pairCount: response.value.pairs.length, degraded: false,
       checkpoint: summary.archiveCount, diagnostics: [], pairs: [],
     });
     setSelectedGroupKeys(new Set());
@@ -790,7 +803,7 @@ export function DeduplicationWorkspace() {
     setProcessedNonDuplicatePairKeys(new Set());
     setProcessedDeletedArchiveIds(new Set());
     setHistoryOpen(false);
-    showToast(`已载入扫描结果：${summary.pairCount} 组疑似重复`, 'success');
+    showToast(`已载入扫描结果：${response.value.pairs.length} 组疑似重复`, 'success');
   }
 
   async function removeSession(summary: DedupSessionSummary) {
