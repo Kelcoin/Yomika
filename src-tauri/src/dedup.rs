@@ -3702,8 +3702,11 @@ pub async fn dedup_load_result(
         Err(error) => return Ok(command_error(Err(error))),
     };
     if refresh_index.unwrap_or(false) {
-        if let CommandResult::Failure { error, .. } = crate::commands::library::refresh_dedup_archive_index(&server_id, &database).await {
-            return Ok(CommandResult::Failure { ok: false, error });
+        match tokio::time::timeout(std::time::Duration::from_secs(60),
+            crate::commands::library::refresh_dedup_archive_index(&server_id, &database)).await {
+            Ok(CommandResult::Failure { error, .. }) => return Ok(CommandResult::Failure { ok: false, error }),
+            Ok(CommandResult::Success { .. }) => {},
+            Err(_) => return Ok(CommandResult::failure("REMOTE_TIMEOUT", "校验档案索引超时，请检查连接后重试；已保存的扫描结果保持不变", true)),
         }
     }
     Ok(command_error(database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.into())

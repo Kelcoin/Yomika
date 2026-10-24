@@ -229,6 +229,8 @@ export function DeduplicationWorkspace() {
   useOverlayBackGuard(historyOpen, () => setHistoryOpen(false));
   const [sessions, setSessions] = useState<DedupSessionSummary[]>([]);
   const [historyBusy, setHistoryBusy] = useState(false);
+  const [loadingSessionId, setLoadingSessionId] = useState<string>();
+  const [historyError, setHistoryError] = useState<string>();
   useLayoutEffect(() => {
     if (!pageActive) {
       setRelationsOpen(false);
@@ -764,6 +766,7 @@ export function DeduplicationWorkspace() {
   }
 
   function openHistory() {
+    setHistoryError(undefined);
     setHistoryOpen(true);
     void loadSessions();
   }
@@ -772,27 +775,35 @@ export function DeduplicationWorkspace() {
   async function loadSession(summary: DedupSessionSummary) {
     if (historyBusy) return;
     setHistoryBusy(true);
-    const response = await loadVerifiedResult(summary.sessionId, true);
-    setHistoryBusy(false);
-    if (!response.ok) { showToast(response.error.message, 'error'); return; }
-    scanGeneration.current += 1;
-    selectionRevision.current += 1;
-    setArchives(response.identities);
-    setResult(response.value);
-    setSessionId(summary.sessionId);
-    setSavedSessionId(summary.saved ? summary.sessionId : undefined);
-    setProgress({
-      sessionId: summary.sessionId, scopeId: summary.scopeId, status: 'completed', stage: 'completed',
-      processed: summary.archiveCount, total: summary.archiveCount, cacheHits: 0, downloads: 0,
-      missingCovers: 0, invalidCovers: 0, pairCount: response.value.pairs.length, degraded: false,
-      checkpoint: summary.archiveCount, diagnostics: [], pairs: [],
-    });
-    setSelectedGroupKeys(new Set());
-    setManuallyTouchedGroupKeys(new Set());
-    setProcessedNonDuplicatePairKeys(new Set());
-    setProcessedDeletedArchiveIds(new Set());
-    setHistoryOpen(false);
-    showToast(`已载入扫描结果：${response.value.pairs.length} 组疑似重复`, 'success');
+    setLoadingSessionId(summary.sessionId);
+    setHistoryError(undefined);
+    try {
+      const response = await loadVerifiedResult(summary.sessionId, true);
+      if (!response.ok) { setHistoryError(response.error.message); return; }
+      scanGeneration.current += 1;
+      selectionRevision.current += 1;
+      setArchives(response.identities);
+      setResult(response.value);
+      setSessionId(summary.sessionId);
+      setSavedSessionId(summary.saved ? summary.sessionId : undefined);
+      setProgress({
+        sessionId: summary.sessionId, scopeId: summary.scopeId, status: 'completed', stage: 'completed',
+        processed: summary.archiveCount, total: summary.archiveCount, cacheHits: 0, downloads: 0,
+        missingCovers: 0, invalidCovers: 0, pairCount: response.value.pairs.length, degraded: false,
+        checkpoint: summary.archiveCount, diagnostics: [], pairs: [],
+      });
+      setSelectedGroupKeys(new Set());
+      setManuallyTouchedGroupKeys(new Set());
+      setProcessedNonDuplicatePairKeys(new Set());
+      setProcessedDeletedArchiveIds(new Set());
+      setHistoryOpen(false);
+      showToast(`已载入扫描结果：${response.value.pairs.length} 组疑似重复`, 'success');
+    } catch {
+      setHistoryError('读取扫描结果失败，请重试');
+    } finally {
+      setHistoryBusy(false);
+      setLoadingSessionId(undefined);
+    }
   }
 
   async function removeSession(summary: DedupSessionSummary) {
@@ -1087,6 +1098,8 @@ export function DeduplicationWorkspace() {
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content dedup-history-dialog" aria-describedby={undefined}>
           <Dialog.Title className="dialog-title"><History aria-hidden="true" />扫描结果</Dialog.Title>
+          {loadingSessionId && <div className="dedup-history-status" role="status"><LoadingIndicator inline />正在校验档案并读取结果…</div>}
+          {historyError && <p className="dedup-history-error" role="alert">{historyError}</p>}
           {/* 空态不再伪装成一条记录：它以前是列表里的一个 <li>，于是套上了记录的
               描边、底色和两端对齐，读起来像"有一条叫这个名字的扫描结果"。 */}
           {sessions.length > 0 ? <ul className="dedup-history-list">
@@ -1096,7 +1109,7 @@ export function DeduplicationWorkspace() {
                 <span>{item.status === 'completed' ? '已完成' : item.status === 'cancelled' ? '已取消' : '未完成'} · {formatCount(item.archiveCount)} 档案 · {formatCount(item.pairCount)} 组疑似重复{item.sessionId === sessionId ? ' · 当前结果' : ''}</span>
               </div>
               <div className="dedup-history-actions">
-                <button className="secondary-action is-icon" type="button" aria-label={`载入 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="载入" disabled={historyBusy || item.sessionId === sessionId} onClick={() => void loadSession(item)}><FolderOpen aria-hidden="true" /></button>
+                <button className="secondary-action is-icon" type="button" aria-label={`载入 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title={loadingSessionId === item.sessionId ? '正在载入' : '载入'} aria-busy={loadingSessionId === item.sessionId} disabled={historyBusy || item.sessionId === sessionId} onClick={() => void loadSession(item)}><FolderOpen aria-hidden="true" /></button>
                 <button className="secondary-action is-danger is-icon" type="button" aria-label={`删除 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="删除" disabled={historyBusy || savingResult} onClick={() => void removeSession(item)}><Trash2 aria-hidden="true" /></button>
               </div>
             </li>)}

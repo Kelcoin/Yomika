@@ -5506,7 +5506,7 @@ fn search_walk_is_done(
     received == 0 || received < first_page_size || collected >= filtered
 }
 
-/// Every row a query selects, gathered one page at a time.
+/// Every row a query selects, gathered with bounded parallel page requests.
 ///
 /// The single-request alternative is `start=-1`, which asks LANraragi to
 /// serialise the entire library into one response — for a ten-thousand-archive
@@ -5519,37 +5519,56 @@ async fn fetch_all_search_pages(
     api_key: &str,
     params: &RefreshSearchParams,
 ) -> Result<Vec<RemoteArchive>, SearchFailure> {
-    let mut collected: Vec<RemoteArchive> = Vec::new();
-    let mut page_size: Option<usize> = None;
-    let mut expected_count = None;
+    // Learn the server's page size once, then fetch independent offsets in a
+    // small bounded batch. A saved result must not pay one RTT per library page.
+    const CONCURRENCY: usize = 4;
+    let mut first_params = params.clone();
+    first_params.start = Some(0);
+    let (mut collected, filtered, _) = fetch_search_page(base_url, api_key, &first_params).await?;
+    let page_size = collected.len().max(1);
+    let expected = usize::try_from(filtered).map_err(|_| ("INVALID_RESPONSE", "Invalid archive count".into(), false))?;
+    if expected.div_ceil(page_size) > MAX_SYNC_PAGES {
+        return Err(("REMOTE_UNAVAILABLE", "LANraragi search exceeded the page limit before completing the snapshot".into(), true));
+    }
     let mut seen = std::collections::HashSet::new();
-    for _ in 0..MAX_SYNC_PAGES {
-        let mut page_params = params.clone();
-        page_params.start = Some(collected.len() as i64);
-        let (archives, filtered, _) = fetch_search_page(base_url, api_key, &page_params).await?;
-        let received = archives.len();
-        if expected_count.is_some_and(|count| count != filtered)
-            || archives.iter().any(|archive| !seen.insert(archive.archive_id.clone()))
-        {
-            return Err(("REMOTE_UNAVAILABLE", "LANraragi directory changed during synchronization; retry the scan".into(), true));
+    if collected.iter().any(|archive| !seen.insert(archive.archive_id.clone())) {
+        return Err(("REMOTE_UNAVAILABLE", "LANraragi directory changed during synchronization; retry the scan".into(), true));
+    }
+    if search_walk_is_done(collected.len(), page_size, collected.len() as i64, filtered) {
+        if collected.len() != expected {
+            return Err(("REMOTE_UNAVAILABLE", "LANraragi returned an incomplete directory; local archives were kept unchanged".into(), true));
         }
-        expected_count = Some(filtered);
-        collected.extend(archives);
-        // `max(1)` keeps an empty first page from recording a size of zero, which
-        // would read as "no page is ever short" and never end the walk.
-        let size = *page_size.get_or_insert(received.max(1));
-        if search_walk_is_done(received, size, collected.len() as i64, filtered) {
-            if collected.len() as i64 != filtered {
+        return Ok(collected);
+    }
+    let offsets: Vec<usize> = (collected.len()..expected).step_by(page_size).collect();
+    for batch in offsets.chunks(CONCURRENCY) {
+        let mut requests = JoinSet::new();
+        for &offset in batch {
+            let mut page_params = params.clone();
+            page_params.start = Some(offset as i64);
+            let base_url = base_url.to_owned();
+            let api_key = api_key.to_owned();
+            requests.spawn(async move {
+                fetch_search_page(&base_url, &api_key, &page_params).await
+                    .map(|(archives, count, _)| (offset, archives, count))
+            });
+        }
+        let mut pages = Vec::with_capacity(batch.len());
+        while let Some(page) = requests.join_next().await {
+            pages.push(page.map_err(|_| ("REMOTE_UNAVAILABLE", "Archive index request interrupted".into(), true))??);
+        }
+        pages.sort_by_key(|(offset, _, _)| *offset);
+        for (offset, archives, count) in pages {
+            if count != filtered || archives.iter().any(|archive| !seen.insert(archive.archive_id.clone())) {
+                return Err(("REMOTE_UNAVAILABLE", "LANraragi directory changed during synchronization; retry the scan".into(), true));
+            }
+            if archives.len() != page_size.min(expected - offset) {
                 return Err(("REMOTE_UNAVAILABLE", "LANraragi returned an incomplete directory; local archives were kept unchanged".into(), true));
             }
-            return Ok(collected);
+            collected.extend(archives);
         }
     }
-    Err((
-        "REMOTE_UNAVAILABLE",
-        "LANraragi search exceeded the page limit before completing the snapshot".into(),
-        true,
-    ))
+    Ok(collected)
 }
 
 #[derive(Debug, Deserialize)]
@@ -8746,6 +8765,50 @@ mod tests {
         let connection = database.connection.lock().unwrap();
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM archives WHERE server_id='server-a' AND is_deleted=0",[],|row|row.get::<_,i64>(0)).unwrap(),1);
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM archives WHERE server_id='server-b' AND is_deleted=0",[],|row|row.get::<_,i64>(0)).unwrap(),2);
+    }
+
+    #[tokio::test]
+    async fn full_search_fetches_remaining_pages_concurrently_and_preserves_order() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let server_peak = peak.clone();
+        let server = tokio::spawn(async move {
+            let mut requests = JoinSet::new();
+            for _ in 0..7 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let active = active.clone();
+                let peak = server_peak.clone();
+                requests.spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if stream.read(&mut byte).await.unwrap() == 0 { return; }
+                        head.push(byte[0]);
+                    }
+                    let request = String::from_utf8(head).unwrap();
+                    let target = request.split_whitespace().nth(1).unwrap();
+                    let parsed = url::Url::parse(&format!("http://localhost{target}")).unwrap();
+                    let offset: usize = parsed.query_pairs().find(|(key, _)| key == "start").unwrap().1.parse().unwrap();
+                    peak.fetch_max(active.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    // Different completion times ensure results must be ordered by offset.
+                    tokio::time::sleep(std::time::Duration::from_millis(if offset % 2 == 0 { 35 } else { 15 })).await;
+                    let body = serde_json::json!({"data":[{"arcid":format!("{offset:040x}"),"title":format!("Archive {offset}"),"tags":"","pagecount":1,"size":1}],"recordsFiltered":7,"recordsTotal":7}).to_string();
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
+                    active.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            while let Some(result) = requests.join_next().await { result.unwrap(); }
+        });
+        let params: RefreshSearchParams = serde_json::from_str("{}").unwrap();
+        let archives = fetch_all_search_pages(&url, "key", &params).await.unwrap();
+        server.await.unwrap();
+        assert!(peak.load(Ordering::SeqCst) > 1, "serial page requests stall saved-result loading");
+        assert!(peak.load(Ordering::SeqCst) <= 4, "do not flood LANraragi");
+        assert_eq!(archives.iter().map(|item| item.archive_id.clone()).collect::<Vec<_>>(),(0..7).map(|offset|format!("{offset:040x}")).collect::<Vec<_>>());
     }
 
     #[tokio::test]

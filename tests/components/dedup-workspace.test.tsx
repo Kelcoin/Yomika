@@ -1096,6 +1096,7 @@ describe('dedup scan progress and saved results', () => {
     await user.click(await screen.findByRole('button', { name: '扫描结果' }));
     await user.click(await screen.findByRole('button', { name: /^载入 / }));
     expect(adapter).toHaveBeenCalledWith('dedup_load_result', { sessionId: 'saved-live', refreshIndex: true });
+    expect(within(screen.getByRole('dialog', { name: '扫描结果' })).getByText('正在校验档案并读取结果…')).toBeInTheDocument();
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     await act(async () => {
       validated = true;
@@ -1112,22 +1113,31 @@ describe('dedup scan progress and saved results', () => {
 
   it('keeps saved history open when current directory validation fails', async () => {
     const user = userEvent.setup();
+    let validationFails = true;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
       if (command === 'list_archive_identities' || command === 'dedup_list_non_duplicates') return { ok: true, value: [] };
       if (command === 'dedup_list_sessions') return { ok: true, value: [{ sessionId: 'saved', scopeId: 'scope', status: 'completed', archiveCount: 2, pairCount: 1, createdAt: 'now', updatedAt: 'now' }] };
-      if (command === 'dedup_load_result') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '目录验证失败，请重试', retryable: true } };
+      if (command === 'dedup_load_result') return validationFails
+        ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: '目录验证失败，请重试', retryable: true } }
+        : { ok: true, value: { session: { sessionId: 'saved', scopeId: 'scope', algorithmVersion: 'v1', status: 'completed', checkpoint: 2, archiveCount: 2 }, archives: [], pairs: [], selectedArchiveIds: [], outcomes: [] } };
       throw new Error(command);
     });
     setInvokeAdapterForTests(adapter);
     render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
     await user.click(await screen.findByRole('button', { name: '扫描结果' }));
     await user.click(await screen.findByRole('button', { name: /^载入 / }));
-    expect(await screen.findByText('目录验证失败，请重试')).toBeInTheDocument();
+    expect(await within(screen.getByRole('dialog', { name: '扫描结果' })).findByText('目录验证失败，请重试')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^载入 / })).toBeEnabled();
     expect(screen.getByRole('dialog', { name: '扫描结果' })).toBeInTheDocument();
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     expect(adapter.mock.calls.filter(([command]) => command === 'list_archive_identities')).toHaveLength(1);
+    validationFails = false;
+    await user.click(screen.getByRole('button', { name: /^载入 / }));
+    expect(await screen.findByText('已载入扫描结果：0 组疑似重复')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: '扫描结果' })).not.toBeInTheDocument();
+    expect(screen.queryByText('目录验证失败，请重试')).not.toBeInTheDocument();
   });
 
   it('lists saved scan results, loads one and deletes one', async () => {
