@@ -41,6 +41,52 @@ it('preserves high resolution trackpad deltas and recognises line/page wheels', 
   expect(isDiscreteWheel({ deltaY: 3, deltaMode: 1 })).toBe(true);
 });
 
+it('finishes within 200ms of the last notch even when rendering stalls', () => {
+  let queued: FrameRequestCallback | undefined;
+  let time = 0;
+  vi.spyOn(performance, 'now').mockImplementation(() => time);
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { queued = callback; return 1; });
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => { queued = undefined; });
+  const step = (now: number) => { time = now; const callback = queued; queued = undefined; callback?.(now); };
+  const host = document.createElement('div');
+  document.body.append(host);
+  Object.defineProperties(host, { scrollHeight: { value: 10000 }, clientHeight: { value: 500 } });
+  const motion = createWheelMotion();
+  motion.push(host, 120);
+  step(16);
+  motion.push(host, 120);
+  step(116);
+  expect(host.scrollTop).toBeGreaterThan(120);
+  expect(host.scrollTop).toBeLessThan(240);
+  step(216);
+  expect(host.scrollTop).toBe(240);
+  expect(queued).toBeUndefined();
+  motion.push(host, 120);
+  step(1216);
+  expect(host.scrollTop).toBe(360);
+  expect(queued).toBeUndefined();
+});
+
+it('still finishes when the compositor hands back a frozen timestamp', () => {
+  // jsdom harnesses (and a paused compositor) can call back with the same
+  // timestamp forever; treating that as "no time passed" would schedule frames
+  // without ever moving, so a stalled clock counts as a nominal 16 ms frame.
+  let queued: FrameRequestCallback | undefined;
+  vi.spyOn(performance, 'now').mockReturnValue(0);
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { queued = callback; return 1; });
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => { queued = undefined; });
+  const host = document.createElement('div');
+  document.body.append(host);
+  Object.defineProperties(host, { scrollHeight: { value: 10000 }, clientHeight: { value: 500 } });
+  const motion = createWheelMotion();
+  motion.push(host, 120);
+  let frames = 0;
+  while (queued && frames < 60) { const callback = queued; queued = undefined; callback(0); frames++; }
+  expect(frames).toBeLessThan(20);
+  expect(host.scrollTop).toBe(120);
+  expect(queued).toBeUndefined();
+});
+
 it('finishes even when a webview rounds scroll positions to whole pixels', () => {
   let queued: FrameRequestCallback | undefined;
   vi.spyOn(performance, 'now').mockReturnValue(0);

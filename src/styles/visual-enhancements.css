@@ -103,33 +103,16 @@ button[data-variant="primary"],
   }
 }
 
-/* ---- Smooth Scroll Enhancement ----------------------------------------- */
+/* Wheel motion has its own bounded animation; touch/trackpads have native
+   inertia. Implicit CSS smoothing would animate direct position writes again.
+   Deliberate scrollTo({ behavior: 'smooth' }) actions still animate. */
 .workspace,
 .library-list-panel-content,
 [data-scroll-region] {
-  scroll-behavior: smooth;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .workspace,
-  .library-list-panel-content,
-  [data-scroll-region] {
-    scroll-behavior: auto;
-  }
+  scroll-behavior: auto;
 }
 
 /* ---- Enhanced Loading States ------------------------------------------- */
-/* Touch scrolling has native inertia. Direct scroll position updates used by
-   edge handling/restoration must land immediately instead of queuing a second
-   smooth-scroll animation. Explicit scrollTo({ behavior: 'smooth' }) is kept. */
-@media (hover: none), (pointer: coarse) {
-  .workspace,
-  .library-list-panel-content,
-  [data-scroll-region] {
-    scroll-behavior: auto;
-  }
-}
-
 .loading-mark {
   animation: loading-pulse var(--duration-pulse) var(--ease-pulse) infinite;
 }

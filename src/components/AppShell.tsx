@@ -321,6 +321,7 @@ export function AppShell({ children }: AppShellProps) {
     // jsdom's ElementEventMap has no wheel entry; the runtime event is a WheelEvent.
     const forward = (raw: Event) => {
       const event = raw as WheelEvent;
+      if (event.defaultPrevented || event.ctrlKey) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
       // Overlays and the reader own their scrolling.
