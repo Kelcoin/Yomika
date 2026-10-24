@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, type CSSProperties } from 'react';
+import { installHorizontalEdgeBounce } from './horizontalEdgeBounce';
 
 /** 这台设备是不是「没有悬停、指针粗糙」。
  *
@@ -20,16 +21,15 @@ export function usesCoarsePointer(): boolean {
  * 档案卡片内无法滚动」）。
  *
  * 也不写 `touch-action: pan-x pan-y`：那等于顺手把双指缩放一起禁掉，而缩放该由浏览器
- * 决定。只把横向的 overscroll 收住（`overscroll-behavior-x: contain`），免得「继续往
+ * 决定。只把横向的 overscroll 收住（`overscroll-behavior-x: none`），免得「继续往
  * 右划」被当成浏览器的返回手势。
  *
- * 与 Readoshi 的 `getTouchScrollStyle()` 逐项一致，这是刻意的：滚轮与触摸要分开对待，
- * 触摸这一路就该是原生的。 */
+ * Native scrolling handles the interior; the content track supplies edge feedback. */
 export function getTouchScrollStyle(): CSSProperties {
   return {
     touchAction: 'auto',
     WebkitOverflowScrolling: 'touch',
-    overscrollBehaviorX: 'contain',
+    overscrollBehaviorX: 'none',
     overscrollBehaviorY: 'auto',
   };
 }
@@ -85,6 +85,7 @@ type PointerStyleWatch = {
 
 export function useHorizontalScroller() {
   const elementRef = useRef<HTMLElement | null>(null);
+  const edgeRef = useRef<ReturnType<typeof installHorizontalEdgeBounce>>();
   const dragRef = useRef<DragState>({ active: false, element: null, startX: 0, startScrollLeft: 0, moved: false, suppressClickUntil: 0, previousUserSelect: '', lastX: 0, lastAt: 0, velocity: 0 });
   const coastRef = useRef<number>();
   const touchRef = useRef(false);
@@ -144,6 +145,7 @@ export function useHorizontalScroller() {
     window.removeEventListener('mousemove', handleWindowMouseMove);
     window.removeEventListener('mouseup', finishDrag);
     window.removeEventListener('blur', finishDrag);
+    if (edgeRef.current?.isActive()) { edgeRef.current.release(); restoreSnap(); return; }
     if (event?.type !== 'mouseup' || !state.moved || !state.element || performance.now() - state.lastAt > 80 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { restoreSnap(); return; }
     const element = state.element;
     let velocity = Math.max(-2.5, Math.min(2.5, state.velocity));
@@ -178,7 +180,12 @@ export function useHorizontalScroller() {
     if (elapsed > 0) state.velocity = (state.lastX - event.clientX) / elapsed;
     state.lastX = event.clientX;
     state.lastAt = now;
-    state.element.scrollLeft = state.startScrollLeft - delta;
+    const desired = state.startScrollLeft - delta;
+    const max = edgeRef.current?.maxScroll() ?? state.element.scrollWidth - state.element.clientWidth;
+    const clamped = Math.max(0, Math.min(max, desired));
+    state.element.scrollLeft = clamped;
+    if (desired !== clamped) edgeRef.current?.pull(desired - clamped);
+    else edgeRef.current?.reset();
     if (event.cancelable) event.preventDefault();
   }, []);
 
@@ -199,7 +206,12 @@ export function useHorizontalScroller() {
     // An overflowing rail retains the wheel at both ends, including fresh gestures.
     if (event.cancelable) event.preventDefault();
     event.stopPropagation();
-    element.scrollLeft += delta * 2.4;
+    const desired = element.scrollLeft + delta * 2.4;
+    const max = edgeRef.current?.maxScroll() ?? element.scrollWidth - element.clientWidth;
+    const clamped = Math.max(0, Math.min(max, desired));
+    element.scrollLeft = clamped;
+    if (desired !== clamped) edgeRef.current?.wheel(desired - clamped);
+    else edgeRef.current?.reset();
   }, [stopCoast]);
 
   /** 按设备档把样式落到导轨上，并跟着设备档的变化改（插拔鼠标、切换平板模式）。
@@ -232,6 +244,8 @@ export function useHorizontalScroller() {
     stopCoast();
     if (previous) {
       finishDrag();
+      edgeRef.current?.dispose();
+      edgeRef.current = undefined;
       previous.removeEventListener('wheel', handleWheel, true);
       cancelTouch();
       previous.removeEventListener('touchstart', beginTouch);
@@ -249,6 +263,7 @@ export function useHorizontalScroller() {
     element.addEventListener('touchcancel', cancelTouch, { passive: true });
     element.addEventListener('scroll', settleTouch, { passive: true });
     element.addEventListener('scrollend', finishTouch, { passive: true });
+    edgeRef.current = installHorizontalEdgeBounce(element);
     applyPointerStyle(element);
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia(COARSE_POINTER_QUERY);
@@ -265,6 +280,7 @@ export function useHorizontalScroller() {
     if ((event.nativeEvent as MouseEvent & { sourceCapabilities?: { firesTouchEvents: boolean } }).sourceCapabilities?.firesTouchEvents) return;
     cancelTouch();
     stopCoast();
+    edgeRef.current?.reset();
     if (event.button !== 0 || event.currentTarget.scrollWidth <= event.currentTarget.clientWidth + 1) return;
     const element = event.currentTarget;
     // A programmatic scrollLeft write can otherwise snap at every animation
@@ -290,6 +306,7 @@ export function useHorizontalScroller() {
   const onDragStart = useCallback((event: React.DragEvent<HTMLElement>) => { if (event.cancelable) event.preventDefault(); }, []);
 
   const resetScroll = useCallback(() => {
+    edgeRef.current?.reset();
     cancelTouch();
     stopCoast();
     finishDrag();

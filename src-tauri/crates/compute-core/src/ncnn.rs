@@ -1,4 +1,6 @@
-//! Content-addressed Android Vulkan variants of the shipped ONNX models.
+//! Content-addressed Android Vulkan variants of the **bundled** ONNX model.
+//! Only a model that already ships inside the app gets a conversion: converting an
+//! online model would put a second 5 MB copy of its weights in every APK (docs/221).
 //! Never select a different model merely because its display name matches.
 use serde::Deserialize;
 #[derive(Deserialize)]
@@ -20,6 +22,17 @@ pub fn matching_model(digest: &str, scale: u32) -> Option<Model> {
         .into_iter()
         .find(|m| m.onnx_sha256 == digest && m.scale == scale)
 }
+
+/// 随包分发的 Vulkan 变体白名单：只有**本来就在安装包里**的模型才配有这一份。
+///
+/// 这不是「谁转换过就带谁」：ncnn 权重是嵌进原生库的第二份字节（Real-CUGAN 每档
+/// 5,138,512 B），把在线下载的大模型也编进来等于让每个 APK 替用户预付一份多数人
+/// 从没用过的权重。在线模型在 Android 上照旧走 ORT（NNAPI/CPU），`NcnnEngine::open`
+/// 认不出指纹就返回 `Ok(None)`（`worker/src/upscale.rs`）。
+///
+/// 改这张表要同时改 `models.json`、`resources/ncnn/` 下的 `.param`/`.bin` 与
+/// `bundled_vulkan_payload_stays_under_budget` 的预算——三条判据会一起转红。
+pub const BUNDLED_VARIANTS: &[&str] = &["waifu2x-upconv7"];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,7 +42,56 @@ mod tests {
         let m = &models()[0];
         assert!(matching_model(&m.onnx_sha256, 2).is_some());
         assert!(matching_model(&m.onnx_sha256, 4).is_none());
-        assert!(matching_model(&"0".repeat(64), 2).is_none());
+        // 探针本身也得先证明不在表里，否则有人把某一档写成全 0/全 f 时这条会假红。
+        let absent = "f".repeat(64);
+        assert!(models().iter().all(|m| m.onnx_sha256 != absent));
+        assert!(matching_model(&absent, 2).is_none());
+    }
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+    /// 随包只带一份变体：id 与 `BUNDLED_VARIANTS` 同序，指纹就是内置的那张图。
+    /// 往回加一档 Real-CUGAN（`.bin` 5,138,512 B）会立刻转红——它只该由用户下载后
+    /// 走 ORT，不该替每个 APK 预付一份从没用过的权重（`docs/221`）。
+    #[test]
+    fn vulkan_variants_are_limited_to_the_bundled_model() {
+        let builtin = sha256_hex(include_bytes!(
+            "../../../resources/models/waifu2x-upconv7/model.onnx"
+        ));
+        let all = models();
+        let ids: Vec<&str> = all.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids.as_slice(),
+            BUNDLED_VARIANTS,
+            "随包变体与白名单不一致：{ids:?}"
+        );
+        for model in &all {
+            assert_eq!(
+                model.onnx_sha256, builtin,
+                "{} 的变体不是随包模型转出来的：编进 APK 等于替用户多背一份在线权重",
+                model.id
+            );
+        }
+    }
+    /// 编译期真的会进二进制的那份字节总量（`.param` + `.bin`）：现役只有 waifu2x 的
+    /// 2,209,960 + 1,477 B，上限 3 MiB。再加一档 Real-CUGAN（5.1 MB）就超。
+    #[test]
+    fn bundled_vulkan_payload_stays_under_budget() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/ncnn");
+        let mut total = 0u64;
+        for model in models() {
+            for extension in ["param", "bin"] {
+                let path = dir.join(format!("{}.{}", model.id, extension));
+                total += std::fs::metadata(&path)
+                    .unwrap_or_else(|error| panic!("missing {}: {error}", path.display()))
+                    .len();
+            }
+        }
+        const BUDGET: u64 = 3 * 1024 * 1024;
+        assert!(
+            total <= BUDGET,
+            "随包 Vulkan 权重 {total} B 超过预算 {BUDGET} B"
+        );
     }
     #[test]
     fn converted_assets_are_verified() {
@@ -147,8 +209,8 @@ mod native {
             };
             let (param, weights) = match m.id.as_str() {
                 "waifu2x-upconv7" => assets!("waifu2x-upconv7"),
-                "realcugan-2x-denoise3x" => assets!("realcugan-2x-denoise3x"),
-                "realcugan-2x-conservative" => assets!("realcugan-2x-conservative"),
+                // 不在 `BUNDLED_VARIANTS` 里的模型没有编译期资源；`models.json` 与白名单
+                // 由 `vulkan_variants_are_limited_to_the_bundled_model` 钉住。
                 _ => return Ok(None),
             };
             let device = device_description()

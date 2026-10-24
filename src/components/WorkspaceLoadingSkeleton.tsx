@@ -3,8 +3,8 @@ import { ContentSkeleton } from './ContentSkeleton';
 import { MetadataEditorSkeleton } from './MetadataEditorSkeleton';
 
 /** Code loading uses the same placeholders as data loading, with no spinner frame between. */
-export function WorkspaceLoadingSkeleton({ path }: { path: string }) {
-  if (path.endsWith('/edit')) return <MetadataEditorSkeleton />;
+export function WorkspaceLoadingSkeleton({ path, onBack }: { path: string; onBack?: (() => void) | undefined }) {
+  if (path.endsWith('/edit')) return <MetadataEditorSkeleton onBack={onBack} />;
   if (path === '/tools/upload') return <div className="workspace-stack" aria-busy="true">
     <header className="workspace-heading"><h1>上传档案</h1></header>
     <div className="upload-panel" aria-hidden="true">

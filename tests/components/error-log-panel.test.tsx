@@ -186,7 +186,7 @@ describe('error log panel', () => {
     }
   });
 
-  it('clears both rounds only after the confirmation, and says how many went', async () => {
+  it('clears both rounds as soon as the button is pressed, with no dialog in between', async () => {
     const user = userEvent.setup();
     const adapter = serve([panicEntry], { error_log_clear: { ok: true, value: 1 } });
     renderPanel();
@@ -194,11 +194,8 @@ describe('error log panel', () => {
     await screen.findByText('state() called before manage()');
     await user.click(screen.getByRole('button', { name: '清空日志' }));
 
-    // 破坏性动作先问一句，问之前不写。
-    expect(adapter).not.toHaveBeenCalledWith('error_log_clear', {});
-    const dialog = await screen.findByRole('dialog', { name: '清空日志' });
-    await user.click(within(dialog).getByRole('button', { name: '清空' }));
-
+    // 用户这一轮要的：点下去就清，不再先弹一个「清空日志」的确认框。
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('error_log_clear', {}));
     // 清空之后整块列表收起来（顶上那行计数已经不在界面上，落点是空的列表本身）。
     expect(screen.queryByRole('list', { name: '错误记录' })).not.toBeInTheDocument();

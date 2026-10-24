@@ -1221,8 +1221,9 @@ describe('design system contract', () => {
 
   it('keeps recommendation rails horizontal and lets wide covers span the thumbnail grid', () => {
     const shell = read('src/styles/shell.css');
-    expect(shell).toMatch(/\.archive-rail-grid\s*\{[\s\S]*display:\s*flex[\s\S]*overflow-x:\s*auto/);
-    expect(shell).toMatch(/\.archive-rail-grid\s*\{[\s\S]*align-items:\s*flex-start/);
+    expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/overflow-x:\s*auto/);
+    expect(ruleBody(shell, '.archive-rail-track')).toMatch(/display:\s*flex/);
+    expect(ruleBody(shell, '.archive-rail-track')).toMatch(/align-items:\s*flex-start/);
     // 用户报告（第 2 条，随后第 1 条）：首页那几排卡片两侧的空隙与别的组件对不上，而且
     // 一开详情就变。卡片区域的两侧空隙由轨道自己的 `padding` 给（四边 16px，与档案库的
     // 网格、宽行同一档），水平那圈不能收成 0——收掉之后整排卡片贴着框边，用户看到的正是
@@ -2533,7 +2534,7 @@ describe('design system contract', () => {
     const railTouch = railGrid.match(/touch-action:\s*([^;]+);/)?.[1]?.trim() ?? '';
     expect(railTouch, '导轨不能整块吃掉手势').not.toMatch(/\bnone\b/);
     expect(railTouch, '导轨的两条轴都留给浏览器；分档靠内联样式而不是这里的限制').toMatch(/\bauto\b/);
-    expect(railGrid, '导轨自己的横向过量滚动不该链给页面').toMatch(/overscroll-behavior-x:\s*contain/);
+    expect(railGrid, '自定义过滚替代浏览器过滚，且不向外链给页面').toMatch(/overscroll-behavior-x:\s*none/);
     const horizontalScroller = read('src/lib/horizontalScroller.ts');
     expect(horizontalScroller, '触摸这一档必须是「浏览器自己滚」').toMatch(/touchAction:\s*'auto'/);
     expect(horizontalScroller, '鼠标这一档才是抓手').toMatch(/cursor:\s*'grab'/);
@@ -3167,6 +3168,18 @@ describe('design system contract', () => {
     ).toMatch(/display:\s*grid;\s*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
     expect(shell, '菜单没了，它那套样式也走').not.toContain('.log-menu');
     expect(read('src/styles/tokens.css'), '只服务于那个菜单的 z 序也该走').not.toContain('--z-menu-over-modal');
+  });
+
+  it('clears the error log on the first press, without a confirmation dialog', () => {
+    // 用户这一轮要的：「去掉清理错误日志的确认弹窗，点击清空日志按钮后直接清空」。这份日志
+    // 只有本次与上次两轮，清掉之后新的失败照样会记；点完 `clearLog` 当场把条目数报出来，
+    // 用户看得见自己清了什么 —— 代价是多一次对话，不是丢东西，所以不再拦一道。
+    const panel = read('src/components/ErrorLogPanel.tsx');
+    expect(panel, '清空日志不再弹确认框').not.toContain('ConfirmDialog');
+    expect(panel, '确认态一起走：别留一个只服务死代码的 state').not.toMatch(/confirmClear/);
+    const actions = /<div className="settings-menu-actions" role="group" aria-label="日志操作">([\s\S]*?)<\/div>/.exec(panel);
+    expect(actions, '清空按钮还在动作行里').not.toBeNull();
+    expect(actions![1], '点下去直接清').toContain('onClick={() => void clearLog()}');
   });
 
   it('lets the error log inherit the project font, and keeps literal families out of the sheets', () => {

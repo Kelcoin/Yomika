@@ -95,7 +95,7 @@ describe('horizontal scroller', () => {
     // 触摸这一路整个交给浏览器：两个轴都由它按手势主方向择一，所以**不能**是
     // `pan-x` / `pan-x pan-y`——后者会把双指缩放一起禁掉，而缩放该由浏览器决定。
     expect(touch.touchAction).toBe('auto');
-    expect(touch.overscrollBehaviorX).toBe('contain');
+    expect(touch.overscrollBehaviorX).toBe('none');
     expect(touch.overscrollBehaviorY).toBe('auto');
     expect(String(touch.touchAction)).not.toContain('pan');
 
@@ -108,7 +108,7 @@ describe('horizontal scroller', () => {
       render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
       const rail = screen.getByTestId('rail');
       expect(rail.style.touchAction).toBe('auto');
-      expect(rail.style.overscrollBehaviorX).toBe('contain');
+      expect(rail.style.overscrollBehaviorX).toBe('none');
       expect(rail.style.cursor).toBe('');
 
       // 插上鼠标 / 切回桌面模式：换那一套，而且要把触摸那套留下的键清掉。

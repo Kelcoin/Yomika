@@ -62,7 +62,9 @@ export function zoomByWheel(zoom: ZoomState, deltaY: number): ZoomState {
   if (zoom.scale < 1 && deltaY < 0) return createZoomState();
   const resistance = zoom.scale <= 1 && deltaY > 0 ? 0.22 : 1;
   const scaled = zoom.scale * Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY * resistance);
-  const snapped = zoom.scale > 1 && Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
+  // Only catch a return toward 100%. Small high-resolution wheel steps moving
+  // away from 100% must accumulate instead of being reset every other event.
+  const snapped = zoom.scale > 1 && deltaY > 0 && Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
   const scale = Math.min(ZOOM_RUBBER_MAX, Math.max(ZOOM_RUBBER_MIN, snapped));
   return scale === 1 ? { scale: 1, panX: 0, panY: 0 } : { ...zoom, scale };
 }

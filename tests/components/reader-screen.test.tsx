@@ -916,7 +916,7 @@ describe('reader screen', () => {
     expect(released).toContain(11);
   });
 
-  it('uses the mouse wheel for zoom on paged reading canvas', () => {
+  it('uses the mouse wheel for zoom on paged reading canvas', async () => {
     const { unmount, container } = renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
 
@@ -932,6 +932,7 @@ describe('reader screen', () => {
     expect(zoomed().getAttribute('style')).toMatch(/scale\(0\.96/);
     expect(screen.getByRole('img', { name: '第 1 页' }).getAttribute('style')).toBeNull();
     fireEvent.wheel(reader, { deltaY: -120 });
+    await act(async () => { await new Promise(requestAnimationFrame); });
     // Coming back within 5% of 100% snaps exactly onto it.
     expect(zoomed()).toHaveStyle('transform: scale(1) translate(0px, 0px)');
     const horizontalScroller = document.createElement('div');
@@ -1405,8 +1406,10 @@ describe('reader screen', () => {
     );
     const zoomed = () => container.querySelector('.reader-single') as HTMLElement;
 
-    fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: 120 });
-    expect(zoomed().style.transform).toMatch(/scale\(0\.96/);
+    fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: -120 });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    const magnified = zoomed().style.transform;
+    expect(magnified).toMatch(/scale\(1\.19/);
 
     // The enhanced rendition arrives after the plain page and takes its place in
     // the same slot. It used to be awaited inside the page load instead, so
@@ -1419,7 +1422,7 @@ describe('reader screen', () => {
     );
     // 换图要等新图解码完（先解码再换，见 lib/decodeImage），所以这里等一下而不是立刻断言。
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
-    expect(zoomed().style.transform).toMatch(/scale\(0\.96/);
+    expect(zoomed().style.transform).toBe(magnified);
   });
 
   it('draws an enhanced page at the size the plain one measured', async () => {

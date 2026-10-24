@@ -36,7 +36,9 @@ export function RetainedPage({ active, flow = false, motionSurface = false, chil
     const frame = requestAnimationFrame(restore);
     const save = (event: Event) => {
       const region = event.target;
-      if (region instanceof HTMLElement && region.getClientRects().length > 0 && !region.closest('[hidden]') && (region === workspace || panel.contains(region))) {
+      // Ignore other panels/overlays before asking the browser for layout.
+      // This capture listener sees every nested scroll event in the document.
+      if (region instanceof HTMLElement && (region === workspace || panel.contains(region)) && !region.closest('[hidden]') && region.getClientRects().length > 0) {
         positions.current.set(region, region.scrollTop);
       }
     };

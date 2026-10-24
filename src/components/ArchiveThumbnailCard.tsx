@@ -13,6 +13,7 @@ import { longPressHandlers } from '../lib/longPressMenu';
 import { useMediaQuery, COMPACT_WIDTH_QUERY } from '../lib/useMediaQuery';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { useProgressBarVisibility } from '../app/preferences';
+import { usePageActive } from '../app/RetainedPage';
 
 const imageCache = getNativeImageCache();
 
@@ -49,36 +50,48 @@ export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limi
     {/* fill: the two rows pack top-down and the rest of the (deliberately
         generous) tag list is dropped, so the slot reads full at any card
         width — the list row's waterfall keeps its own spreading behaviour. */}
-    <ArchiveCardTags tags={tags} limit={limit} rowCount={2} fill className="archive-thumb-card-tags" />
+    <ArchiveCardTags tags={tags} limit={limit} rowCount={2} fill layout="wrap" className="archive-thumb-card-tags" />
     <ArchiveThumbMeta>{meta}</ArchiveThumbMeta>
   </div>;
 }
 
 export function ArchiveThumbMeta({ children }: { children: ReactNode }) {
   const root = useRef<HTMLDivElement>(null);
+  const pageActive = usePageActive();
+  const fitRef = useRef<() => void>();
   useLayoutEffect(() => {
     const node = root.current;
-    if (!node) return;
+    if (!node || !pageActive) return;
     let active = true;
-    const fit = () => {
-      if (!active || node.clientWidth <= 0) return;
+    let measured: { width: number; text: string } | undefined;
+    const fit = (force = false) => {
+      if (!active) return;
+      const width = node.clientWidth;
+      if (width <= 0) return;
+      const text = [...node.children].map((child) => child.textContent).join('\0');
+      if (!force && measured?.width === width && measured.text === text) return;
+      measured = { width, text };
       node.style.removeProperty('--archive-thumb-meta-fitted-size');
       const style = getComputedStyle(node);
       const base = parseFloat(style.fontSize) || 11;
       const minimum = parseFloat(style.getPropertyValue('--archive-thumb-meta-min-font-size')) || 10;
       const gap = parseFloat(style.columnGap) || 4;
       const needed = () => [...node.children].reduce((width, child) => width + child.scrollWidth, 0) + gap * Math.max(0, node.children.length - 1);
-      for (let size = base; needed() > node.clientWidth && size > minimum;) {
+      for (let size = base; needed() > width && size > minimum;) {
         size = Math.max(minimum, size - 0.5);
         node.style.setProperty('--archive-thumb-meta-fitted-size', `${size}px`);
       }
     };
+    fitRef.current = fit;
     fit();
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(fit);
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => fit());
     observer?.observe(node);
-    void document.fonts?.ready.then(fit);
-    return () => { active = false; observer?.disconnect(); };
-  }, [children]);
+    // Font metrics can change at the same width; only that signal bypasses
+    // the text/width cache. A parent render must not restart font measurement.
+    void document.fonts?.ready.then(() => fit(true));
+    return () => { active = false; fitRef.current = undefined; observer?.disconnect(); };
+  }, [pageActive]);
+  useLayoutEffect(() => { fitRef.current?.(); }, [children, pageActive]);
   return <div ref={root} className="archive-thumb-card-meta">{children}</div>;
 }
 
@@ -107,6 +120,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
    * 属主线程每帧重画，一屏几十张失败的封面就是几十个元素一直在画，而它们永远不会
    * 变成图。 */
   const [failed, setFailed] = useState(false);
+  const [loadStarted, setLoadStarted] = useState(false);
   const [retry, setRetry] = useState(0);
   const [node, setNode] = useState<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -114,6 +128,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
     const controller = new AbortController();
     let timeout: number | undefined;
     setFailed(false);
+    setLoadStarted(false);
     setSrc(peekCachedImageUrl(imageCache, identity));
     let handle: import('../lib/unifiedImageCache').ImageHandle | undefined;
     /** 只还一次：取图可能在 cleanup 之后才落地（那时由它自己还），cleanup 也会试着还一次，
@@ -123,6 +138,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
     // retain: 最后一个消费者放手后这张封面继续留在缓存里，重新挂载的第一帧才有东西可同步拿
     // （见上面的 useState 初值）。它照样受缓存自己的 96MiB / 256 条预算约束，超了就被挤出去。
     const load = () => {
+      setLoadStarted(true);
       timeout = window.setTimeout(() => { setFailed(true); controller.abort(); }, 30_000);
       void imageCache.load(identity, { signal: controller.signal, retain: true }).then((value) => {
         handle = value;
@@ -143,7 +159,7 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
       if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
     }} /> : failed ? <span className="archive-cover-retry" role="button" tabIndex={0} aria-label="重新加载封面" title="封面加载失败，点击重试" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }} onKeyDown={(event) => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }
-    }}><RefreshCw aria-hidden="true" /></span> : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}
+    }}><RefreshCw aria-hidden="true" /></span> : <span className={`archive-thumb-card-skeleton${loadStarted ? '' : ' is-deferred'}`} aria-hidden="true" />}
     {children}
   </div>;
 }
@@ -241,9 +257,11 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
       </button>}
     </div>}
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
+      <div className="archive-rail-track" data-horizontal-content="">
       {archives.length === 0 && loading
         ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
         : archives.map((archive) => <div className="archive-rail-item" key={archive.archiveId}><ArchiveThumbnailCard archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} progressScope={progressScope} detailBasePath={detailBasePath} /></div>)}
+      </div>
     </div>
   </section>;
 }

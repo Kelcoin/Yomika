@@ -202,7 +202,8 @@ it('keeps rail snap targets outside the cards that animate on press', () => {
   const { container } = render(<MemoryRouter><ArchiveThumbnailRail title="Rail" archives={[archive]} scopeId="scope" serverId="server" /></MemoryRouter>);
   const card = container.querySelector('.archive-thumb-card')!;
   expect(card.parentElement).toHaveClass('archive-rail-item');
-  expect(card.parentElement?.parentElement).toHaveClass('archive-rail-grid');
+  expect(card.parentElement?.parentElement).toHaveClass('archive-rail-track');
+  expect(card.parentElement?.parentElement?.parentElement).toHaveClass('archive-rail-grid');
 });
 
 it('keeps the cover and rail progress track inside one card scale layer', () => {

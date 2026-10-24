@@ -2151,6 +2151,10 @@ body::-webkit-scrollbar,
 .archive-page-thumbnail.is-skeleton,
 .archive-thumb-card-skeleton { background: linear-gradient(90deg, color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline)), color-mix(in srgb, var(--ink-secondary) 22%, var(--surface-elevated)), color-mix(in srgb, var(--surface-elevated) 80%, var(--hairline))); background-size: 200% 100%; animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite; }
 
+/* Deferred covers outside the lazy-load margin are not loading yet. Keep the
+   same placeholder, but start its sweep only when its image request starts. */
+.archive-thumb-card-skeleton.is-deferred { animation: none; }
+
 /* 封面确定取不回来之后，占位块停在静止的表面上。
    `skeleton-shimmer` 动的是 `background-position`——不是合成器动画，而是主线程每帧
    重画。它本来只在「还在加载」这一段出现，但失败的占位会一直留在原处：一屏几十张
@@ -4508,7 +4512,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    返回手势。逐设备的取值由 `src/lib/horizontalScroller.ts` 的
    `getTouchScrollStyle()` / `getMouseScrollStyle()` 以行内样式落上去（行内赢过这里），
    这一条是首帧与没有脚本时的兜底，两边必须一致。 */
-.archive-rail-grid { display: flex; align-items: flex-start; gap: var(--space-3); width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: auto; }
+.archive-rail-grid { width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: none; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: auto; }
+.archive-rail-track { display: flex; align-items: flex-start; gap: var(--space-3); width: max-content; min-width: 100%; }
 /* Snap uses an untransformed wrapper: pressing the first card must not
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
@@ -6591,7 +6596,10 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    dedup lists. A fixed line height clips only complete rows. */
 .card-tag-waterfall.is-wrapped { display: block; overflow: hidden; min-height: 0; max-height: calc(var(--tag-row-count, 3) * 24px + (var(--tag-row-count, 3) - 1) * 4px); }
 .card-tag-waterfall.is-wrapped .archive-row-tag-line { flex-wrap: wrap; align-content: flex-start; gap: 4px; }
-.card-tag-waterfall.is-wrapped .metadata-chip { height: 24px; box-sizing: border-box; max-width: 100%; }
+.card-tag-waterfall.is-wrapped .metadata-chip { height: var(--tag-chip-height, 24px); box-sizing: border-box; max-width: 100%; }
+/* The existing 48px slot fits two 20px chip rows plus their gap. Native wrap
+   matches greedy thumbnail filling without measuring hidden chip copies. */
+.archive-thumb-card-tags.is-wrapped { --tag-chip-height: 20px; height: 48px; max-height: 48px; }
 .card-tag-measures { position: absolute; visibility: hidden; pointer-events: none; height: 0; overflow: hidden; white-space: nowrap; }
 .card-tag-waterfall .card-tag-measure { display: inline-block; }
 /* Keep the loading and final title on the same baseline. */

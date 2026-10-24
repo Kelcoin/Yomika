@@ -20,6 +20,7 @@ import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
+import { useReaderImageHandover } from '../lib/useReaderImageHandover';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
  * over a spread without a refetch, and costs a handful of blob URLs. */
@@ -288,13 +289,15 @@ interface ReaderScreenProps {
  * 包在 `memo` 里：翻一页只该动那一页的图。三个帧（上一页 / 这一页 / 下一页）都在同一个
  * 树里，不拦一下就是每次翻页把三张图的元素与内联样式重新算一遍。
  */
-const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed }: {
+const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote }: {
   index: number;
   source: string;
   size: { width: number; height: number } | undefined;
   onMeasured: (index: number, image: HTMLImageElement) => void;
   onDisplayed?: ((index: number, url: string) => void) | undefined;
   onFailed: (index: number, url: string) => void;
+  handoverPaused: boolean;
+  canPromote: () => boolean;
 }) {
   const [shown, setShown] = useState(source);
   const candidateRef = useRef<HTMLImageElement>(null);
@@ -314,10 +317,10 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
   }, [shown, index]);
   useEffect(() => {
     const candidate = candidateRef.current;
-    if (source === shown || !candidate) return;
+    if (handoverPaused || source === shown || !candidate) return;
     let active = true;
     const failed = (error: unknown) => {
-      if (!active) return;
+      if (!active || !canPromote()) return;
       logError('reader/page-image', '替换图片解码失败', { page: index + 1, url: source, error: String(error), recovery: displayedFailed.current });
       if (displayedFailed.current) callbacks.current.onFailed(index, source);
     };
@@ -326,7 +329,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
       active = false;
     }, PAGE_LOAD_TIMEOUT_MS);
     void decodeImageElementStrict(candidate).then(() => {
-      if (!active) return;
+      if (!active || !canPromote()) return;
       window.clearTimeout(timeout);
       displayedFailed.current = false;
       loadedUrl.current = source;
@@ -337,7 +340,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
       failed(error);
     });
     return () => { active = false; window.clearTimeout(timeout); };
-  }, [source, shown, index]);
+  }, [source, shown, index, handoverPaused, canPromote]);
   // Handle release belongs after the DOM commit that makes the candidate visible.
   useLayoutEffect(() => {
     const next = handover.current;
@@ -346,7 +349,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
     callbacks.current.onMeasured(index, next.image);
     callbacks.current.onDisplayed?.(index, next.url);
   }, [shown, index]);
-  return <>{(source === shown ? [shown] : [shown, source]).map((url) => {
+  return <>{(handoverPaused || source === shown ? [shown] : [shown, source]).map((url) => {
     const candidate = url !== shown;
     return <img
       key={url}
@@ -398,6 +401,7 @@ function readViewport() {
 
 export function ReaderScreen({ archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed }: ReaderScreenProps) {
   const pageActive = usePageActive();
+  const { paused: handoverPaused, canPromote, pause: pauseHandover, resume: resumeHandover } = useReaderImageHandover(pageActive);
   const reduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   /** 手指点的设备：页码胶囊在手机上只走居中那一档（见下面量底缝的那一处）。
    *
@@ -433,7 +437,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const zoomScaleRef = useRef(1);
   const zoomElementRef = useRef<HTMLDivElement>(null);
   const zoomFrameRef = useRef<number>();
+  const zoomAnimationRef = useRef<Animation>();
   const setZoom = useCallback((update: ZoomState | ((current: ZoomState) => ZoomState)) => {
+    zoomAnimationRef.current?.cancel();
+    zoomAnimationRef.current = undefined;
     if (zoomFrameRef.current !== undefined) cancelAnimationFrame(zoomFrameRef.current);
     zoomFrameRef.current = undefined;
     const next = typeof update === 'function' ? update(zoomRef.current) : update;
@@ -443,6 +450,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
   const followZoom = useCallback((next: ZoomState) => {
     // Gesture input must not wait for reconciliation of pages, chrome or thumbnails.
+    zoomAnimationRef.current?.cancel();
+    zoomAnimationRef.current = undefined;
     zoomRef.current = next;
     zoomScaleRef.current = next.scale;
     if (zoomFrameRef.current !== undefined) return;
@@ -450,7 +459,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       zoomFrameRef.current = undefined;
       const element = zoomElementRef.current;
       const current = zoomRef.current;
-      if (element) element.style.transform = `scale(${current.scale}) translate(${current.panX}px, ${current.panY}px)`;
+      if (element) {
+        element.style.transition = 'none';
+        element.style.transform = `scale(${current.scale}) translate(${current.panX}px, ${current.panY}px)`;
+      }
     });
   }, []);
   /**
@@ -461,20 +473,36 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * 渲染值相同就跳过），两条路都走一遍最稳。
    */
   const settleZoomNow = useCallback(() => {
+    const element = zoomElementRef.current;
+    const from = element?.style.transform;
     const next = settleZoom(zoomRef.current);
+    // Pointer cancellation and touch cancellation can describe the same release.
+    // Don't cancel an already running return just because its target is settled.
+    if (zoomAnimationRef.current && next.scale === zoomRef.current.scale
+      && next.panX === zoomRef.current.panX && next.panY === zoomRef.current.panY) return;
     setZoom(() => next);
     // React may still remember scale(1) while gesture frames changed the DOM.
     // Set the transition before restoring the transform, without scheduling a
     // frame that setZoom would immediately cancel.
-    const element = zoomElementRef.current;
     if (element) {
-      element.style.transition = reduceMotion ? 'none' : 'transform 140ms ease-out';
-      element.style.transform = `scale(${next.scale}) translate(${next.panX}px, ${next.panY}px)`;
+      const to = `scale(${next.scale}) translate(${next.panX}px, ${next.panY}px)`;
+      // Explicit keyframes survive a busy React commit coalescing both style
+      // writes into one frame. The compositor runs the return independently.
+      const animate = !reduceMotion && from && from !== to && element.animate;
+      element.style.transition = reduceMotion || animate ? 'none' : 'transform 140ms ease-out';
+      element.style.transform = to;
+      if (animate) {
+        const animation = element.animate([{ transform: from }, { transform: to }], { duration: 140, easing: 'ease-out' });
+        zoomAnimationRef.current = animation;
+        animation.onfinish = () => { if (zoomAnimationRef.current === animation) zoomAnimationRef.current = undefined; };
+      }
     }
   }, [reduceMotion, setZoom]);
   useEffect(() => () => {
     if (zoomFrameRef.current !== undefined) cancelAnimationFrame(zoomFrameRef.current);
     zoomFrameRef.current = undefined;
+    zoomAnimationRef.current?.cancel();
+    zoomAnimationRef.current = undefined;
   }, [pageActive]);
   const [panning, setPanning] = useState(false);
   const panStart = useRef<{ x: number; y: number; zoom: ZoomState }>();
@@ -973,9 +1001,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (event.deltaY === 0) return;
       if (event.cancelable) event.preventDefault();
       if (sliding.current || panStart.current || pinchStart.current) return;
+      pauseHandover();
+      resumeHandover(380);
       const point = viewportPoint(event.clientX, event.clientY);
       const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1);
-      setZoom((current) => zoomAtPoint(current, zoomByWheel(current, delta).scale, point.x, point.y));
+      followZoom(zoomAtPoint(zoomRef.current, zoomByWheel(zoomRef.current, delta).scale, point.x, point.y));
       // Springs an overshoot back once the wheel goes quiet, so the limits feel
       // elastic instead of hard-stopping mid-gesture.
       window.clearTimeout(settleTimer);
@@ -988,7 +1018,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       window.clearTimeout(settleTimer);
       element.removeEventListener('wheel', onWheel);
     };
-  }, [settleZoomNow]);
+  }, [settleZoomNow, followZoom, pauseHandover, resumeHandover]);
 
   // Arrow keys are bound to the canvas, so it has to own focus from the start;
   // otherwise the user must click first, and that click toggles the chrome.
@@ -1204,6 +1234,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     horizontalDrag.current = false;
     const touch = event.touches[0];
     if (!touch) return;
+    pauseHandover();
     // Two fingers are a pinch, never a page turn: a zoom gesture used to leave a
     // drag offset behind and could commit a turn on release.
     if (event.touches.length > 1) {
@@ -1233,7 +1264,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       setPanning(true);
     }
     touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
-  }, [hideExitHint, thumbnailPanelOpen]);
+  }, [hideExitHint, thumbnailPanelOpen, pauseHandover]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
     const pinch = pinchStart.current;
@@ -1273,6 +1304,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   const handleTouchEnd = useCallback((event: TouchEvent) => {
     touchEndAt.current = Date.now();
+    if (event.touches.length === 0) resumeHandover(pinchStart.current || panStart.current ? 180 : EDGE_SETTLE_MS + 32);
     if (pinchStart.current || panStart.current) {
       const start = touchStartRef.current;
       const end = event.changedTouches[0];
@@ -1344,7 +1376,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // Same distance and recent-velocity rule as the mouse.
     gestureMovedRef.current = true;
     finishDrag(dx, elapsed);
-  }, [handleChromeTouchTap, settleZoomNow]);
+  }, [handleChromeTouchTap, settleZoomNow, resumeHandover]);
 
   /** Windows fires mouse events for a trackpad or mouse drag, so paging needs a
    * press-drag-release gesture here; touch keeps its own swipe handler. */
@@ -1359,6 +1391,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     dragSample.current = undefined;
     horizontalDrag.current = false;
     if (event.button !== 0) return;
+    pauseHandover();
     gestureMovedRef.current = false;
     if (zoomRef.current.scale > 1 && layoutRef.current !== 'webtoon') {
       panStart.current = { x: event.clientX, y: event.clientY, zoom: zoomRef.current };
@@ -1366,7 +1399,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       return;
     }
     pointerStartRef.current = { x: event.clientX, y: event.clientY, time: Date.now() };
-  }, []);
+  }, [pauseHandover]);
 
   const handleMouseMove = useCallback((event: MouseEvent<HTMLElement>) => {
     // 缩略面板是压在阅读器上的一层。它在的时候指针既不该唤出/切换两条栏，也不该开始
@@ -1381,6 +1414,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, [hoverTarget, setHover, trackDrag, thumbnailPanelOpen]);
 
   const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
+    if (event.button === 0) resumeHandover(EDGE_SETTLE_MS + 32);
     if (panStart.current) {
       dragZoom(event.clientX, event.clientY);
       panStart.current = undefined;
@@ -1402,7 +1436,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // A drag is a page turn, not a chrome toggle.
     dragPagedRef.current = true;
     finishDrag(dx, Date.now() - start.time);
-  }, []);
+  }, [resumeHandover, settleZoomNow]);
 
   /** 连续阅读的滚动：一帧只认一次。
    *
@@ -1412,6 +1446,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const webtoonOffsetRef = useRef(0);
   const webtoonScrollFrameRef = useRef<number>();
   const handleWebtoonScroll = useCallback((event: UIEvent<HTMLElement>) => {
+    pauseHandover();
+    resumeHandover();
     webtoonScrolledRef.current = true;
     webtoonOffsetRef.current = event.currentTarget.scrollTop;
     if (webtoonScrollFrameRef.current !== undefined) return;
@@ -1419,7 +1455,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       webtoonScrollFrameRef.current = undefined;
       setScrollTop(webtoonOffsetRef.current);
     });
-  }, []);
+  }, [pauseHandover, resumeHandover]);
   useEffect(() => () => {
     if (webtoonScrollFrameRef.current !== undefined) cancelAnimationFrame(webtoonScrollFrameRef.current);
   }, []);
@@ -1438,6 +1474,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, []);
 
   function cancelGesture() {
+    resumeHandover();
     touchStartRef.current = null;
     pointerStartRef.current = null;
     pinchStart.current = undefined;
@@ -1446,6 +1483,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     settleZoomNow();
     if (!sliding.current) finishDrag(0, 0);
   }
+
+  useEffect(() => {
+    if (!pageActive) return;
+    const cancel = () => cancelGesture();
+    const visibility = () => { if (document.visibilityState === 'hidden') cancel(); };
+    window.addEventListener('blur', cancel);
+    document.addEventListener('visibilitychange', visibility);
+    return () => {
+      window.removeEventListener('blur', cancel);
+      document.removeEventListener('visibilitychange', visibility);
+    };
+  }, [pageActive, resumeHandover, settleZoomNow]);
 
   const jumpToPage = useCallback((index: number) => {
     setState((current) => ({ ...current, pageIndex: index, phase: 'ready' }));
@@ -1663,7 +1712,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     return (
       <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
         {source && !exhaustedPages.has(index)
-          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} />
+          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -1733,7 +1782,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         }}
         onPointerCancel={cancelGesture}
         onPointerUp={(event) => { if (event.pointerType === 'mouse') handleMouseUp(event); }}
-        onLostPointerCapture={() => { if (pointerStartRef.current || panStart.current) cancelGesture(); }}
+        onLostPointerCapture={(event) => { if (event.pointerType === 'mouse' && (pointerStartRef.current || panStart.current)) cancelGesture(); }}
       onMouseMove={handleMouseMove}
       onMouseUp={handleMouseUp}
       // Pointer capture keeps delivering the gesture after the cursor leaves the
@@ -1766,7 +1815,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           </div>
         </section>
       ) : (
-        <div ref={trackRef} className={`reader-track${drag || panning ? ' is-moving' : ''}`} style={dragStyle}>
+        <div ref={trackRef} className={`reader-track${drag ? ' is-moving' : ''}`} style={dragStyle}>
           {([
             { offset: -1, indexes: neighbourIndexes.previous },
             { offset: 0, indexes: visibleIndexes },

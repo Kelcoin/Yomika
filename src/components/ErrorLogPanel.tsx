@@ -11,7 +11,6 @@ import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { NativeErrorLogRepository, type ErrorLogEntry } from '../repositories/nativeErrorLogRepository';
 import { NativeAppInfoRepository, type AppBuildInfo } from '../repositories/nativeAppInfoRepository';
 import { useToast } from './Toast';
-import { ConfirmDialog } from './ConfirmDialog';
 
 const repository = new NativeErrorLogRepository();
 const appRepository = new NativeAppInfoRepository();
@@ -314,7 +313,6 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
   // 收起这一半永远看不见（用户报的「只有展开有动画，收起没有」）。
   const factsReveal = useDelayedUnmount(factsOpen, REVEAL_EXIT_MS);
   const [openEntry, setOpenEntry] = useState<string>();
-  const [confirmClear, setConfirmClear] = useState(false);
   const facts = useMemo(() => appInfoLines(build, platform), [build, platform]);
   const factsText = useMemo(
     () => facts.sections.flatMap((section) => [`${section.title}`, ...section.rows.map((row) => `  ${row.label}: ${row.value}`)]).join('\n'),
@@ -405,7 +403,11 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
     </div>}
 
     {/* 四个动作铺在底部、各占一份宽（`.settings-menu-actions` 的既有规则就是「一行动作平分
-        宽度」）：清空是破坏性的那一个，用 `is-danger` 说清楚。 */}
+        宽度」）：清空是破坏性的那一个，用 `is-danger` 说清楚。
+
+        清空**不再先弹一次确认**（用户这轮要的）：这份日志本来就只有本次与上次两轮，清掉之后
+        新的失败照样会记，代价是多点一次对话而不是丢东西；点完当场把条目数报出来（`clearLog`
+        的 toast），用户看得见自己清了什么。 */}
     <div className="settings-menu-actions" role="group" aria-label="日志操作">
       <button className="secondary-action" type="button" disabled={!entries?.length} onClick={() => void copyLog()}>
         <ClipboardCopy aria-hidden="true" />复制日志
@@ -416,21 +418,9 @@ export function ErrorLogPanel({ state }: { state: ErrorLogState }) {
       <button className="secondary-action" type="button" onClick={openFeedback}>
         <MessageSquareWarning aria-hidden="true" />错误反馈
       </button>
-      <button className="secondary-action is-danger" type="button" disabled={!entries?.length} onClick={() => setConfirmClear(true)}>
+      <button className="secondary-action is-danger" type="button" disabled={!entries?.length} onClick={() => void clearLog()}>
         <Trash2 aria-hidden="true" />清空日志
       </button>
     </div>
-
-    {confirmClear && <ConfirmDialog
-      title="清空日志"
-      description={`将删掉本次与上次运行的全部记录（含崩溃现场）。这个操作不可撤销，之后再出的错照样会记。`}
-      confirmLabel="清空"
-      danger
-      onClose={() => setConfirmClear(false)}
-      onConfirm={async () => {
-        const done = await clearLog();
-        if (!done) throw new Error('清空失败');
-      }}
-    />}
   </div>;
 }

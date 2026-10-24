@@ -398,7 +398,10 @@ describe('reader domain', () => {
       expect(zoomByWheel(zoomedOut, -120).scale).toBe(1);
 
       // Coming back within the snap tolerance lands exactly on 100%, pan cleared.
-      expect(zoomByWheel({ scale: 1.03, panX: 12, panY: 8 }, -1)).toEqual({ scale: 1, panX: 0, panY: 0 });
+      expect(zoomByWheel({ scale: 1.03, panX: 12, panY: 8 }, 1)).toEqual({ scale: 1, panX: 0, panY: 0 });
+      let fineWheel = start;
+      for (let step = 0; step < 40; step++) fineWheel = zoomByWheel(fineWheel, -2);
+      expect(fineWheel.scale).toBeCloseTo(Math.exp(.12), 10);
 
       // Gestures may overshoot the hard limits...
       const overshot = zoomByWheel({ scale: 2.9, panX: 0, panY: 0 }, -600);

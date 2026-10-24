@@ -18,18 +18,19 @@ export interface CardTagLeadingChip { label: string; tone?: string; }
  * watched 的席位和上限都在 `pickCardTags` 里，颜色取自同一个账户的 My Tags 预设。
  * 档案库的宽行、缩略卡片和本地档案页都渲染这一个组件——各写一遍，正是标签顺序、
  * 显示范围和「我的标签」在本地档案页失效的原因。 */
-export function ArchiveCardTags({ tags, limit, rowCount, className, fill = false }: {
+export function ArchiveCardTags({ tags, limit, rowCount, className, fill = false, layout = 'measured' }: {
   tags: readonly string[] | undefined;
   limit: number;
   rowCount: number;
   className: string;
   fill?: boolean | undefined;
+  layout?: 'measured' | 'wrap' | undefined;
 }) {
   const myTags = useEhMyTags();
   const myTagKeys = useMemo(() => new Set(myTags.priority), [myTags.priority]);
   const picked = useMemo(() => pickCardTags(tags ?? [], limit, myTagKeys), [tags, limit, myTagKeys]);
   const colorFor = useCallback((tag: string) => myTags.colors.get(normalizeMyTagKey(tag)), [myTags.colors]);
-  return <CardTagRows tags={picked} rowCount={rowCount} className={className} colorFor={colorFor} fill={fill} />;
+  return <CardTagRows tags={picked} rowCount={rowCount} className={className} colorFor={colorFor} fill={fill} layout={layout} />;
 }
 
 export function CardTagRows({ tags, rowCount, className, colorFor, fill = false, leading = [], layout = 'measured' }: {
@@ -60,7 +61,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     : 'metadata-chip';
   const labelKey = useMemo(() => JSON.stringify(labels), [labels]);
   useLayoutEffect(() => {
-    if (layout === 'wrap') return;
+    if (layout === 'wrap' || !pageActive) return;
     const element = root.current;
     if (!element) return;
     let active = true;

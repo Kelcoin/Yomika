@@ -1,9 +1,9 @@
 import { RefreshIcon as RefreshCw } from '../components/RefreshIcon';
 import { loadFavoriteArchives } from '../lib/favoritesMirror';
 import { Bookmark, BookOpen, Eraser, FolderHeart, Server, Shuffle } from 'lucide-react';
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
-import { Link, Navigate, Route, Routes, useLocation, useParams, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
 import { RetainedPage, usePageActive } from './RetainedPage';
 import { EmptyState } from '../components/EmptyState';
@@ -50,9 +50,9 @@ export function preloadLazyPages(getForegroundPath: () => string = () => '/'): (
   const stop = scheduleStartupWarmup([
     // Common leaves first; main shells including home/library/more are already eager.
     lazyPages.settings, lazyPages.localArchives,
+    ...Object.entries(lazyPages).filter(([key]) => key !== 'settings' && key !== 'localArchives').map(([, load]) => load),
     ...(['toRead', 'history', 'watchlist'] as const).map(name => () => warmShelfSnapshot(name,
       () => allowed(name === 'toRead' ? '/to-read' : `/${name}`))),
-    ...Object.entries(lazyPages).filter(([key]) => key !== 'settings' && key !== 'localArchives').map(([, load]) => load),
   ]);
   return () => { stopped = true; stop(); };
 }
@@ -71,6 +71,7 @@ import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID } from '../lib/tags';
 import { pickRandomSample } from '../lib/archiveCardPresentation';
 import { readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { readKnownServerPresence } from '../lib/serverPresence';
+import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { isArchiveFinished } from '../lib/archiveCardPresentation';
 import { useCardStyle, usePreferences } from './preferences';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -111,7 +112,8 @@ function formatShelfTimeline(iso: string): ShelfTimelineEntry {
 
 const HOME_SNAPSHOT_KEY = 'home:shelves';/** Same reasoning as the library list: switching tabs and coming back should not
  * re-resolve the shelves and draw a new random set. */
-const HOME_SNAPSHOT_FRESH_MS = 90_000;
+// Revalidate on activation; an older local snapshot still supplies the first frame.
+const HOME_SNAPSHOT_FRESH_MS = Infinity;
 
 /** 首页「继续阅读」与「待看档案」两排的显示上限：一排横向书架摆满一屏之后，
  * 剩下的既看不见也懒得翻；20 本够翻一会儿，又不至于让首屏挂上几百张卡片。
@@ -977,8 +979,30 @@ export function WorkspaceRoutes() {
   const visited = useRef(new Map<string, typeof location>());
   visited.current.set(routeKey, location);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedPage key={key} active={routeKey === key} motionSurface flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}>
-      <Suspense fallback={<WorkspaceLoadingSkeleton path={saved.pathname} />}>
+    <RetainedWorkspacePage key={key} saved={saved} active={routeKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
+  ))}</>;
+}
+
+function ActiveRedirect({ to }: { to: string }) {
+  return usePageActive() ? <Navigate to={to} replace /> : null;
+}
+
+function WorkspaceRouteFallback({ path }: { path: string }) {
+  const goBack = useReturnNavigation();
+  return <WorkspaceLoadingSkeleton path={path} onBack={goBack} />;
+}
+
+/** Stable route elements keep unrelated retained pages out of navigation renders.
+ * Active context still reaches consumers for freshness and scroll restoration. */
+const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, active, flow }: {
+  saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean;
+}) {
+  // Routes(location=...) still subscribes to the outer LocationContext. Isolate
+  // that subscription too, otherwise every hidden useLocation consumer updates.
+  // Keep the navigator inherited so links and back continue to use the real router.
+  const routeLocation = useMemo(() => ({ location: saved, navigationType: NavigationType.Pop }), [saved]);
+  const content = useMemo(() => (
+      <Suspense fallback={<WorkspaceRouteFallback path={saved.pathname} />}>
         <Routes location={saved}>
           <Route path="/" element={<HomeShell><HomeWorkspace /></HomeShell>} />
           {/* 首页自己的详情：卡片开在 `/home/:id` 上，返回与再进首页都落在首页，
@@ -994,15 +1018,17 @@ export function WorkspaceRoutes() {
           <Route path="/more" element={<MorePagesRoute />} />
           <Route path="/tools/upload" element={<UploadRoute />} />
           <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />
-          <Route path="/dedup" element={routeKey === key ? <Navigate to="/tools/dedup" replace /> : null} />
-          <Route path="/sync" element={routeKey === key ? <Navigate to="/settings?section=sync" replace /> : null} />
+          <Route path="/dedup" element={<ActiveRedirect to="/tools/dedup" />} />
+          <Route path="/sync" element={<ActiveRedirect to="/settings?section=sync" />} />
           <Route path="/settings" element={<SettingsWorkspace />} />
           <Route path="*" element={<HomeWorkspace />} />
         </Routes>
       </Suspense>
-    </RetainedPage>
-  ))}</>;
-}
+  ), [saved]);
+  return <RetainedPage active={active} motionSurface flow={flow}>
+    <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
+  </RetainedPage>;
+});
 
 function MetadataEditRouteRoute() {
   const { archiveId = '' } = useParams();

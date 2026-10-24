@@ -51,9 +51,13 @@ impl RuntimeId {
     }
 }
 
-/// 平台偏好顺序：Windows 先 DirectML，苹果先 CoreML，Android 先 NNAPI，CPU 永远
-/// 排在最后。这只表达「想用哪个」，不代表真的能用——能不能用要看
+/// 平台偏好顺序（只是 ORT 的 EP）：Windows 先 DirectML，苹果先 CoreML，Android 先
+/// NNAPI，CPU 永远排在最后。这只表达「想用哪个」，不代表真的能用——能不能用要看
 /// `available_runtimes()` 与实测结论。
+///
+/// Android 上真正的首选不在这个列表里：ONNX 指纹命中内置 ncnn-Vulkan 变体的模型
+/// 直接走 Vulkan，`mobile_worker.rs` 把 `ncnn-vulkan` 插在运行库表最前；NNAPI 是它
+/// 对不上指纹时的回落，`ncnn.rs` 的 `matching_model` 只认 SHA-256 与 scale。
 pub fn platform_preference() -> Vec<RuntimeId> {
     let mut order = Vec::new();
     if cfg!(target_os = "windows") {

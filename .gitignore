@@ -1,5 +1,7 @@
 # Local architecture and migration documents（架构、审计与迁移笔记只在本地，不随仓库走）。
 /docs/*
+# Public build instructions linked from the user-facing README.
+!/docs/BUILDING.md
 
 # Planning state
 /.planning/

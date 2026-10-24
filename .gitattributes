@@ -1,0 +1,5 @@
+# 这些资源的身份是 sha256（ncnn.rs / 包自检逐字节核对），换行转换会让 .param 在
+# checkout 后被写成 CRLF、指纹对不上。按二进制处理，永远原样进出。
+*.bin binary
+*.onnx binary
+*.param -text
