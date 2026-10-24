@@ -4512,7 +4512,17 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* Snap uses an untransformed wrapper: pressing the first card must not
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
-.archive-rail-item > .archive-thumb-card { scroll-snap-align: none; transform: translateZ(0); isolation: isolate; }
+.archive-rail-item > .archive-thumb-card {
+  --archive-thumb-body-height: 135px;
+  scroll-snap-align: none;
+  transform: translateZ(0);
+  isolation: isolate;
+  /* The progress track's centre is 2px above the body (top: -5px,
+     height: 6px). Scale around that seam, rather than the card centre:
+     otherwise hover moves the track down by about 0.7px. This also keeps
+     the seam stable on wide covers and rails without a visible track. */
+  transform-origin: 50% calc(100% - var(--archive-thumb-body-height) - 2px);
+}
 .archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
@@ -4532,7 +4542,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-thumb-card.is-skeleton .archive-thumb-card-meta .skeleton-line { width: 60%; height: 100%; }
 .archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-container); }
 .archive-thumb-card-media img, .archive-thumb-card-skeleton { display: block; width: 100%; height: 100%; object-fit: cover; }
-.archive-thumb-card-body { position: relative; display: grid; align-content: start; grid-template-columns: minmax(0, 1fr); grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
+.archive-thumb-card-body { position: relative; display: grid; align-content: start; grid-template-columns: minmax(0, 1fr); grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: var(--archive-thumb-body-height, 135px); padding: var(--space-3); }
 /* 进度条压在封面与正文的接缝上，读的是「这张卡读到哪儿了」。
    两端都顶到卡片内边缘、外边不带圆角：左侧留白会让 1% 的进度看起来是一枚悬空的
    圆点，而画满时右侧的圆角会在卡片边缘留下一小块轨道底色——两种都不像这张卡
