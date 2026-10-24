@@ -121,6 +121,22 @@ describe('device identity', () => {
 });
 
 describe('compute center paired clients', () => {
+  it('renders cached service details immediately while reconciling in the background', () => {
+    localStorage.setItem('yomika.compute-center-status', JSON.stringify(computeStatus({ running: true, pairedClients: CLIENTS, token: '' })));
+    setInvokeAdapterForTests(adapterFor({ compute_center_status: () => new Promise(() => {}) }));
+    render(<ToastProvider><ComputeCenterSettingsGroup preferences={{ ...DEFAULT_PREFERENCES, computeCenterEnabled: true }} editPreferences={() => {}} /></ToastProvider>);
+    expect(screen.getByRole('switch', { name: '开启本机远程后处理服务' })).toBeEnabled();
+    expect(screen.getByRole('switch', { name: '开启本机远程后处理服务' })).toBeChecked();
+    expect(screen.getByRole('button', { name: '端口' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '管理已有配对' })).toHaveTextContent('4 台设备');
+    expect(screen.queryByRole('region', { name: '远程后处理服务' })).not.toBeInTheDocument();
+  });
+
+  it('renders the remote settings immediately when local serving is disabled', () => {
+    setInvokeAdapterForTests(adapterFor({ compute_center_status: () => new Promise(() => {}) }));
+    renderComputeCenter();
+    expect(screen.getByRole('region', { name: '远程后处理服务' })).toBeInTheDocument();
+  });
   it('does not restore a revoked client when an older status refresh finishes', async () => {
     let reads = 0;
     let finish!: (value: unknown) => void;

@@ -32,7 +32,7 @@ pub const MENU_HEIGHT: f64 = 62.0;
 /// 菜单左上角的位置（物理像素）。
 ///
 /// 默认从光标**向左上**展开——托盘在右下角，往这两个方向才是屏幕里侧。放不下就翻到
-/// 光标另一侧（任务栏可以在上边或左边），最后无论如何夹进这个显示器的范围，绝不把菜单
+/// 光标另一侧（任务栏可以在上边或左边），最后无论如何夹进这个显示器的可用工作区，绝不把菜单
 /// 放到看不见的地方。
 pub fn menu_origin(
     cursor: (f64, f64),
@@ -89,30 +89,35 @@ pub fn install(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(window)
 }
 
-/// 在光标处弹出。位置按 `menu_origin` 算，超出显示器就夹回来。
+/// 在光标处弹出，按当前显示器的 DPI 与工作区避开任务栏。
 pub fn show_at(app: &AppHandle, cursor: PhysicalPosition<f64>) {
     let Some(window) = app.get_webview_window(MENU_WINDOW) else {
         return;
     };
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let size = (MENU_WIDTH * scale, MENU_HEIGHT * scale);
-    let bounds = app
+    let monitor = app
         .monitor_from_point(cursor.x, cursor.y)
         .ok()
         .flatten()
-        .map(|monitor| {
-            let position = monitor.position();
-            let area = monitor.size();
-            (
-                f64::from(position.x),
-                f64::from(position.y),
-                f64::from(position.x) + f64::from(area.width),
-                f64::from(position.y) + f64::from(area.height),
-            )
-        });
-    if let Some(bounds) = bounds {
+        .or_else(|| app.primary_monitor().ok().flatten());
+    if let Some(monitor) = monitor {
+        let scale = monitor.scale_factor();
+        let size = ((MENU_WIDTH * scale).round(), (MENU_HEIGHT * scale).round());
+        let area = monitor.work_area();
+        // Leave a small gap from the taskbar instead of touching its top edge.
+        let gap = 6.0 * scale;
+        let left = f64::from(area.position.x);
+        let top = f64::from(area.position.y);
+        let bounds = (
+            left + gap,
+            top + gap,
+            left + f64::from(area.size.width) - gap,
+            top + f64::from(area.size.height) - gap,
+        );
         let (x, y) = menu_origin((cursor.x, cursor.y), size, bounds);
         let _ = window.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        // Move first: WM_DPICHANGED may resize when crossing monitors. Apply the
+        // target physical size afterwards so that adjustment cannot scale twice.
+        let _ = window.set_size(tauri::PhysicalSize::new(size.0 as u32, size.1 as u32));
     }
     let _ = app.emit_to(MENU_WINDOW, "tray-menu-opening", ());
     let _ = window.show();
@@ -199,6 +204,24 @@ mod tests {
         assert_eq!(menu_origin((4.0, 4.0), (84.0, 62.0), SCREEN), (4.0, 4.0));
         // 左边缘但下方有空间：横向翻、纵向仍然往上。
         assert_eq!(menu_origin((4.0, 900.0), (84.0, 62.0), SCREEN), (4.0, 838.0));
+    }
+
+    #[test]
+    fn avoids_taskbars_on_each_edge_using_the_work_area() {
+        // 48px taskbar and a 6px gap from its edge.
+        assert_eq!(menu_origin((1900.0, 1070.0), (60.0, 62.0), (6.0, 6.0, 1914.0, 1026.0)), (1840.0, 964.0));
+        assert_eq!(menu_origin((1900.0, 20.0), (60.0, 62.0), (6.0, 54.0, 1914.0, 1074.0)), (1840.0, 54.0));
+        assert_eq!(menu_origin((20.0, 1000.0), (60.0, 62.0), (54.0, 6.0, 1914.0, 1074.0)), (54.0, 938.0));
+        assert_eq!(menu_origin((1900.0, 1000.0), (60.0, 62.0), (6.0, 6.0, 1866.0, 1074.0)), (1806.0, 938.0));
+    }
+
+    #[test]
+    fn fits_scaled_menu_above_a_secondary_monitor_taskbar() {
+        // 150% secondary screen left of primary, with a 72px bottom taskbar.
+        let work_area = (-1911.0, 9.0, -9.0, 999.0);
+        let origin = menu_origin((-30.0, 1050.0), (90.0, 93.0), work_area);
+        assert_eq!(origin, (-120.0, 906.0));
+        assert!(origin.1 + 93.0 <= work_area.3);
     }
 
     #[test]

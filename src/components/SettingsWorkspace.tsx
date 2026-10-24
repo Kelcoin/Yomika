@@ -348,6 +348,12 @@ export function SettingsWorkspace() {
   const [installedModels, setInstalledModels] = useState<InstalledModel[] | undefined>(() => readStorageSnapshot('yomika.advanced-models', InstalledModelSchema.array()));
   /** The hosted catalog. `undefined` = not fetched yet, `[]` = fetch failed. */
   const [upscaleCatalog, setUpscaleCatalog] = useState<UpscaleCatalogModel[] | undefined>(() => readStorageSnapshot('yomika.advanced-upscale-catalog', UpscaleCatalogSchema.shape.models));
+  /** Display may start from the cached list, but **actions** wait for a real answer:
+   * trusting the cache here would let a stale or empty snapshot enable the upscale
+   * switch before the IPC reconciles, and a cache written while models were missing
+   * (or removed outside the app) would leave a control that cannot run. So the gate
+   * stays closed until verification returns — see 「shows cached model detection
+   * while refreshing after a restart」 in tests/components/settings-workspace.test.tsx. */
   const [modelsVerified, setModelsVerified] = useState(false);
   // A model with no recorded scale cannot be run, so it is not a choice. One row
   // per id: see firstPerId.

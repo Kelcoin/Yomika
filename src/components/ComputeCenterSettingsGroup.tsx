@@ -86,7 +86,10 @@ interface Props {
 export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobile = false }: Props) {
   const { showToast } = useToast();
   const repository = useMemo(() => new NativeComputeCenterRepository(), []);
-  const [status, setStatus] = useState<ComputeCenterStatus>();
+  const [status, setStatus] = useState<ComputeCenterStatus | undefined>(() => {
+    const cached = readStorageSnapshot('yomika.compute-center-status', ComputeCenterStatusSchema);
+    return cached ? { ...cached, token: '' } : undefined;
+  });
   const [busy, setBusy] = useState(false);
   const [remote, setRemote] = useState<RemoteCapabilities>();
   /** `remote` 说的是**哪一台**：换设备时旧清单要立刻让位，同一台重探时则留着（见 `connectRemote`）。 */
@@ -119,16 +122,15 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
    *  就是让人以为能同时选。从前只有单向：本机开着时藏远端那一组，反过来没做，于是开着
    *  远端还留着「开启本机远程后处理服务」这条。 */
   const showLocalServing = !mobile && !remoteOps.enabled;
-  /** 远端那一组什么时候在：桌面端要等到 status 回来（本机开着算力中心时这一档没意义），
-   *  手机上没有本机那一档可争，status 取不到（网页调试、命令失败）也得留着——不然手机
-   *  用户就一个入口都没有了。 */
-  const showRemote = mobile || (Boolean(status) && !status?.running);
   /** 开关画的是「这一台在不在对外提供算力」。**初值取偏好，不取瞬时的 status**：status 要
    *  等一次 IPC 回来（挂载时先读上一次写下的缓存快照，那份很可能还是关着的时候写的），
    *  于是开关先画成关、再跳成开——用户报「每次进高级页面都默认关闭再变成开启；开着就一直
    *  开着，不要每次都从关闭再变成开的」。偏好是用户自己的意图，先按它画；`refresh()` 回来
    *  之后以 status 为准（真关了也就跟着画成关）。 */
   const serving = verified ? status?.running ?? preferences.computeCenterEnabled : preferences.computeCenterEnabled;
+  // Initial visibility follows persisted intent, never the timing of the IPC.
+  const showRemote = mobile || !serving;
+  const servingPort = verified ? status?.port ?? preferences.computeCenterPort : preferences.computeCenterPort;
   /** 自动搜到的、**还没配对过**的设备：已经配好的在上面「已配对设备」那一条里，搜出来
    *  再列一遍只会让人分不清点哪个。 */
   const unpairedDevices = useMemo(
@@ -160,12 +162,6 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   }, [repository, publishStatus]);
 
   useEffect(() => {
-    const cached = readStorageSnapshot('yomika.compute-center-status', ComputeCenterStatusSchema);
-    if (cached) {
-      const display = { ...cached, token: '' };
-      setStatus(display);
-      cacheDisplayStatus(display);
-    }
     void refresh();
     return () => { statusRequest.current += 1; };
   }, [refresh]);
@@ -333,20 +329,20 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
           hint={
             serving ? '这台设备正在为局域网内的其他设备处理图片' : '允许其他设备连接这台设备处理图片'
           }
-          disabled={busy || !verified}
+          disabled={busy || (!verified && !status)}
           checked={serving}
           onToggle={() => void toggleServing(!serving)}
         />
-        {status?.running && <SettingsRow
+        {serving && <SettingsRow
           icon={<Server />}
           label="端口"
           hint={
             status && status.addresses.length > 0
-              ? `移动端填：${status.addresses[0]}:${status.port}`
+              ? `移动端填：${status.addresses[0]}:${servingPort}`
               : '没有找到局域网地址，请连接 Wi-Fi 或网线'
           }
-          value={String(status.port)}
-          onClick={verified ? () => { setPortDraft(status.port); setPortMenu(true); } : undefined}
+          value={String(servingPort)}
+          onClick={() => { setPortDraft(servingPort); setPortMenu(true); }}
         />}
         {portMenu && <SettingsMenu title="端口" icon={<Server />} onClose={() => setPortMenu(false)}>
           <label className="settings-menu-field">
@@ -357,7 +353,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             <button className="primary-action" type="button" disabled={busy || !Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535} onClick={() => void savePort()}><Save aria-hidden="true" />保存</button>
           </div>
         </SettingsMenu>}
-        {status?.running && <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status.pairedClients?.length ?? 0} 台设备`} onClick={verified ? () => { setLocalPairMenu(true); void refresh(); } : undefined} />}
+        {serving && <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status?.pairedClients?.length ?? 0} 台设备`} onClick={() => { setLocalPairMenu(true); void refresh(); }} />}
         {localPairMenu && <SettingsMenu
           title="管理已有配对"
           icon={<Link2 />}
