@@ -622,3 +622,11 @@ describe('native library repository bridge', () => {
     });
   });
 });
+
+
+it('preserves archive added timestamps in the lightweight dedup identity response', async () => {
+  const identities = [{ archiveId:'a',title:'Archive',tags:[],pageCount:24,fileSize:2500000,addedAt:1700000000 }];
+  setInvokeAdapterForTests(async () => ({ok:true,value:identities}));
+  const result = await new NativeLibraryRepository().listArchiveIdentities('server-a');
+  expect(result).toEqual({ok:true,value:identities});
+});

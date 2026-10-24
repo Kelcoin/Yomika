@@ -1,8 +1,9 @@
 import { ContentSkeleton } from './ContentSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
-import { Ban, Check, Eraser, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, Save, ListChecks, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
+import { ExternalLink, LayoutGrid, Ban, Check, Eraser, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, Save, ListChecks, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
 import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -18,12 +19,15 @@ import { EmptyState } from './EmptyState';
 import { LoadingIndicator } from './LoadingIndicator';
 import { StatusLine } from './StatusLine';
 import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
-import { pickCardTags } from '../lib/archiveCardPresentation';
+import { formatArchiveDate, pickCardTags } from '../lib/archiveCardPresentation';
 import { pickServer } from '../domain/server';
 import { parseArchiveTagString } from '../lib/tags';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { DatePicker } from './DatePicker';
 import { SettingsSwitch } from './SettingsControls';
+import { archiveSourceUrl } from '../lib/archiveSource';
+import { openExternalUrl } from '../bridge/externalUrl';
+import { longPressHandlers } from '../lib/longPressMenu';
 
 const library = new NativeLibraryRepository();
 const dedup = new NativeDedupRepository();
@@ -42,6 +46,7 @@ function dedupeArchiveOf(archive: ArchiveIdentity): DedupeArchive {
     tags: archive.tags,
     size: archive.fileSize ?? undefined,
     pagecount: archive.pageCount ?? undefined,
+    date_added: archive.addedAt ?? undefined,
   };
 }
 
@@ -66,20 +71,6 @@ function pageGapArchiveIds(group: readonly DedupMember[]): ReadonlySet<string> {
   return new Set(counted
     .filter((member) => Number(member.pagecount) === smallest || Number(member.pagecount) === largest)
     .map((member) => member.archiveId));
-}
-
-/** 组卡片的行布局：一行能放几列由实测宽度决定（与 --space-4 的间距保持一致），
- * 放不满的那一行整行居中。 */
-const GROUP_MIN_WIDTH = 340;
-const GROUP_GAP = 16;
-function groupColumnsFor(width: number): number {
-  if (width <= 0) return 3;
-  return Math.max(1, Math.floor((width + GROUP_GAP) / (GROUP_MIN_WIDTH + GROUP_GAP)));
-}
-function chunkRows<T>(items: readonly T[], size: number): T[][] {
-  const rows: T[][] = [];
-  for (let index = 0; index < items.length; index += size) rows.push(items.slice(index, index + size));
-  return rows;
 }
 
 /** 进度条上的阶段名：与后端的 stage 一一对应。 */
@@ -128,7 +119,7 @@ function selectionSignals(archive: DedupeArchive): Array<{ label: string; tone: 
 }
 
 /** 一个待处理档案：封面、标签与元信息。整张卡是勾选框，底色表示多选状态。 */
-const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverId, selected, disabled, pageGap, onToggle }: {
+const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverId, selected, disabled, pageGap, chainMarker, onToggle, onContextMenu }: {
   member: DedupMember;
   scopeId?: string | undefined;
   serverId?: string | undefined;
@@ -136,7 +127,9 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
   disabled: boolean;
   /** 与同组档案页数差过大：页数本身被标出来，代替组标题上的提醒。 */
   pageGap: boolean;
+  chainMarker?: number | undefined;
   onToggle: (archiveId: string) => void;
+  onContextMenu: (archiveId: string, at: { x: number; y: number }) => void;
 }) {
   // DedupeArchive 的 tags 既可能是数组也可能是 LANraragi 的逗号串。
   const tags = useMemo(() => {
@@ -146,7 +139,12 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
   }, [member.tags]);
   const leading = useMemo(() => selectionSignals(member), [member]);
   const pageCount = Number(member.pagecount) > 0 ? Number(member.pagecount) : 0;
-  return <button
+  const openMenu = (at: { x: number; y: number }) => onContextMenu(member.archiveId, at);
+  return <span className="dedup-member-interaction" {...longPressHandlers(openMenu)} onContextMenu={(event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openMenu({ x: event.clientX, y: event.clientY });
+  }}><button
     type="button"
     role="checkbox"
     aria-checked={selected}
@@ -160,19 +158,21 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
       {scopeId && serverId
         ? <ArchiveThumbMedia scopeId={scopeId} serverId={serverId} archiveId={member.archiveId} />
         : <span className="archive-thumb-card-skeleton" aria-hidden="true" />}
+      {chainMarker !== undefined && <span className="dedup-member-chain-marker" aria-label={'链内档案 ' + chainMarker} title={'链内档案 ' + chainMarker + '：同一编号代表同一本档案'}>#{chainMarker}</span>}
     </span>
     <span className="dedup-member-copy">
       <strong className="dedup-member-title">{member.title || member.archiveId}</strong>
-      <CardTagRows tags={tags} leading={leading} rowCount={3} fill className="dedup-member-tags archive-thumb-card-tags" />
-      {/* 体积与页数钉在标签区下方两端：标签有几行都不影响它们的位置。 */}
+      <CardTagRows tags={tags} leading={leading} rowCount={3} fill layout="wrap" className="dedup-member-tags archive-thumb-card-tags" />
+      {/* 添加时间、体积、页数依次固定在卡片底部。 */}
       <span className="dedup-member-meta">
-        <span>{formatBytes(member.size)}</span>
+        <span className="dedup-member-added" title="添加时间">{formatArchiveDate(Number(member.date_added)) || '时间未知'}</span>
+        <span className="dedup-member-size" title="体积">{formatBytes(member.size)}</span>
         <span className={`dedup-member-pages${pageGap ? ' is-flagged' : ''}`} {...(pageGap ? { title: '与同组档案页数差异较大，删除前请确认' } : {})}>
           {pageCount > 0 ? `${pageCount}页` : '页数未知'}
         </span>
       </span>
     </span>
-  </button>;
+  </button></span>;
 });
 
 /** 去重工作区，操作模型与 Readoshi 对齐：
@@ -193,7 +193,7 @@ export function DeduplicationWorkspace() {
   const [endDate, setEndDate] = useState(() => toDedupeDayString());
   const [sourceFilter, setSourceFilter] = useState<'all' | DuplicateSource>('all');
   const [selectionFilter, setSelectionFilter] = useState<'all' | 'selected' | 'pending'>('all');
-  const [view, setView] = useState<'groups' | 'chains' | 'page-gap'>('groups');
+  const [view, setView] = useState<'all' | 'groups' | 'chains' | 'page-gap'>('all');
   const [busy, setBusy] = useState(false);
   const [selectedGroupKeys, setSelectedGroupKeys] = useState<Set<string>>(new Set());
   const [manuallyTouchedGroupKeys, setManuallyTouchedGroupKeys] = useState<Set<string>>(new Set());
@@ -214,6 +214,10 @@ export function DeduplicationWorkspace() {
   const [relations, setRelations] = useState<DedupNonDuplicateRecord[]>([]);
   /** 从关系行打开的档案概览：就地看一眼，不离开查重页（筛选与选择都留着）。 */
   const [overviewArchiveId, setOverviewArchiveId] = useState<string>();
+  const [contextMenuTarget, setContextMenuTarget] = useState<{ archive: ArchiveIdentity; x: number; y: number }>();
+  useOverlayBackGuard(Boolean(contextMenuTarget), () => setContextMenuTarget(undefined));
+  useEffect(() => { setContextMenuTarget(undefined); }, [server?.id]);
+  const contextGalleryUrl = archiveSourceUrl(contextMenuTarget?.archive.tags);
   /** 身份列表里没有概览弹窗要的全字段：打开时按 id 现取一条。 */
   const [overviewArchive, setOverviewArchive] = useState<ArchiveRecord>();
   // Keep the logical parent on the back stack while only its visual surface
@@ -231,6 +235,7 @@ export function DeduplicationWorkspace() {
       setHistoryOpen(false);
       setSmartSelectPending(false);
       setDeleteSession(undefined);
+      setContextMenuTarget(undefined);
       setOverviewArchiveId(undefined);
       setOverviewArchive(undefined);
     }
@@ -242,9 +247,6 @@ export function DeduplicationWorkspace() {
   const selectionWrites = useRef<Promise<void>>(Promise.resolve());
   const selectionRevision = useRef(0);
   const confirmedSelection = useRef<{ sessionId: string; ids: string[] }>();
-  /** 结果区宽度：列数与「不满行居中」的卡片宽度都按它算。 */
-  const groupsRef = useRef<HTMLDivElement>(null);
-  const [groupsWidth, setGroupsWidth] = useState(0);
 
   useEffect(() => {
     void library.listServers().then((response) => {
@@ -283,6 +285,11 @@ export function DeduplicationWorkspace() {
     return byId;
   }, [archives]);
 
+  const openCardContextMenu = useCallback((archiveId: string, at: { x: number; y: number }) => {
+    const archive = archiveById.get(archiveId);
+    if (archive) setContextMenuTarget({ archive, ...at });
+  }, [archiveById]);
+
   const groups = useMemo<DedupMember[][]>(() => {
     const resolve = (archiveId: string): DedupMember => {
       const record = archiveById.get(archiveId)!;
@@ -302,6 +309,16 @@ export function DeduplicationWorkspace() {
   const selected = useMemo(() => new Set(result?.selectedArchiveIds ?? []), [result?.selectedArchiveIds]);
   // Membership comes from all pairs, including edges hidden by the current filter.
   const selectionComponents = useMemo(() => filtered.allChains.map((chain) => new Set(chain.flatMap((group) => group.map((member) => member.archiveId)))), [filtered.allChains]);
+  // Assign from the complete chain before source/view/selection filters and
+  // progressive mounting, so the same archive keeps its badge in every pair.
+  const chainArchiveMarkers = useMemo(() => {
+    const markers = new Map<string, number>();
+    for (const ids of selectionComponents) {
+      if (ids.size <= 2) continue;
+      [...ids].sort().forEach((id, index) => markers.set(id, index + 1));
+    }
+    return markers;
+  }, [selectionComponents]);
   const standalonePairArchiveIds = useMemo(() => new Set(selectionComponents.filter((ids) => ids.size === 2).flatMap((ids) => [...ids])), [selectionComponents]);
   const selectionDisabledIds = useMemo(() => {
     const disabled = new Set<string>();
@@ -328,12 +345,15 @@ export function DeduplicationWorkspace() {
     return filtered.allChains.flatMap((chain) => {
       if (chain.length > 1) number += 1;
       const visible = sourceFilter === 'all' ? chain : chain.filter((group) => sourceByGroupKey[groupKeyOf(group)] === sourceFilter);
-      return visible.length ? [{ key: chain.map(groupKeyOf).join('#'), number, groups: visible }] : [];
+      return visible.length ? [{ key: chain.map(groupKeyOf).join('#'), number, isChain: chain.length > 1, groups: visible }] : [];
     });
   }, [filtered.allChains, sourceByGroupKey, sourceFilter]);
   /** 已选择 / 待选择视图：按组筛，链里留下的组仍连在原来的链区块里。 */
   const visibleSections = useMemo(() => {
-    const sections = view === 'page-gap' ? chainSections.map((section) => ({ ...section, groups: section.groups.filter((group) => pageGapArchiveIds(group).size > 0) })).filter((section) => section.groups.length > 0) : chainSections;
+    const sections = view === 'groups' ? chainSections.filter((section) => !section.isChain)
+      : view === 'chains' ? chainSections.filter((section) => section.isChain)
+        : view === 'page-gap' ? chainSections.map((section) => ({ ...section, groups: section.groups.filter((group) => pageGapArchiveIds(group).size > 0) })).filter((section) => section.groups.length > 0)
+          : chainSections;
     if (selectionFilter === 'all') return sections;
     const wanted = selectionFilter === 'selected';
     return sections
@@ -346,8 +366,7 @@ export function DeduplicationWorkspace() {
   useEffect(() => { setMountedGroupCount(DEMOUNT_GROUP_CHUNK); }, [sourceFilter, selectionFilter, view, result?.session.sessionId]);
   const mountedSections = useMemo(() => {
     let remaining = mountedGroupCount;
-    const sections = view === 'chains' ? visibleSections.filter((section) => section.groups.length > 1) : visibleSections;
-    return sections.flatMap((section) => {
+    return visibleSections.flatMap((section) => {
       if (remaining <= 0) return [];
       const shown = section.groups.slice(0, remaining);
       remaining -= shown.length;
@@ -355,27 +374,7 @@ export function DeduplicationWorkspace() {
       return [{ ...section, groups: shown, fullGroups: section.groups }];
     });
   }, [visibleSections, mountedGroupCount, view]);
-  const moreRowsMounted = mountedSections.reduce((count, section) => count + section.groups.length, 0) < (view === 'chains' ? visibleSections.filter((section) => section.groups.length > 1) : visibleSections).reduce((count, section) => count + section.groups.length, 0);
-  const groupColumns = groupColumnsFor(groupsWidth);
-  const chainColumns = groupColumnsFor(groupsWidth - 2 * 16 - 2);
-  const resultRows = useMemo(() => {
-    type Row = { kind: 'groups'; key: string; groups: DedupMember[][] } | { kind: 'chain'; key: string; number: number; chain: DedupMember[][]; fullChain: DedupMember[][] };
-    const rows: Row[] = [];
-    let pending: DedupMember[][] = [];
-    const flush = () => {
-      if (!pending.length) return;
-      rows.push({ kind: 'groups', key: `row-${rows.length}`, groups: pending });
-      pending = [];
-    };
-    mountedSections.forEach((section) => {
-      if (section.fullGroups.length > 1) { flush(); rows.push({ kind: 'chain', key: section.key, number: section.number, chain: section.groups, fullChain: section.fullGroups }); return; }
-      pending.push(section.groups[0]!);
-      if (pending.length >= groupColumns) flush();
-    });
-    flush();
-    return rows;
-  }, [mountedSections, groupColumns]);
-  const mountedRows = resultRows;
+  const moreRowsMounted = mountedSections.reduce((count, section) => count + section.groups.length, 0) < visibleGroups.length;
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (!pageActive || !moreRowsMounted) return undefined;
@@ -416,16 +415,6 @@ export function DeduplicationWorkspace() {
     selectionWrites.current = write.then(() => undefined, () => undefined);
     return write;
   }
-
-  useEffect(() => {
-    const element = groupsRef.current;
-    if (!pageActive || !element || typeof ResizeObserver === 'undefined') return undefined;
-    const measure = () => setGroupsWidth(element.clientWidth);
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [pageActive, Boolean(result)]);
 
   async function persistSelection(nextSelected: string[]) {
     await applySelection(nextSelected);
@@ -837,10 +826,16 @@ export function DeduplicationWorkspace() {
     let active = true;
     setOverviewArchive(undefined);
     void library.listArchivesByIds(server.id, [overviewArchiveId]).then((response) => {
-      if (active) setOverviewArchive(response.ok ? response.value[0] : undefined);
+      if (!active) return;
+      const archive = response.ok ? response.value[0] : undefined;
+      setOverviewArchive(archive);
+      if (!archive) {
+        setOverviewArchiveId(undefined);
+        showToast(response.ok ? '档案不存在或已移除' : response.error.message, 'error');
+      }
     });
     return () => { active = false; };
-  }, [overviewArchiveId, server, pageActive]);
+  }, [overviewArchiveId, server, pageActive, showToast]);
 
   const visibleRelations = useMemo(() => {
     const query = relationsQuery.trim().toLowerCase();
@@ -852,12 +847,12 @@ export function DeduplicationWorkspace() {
       || relationLabel(record.rightArchiveId).toLowerCase().includes(query));
   }, [relations, relationsQuery, archiveById]);
 
-  function renderGroup(group: DedupMember[], rowKey: string) {
+  function renderGroup(group: DedupMember[]) {
     const key = groupKeyOf(group);
     const isSelected = selectedGroupKeys.has(key);
     const pageGapIds = pageGapArchiveIds(group);
     const sourceLabel = sourceByGroupKey[key] === 'filename' ? '文件名' : '封面相似';
-    return <li className={`dedup-group${isSelected ? ' is-selected' : ''}`} key={`${rowKey}#${key}`}>
+    return <li className={`dedup-group${isSelected ? ' is-selected' : ''}`} key={key}>
       {/* 标题就是整组的选择按钮：一组永远「两两成对」，所以不报条数，只留可定位
           的序号；来源改成序号后面的图标（文件名 / 封面相似），页数差这类提醒挪到
           出了问题的页数上。 */}
@@ -875,7 +870,9 @@ export function DeduplicationWorkspace() {
           selected={selected.has(archive.archiveId)}
           disabled={selectionDisabledIds.has(archive.archiveId)}
           pageGap={pageGapIds.has(archive.archiveId)}
+          chainMarker={chainArchiveMarkers.get(archive.archiveId)}
           onToggle={handleMemberToggle}
+          onContextMenu={openCardContextMenu}
         />
       </li>)}</ul>
     </li>;
@@ -981,7 +978,7 @@ export function DeduplicationWorkspace() {
       </dl>
       <div className="dedup-filters">
         <label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部来源' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label>
-        <label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }, { value: 'page-gap', label: '页数差距大' }]} onChange={(value) => setView(value as typeof view)} /></label>
+        <label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'all', label: '全部' }, { value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }, { value: 'page-gap', label: '页数差距大' }]} onChange={(value) => setView(value as typeof view)} /></label>
         {/* 已选择 / 待选择：检查这批重复还有哪些没定，或复核已经定下的那些。
             和上面两个筛选用同一种控件，三格看起来是一排。 */}
         <label>选择<SelectField name="dedupSelection" aria-label="选择" value={selectionFilter} options={[{ value: 'all', label: '全部' }, { value: 'selected', label: '已选择' }, { value: 'pending', label: '待选择' }]} onChange={(value) => setSelectionFilter(value as typeof selectionFilter)} /></label>
@@ -1017,39 +1014,21 @@ export function DeduplicationWorkspace() {
       </Dialog.Portal>
     </Dialog.Root>
     {result && <>
-      {/* 默认视图也把关联链划出来（Readoshi 的 renderChain）：多个组属于同一条
-          重复关系链时，它们围在一个带标题的区块里，而不是散落在网格中。 */}
-      {view !== 'chains' && <div className="dedup-group-rows" aria-label="重复结果" ref={groupsRef}>
-        {mountedRows.map((row) => row.kind === 'chain'
-          ? <ul className="dedup-group-row is-chain-row" key={row.key} style={{ '--group-columns': chainColumns } as CSSProperties}>
-            <li className="dedup-chain">
+      {/* CSS handles column changes without regrouping/remounting card nodes. */}
+      <div className="dedup-results">
+        <ul className="dedup-group-grid" aria-label={view === 'chains' ? '重复链' : '重复结果'}>
+          {mountedSections.map((section) => section.isChain
+            ? <li className="dedup-chain" key={section.key}>
               <div className="dedup-chain-heading">
-                {/* 图标 + 链号：这枚按钮的身份就是那个号，号是数据不是标签，所以它留下。 */}
-                <button className="secondary-action is-compact" type="button" aria-pressed={row.fullChain.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${row.number}`} title={`关联重复链 ${row.number}`} onClick={() => void toggleChainSelection(row.fullChain)}><Link2 aria-hidden="true" />{row.number}</button>
+                <button className="secondary-action is-compact" type="button" aria-pressed={section.fullGroups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={'关联重复链 ' + section.number} title={'关联重复链 ' + section.number} onClick={() => void toggleChainSelection(section.fullGroups)}><Link2 aria-hidden="true" />{section.number}</button>
               </div>
-              <div className="dedup-group-rows">
-                {chunkRows(row.chain, chainColumns).map((chainRow, chainRowIndex) => <ul className="dedup-group-row" key={`${row.key}-row-${chainRowIndex}`} style={{ '--group-columns': chainColumns } as CSSProperties}>
-                  {chainRow.map((group) => renderGroup(group, row.key))}
-                </ul>)}
-              </div>
+              <ul className="dedup-group-grid">
+                {section.groups.map((group) => renderGroup(group))}
+              </ul>
             </li>
-          </ul>
-          : <ul className="dedup-group-row" key={row.key} style={{ '--group-columns': groupColumns } as CSSProperties}>
-            {row.groups.map((group) => renderGroup(group, row.key))}
-          </ul>)}
-      </div>}
-      {view === 'chains' && <div className="dedup-chains" aria-label="重复链">
-        {mountedSections.filter((section) => section.fullGroups.length > 1).map((section) => <section className="dedup-chain" key={`chain-only-${section.key}`}>
-          <div className="dedup-chain-heading">
-            <button className="secondary-action is-compact" type="button" aria-pressed={section.fullGroups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={`关联重复链 ${section.number}`} title={`关联重复链 ${section.number}`} onClick={() => void toggleChainSelection(section.fullGroups)}><Link2 aria-hidden="true" />{section.number}</button>
-          </div>
-          <div className="dedup-group-rows">
-            {chunkRows(section.groups, chainColumns).map((chainRow, chainRowIndex) => <ul className="dedup-group-row" key={`chain-only-${section.key}-row-${chainRowIndex}`} style={{ '--group-columns': chainColumns } as CSSProperties}>
-              {chainRow.map((group) => renderGroup(group, `chain-only-${section.key}`))}
-            </ul>)}
-          </div>
-        </section>)}
-      </div>}
+            : section.groups.map((group) => renderGroup(group)))}
+        </ul>
+      </div>
       {moreRowsMounted && <div ref={sentinelRef} aria-hidden="true" className="dedup-list-sentinel" />}
       {!visibleGroups.length && !busy && <StatusLine>没有匹配当前筛选的重复组。</StatusLine>}
     </>}
@@ -1087,6 +1066,21 @@ export function DeduplicationWorkspace() {
       </Dialog.Portal>
     </Dialog.Root>
     {/* 关系行标题打开的档案概览：就地看，查重页的筛选、滚动和选择都留着。 */}
+    {contextMenuTarget && <DropdownMenu.Root modal={false} open onOpenChange={(open) => { if (!open) setContextMenuTarget(undefined); }}>
+      <DropdownMenu.Trigger asChild><span aria-hidden="true" style={{ position: 'fixed', left: contextMenuTarget.x, top: contextMenuTarget.y, width: 0, height: 0 }} /></DropdownMenu.Trigger>
+      <DropdownMenu.Portal>
+        <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label={contextMenuTarget.archive.title + ' 操作'}>
+          <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => {
+            setOverviewArchiveId(contextMenuTarget.archive.archiveId);
+            setContextMenuTarget(undefined);
+          }}><LayoutGrid aria-hidden="true" />缩略面板</DropdownMenu.Item>
+          {contextGalleryUrl && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => {
+            void openExternalUrl(contextGalleryUrl).then((response) => { if (!response.ok) showToast(response.error.message, 'error'); });
+            setContextMenuTarget(undefined);
+          }}><ExternalLink aria-hidden="true" />跳转画廊</DropdownMenu.Item>}
+        </DropdownMenu.Content>
+      </DropdownMenu.Portal>
+    </DropdownMenu.Root>}
     {overviewArchive && server && <ArchiveOverviewDialog archive={overviewArchive} scopeId={server.scopeId} serverId={server.id} onClose={() => setOverviewArchiveId(undefined)} />}
     <Dialog.Root open={historyOpen} onOpenChange={(open) => { if (!open) setHistoryOpen(false); }}>
       <Dialog.Portal>

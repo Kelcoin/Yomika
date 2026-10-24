@@ -6694,9 +6694,10 @@ pub struct ArchiveIdentity {
     pub tags: Vec<String>,
     pub page_count: Option<i64>,
     pub file_size: Option<i64>,
+    pub added_at: Option<i64>,
 }
 
-/// 去重页只读这五个字段（id/标题/标签/页数/体积）。整库返回全字段记录
+/// 查重页只读身份与卡片展示字段（含添加时间）。整库返回全字段记录
 /// 会让序列化体积和前端的逐条 zod 校验跟着不相关的字段一起涨。
 #[tauri::command(async)]
 pub fn list_archive_identities(
@@ -6707,30 +6708,33 @@ pub fn list_archive_identities(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
-    let query = || -> Result<Vec<ArchiveIdentity>, String> {
-        let mut statement = connection.prepare(
-            "SELECT archive_id, title, tags_json, page_count, file_size
-             FROM archives WHERE server_id = ?1 AND is_deleted = 0",
-        )
-        .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([server_id.as_str()], |row| {
-                Ok(ArchiveIdentity {
-                    archive_id: row.get(0)?,
-                    title: row.get(1)?,
-                    tags: archive_tags(row.get::<_, String>(2)?),
-                    page_count: row.get(3)?,
-                    file_size: row.get(4)?,
-                })
-            })
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())
-    };
-    match query() {
+    match query_archive_identities(&connection, &server_id) {
         Ok(identities) => CommandResult::success(identities),
         Err(error) => CommandResult::failure("UNKNOWN", error, true),
     }
+}
+
+fn query_archive_identities(connection: &Connection, server_id: &str) -> Result<Vec<ArchiveIdentity>, String> {
+    let mut statement = connection.prepare(
+        "SELECT archive_id, title, tags_json, page_count, file_size, COALESCE(added_at, first_seen_at)
+         FROM archives WHERE server_id = ?1 AND is_deleted = 0",
+    )
+    .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([server_id], |row| {
+            let tags = archive_tags(row.get::<_, String>(2)?);
+            Ok(ArchiveIdentity {
+                archive_id: row.get(0)?,
+                title: row.get(1)?,
+                page_count: row.get(3)?,
+                file_size: row.get(4)?,
+                added_at: row.get::<_, Option<i64>>(5)?.or_else(|| archive_added_at(&tags)),
+                tags,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command(async)]
@@ -9726,6 +9730,25 @@ mod tests {
             r#"{"data":[{"arcid":"bad"}],"recordsFiltered":1,"recordsTotal":1}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn archive_identities_include_added_time_without_deleted_or_other_server_rows() {
+        let connection = migrated_connection();
+        connection.execute_batch("INSERT INTO servers (id,name,base_url,scope_id) VALUES
+            ('server-a','A','https://example.com','scope-a'),('server-b','B','https://example.org','scope-b');
+            INSERT INTO archives (server_id,archive_id,title,title_sort,tags_json,page_count,file_size,added_at,first_seen_at,is_deleted) VALUES
+            ('server-a','a','A','a','[]',24,100,1700000000,1701000000,0),
+            ('server-a','b','B','b','[]',48,200,NULL,1702000000,0),
+            ('server-a','gone','Gone','gone','[]',1,1,1700000000,1701000000,1),
+            ('server-b','a','Other','other','[]',1,1,1600000000,1600000000,0);").unwrap();
+        let rows = query_archive_identities(&connection,"server-a").unwrap();
+        assert_eq!(rows.len(),2);
+        let a = rows.iter().find(|row| row.archive_id == "a").unwrap();
+        let b = rows.iter().find(|row| row.archive_id == "b").unwrap();
+        assert_eq!(a.added_at,Some(1700000000));
+        assert_eq!(b.added_at,Some(1702000000));
+        assert_eq!(a.file_size,Some(100));
     }
 
     #[test]

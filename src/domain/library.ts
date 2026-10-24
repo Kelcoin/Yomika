@@ -31,14 +31,14 @@ export const ArchiveRecordSchema = z.object({
 
 export type ArchiveRecord = z.infer<typeof ArchiveRecordSchema>;
 
-/** 去重页只需要 id/标题/标签/页数/体积五个字段：整库逐条验证全字段记录
- * 是按不相关的字段付的校验成本。 */
+/** 查重页只取身份、卡片展示和比较所需字段，避免整库传输无关元数据。 */
 export const ArchiveIdentitySchema = z.object({
   archiveId: z.string().min(1),
   title: z.string(),
   tags: z.array(z.string()).optional(),
   pageCount: z.number().int().nullable().optional(),
   fileSize: z.number().int().nullable().optional(),
+  addedAt: z.number().int().nonnegative().nullable().optional(),
 });
 export type ArchiveIdentity = z.infer<typeof ArchiveIdentitySchema>;
 

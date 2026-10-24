@@ -32,7 +32,7 @@ export function ArchiveCardTags({ tags, limit, rowCount, className, fill = false
   return <CardTagRows tags={picked} rowCount={rowCount} className={className} colorFor={colorFor} fill={fill} />;
 }
 
-export function CardTagRows({ tags, rowCount, className, colorFor, fill = false, leading = [] }: {
+export function CardTagRows({ tags, rowCount, className, colorFor, fill = false, leading = [], layout = 'measured' }: {
   tags: string[];
   rowCount: number;
   className: string;
@@ -41,6 +41,8 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
   /** 排在最前面的固定胶囊（渣翻/无修正这类判定）：和标签一起参与行排布，
    * 所以它们既优先显示，也不会单独占一整行。 */
   leading?: readonly CardTagLeadingChip[] | undefined;
+  /** Dense result lists use native wrapping, without per-card resize measurement. */
+  layout?: 'measured' | 'wrap' | undefined;
 }) {
   const root = useRef<HTMLSpanElement>(null);
   const pageActive = usePageActive();
@@ -58,6 +60,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     : 'metadata-chip';
   const labelKey = useMemo(() => JSON.stringify(labels), [labels]);
   useLayoutEffect(() => {
+    if (layout === 'wrap') return;
     const element = root.current;
     if (!element) return;
     let active = true;
@@ -98,7 +101,14 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     return () => { active = false; observer?.disconnect(); };
   // Retained pages reveal before ResizeObserver delivers: measure in the
   // activation layout effect so the fallback rows never reach the screen.
-  }, [tags, labelKey, fill, pageActive]);
+  }, [tags, labelKey, fill, pageActive, layout]);
+  if (layout === 'wrap') return <span className={className + ' card-tag-waterfall is-wrapped'} style={{ '--tag-row-count': rowCount } as import('react').CSSProperties}>
+    <span className="archive-row-tag-line">{labels.map((label, index) => {
+      const tag = tags[index - leading.length];
+      const color = tag === undefined ? undefined : colorFor?.(tag);
+      return <span className={chipClass(index)} key={index} style={color ? myTagChipStyle(color) : undefined}>{label}</span>;
+    })}</span>
+  </span>;
   // 测量层的顺序与 labels 一致（判定胶囊在前），所以宽度表也按 labels 兜底。
   const widths = measured?.tags === tags ? measured.widths : labels.map(() => 1);
   const containerWidth = measured?.tags === tags ? measured.containerWidth : 0;

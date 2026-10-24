@@ -72,6 +72,17 @@ const TAGS = [
 ];
 
 describe('card tag rows', () => {
+  it('uses CSS wrapping without hidden measurement chips on dense responsive lists', () => {
+    const fake = installMeasureFake();
+    try {
+      const { container } = render(<CardTagRows tags={TAGS} rowCount={3} fill layout="wrap" leading={[{label:'无修正',tone:'is-positive'}]} className="tags" />);
+      expect(container.querySelector('.card-tag-measures')).toBeNull();
+      expect(container.querySelector('.card-tag-waterfall')).toHaveClass('is-wrapped');
+      expect(container.querySelectorAll('.metadata-chip')).toHaveLength(TAGS.length+1);
+      expect(container.querySelector('.metadata-chip')).toHaveTextContent('无修正');
+    } finally { fake.restore(); }
+  });
+
   it('updates mounted chips when translations are installed or cleared', () => {
     clearTagTranslations();
     const { container } = render(<CardTagRows tags={['artist:somebody']} rowCount={1} className="tags" />);

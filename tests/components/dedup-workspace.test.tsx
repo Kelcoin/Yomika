@@ -1,3 +1,4 @@
+import { Profiler } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
@@ -11,6 +12,178 @@ import { RetainedPage } from '../../src/app/RetainedPage';
 
 afterEach(() => { resetInvokeAdapterForTests(); vi.unstubAllGlobals(); });
 describe('duplicate deletion confirmation', () => {
+  it('offers all results separately from standalone groups and duplicate chains', async () => {
+    const fixture = scanFixture(['a','b','c','d','e'].map((id) => ({ id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 24 })));
+    const pairs = [['a','b'],['b','c'],['d','e']].map(([leftArchiveId,rightArchiveId]) => ({ leftArchiveId,rightArchiveId,source:'image' }));
+    setInvokeAdapterForTests(async (command, payload) => {
+      const response = await fixture(command,payload) as { ok: boolean; value: unknown };
+      return command === 'dedup_load_result' ? { ok:true,value:{ ...(response.value as object),pairs } } : response;
+    });
+    const { container } = render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button',{name:'开始扫描'})).toBeEnabled());
+    fireEvent.click(screen.getByRole('button',{name:'开始扫描'}));
+    await screen.findByRole('checkbox',{name:'选择 E'});
+    const selector = screen.getByRole('combobox',{name:'视图'});
+    expect(selector).toHaveValue('all');
+    expect(within(selector).getByRole('option',{name:'全部'})).toBeInTheDocument();
+    expect(container.querySelectorAll('.dedup-group')).toHaveLength(3);
+    fireEvent.change(selector,{target:{value:'groups'}});
+    expect(container.querySelectorAll('.dedup-group')).toHaveLength(1);
+    expect(screen.getByRole('checkbox',{name:'选择 D'})).toBeInTheDocument();
+    expect(screen.queryByRole('checkbox',{name:'选择 A'})).not.toBeInTheDocument();
+    fireEvent.change(selector,{target:{value:'chains'}});
+    expect(container.querySelectorAll('.dedup-group')).toHaveLength(2);
+    expect(screen.queryByRole('checkbox',{name:'选择 E'})).not.toBeInTheDocument();
+    fireEvent.change(selector,{target:{value:'all'}});
+    expect(container.querySelectorAll('.dedup-group')).toHaveLength(3);
+  });
+
+  it('opens dedup card previews without changing the deletion selection', async () => {
+    const user = userEvent.setup();
+    const fixture = scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ]);
+    const adapter = vi.fn(async (command: string, payload?: Parameters<typeof fixture>[1]) => {
+      if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 's', archiveId: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 2, updatedAt: '2026-01-01' }] };
+      return fixture(command, payload);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter><ToastProvider><DeduplicationWorkspace /></ToastProvider></MemoryRouter>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '开始扫描' }));
+    const card = await screen.findByRole('checkbox', { name: '选择 Archive A' });
+    fireEvent.contextMenu(card, { clientX: 100, clientY: 120 });
+    expect(card).toHaveAttribute('aria-checked', 'false');
+    expect(screen.queryByRole('menuitem', { name: '跳转画廊' })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('menuitem', { name: '缩略面板' }));
+    const overview = await screen.findByRole('dialog', { name: 'Archive A' });
+    expect(within(overview).getByLabelText('档案概览')).toBeInTheDocument();
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    await user.click(within(overview).getByRole('button', { name: '关闭概览' }));
+    expect(card).toHaveAttribute('aria-checked', 'false');
+    expect(adapter.mock.calls.some(([command]) => command === 'dedup_save_selection')).toBe(false);
+  });
+
+  it('opens the metadata gallery URL through the system browser bridge', async () => {
+    const user = userEvent.setup();
+    const gallery = 'https://exhentai.org/g/123/token/';
+    const fixture = scanFixture([
+      { id: 'a', title: 'Archive A', tags: ['source:' + gallery], fileSize: 1, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: ['source:javascript:alert(1)'], fileSize: 1, pageCount: 2 },
+    ]);
+    const adapter = vi.fn(async (command: string, payload?: Parameters<typeof fixture>[1]) => {
+      if (command === 'open_external_url') return { ok: true, value: null };
+      return fixture(command, payload);
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    await user.click(screen.getByRole('button', { name: '开始扫描' }));
+    const card = await screen.findByRole('checkbox', { name: '选择 Archive A' });
+    fireEvent.contextMenu(card, { clientX: 100, clientY: 120 });
+    await user.click(await screen.findByRole('menuitem', { name: '跳转画廊' }));
+    expect(adapter).toHaveBeenCalledWith('open_external_url', { url: gallery });
+    expect(adapter.mock.calls.some(([command]) => command === 'list_archives_by_ids')).toBe(false);
+    expect(card).toHaveAttribute('aria-checked', 'false');
+    fireEvent.contextMenu(screen.getByRole('checkbox', { name: '选择 Archive B' }));
+    expect(await screen.findByRole('menuitem', { name: '缩略面板' })).toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: '跳转画廊' })).not.toBeInTheDocument();
+  });
+
+  it('opens the dedup menu on touch hold and suppresses its synthetic selection click', async () => {
+    setInvokeAdapterForTests(scanFixture([
+      { id: 'a', title: 'Archive A', tags: [], fileSize: 1, pageCount: 2 },
+      { id: 'b', title: 'Archive B', tags: [], fileSize: 1, pageCount: 2 },
+    ]));
+    const content = <ToastProvider><DeduplicationWorkspace /></ToastProvider>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    const card = await screen.findByRole('checkbox', { name: '选择 Archive A' });
+    fireEvent.pointerDown(card, { pointerType: 'touch', clientX: 100, clientY: 120 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 480)); });
+    expect(screen.getByRole('menuitem', { name: '缩略面板' })).toBeInTheDocument();
+    fireEvent.pointerUp(card, { pointerType: 'touch' });
+    fireEvent.click(card);
+    expect(card).toHaveAttribute('aria-checked', 'false');
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('marks each chain archive consistently across pairs and filters', async () => {
+    const fixture = scanFixture(['a','b','c','d','e'].map((id) => ({ id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 24 })));
+    const pairs = [
+      { leftArchiveId: 'a', rightArchiveId: 'b', source: 'image' },
+      { leftArchiveId: 'b', rightArchiveId: 'c', source: 'filename' },
+      { leftArchiveId: 'd', rightArchiveId: 'e', source: 'image' },
+    ];
+    setInvokeAdapterForTests(async (command, payload) => {
+      const response = await fixture(command, payload) as { ok: boolean; value: unknown };
+      return command === 'dedup_load_result' ? { ok: true, value: { ...(response.value as object), pairs } } : response;
+    });
+    render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+    await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: '开始扫描' }));
+    await screen.findByRole('checkbox', { name: '选择 E' });
+    const marker = (id: string) => within(screen.getAllByRole('checkbox', { name: '选择 ' + id })[0]!).getByLabelText(/链内档案/).textContent;
+    const marks = ['A','B','C'].map(marker);
+    expect(new Set(marks).size).toBe(3);
+    expect(marks.every(Boolean)).toBe(true);
+    for (const card of screen.getAllByRole('checkbox', { name: '选择 B' })) {
+      expect(within(card).getByLabelText(/链内档案/)).toHaveTextContent(marks[1]!);
+    }
+    expect(within(screen.getByRole('checkbox', { name: '选择 D' })).queryByLabelText(/链内档案/)).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: '来源' }), { target: { value: 'filename' } });
+    expect(marker('B')).toBe(marks[1]);
+    expect(marker('C')).toBe(marks[2]);
+    fireEvent.change(screen.getByRole('combobox', { name: '视图' }), { target: { value: 'chains' } });
+    expect(marker('B')).toBe(marks[1]);
+    expect(marker('C')).toBe(marks[2]);
+  });
+
+  it('keeps card nodes and skips React commits across continuous viewport resizing', async () => {
+    vi.stubGlobal('IntersectionObserver',class { observe() {} unobserve() {} disconnect() {} });
+    const observers = new Set<{ callback: ResizeObserverCallback; targets: Set<Element> }>();
+    vi.stubGlobal('ResizeObserver',class {
+      targets = new Set<Element>();
+      constructor(public callback: ResizeObserverCallback) { observers.add(this); }
+      observe(target: Element) { this.targets.add(target); }
+      unobserve(target: Element) { this.targets.delete(target); }
+      disconnect() { this.targets.clear(); observers.delete(this); }
+    });
+    let width = 1200;
+    const widthSpy = vi.spyOn(HTMLElement.prototype,'clientWidth','get').mockImplementation(() => width);
+    try {
+      const records = Array.from({length:1600},(_,i) => ({id:String(i),title:'Archive '+i,tags:['language:chinese','artist:test'],fileSize:1,pageCount:24}));
+      const fixture = scanFixture(records);
+      const pairs = records.filter((_,i) => i % 2 === 0).map((record,i) => ({leftArchiveId:record.id,rightArchiveId:records[i*2+1]!.id,source:'image'}));
+      setInvokeAdapterForTests(async (command,payload) => {
+        const response = await fixture(command,payload) as { ok:boolean;value:unknown };
+        return command === 'dedup_load_result' ? {ok:true,value:{...(response.value as object),pairs}} : response;
+      });
+      let commits = 0;
+      const { container } = render(<Profiler id="dedup" onRender={() => { commits += 1; }}><ToastProvider><DeduplicationWorkspace /></ToastProvider></Profiler>);
+      await waitFor(() => expect(screen.getByRole('button',{name:'开始扫描'})).toBeEnabled());
+      fireEvent.click(screen.getByRole('button',{name:'开始扫描'}));
+      const original = await screen.findByRole('checkbox',{name:'选择 Archive 2'});
+      await act(async () => {});
+      const before = commits;
+      const start = performance.now();
+      for (const next of [1199,1190,1180,1100,1000,900,800,700,600,500,750,1000,1200]) {
+        width = next;
+        await act(async () => {
+          for (const observer of [...observers]) observer.callback([...observer.targets].map((target) => ({target,contentRect:{width}} as ResizeObserverEntry)),{} as ResizeObserver);
+          window.dispatchEvent(new Event('resize'));
+        });
+      }
+      console.info('dedup resize: pairs',pairs.length,'cards',container.querySelectorAll('.dedup-member').length,'commits',commits-before,'elapsed',Math.round(performance.now()-start),'ms');
+      expect(screen.getByRole('checkbox',{name:'选择 Archive 2'})).toBe(original);
+      expect(commits-before).toBe(0);
+      expect(container.querySelectorAll('.dedup-member')).toHaveLength(48);
+    } finally { widthSpy.mockRestore(); }
+  });
+
   it('bounds mounted cards even when every pair belongs to one large chain', async () => {
     vi.stubGlobal('IntersectionObserver', class { observe() {} unobserve() {} disconnect() {} });
     const records = Array.from({ length: 301 }, (_, index) => ({ id: String(index), title: 'Archive ' + index, tags: [], fileSize: 1, pageCount: 24 }));
@@ -368,13 +541,13 @@ describe('duplicate deletion confirmation', () => {
   });
 
   function scanFixture(
-    archives: { id: string; title: string; tags: string[]; fileSize: number; pageCount: number }[],
+    archives: { id: string; title: string; tags: string[]; fileSize: number; pageCount: number; addedAt?: number }[],
     source = 'image',
     deleteOutcomes?: { archiveId: string; deleted: boolean; message?: string }[],
   ) {
     const pairs = [{ leftArchiveId: archives[0]!.id, rightArchiveId: archives[1]!.id, source }];
     const session = { sessionId: 'scan', scopeId: 'scope', algorithmVersion: 'v1', status: 'completed', checkpoint: 2, archiveCount: 2 };
-    const records = archives.map((archive) => ({ serverId: 's', archiveId: archive.id, title: archive.title, tags: archive.tags, fileSize: archive.fileSize, pageCount: archive.pageCount, updatedAt: '2026-01-01' }));
+    const records = archives.map((archive) => ({ serverId: 's', archiveId: archive.id, title: archive.title, tags: archive.tags, fileSize: archive.fileSize, pageCount: archive.pageCount, addedAt: archive.addedAt, updatedAt: '2026-01-01' }));
     // loadResult 与真实后端一样回放持久化的选择：scanChunk 写什么就回什么。
     let selectedArchiveIds: string[] = [];
     const adapter = vi.fn(async (command: string, payload?: { input?: { selectedArchiveIds?: string[] }; selectedArchiveIds?: string[] }) => {
@@ -399,7 +572,7 @@ describe('duplicate deletion confirmation', () => {
   it('shows smart signals and the size row on each card', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(scanFixture([
-      { id: 'a', title: 'Archive A', tags: ['other:uncensored', 'language:chinese'], fileSize: 2_500_000, pageCount: 24 },
+      { id: 'a', title: 'Archive A', tags: ['other:uncensored', 'language:chinese'], fileSize: 2_500_000, pageCount: 24, addedAt: new Date(2026,0,2).getTime()/1000 },
       { id: 'b', title: 'Archive B', tags: ['other:rough translation', 'other:extraneous ads'], fileSize: 1_200_000, pageCount: 24 },
     ]));
     render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
@@ -417,8 +590,8 @@ describe('duplicate deletion confirmation', () => {
     expect(visible('选择 Archive B')).toContain('无汉语');
     // 体积与页数分列两端、各自成元素（钉在卡片底部，不随标签行数移动）。
     const meta = (name: string) => screen.getByRole('checkbox', { name }).querySelector('.dedup-member-meta')!.textContent;
-    expect(meta('选择 Archive A')).toBe('2.5 MB24页');
-    expect(meta('选择 Archive B')).toBe('1.2 MB24页');
+    expect(meta('选择 Archive A')).toBe('2026-01-022.5 MB24页');
+    expect(meta('选择 Archive B')).toBe('时间未知1.2 MB24页');
   });
 
   it('draws every duplicate member as a card with a cover, tag chips and accessible selection states', async () => {
@@ -443,7 +616,7 @@ describe('duplicate deletion confirmation', () => {
     expect(visibleChips).toContain(translateRawTag('other:mosaic censorship'));
     expect(visibleChips).toContain(translateRawTag('language:chinese'));
     expect(visibleChips).toContain('有码');
-    expect(card.querySelector('.dedup-member-meta')?.textContent).toBe('2.5 MB24页');
+    expect(card.querySelector('.dedup-member-meta')?.textContent).toBe('时间未知2.5 MB24页');
     const otherCard = screen.getByRole('checkbox', { name: '选择 Archive B' });
     expect([...otherCard.querySelectorAll('.archive-row-tag-line')].map((line) => line.textContent).join('|')).toContain('无修正');
     // 裸 checkbox 会被全局 input 样式拉成整行宽的方块，正是布局崩坏的原因。
@@ -584,7 +757,7 @@ describe('duplicate deletion confirmation', () => {
     await waitFor(() => expect(stat).toHaveTextContent('1'));
   });
 
-  it('packs standalone groups into rows and leaves the partial row centered', async () => {
+  it('keeps standalone groups in one stable CSS layout container', async () => {
     const user = userEvent.setup();
     // 四条互不相连的重复对 → 三个一行、最后一个单独一行；链各自占整行。
     const pairs = [
@@ -609,12 +782,11 @@ describe('duplicate deletion confirmation', () => {
     await user.click(screen.getByRole('button', { name: '开始扫描' }));
 
     await screen.findByRole('button', { name: /疑似重复 1/ });
-    const rows = [...document.querySelectorAll('.dedup-group-row')];
-    // jsdom 量不到宽度 → 按默认三列分行：3 + 1。
-    expect(rows.map((row) => row.querySelectorAll('.dedup-group').length)).toEqual([3, 1]);
-    // 每行都按「满行三列」的列数留给卡片（jsdom 不做 calc 解析，只看变量）：
-    // 不满的行因此是两边留白，而不是把卡片撑胖。
-    for (const row of rows) expect((row as HTMLElement).style.getPropertyValue('--group-columns')).toBe('3');
+    const grid = screen.getByRole('list', { name: '重复结果' });
+    expect(grid).toHaveClass('dedup-group-grid');
+    expect([...grid.children]).toHaveLength(4);
+    expect([...grid.children].every((child) => child.classList.contains('dedup-group'))).toBe(true);
+    expect(grid.querySelector('.dedup-group-row')).toBeNull();
   });
 
   it('toggles every group of a chain from the chain label', async () => {
