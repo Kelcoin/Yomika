@@ -181,13 +181,14 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
 }
 
 /** Fit one line before falling back to CSS ellipsis. */
-export function useSingleLineTitle(title: string) {
+const DEFAULT_TITLE_SIZES = ['var(--text-lg)', 'var(--text-md)', 'var(--text-sm)'] as const;
+export function useSingleLineTitle(title: string, sizes: readonly string[] = DEFAULT_TITLE_SIZES) {
   const ref = useRef<HTMLHeadingElement>(null);
   useLayoutEffect(() => {
     const element = ref.current;
     if (!element) return;
     const fit = () => {
-      for (const size of ['var(--text-lg)', 'var(--text-md)', 'var(--text-sm)']) {
+      for (const size of sizes) {
         element.style.fontSize = size;
         if (element.scrollWidth <= element.clientWidth + 1) break;
       }
@@ -201,7 +202,7 @@ export function useSingleLineTitle(title: string) {
     });
     observer?.observe(element);
     return () => observer?.disconnect();
-  }, [title]);
+  }, [title, sizes]);
   return ref;
 }
 

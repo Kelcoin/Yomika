@@ -903,9 +903,7 @@
   gap: var(--space-3);
 }
 
-/* Cover with its own facts underneath: page count and byte size describe the
-   archive, not its tags, and in the wide column they pushed every tag group down
-   a line. */
+/* Cover stays beside tags; page count and size share a compact row below. */
 .reader-overview-identity {
   display: grid;
   align-content: start;
@@ -965,11 +963,11 @@
 /* 封面自己的两个数字：与详情页封面右侧那份事实网格同一套结构、同一套图标、同一套
    字色（值继承面板正文，标签与图标走 on-surface-variant）。以前这里是一行
    "3 页 · 143.2 MB"，同一份数据两处各画一遍，两边迟早不一样。 */
-.reader-overview-stats { display: grid; gap: 4px; margin: 0; }
+.reader-overview-stats { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-4); margin: 0; }
 .reader-overview-stats > div { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .reader-overview-stats dt { display: flex; flex: 0 0 16px; color: var(--on-surface-variant); }
 .reader-overview-stats dt svg { width: 16px; height: 16px; }
-.reader-overview-stats dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-utility); font-size: var(--text-xs); }
+.reader-overview-stats dd { margin: 0; white-space: nowrap; font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
    rather than being one run of identical chips. */
 .reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
@@ -983,7 +981,7 @@
 
 .reader-overview-thumbnails {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
   grid-auto-rows: max-content;
   /* `stretch` (the default) overrides a grid item's aspect-ratio, so every row
      collapsed and the thumbnails stacked on top of each other. Aligning to the

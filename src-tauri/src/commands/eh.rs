@@ -1256,6 +1256,41 @@ pub async fn search_eh_galleries(
 
 // ── remove_eh_favorite ────────────────────────────────────────────────────
 
+fn favorite_form_fields(body: &str) -> Option<(bool, Vec<(String, String)>)> {
+    use std::sync::LazyLock;
+    static TAGS: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?is)<(?:input|select|option)\b[^>]*>|</select\s*>").unwrap());
+    static ATTRS: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r#"(?is)([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))"#).unwrap());
+    static CHECKED: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)\s(?:checked|selected)(?:\s|=|/?>)").unwrap());
+    let mut favorite = false;
+    let mut explicit_empty = false;
+    let mut categories = std::collections::HashSet::new();
+    let mut category_select = false;
+    let mut fields = Vec::new();
+    for tag in TAGS.find_iter(body) {
+        let tag = tag.as_str();
+        if tag.to_ascii_lowercase().starts_with("</select") { category_select = false; continue; }
+        let attrs = ATTRS.captures_iter(tag).map(|capture| (
+            capture[1].to_ascii_lowercase(),
+            decode_html_text(capture.get(2).or_else(|| capture.get(3)).or_else(|| capture.get(4)).unwrap().as_str()),
+        )).collect::<std::collections::HashMap<_, _>>();
+        let name = attrs.get("name").map(String::as_str).unwrap_or("");
+        let value = attrs.get("value").cloned().unwrap_or_default();
+        if tag.to_ascii_lowercase().starts_with("<select") { category_select = name == "favcat"; }
+        if name == "favcat" || category_select && tag.to_ascii_lowercase().starts_with("<option") {
+            if let Ok(category @ 0..=9) = value.parse::<u8>() {
+                categories.insert(category);
+                if CHECKED.is_match(tag) { favorite = true; }
+            } else if value == "favdel" && CHECKED.is_match(tag) { explicit_empty = true; }
+        }
+        if attrs.get("type").is_some_and(|kind| kind.eq_ignore_ascii_case("hidden")) && !name.is_empty() {
+            fields.push((name.to_string(), value));
+        }
+    }
+    // EH leaves all ten category radios unchecked for a gallery not favorited.
+    // An incomplete/unrecognized form must never be mistaken for that state.
+    (favorite || explicit_empty || categories.len() == 10).then_some((favorite, fields))
+}
+
 async fn remove_eh_favorite_request(
     cookie: &str,
     host: &str,
@@ -1267,16 +1302,28 @@ async fn remove_eh_favorite_request(
         Ok(value) => value,
         Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
     };
-    let request = client
-        .post(url)
+    let popup = client
+        .get(&url)
         .query(&[("gid", gallery_id), ("t", token), ("act", "addfav")])
-        .header("Cookie", cookie)
-        .form(&[
-            ("favcat", "favdel"),
-            ("favnote", ""),
-            ("apply", "Apply Changes"),
-            ("update", "1"),
-        ]);
+        .header("Cookie", cookie);
+    let (status, body) = match read_http_response(popup).await {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
+    };
+    if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
+        return CommandResult::failure(code, message, retryable);
+    }
+    let Some((favorite, mut fields)) = favorite_form_fields(&body) else {
+        return CommandResult::failure("EH_UNEXPECTED_PAGE", "无法读取 E-Hentai 收藏表单，已保留档案", false);
+    };
+    if !favorite { return CommandResult::success(()); }
+    fields.retain(|(name, _)| !matches!(name.as_str(), "favcat" | "favnote" | "apply" | "update"));
+    fields.extend([("favcat", "favdel"), ("favnote", ""), ("apply", "Apply Changes"), ("update", "1")]
+        .into_iter().map(|(name, value)| (name.to_string(), value.to_string())));
+    let request = client.post(&url)
+        .query(&[("gid", gallery_id), ("t", token), ("act", "addfav")])
+        .header("Cookie", cookie).header("Referer", format!("{url}?gid={gallery_id}&t={token}&act=addfav"))
+        .form(&fields);
     let (status, body) = match read_http_response(request).await {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
@@ -1284,7 +1331,23 @@ async fn remove_eh_favorite_request(
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
     }
-    CommandResult::success(())
+    // A 200 response may still be an error page or the unchanged form. Verify
+    // membership before allowing any caller to delete the LANraragi archive.
+    let verify = client.get(&url)
+        .query(&[("gid", gallery_id), ("t", token), ("act", "addfav")])
+        .header("Cookie", cookie).header("Cache-Control", "no-cache");
+    let (status, body) = match read_http_response(verify).await {
+        Ok(value) => value,
+        Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
+    };
+    if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
+        return CommandResult::failure(code, message, retryable);
+    }
+    match favorite_form_fields(&body) {
+        Some((false, _)) => CommandResult::success(()),
+        Some((true, _)) => CommandResult::failure("EH_UNAVAILABLE", "E-Hentai 收藏仍然存在，已保留档案", true),
+        None => CommandResult::failure("EH_UNEXPECTED_PAGE", "无法确认 E-Hentai 收藏已删除，已保留档案", false),
+    }
 }
 
 #[cfg(test)]
@@ -3188,6 +3251,23 @@ mod tests {
     }
 
     // ── remove_eh_favorite tests ──────────────────────────────────────────
+
+    #[test]
+    fn favorite_popup_detects_membership_and_preserves_submission_fields() {
+        let body = r#"<form id='galpop'><input type='hidden' name='csrf' value='a&amp;b'>
+            <input name='favcat' type='radio' value='2' checked='checked'>
+            <input name='favcat' type='radio' value='favdel'></form>"#;
+        let (favorite, fields) = favorite_form_fields(body).unwrap();
+        assert!(favorite);
+        assert_eq!(fields, vec![("csrf".into(), "a&b".into())]);
+        assert_eq!(favorite_form_fields("<html>Temporarily unavailable</html>"), None);
+        assert_eq!(favorite_form_fields("<input name=favcat value=0>"), None);
+        assert_eq!(favorite_form_fields("<select name=favcat></select><select name=other><option value=3 selected></select>"), None);
+        let empty = (0..10).map(|category| format!("<input type=radio name=favcat value={category}>")).collect::<String>();
+        assert!(!favorite_form_fields(&empty).unwrap().0);
+        assert!(favorite_form_fields("<select name=favcat><option value=3 selected>3</option></select>").unwrap().0);
+        assert!(!favorite_form_fields("<input name='favcat' value='0'><input name='favcat' value='favdel' checked>").unwrap().0);
+    }
 
     #[tokio::test]
     async fn remove_favorite_rejects_invalid_gallery_id() {

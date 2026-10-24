@@ -103,6 +103,25 @@ function panelGrow(id: string): string | undefined {
 }
 
 describe('home detail route', () => {
+  it('transfers the home position before paint without smooth-scrolling intermediate offsets', async () => {
+    renderAppInWorkspace('/', makeAdapter());
+    const card = await screen.findByRole('link', { name: /Archive 0/ });
+    const page = scrollHost(document.getElementById('main-content')!);
+    const list = scrollHost(document.querySelector('.library-shell-list') as HTMLElement);
+    list.style.scrollBehavior = 'smooth';
+    page.scrollTop = 240;
+    fireEvent.scroll(page);
+    let offset = 0;
+    const writes: string[] = [];
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true, get: () => offset,
+      set: (value: number) => { writes.push(list.style.scrollBehavior); offset = value; },
+    });
+    fireEvent.click(card);
+    expect(list.scrollTop).toBe(240);
+    expect(writes).toEqual(['auto']);
+    await waitFor(() => expect(list.style.scrollBehavior).toBe('smooth'));
+  });
   it('opens a home rail card on the home page instead of the library', async () => {
     renderApp('/', makeAdapter());
     const rail = await screen.findByRole('region', { name: '继续阅读' });

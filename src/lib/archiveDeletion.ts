@@ -31,7 +31,12 @@ export async function deleteArchiveWithFavoriteSync(archive: Pick<ArchiveRecord,
       if (!accounts.ok) throw new Error(accounts.error.message);
       const account = accounts.value.find((account) => account.isActive);
       if (!account) throw new Error('请先登录 E-Hentai，或关闭本次收藏同步删除');
-      const removed = await eh.removeFavorite(account.id, gallery.galleryId, gallery.token);
+      let removed = await eh.removeFavorite(account.id, gallery.galleryId, gallery.token);
+      // Only transient failures are retried. Exhaustion must leave the archive intact.
+      for (let attempt = 1; !removed.ok && removed.error.retryable && attempt < 3; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, attempt * 150));
+        removed = await eh.removeFavorite(account.id, gallery.galleryId, gallery.token);
+      }
       if (!removed.ok) throw new Error(`收藏同步删除失败：${removed.error.message}`);
     }
   }

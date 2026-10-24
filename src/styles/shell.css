@@ -1543,7 +1543,7 @@ body::-webkit-scrollbar,
 .settings-choice-option:is(.is-pressed, :active) { background: var(--surface-container-highest); }
 .settings-choice-option.is-active:is(.is-pressed, :active) { background: color-mix(in srgb, var(--primary-container) 84%, var(--on-primary-container)); }
 
-.settings-choice-empty { margin: 0; padding: var(--space-3); color: var(--on-surface-variant); font-size: var(--text-sm); }
+.settings-choice-empty { display: grid; place-content: center; min-height: 88px; margin: 0; padding: var(--space-4); color: var(--on-surface-variant); font-size: var(--text-sm); line-height: var(--leading-relaxed); text-align: center; overflow-wrap: anywhere; }
 
 /* 文案区自己给内边距：卡片只画框，上下两块各自管自己的留白。 */
 .first-run-copy {
@@ -1890,6 +1890,21 @@ body::-webkit-scrollbar,
 
 .empty-state h2 { margin: 0; }
 .empty-state p { margin: 0; max-width: 48ch; }
+.empty-state.is-compact {
+  min-height: 160px;
+  padding: var(--space-5) var(--space-4);
+  gap: var(--space-2);
+}
+.empty-state.is-compact > svg { width: 28px; height: 28px; }
+.empty-state.is-compact h2 { font-size: var(--text-md); }
+.empty-state.is-compact p { font-size: var(--text-sm); }
+.dedup-panel > .status-line {
+  justify-content: center;
+  min-height: 160px;
+  margin: 0;
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+}
 .empty-state > .primary-action,
 .empty-state > .secondary-action { margin-top: var(--space-2); }
 
@@ -2812,8 +2827,8 @@ body::-webkit-scrollbar,
 .archive-list-pull[data-overscroll='wheel'],
 .archive-list-pull[data-overscroll='touch'],
 .archive-list-pull[data-overscroll='settle'] { will-change: transform; }
-.archive-list-pull[data-overscroll='wheel'],
 .archive-list-pull[data-overscroll='touch'] { transition: none; }
+.archive-list-pull[data-overscroll='wheel'] { transition: transform 180ms cubic-bezier(.16,.7,.2,1); }
 .archive-list-pull[data-overscroll='settle'] { transition: transform 360ms cubic-bezier(.22, 1, .36, 1); }
 
 /* The refresh disc, pinned over the list instead of carried by it: it answers
@@ -2867,10 +2882,10 @@ body::-webkit-scrollbar,
   position: relative;
   align-self: stretch;
   display: grid;
-  align-content: start;
+  align-content: center;
   justify-items: end;
   gap: 2px;
-  padding: var(--space-3) 28px 0 0;
+  padding: 0 28px 0 0;
   color: var(--on-surface-variant);
   font-family: var(--font-body);
   font-size: var(--text-xs);
@@ -2912,11 +2927,11 @@ body::-webkit-scrollbar,
 
 .archive-row-timeline::after {
   position: absolute;
-  top: 12px;
+  top: 50%;
   right: var(--timeline-rail-center);
   width: 8px;
   height: 8px;
-  transform: translateX(50%);
+  transform: translate(50%, -50%);
   border: 2px solid var(--surface-container-high);
   border-radius: 50%;
   background: var(--primary);
@@ -3504,7 +3519,7 @@ body::-webkit-scrollbar,
 }
 .archive-page-thumbnails-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
   gap: var(--space-2);
   height: auto;
   overflow: visible;
@@ -4497,7 +4512,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* Snap uses an untransformed wrapper: pressing the first card must not
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
-.archive-rail-item > .archive-thumb-card { scroll-snap-align: none; }
+.archive-rail-item > .archive-thumb-card { scroll-snap-align: none; transform: translateZ(0); isolation: isolate; }
 .archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
@@ -4530,6 +4545,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    进度条底部闪出一丝封面」。多盖 1px 与抬 z-index 各挡一个方向：正文给不出这块
    遮挡（块级背景画在内联替换内容之下）。宽行档把 height 覆写成 4px，不受影响。 */
 .archive-card-progress { position: absolute; inset: -5px 0 auto; z-index: 1; display: block; height: 6px; overflow: hidden; background: color-mix(in srgb, var(--on-surface) 12%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); box-shadow: var(--shadow-progress); pointer-events: none; }
+.archive-rail-item .archive-card-progress { transform: translateZ(0); backface-visibility: hidden; }
 /* 轨道底色不能用 `--surface-container-highest`：设置菜单里的选项行悬停时**正是**填这个色
    （`.settings-choice-option:hover`），于是鼠标一移上去，轨道与行的悬停底融成一片、只剩
    填充那一段——用户 2026-10-18 报「鼠标移上去就会消失」。改成一层由正文色兑出来的半透明
@@ -4642,16 +4658,15 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-workspace .dedup-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; gap: var(--space-3); }
 .dedup-workspace .dedup-filters label { display: grid; gap: 6px; min-width: 0; padding-left: 12px; color: var(--ink-secondary); font-size: var(--text-sm); font-weight: var(--weight-semibold); }
 .dedup-history-dialog { width: min(560px, 92vw); }
-.dedup-history-status { display: flex; align-items: center; gap: var(--space-2); color: var(--ink-secondary); font-size: var(--text-sm); }
 .dialog-content > .dedup-history-error { margin: 0; color: var(--state-danger); font-size: var(--text-sm); }
 /* 对话框里的空态比整页的小一号：320px 的整页空态会把「扫描结果」这个弹窗撑成一屏，
    而这里要说的只是一句「还没有」。 */
 .dedup-history-dialog .empty-state { min-height: 180px; padding: var(--space-5) var(--space-4); }
 .dedup-history-list { display: grid; gap: var(--space-2); max-height: 46dvh; margin: var(--space-2) 0 0; padding: 0; overflow: auto; overscroll-behavior: contain; list-style: none; }
-.dedup-history-list li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
+.dedup-history-list li { position: relative; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) var(--space-3); border: 1px solid var(--hairline); border-radius: var(--radius-control); background: var(--surface-container-low); }
 .dedup-history-list li.is-current { border-color: var(--primary); background: var(--primary-container); }
 .dedup-history-list strong { display: block; font-size: var(--text-sm); }
-.dedup-history-list span { display: block; margin-top: 2px; color: var(--ink-secondary); font-size: var(--text-xs); }
+.dedup-history-list li > div:first-child > span { display: block; margin-top: 2px; color: var(--ink-secondary); font-size: var(--text-xs); }
 .dedup-history-actions { display: flex; flex: none; gap: var(--space-2); }
 .dedup-workspace .panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
 /* 一组重复档案一张卡；成员行要放得下 64px 封面加标题，所以列宽下限抬到 320px。
@@ -4872,6 +4887,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    哪些关系还在生效。 */
 .dedup-relations-list li.is-tombstoned .dedup-relation-titles { opacity: 0.55; }
 .dedup-relations-list .secondary-action { flex: none; }
+.dedup-relations-list > .dedup-relations-empty { display: block; padding: 0; border: 0; background: transparent; }
 .dedup-workspace .progress-line.is-warning { color: var(--state-danger); }
 .dedup-workspace .progress-line .icon-button { vertical-align: middle; }
 /* 查重页只有两套布局：>900px 是桌面（与应用的紧凑模式断点一致），≤900px 是
@@ -6016,6 +6032,10 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .search-preset-icon svg { width: 16px; height: 16px; }
 
 .search-preset-empty {
+  display: grid;
+  place-content: center;
+  min-height: 80px;
+  text-align: center;
   margin: 0;
   padding: var(--space-2) var(--space-3);
   color: var(--on-surface-variant);
@@ -6323,6 +6343,25 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* Both sources reserve the same grid track; switching cannot move the queue. */
 .upload-source-stage { display: grid; min-block-size: 264px; }
+.upload-mode-tabs button { transform: none; scale: 1; }
+.upload-mode-tabs .upload-mode-label {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  transition: transform var(--motion-crisp);
+}
+.upload-mode-tabs button:is(.is-pressed, :active) { transform: none; scale: 1; }
+.upload-mode-tabs button:is(.is-pressed, :active) .upload-mode-label { transform: scale(.97); }
+@media (prefers-reduced-motion: reduce) {
+  .upload-mode-tabs button:is(.is-pressed, :active) .upload-mode-label { transform: none; }
+}
+.dedup-execution-progress { display: grid; gap: var(--space-3); width: 100%; padding-block: var(--space-3); }
+.dedup-execution-progress > div { display: flex; justify-content: space-between; gap: var(--space-3); font-size: var(--text-sm); }
+.dedup-execution-progress .archive-card-progress { position: relative; inset: auto; width: 100%; border-radius: 3px; }
 .upload-source-stage > .upload-dropzone { align-content: center; }
 .upload-source-stage > * { grid-area: 1 / 1; min-width: 0; }
 .upload-source-stage > [hidden] { display: grid !important; visibility: hidden; pointer-events: none; }
@@ -7203,7 +7242,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* Keep the revoke action alongside its device, including narrow settings menus. */
-.settings-paired-client { flex-wrap: nowrap; }
+.settings-paired-client { flex-wrap: nowrap; gap: var(--space-2); padding-block: var(--space-2); }
 .settings-paired-client .settings-device-option { grid-template-columns: auto minmax(0, 1fr); }
 .settings-revoke-action { flex: none; margin-inline-end: var(--space-2); white-space: nowrap; }
 
@@ -7265,3 +7304,29 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-cover-retry { display: grid; place-items: center; width: 100%; height: 100%; min-height: 44px; background: var(--surface-container); color: var(--on-surface-variant); cursor: pointer; }
 .archive-cover-retry svg { width: 20px; height: 20px; }
 .archive-cover-retry:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }
+
+/* Shared card-title bubble: portal avoids clipping inside scrollers and dialogs. */
+.archive-title-tooltip {
+  position: fixed;
+  z-index: var(--z-toast);
+  max-width: min(420px, calc(100vw - 16px));
+  max-height: min(240px, calc(100dvh - 16px));
+  overflow: hidden;
+  box-sizing: border-box;
+  padding: 8px 12px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+  color: var(--on-surface);
+  box-shadow: var(--shadow-overlay);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  animation: archive-tooltip-in var(--motion-fast);
+}
+@keyframes archive-tooltip-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .archive-title-tooltip { animation: none; } }
+
+/* Inset menu rows own rounded hover surfaces instead of full-width square bars. */
+.settings-menu-body .settings-row { border-radius: var(--radius-card); }

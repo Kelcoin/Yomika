@@ -144,7 +144,16 @@ export class NativeDedupRepository {
     }
     return this.importReadoshi({ scopeId, pairs: report.pairs }).then((result) => result.ok ? { ok: true, value: report } : result as CommandResult<ReadoshiImportReport>);
   }
-  deleteSelected(input: { sessionId: string; outcomes?: DedupDeletionOutcomeInput[] }, syncFavorite = false) {
-    return invokeCommand('dedup_delete_selected', { input: { ...input, outcomes: input.outcomes ?? [] }, syncFavorite }, DedupDeleteResultSchema);
+  async deleteSelected(input: { sessionId: string; outcomes?: DedupDeletionOutcomeInput[] }, syncFavorite = false, onProgress?: (progress: { processed: number; total: number }) => void) {
+    let onProgressChannel;
+    if ('__TAURI_INTERNALS__' in window) {
+      const { Channel } = await import('@tauri-apps/api/core');
+      onProgressChannel = new Channel<unknown>();
+      onProgressChannel.onmessage = (value) => {
+        const parsed = z.object({ processed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).safeParse(value);
+        if (parsed.success) onProgress?.(parsed.data);
+      };
+    }
+    return invokeCommand('dedup_delete_selected', { input: { ...input, outcomes: input.outcomes ?? [] }, syncFavorite, ...(onProgressChannel ? { onProgress: onProgressChannel } : {}) }, DedupDeleteResultSchema);
   }
 }

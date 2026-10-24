@@ -15,7 +15,7 @@ import {
 } from '../domain/upload';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { useToast } from './Toast';
-import { StatusLine } from './StatusLine';
+import { EmptyState } from './EmptyState';
 
 const repository = new NativeLibraryRepository();
 
@@ -148,10 +148,10 @@ export function UploadPanel() {
       <h2 className="sr-only" id="upload-panel-title">添加档案</h2>
       <div className="segmented-control upload-mode-tabs" role="tablist" aria-label="添加方式">
         <button type="button" role="tab" aria-selected={mode === 'local'} className={mode === 'local' ? 'is-active' : ''} onClick={() => setMode('local')}>
-          <FolderOpen aria-hidden="true" />从本地添加
+          <span className="upload-mode-label"><FolderOpen aria-hidden="true" />从本地添加</span>
         </button>
         <button type="button" role="tab" aria-selected={mode === 'url'} className={mode === 'url' ? 'is-active' : ''} onClick={() => setMode('url')}>
-          <CloudDownload aria-hidden="true" />从互联网添加
+          <span className="upload-mode-label"><CloudDownload aria-hidden="true" />从互联网添加</span>
         </button>
       </div>
 
@@ -199,7 +199,7 @@ export function UploadPanel() {
           </div>
         </div>
         {items.length === 0
-          ? <StatusLine>队列是空的。</StatusLine>
+          ? <EmptyState compact icon={Upload} title="队列是空的" description="从本地选择档案或添加互联网链接后，即可开始处理。" />
           : <ul className="upload-queue-list">
               {items.map((item) => (
                 <li key={item.id} className={`upload-queue-row is-${item.status}`}>

@@ -138,9 +138,9 @@ export const DlssnrPassSchema = z
     localStructureStrength: z.number().min(0).max(2).default(1),
     skinStructureStrength: z.number().min(0).max(2).default(0),
     /** 自动遮罩：让网络自己圈出该处理的地方。 */
-    autoMask: z.boolean().default(false),
+    autoMask: z.boolean().default(true),
     /** 界面修正：文字与线条保持原样（漫画里的拟声词、边框）。 */
-    uiCorrection: z.boolean().default(false),
+    uiCorrection: z.boolean().default(true),
   })
   .strip();
 
@@ -157,8 +157,8 @@ export const DEFAULT_DLSSNR_PASS: DlssnrPass = {
   localToneStrength: 1,
   localStructureStrength: 1,
   skinStructureStrength: 0,
-  autoMask: false,
-  uiCorrection: false,
+  autoMask: true,
+  uiCorrection: true,
 };
 
 /** 把偏好里那段 JSON 读成层参数：坏数据一律回一层默认，不让设置页崩。 */

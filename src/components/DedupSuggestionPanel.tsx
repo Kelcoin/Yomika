@@ -1,7 +1,8 @@
-import { AlertCircle, X } from 'lucide-react';
+import { CheckCheck, X } from 'lucide-react';
 import type { DHashMatch } from '../domain/dedup';
 
 import { StatusLine } from './StatusLine';
+import { EmptyState } from './EmptyState';
 
 interface DedupSuggestionPanelProps {
   matches: DHashMatch[];
@@ -30,7 +31,7 @@ export function DedupSuggestionPanel({ matches, dismissedIds = new Set(), onDism
   if (visible.length === 0) {
     return (
       <section className="dedup-panel" aria-label="查重建议">
-        <StatusLine>未发现相似档案</StatusLine>
+        <EmptyState compact icon={CheckCheck} title="未发现相似档案" />
       </section>
     );
   }

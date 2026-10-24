@@ -162,6 +162,14 @@ export function HomeShell({ children }: { children: ReactNode }) {
     let settled = 0;
     let lastTarget: number | null = null;
     let handle = 0;
+    const behavior = scroller.style.scrollBehavior;
+    const anchoring = scroller.style.overflowAnchor;
+    scroller.style.scrollBehavior = 'auto';
+    scroller.style.overflowAnchor = 'none';
+    const restoreStyles = () => {
+      scroller.style.scrollBehavior = behavior;
+      scroller.style.overflowAnchor = anchoring;
+    };
     const apply = () => {
       const target = positionFor();
       if (scroller.scrollTop !== target) {
@@ -172,17 +180,20 @@ export function HomeShell({ children }: { children: ReactNode }) {
       }
       lastTarget = target;
       frames += 1;
-      if (settled >= 2 || frames >= POSITION_RETRY_FRAMES) return;
+      if (settled >= 2 || frames >= POSITION_RETRY_FRAMES) { restoreStyles(); return; }
       handle = requestAnimationFrame(apply);
     };
     const yieldToUser = () => {
       if (handle) cancelAnimationFrame(handle);
       handle = 0;
+      restoreStyles();
     };
     for (const type of USER_INPUT_EVENTS) window.addEventListener(type, yieldToUser, { capture: true, passive: true });
-    handle = requestAnimationFrame(apply);
+    // Transfer before paint; deferring the first write exposes scrollTop=0.
+    apply();
     return () => {
       if (handle) cancelAnimationFrame(handle);
+      restoreStyles();
       for (const type of USER_INPUT_EVENTS) window.removeEventListener(type, yieldToUser, { capture: true });
     };
   }, [detailOpen, scrollerFor]);

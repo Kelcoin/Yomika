@@ -13,6 +13,7 @@ import { UpdateNotice } from '../components/UpdateNotice';
 import { ComputeWorkerToasts } from '../components/ComputeWorkerToasts';
 import { PairingCodeNotice } from '../components/PairingCodeNotice';
 import { RenderGuard } from '../components/RenderGuard';
+import { ArchiveTitleTooltip } from '../components/ArchiveTitleTooltip';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
  * the route it launched at — a later visit to the home page is the user's own
@@ -112,6 +113,7 @@ export function App() {
         {/* 配对码同样挂在所有页面之外：请求来自**另一台设备**，人到那一刻不一定停在设置页
             （阅读器里、任何路由上都要弹得出来）。 */}
         <PairingCodeNotice />
+        <ArchiveTitleTooltip />
       </ToastProvider>
       </PreferencesProvider>
     </RenderGuard>

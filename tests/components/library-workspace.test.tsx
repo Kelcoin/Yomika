@@ -48,6 +48,16 @@ beforeEach(() => { vi.spyOn(window, 'requestAnimationFrame').mockImplementation(
 afterEach(() => vi.restoreAllMocks());
 
 describe('library workspace', () => {
+  it('reserves the timeline column before history times arrive', () => {
+    const view = renderWorkspace({ archives: [archives[0]!], timelineByArchiveId: new Map(), cardStyle: 'wide' });
+    const timeline = document.querySelector('.archive-row-timeline');
+    expect(timeline).not.toBeNull();
+    const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+    view.rerender(<MemoryRouter><LibraryWorkspace archives={[archives[0]!]} cardStyle="wide" timelineByArchiveId={new Map([['archive-0', { date: '2026-10-23', dayLabel: '今天', time: '12:30' }]])} /></MemoryRouter>);
+    expect(document.querySelector('.archive-row-timeline')).toBe(timeline);
+    expect(screen.getByRole('button', { name: /^Archive 0\b/ })).toBe(card);
+    expect(timeline).toHaveTextContent('12:30');
+  });
   it('continues a native card drag into bottom feedback without a second touch', () => {
     renderWorkspace({ archives });
     const list = screen.getByRole('list', { name: '档案' });

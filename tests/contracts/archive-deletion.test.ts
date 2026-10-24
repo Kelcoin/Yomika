@@ -8,6 +8,17 @@ const metadata = { archiveId: 'a', title: 'Title', filename: 'a.zip', tags: 'sou
 const account = { id: 'eh', label: 'EH', host: 'e-hentai.org', cookieRef: 'secret-ref', isActive: true, status: 'verified', createdAt: '', updatedAt: '' };
 
 describe('archive deletion with favorite sync', () => {
+  it('keeps the archive when all transient favorite retries fail', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_eh_accounts') return { ok: true, value: [account] };
+      return { ok: false, error: { code: 'EH_UNAVAILABLE', message: 'Still in favorites', retryable: true } };
+    });
+    setInvokeAdapterForTests(adapter);
+    await expect(deleteArchiveWithFavoriteSync(archive, true)).rejects.toThrow('Still in favorites');
+    expect(adapter.mock.calls.filter(([command]) => command === 'remove_eh_favorite')).toHaveLength(3);
+    expect(adapter.mock.calls.some(([command]) => command === 'delete_archive')).toBe(false);
+  });
   it('accepts gallery source tags only on exact E-Hentai hosts', () => {
     expect(ehGalleryFromTags(['source:https://e-hentai.org.evil.test/g/123/abc/'])).toBeUndefined();
     expect(ehGalleryFromTags(['source:exhentai.org/g/123/abc/'])).toEqual({ galleryId: '123', token: 'abc' });

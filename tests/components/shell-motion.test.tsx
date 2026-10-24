@@ -356,18 +356,19 @@ it('keeps dock visibility stable for tiny reversals but accumulates slow deliber
   expect(nav).not.toHaveClass('is-hidden');
 });
 
- it('bounces on outward wheel input, leaves normal scrolling and editors native', () => {
+ it('bounces on outward wheel input, smooths discrete scrolling and leaves editors native', () => {
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1);
   const host = renderShell();
   const content = screen.getByTestId('content');
   const outward = new WheelEvent('wheel', { deltaY: -60, bubbles: true, cancelable: true });
   host.dispatchEvent(outward);
   expect(outward.defaultPrevented).toBe(true);
-  expect(content.style.translate).toBe(`0 ${rubberBand(60)}px`);
+  expect(host).toHaveAttribute('data-edge-bounce', 'dragging');
   fireEvent.touchCancel(host);
   host.scrollTop = 100;
   const normal = new WheelEvent('wheel', { deltaY: 60, bubbles: true, cancelable: true });
   host.dispatchEvent(normal);
-  expect(normal.defaultPrevented).toBe(false);
+  expect(normal.defaultPrevented).toBe(true);
   expect(content.style.translate).toBe('');
   host.scrollTop = 0;
   fireEvent.wheel(screen.getByRole('textbox'), { deltaY: -60 });

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
 import { listen } from '@tauri-apps/api/event';
-import { CircleHelp, Download, ImageUpscale, Layers, Loader2, Plus, Save, Scan, Sparkles, Trash2, Wand } from 'lucide-react';
+import { CircleHelp, Download, Layers, Loader2, Plus, Save, Trash2, Wand } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
@@ -9,6 +9,7 @@ import { SettingsRow } from './SettingsRow';
 import { OverlayLayer } from './OverlayLayer';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
 import { DlssnrIcon } from './DlssnrIcon';
+import { DlssnrParameterIcon } from './DlssnrParameterIcon';
 import { useToast } from './Toast';
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 import { DLSSNR_PRESETS, presetOf } from '../domain/dlssnrPresets';
@@ -550,7 +551,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         {DLSSNR_PRESETS.map((preset) => (
           <SettingsRow
             key={preset.id}
-            icon={<Sparkles />}
+            icon={<DlssnrParameterIcon kind={preset.id === 'cg-light' ? 'light' : preset.id === 'cg-standard' ? 'standard' : 'strong'} />}
             label={preset.label}
             hint={preset.note}
             value={activePreset === preset.id ? '当前' : `${preset.passes.length} 层`}
@@ -576,14 +577,14 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             改一处就会对不上。 */}
         <div className="settings-subgroup" role="group" aria-label={`第 ${index + 1} 层`}>
           <SettingsChoice
-            icon={<ImageUpscale />}
+            icon={<DlssnrParameterIcon kind="style" />}
             label="风格"
             value={String(pass.style)}
             options={STYLE_OPTIONS}
             onChange={(value) => updateDraftPass({ style: Number(value) })}
           />
           <SettingsNumber
-            icon={<Sparkles />}
+            icon={<DlssnrParameterIcon kind="intensity" />}
             label="强度"
             value={pass.intensity}
             min={0}
@@ -593,7 +594,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             onChange={(value) => updateDraftPass({ intensity: value })}
           />
           <SettingsNumber
-            icon={<Sparkles />}
+            icon={<DlssnrParameterIcon kind="tone" />}
             label="局部色调"
             value={pass.localToneStrength}
             min={0}
@@ -603,7 +604,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             onChange={(value) => updateDraftPass({ localToneStrength: value })}
           />
           <SettingsNumber
-            icon={<Sparkles />}
+            icon={<DlssnrParameterIcon kind="structure" />}
             label="局部结构"
             value={pass.localStructureStrength}
             min={0}
@@ -613,7 +614,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             onChange={(value) => updateDraftPass({ localStructureStrength: value })}
           />
           <SettingsNumber
-            icon={<Sparkles />}
+            icon={<DlssnrParameterIcon kind="skin" />}
             label="皮肤结构"
             value={pass.skinStructureStrength}
             min={0}
@@ -623,13 +624,13 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             onChange={(value) => updateDraftPass({ skinStructureStrength: value })}
           />
           <SettingsSwitch
-            icon={<Scan />}
+            icon={<DlssnrParameterIcon kind="mask" />}
             label="自动遮罩"
             checked={pass.autoMask}
             onToggle={() => updateDraftPass({ autoMask: !pass.autoMask })}
           />
           <SettingsSwitch
-            icon={<Scan />}
+            icon={<DlssnrParameterIcon kind="ui" />}
             label="界面修正"
             checked={pass.uiCorrection}
             onToggle={() => updateDraftPass({ uiCorrection: !pass.uiCorrection })}

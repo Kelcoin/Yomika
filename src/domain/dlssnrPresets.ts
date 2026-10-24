@@ -1,14 +1,6 @@
 import type { DlssnrPass } from '../repositories/nativeDlssnrRepository';
 
-/** 3D CG 图片的三套预设：都是同一张图串行跑的层数不同（1 / 3 / 5）。
- *
- *  取值是按本机量出来的取向定的，不是规范：3D CG 是干净渲染图，DLSSNR 每多跑一层就
- *  会在平滑面上多留一点颗粒——同一张 1500×2000 的样张上，「最平坦的 5% 区域噪声」这一
- *  项，1 层 ×1.03、3 层 ×1.13、5 层 ×1.17；而「层层都开着结构」的写法能到 ×1.4–1.8，
- *  脸上直接起斑。所以这里三套都是**第一层出主要效果、后面的层逐级收窄**：强度往下让、
- *  色调递减、结构减半，把一次重手拆成几次轻手。
- *
- *  换了片段或换了画风，这三个数要重新量（记录在 `docs/68`）。 */
+/** 三套渐进增强预设（1 / 3 / 5 层）：后续层逐渐减弱，避免反复增强平坦区域。 */
 export interface DlssnrPreset {
   readonly id: string;
   readonly label: string;
@@ -17,41 +9,40 @@ export interface DlssnrPreset {
   readonly passes: ReadonlyArray<DlssnrPass>;
 }
 
-/** 只写这次的三个变量，其余字段取「什么都不额外做」：风格 0、皮肤结构 0、
- *  自动遮罩与界面修正关——预设要管的是强度，别的旋钮留给用户自己开。 */
+/** 保留皮肤的柔和质感，默认启用区域遮罩与界面保护。 */
 const pass = (intensity: number, localToneStrength: number, localStructureStrength: number): DlssnrPass => ({
   style: 0,
   intensity,
   localToneStrength,
   localStructureStrength,
   skinStructureStrength: 0,
-  autoMask: false,
-  uiCorrection: false,
+  autoMask: true,
+  uiCorrection: true,
 });
 
 export const DLSSNR_PRESETS: ReadonlyArray<DlssnrPreset> = [
   {
     id: 'cg-light',
     label: '轻度',
-    note: '1 层 · 只去噪，几乎不动细节',
-    passes: [pass(1, 0, 0.5)],
+    note: '1 层 · 柔和去噪与色调',
+    passes: [pass(1, 0.15, 0.5)],
   },
   {
     id: 'cg-standard',
     label: '标准',
     note: '3 层 · 细节与结构',
-    passes: [pass(1, 0.3, 0.8), pass(0.7, 0.15, 0.4), pass(0.5, 0.1, 0.2)],
+    passes: [pass(1, 0.5, 0.8), pass(0.85, 0.3, 0.4), pass(0.65, 0.2, 0.2)],
   },
   {
     id: 'cg-strong',
     label: '强化',
     note: '5 层 · 纹理与结构最强',
     passes: [
-      pass(1, 0.4, 0.8),
-      pass(0.8, 0.2, 0.5),
-      pass(0.6, 0.15, 0.35),
-      pass(0.5, 0.1, 0.25),
-      pass(0.4, 0.1, 0.15),
+      pass(1, 0.65, 0.8),
+      pass(0.95, 0.4, 0.5),
+      pass(0.8, 0.3, 0.35),
+      pass(0.65, 0.2, 0.25),
+      pass(0.55, 0.15, 0.15),
     ],
   },
 ];

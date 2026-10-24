@@ -11,6 +11,7 @@ import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { presentEhError } from '../services/ehClient';
 import { useToast } from './Toast';
 import { StatusLine } from './StatusLine';
+import { EmptyState } from './EmptyState';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
@@ -249,7 +250,7 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
       {error && <StatusLine tone="error">{error}</StatusLine>}
       {loading && comments.length === 0
         ? <ContentSkeleton label="正在读取评论" variant="comments" rows={2} />
-        : !error && comments.length === 0 ? <StatusLine>暂无评论</StatusLine> : null}
+        : !error && comments.length === 0 ? <EmptyState compact icon={MessageCircle} title="暂无评论" /> : null}
       {comments.length > 0 && <ul className="eh-comments-list">{comments.map((comment) => (
         <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>
           <div className="eh-comment-meta">

@@ -9,9 +9,38 @@ import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsReposi
 import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { translateRawTag } from '../../src/lib/tags';
 import { RetainedPage } from '../../src/app/RetainedPage';
+import { NativeDedupRepository } from '../../src/repositories/nativeDedupRepository';
 
 afterEach(() => { resetInvokeAdapterForTests(); vi.unstubAllGlobals(); });
 describe('duplicate deletion confirmation', () => {
+  it('keeps execution open with live progress until the user closes the completed result', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(scanFixture(['a', 'b'].map((id) => ({ id, title: id, tags: [], fileSize: 1, pageCount: 24 }))));
+    let report: ((progress: { processed: number; total: number }) => void) | undefined;
+    let finish!: () => void;
+    const deletion = vi.spyOn(NativeDedupRepository.prototype, 'deleteSelected').mockImplementation(async (_input, _sync, callback) => {
+      report = callback;
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return { ok: true, value: { rejectedArchiveIds: [], outcomes: [{ archiveId: 'a', deleted: true }] } };
+    });
+    try {
+      render(<ToastProvider><DeduplicationWorkspace /></ToastProvider>);
+      await waitFor(() => expect(screen.getByRole('button', { name: '开始扫描' })).toBeEnabled());
+      await user.click(screen.getByRole('button', { name: '开始扫描' }));
+      await user.click(await screen.findByRole('checkbox', { name: '选择 a' }));
+      await user.click(screen.getByRole('button', { name: '执行所选' }));
+      await user.click(await screen.findByRole('button', { name: '确认删除' }));
+      const dialog = screen.getByRole('dialog', { name: '确认删除' });
+      await waitFor(() => expect(report).toBeDefined());
+      expect(within(dialog).getByRole('button', { name: '取消' })).toBeDisabled();
+      expect(within(dialog).getByRole('progressbar', { name: '执行进度' })).toHaveAttribute('aria-valuenow', '0');
+      act(() => report?.({ processed: 1, total: 1 }));
+      expect(within(dialog).getByRole('progressbar', { name: '执行进度' })).toHaveAttribute('aria-valuenow', '100');
+      await act(async () => { finish(); });
+      await user.click(await within(dialog).findByRole('button', { name: '完成' }));
+      expect(screen.queryByRole('dialog', { name: '确认删除' })).not.toBeInTheDocument();
+    } finally { deletion.mockRestore(); }
+  });
   it('offers all results separately from standalone groups and duplicate chains', async () => {
     const fixture = scanFixture(['a','b','c','d','e'].map((id) => ({ id, title: id.toUpperCase(), tags: [], fileSize: 1, pageCount: 24 })));
     const pairs = [['a','b'],['b','c'],['d','e']].map(([leftArchiveId,rightArchiveId]) => ({ leftArchiveId,rightArchiveId,source:'image' }));
@@ -69,7 +98,7 @@ describe('duplicate deletion confirmation', () => {
     const user = userEvent.setup();
     const gallery = 'https://exhentai.org/g/123/token/';
     const fixture = scanFixture([
-      { id: 'a', title: 'Archive A', tags: ['source:' + gallery], fileSize: 1, pageCount: 2 },
+      { id: 'a', title: 'Archive A', tags: ['source:' + gallery.replace('https://', '')], fileSize: 1, pageCount: 2 },
       { id: 'b', title: 'Archive B', tags: ['source:javascript:alert(1)'], fileSize: 1, pageCount: 2 },
     ]);
     const adapter = vi.fn(async (command: string, payload?: Parameters<typeof fixture>[1]) => {
@@ -443,6 +472,7 @@ describe('duplicate deletion confirmation', () => {
       if (command === 'dedup_scan') return {ok:true,value:{...session,stage:'completed',processed:2,total:2,cacheHits:0,downloads:0,missingCovers:0,invalidCovers:0,pairCount:1,degraded:false,diagnostics:[],pairs:[pair]}};
       if (command === 'dedup_load_result') return {ok:true,value:{session,archives:[],pairs:[pair],selectedArchiveIds:['a'],outcomes:[]}};
       if (command === 'dedup_delete_selected') return {ok:true,value:{rejectedArchiveIds:[],outcomes:[{archiveId:'a',deleted:false,message:'收藏同步失败'}]}};
+      if (command === 'dedup_list_sessions') return { ok: true, value: [] };
       throw new Error(command);
     });
     setInvokeAdapterForTests(adapter);
@@ -536,6 +566,7 @@ describe('duplicate deletion confirmation', () => {
     await user.click(await screen.findByRole('button', { name: '确认删除' }));
     // 失败的那一个照常播报（执行结果不再挂在列表下方那行小字里）。
     expect(await screen.findByRole('alert')).toHaveTextContent('1 个档案未删除：LANraragi 删除失败');
+    await user.click(await screen.findByRole('button', { name: '完成' }));
     await waitFor(() => expect(screen.queryByRole('checkbox', { name: /Archive A/ })).not.toBeInTheDocument());
     expect(screen.queryByRole('checkbox', { name: /Archive B/ })).not.toBeInTheDocument();
   });
@@ -561,6 +592,7 @@ describe('duplicate deletion confirmation', () => {
         return { ok: true, value: null };
       }
       if (command === 'dedup_load_result') return { ok: true, value: { session, archives: [], pairs, selectedArchiveIds, outcomes: [] } };
+      if (command === 'dedup_list_sessions') return { ok: true, value: [] };
       if (command === 'dedup_delete_selected') {
         return { ok: true, value: { rejectedArchiveIds: [], outcomes: deleteOutcomes ?? [{ archiveId: records[0]!.archiveId, deleted: true }] } };
       }
@@ -1096,7 +1128,13 @@ describe('dedup scan progress and saved results', () => {
     await user.click(await screen.findByRole('button', { name: '扫描结果' }));
     await user.click(await screen.findByRole('button', { name: /^载入 / }));
     expect(adapter).toHaveBeenCalledWith('dedup_load_result', { sessionId: 'saved-live', refreshIndex: true });
-    expect(within(screen.getByRole('dialog', { name: '扫描结果' })).getByText('正在校验档案并读取结果…')).toBeInTheDocument();
+    const history = screen.getByRole('dialog', { name: '扫描结果' });
+    expect(within(history).queryByText('正在校验档案并读取结果…')).not.toBeInTheDocument();
+    const loadingBar = within(history).getByRole('progressbar', { name: '扫描结果读取进度' });
+    expect(loadingBar).toHaveClass('archive-card-progress', 'is-indeterminate');
+    expect(loadingBar).not.toHaveAttribute('aria-valuenow');
+    expect(loadingBar.closest('.dedup-history-list li')).not.toBeNull();
+    expect(within(history).queryByRole('status')).not.toBeInTheDocument();
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
     await act(async () => {
       validated = true;
@@ -1109,6 +1147,7 @@ describe('dedup scan progress and saved results', () => {
     expect(screen.getByRole('checkbox', { name: '选择 Current a' })).toBeInTheDocument();
     expect(screen.queryByRole('checkbox', { name: /ghost/ })).not.toBeInTheDocument();
     expect(screen.queryByText('Old a')).not.toBeInTheDocument();
+    expect(screen.queryByRole('progressbar', { name: '扫描结果读取进度' })).not.toBeInTheDocument();
   });
 
   it('keeps saved history open when current directory validation fails', async () => {

@@ -160,6 +160,7 @@ function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onT
   return (
     <button
       type="button"
+      data-archive-tooltip={archive.title || '未命名档案'}
       className={`archive-row${selected ? ' is-selected' : ''}${active ? ' is-active' : ''}`}
       {...(selectionMode
         ? { role: 'checkbox', 'aria-checked': selected, 'aria-label': `选择 ${archive.title}` }

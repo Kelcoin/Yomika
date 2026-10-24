@@ -9,6 +9,7 @@ import { deleteArchiveWithFavoriteSync } from '../lib/archiveDeletion';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useToast } from './Toast';
 import { SettingsSwitch } from './SettingsControls';
+import { CardProgressBar } from './CardProgressBar';
 
 type ArchiveDeleteDialogProps = {
   archive: Pick<ArchiveRecord, 'serverId' | 'archiveId' | 'title'>;
@@ -43,10 +44,12 @@ export function ArchiveDeletionConfirmation(props: Parameters<typeof ArchiveDele
   return pageActive ? <ArchiveDeletionConfirmationContent {...props} /> : null;
 }
 
-function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }: {
+function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm, progress, keepOpenAfterConfirm = false }: {
   description: string;
   onClose: () => void;
   onConfirm: (syncFavorite: boolean) => Promise<void>;
+  progress?: { processed: number; total: number; label: string } | undefined;
+  keepOpenAfterConfirm?: boolean;
 }) {
   const { showToast } = useToast();
   const [preferences, setPreferences] = useState<PreferenceSnapshot>();
@@ -54,6 +57,7 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
   /** 有没有可用的 E-Hentai 账户；undefined 表示还没读到（或读失败，按可用处理）。 */
   const [ehReady, setEhReady] = useState<boolean>();
   const [busy, setBusy] = useState(false);
+  const [finished, setFinished] = useState(false);
   const busyRef = useRef(false);
   const mounted = useRef(true);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
@@ -88,7 +92,10 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
     setBusy(true);
     try {
       await onConfirm(syncFavorite);
-      if (mounted.current) onClose();
+      if (mounted.current) {
+        if (keepOpenAfterConfirm) setFinished(true);
+        else onClose();
+      }
     } catch (error) { if (mounted.current) showToast(error instanceof Error ? error.message : '删除失败', 'error'); }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
@@ -104,12 +111,18 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm }:
         </div>}
         {/* 没登录 E-Hentai 就整行不出现（Readoshi 也这么做）：摆一个按不动的开关
             只会让人以为功能坏了，而这次删除确实没有收藏可同步。 */}
-        {syncAvailable && (
+        {syncAvailable && !finished && (
           <SettingsSwitch label="本次同步删除 E-Hentai 收藏" checked={Boolean(syncFavorite)} disabled={busy} onToggle={() => setSyncFavorite(!syncFavorite)} />
         )}
+        {(busy || finished) && progress && <div className="dedup-execution-progress" role="status">
+          <div><strong>{progress.label}</strong><span>{progress.processed} / {progress.total}</span></div>
+          <CardProgressBar percent={progress.total > 0 ? progress.processed / progress.total * 100 : 0} indeterminate={progress.total === 0} label="执行进度" />
+        </div>}
         <div className="dialog-actions">
-          <button className="secondary-action" type="button" disabled={busy} onClick={onClose}><X aria-hidden="true" />取消</button>
-          <button className="primary-action" type="button" disabled={busy || syncFavorite === undefined} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
+          {finished ? <button className="primary-action" type="button" onClick={onClose}>完成</button> : <>
+            <button className="secondary-action" type="button" disabled={busy} onClick={onClose}><X aria-hidden="true" />取消</button>
+            <button className="primary-action" type="button" disabled={busy || syncFavorite === undefined} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
+          </>}
         </div>
       </Dialog.Content>
     </Dialog.Portal>

@@ -673,7 +673,7 @@ describe('DLSS5 settings group', () => {
     const saved = edits.find((patch) => typeof patch.dlssnrPasses === 'string')?.dlssnrPasses ?? '';
     const passes = parseDlssnrPasses(saved);
     expect(passes).toHaveLength(2);
-    expect(passes[1]).toMatchObject({ style: 0, intensity: 1, autoMask: false });
+    expect(passes[1]).toMatchObject({ style: 0, intensity: 1, autoMask: true, uiCorrection: true, skinStructureStrength: 0 });
     // 第二层是完整一份参数，不是只带一个字段的补丁。
     const [first, second] = passes;
     expect(first).toBeDefined();
@@ -949,7 +949,7 @@ describe('DLSS5 settings group', () => {
     // 写回去的是整套参数，不是只改了层数：第一层还是最强的那个出效果的人。
     const passes = parseDlssnrPasses(latest);
     expect(passes).toHaveLength(5);
-    expect(passes[0]).toMatchObject({ style: 0, intensity: 1, localToneStrength: 0.4, localStructureStrength: 0.8 });
+    expect(passes[0]).toMatchObject({ style: 0, intensity: 1, localToneStrength: 0.65, localStructureStrength: 0.8, skinStructureStrength: 0, autoMask: true, uiCorrection: true });
     // 再打开预设，命中当前设置的那一套标「当前」。
     await user.click(within(applied).getByRole('button', { name: '预设' }));
     const reopened = await screen.findByRole('dialog', { name: 'DLSSNR 预设' });

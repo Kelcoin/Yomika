@@ -4,6 +4,31 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn saved_results_are_removed_only_after_all_pairs_are_resolved() {
+        let mut connection = connection();
+        start_scan(&mut connection, scan_input("v1")).unwrap();
+        scan_chunk(&mut connection, DedupScanChunkInput {
+            session_id: "scan-1".into(), algorithm_version: "v1".into(), checkpoint: 3,
+            archives: ["a", "b"].into_iter().map(|id| DedupArchiveSnapshotInput {
+                archive_id: id.into(), path: id.into(), title: None, page_count: None, size: None, feature_version: "v1".into(),
+            }).collect(),
+            pairs: vec![DedupPairInput { left_archive_id: "a".into(), right_archive_id: "b".into(), source: "image".into(), diagnostics: None }],
+            selected_archive_ids: vec![],
+        }).unwrap();
+        save_session(&connection, "scan-1").unwrap();
+        assert_eq!(list_sessions_filtered(&connection, "server-a", 50, true).unwrap().len(), 1);
+        connection.execute("INSERT INTO dedup_deletion_outcomes (session_id,archive_id,deleted,message) VALUES ('scan-1','a',0,'network failure')", []).unwrap();
+        assert_eq!(list_sessions_filtered(&connection, "server-a", 50, true).unwrap().len(), 1, "failed deletion remains actionable");
+        assert!(list_sessions_filtered(&connection, "server-b", 50, true).unwrap().is_empty());
+        assert!(session(&connection, "scan-1").is_ok(), "another scope cannot clean this result");
+        save_non_duplicate(&mut connection, DedupNonDuplicateInput {
+            scope_id: "server-a".into(), left_archive_id: "a".into(), right_archive_id: "b".into(),
+        }).unwrap();
+        assert!(list_sessions_filtered(&connection, "server-a", 50, true).unwrap().is_empty());
+        assert!(session(&connection, "scan-1").is_err());
+    }
+
+    #[test]
     fn current_result_removes_missing_archives_and_preserves_a_chain_survivor() {
         let mut connection = connection();
         connection.execute_batch("CREATE TABLE archives (server_id TEXT,archive_id TEXT,is_deleted INTEGER);
@@ -1096,6 +1121,7 @@ mod tests {
             .sqrt();
         StoredImageSignature {
             ratio: 1.0,
+            rgb: luminance.iter().flat_map(|value| [*value; 3]).collect(),
             luminance,
             mean,
             standard_deviation,
@@ -1106,6 +1132,66 @@ mod tests {
 
     fn solid_signature(mean: u8) -> StoredImageSignature {
         signature_with_luminance(vec![mean; SIGNATURE_GRID * SIGNATURE_GRID], 1.0)
+    }
+
+    const FALSE_POSITIVE_COVERS: [(&[u8], &[u8]); 3] = [
+        (include_bytes!("../tests/fixtures/dedup/cover-1-a.png"), include_bytes!("../tests/fixtures/dedup/cover-1-b.png")),
+        (include_bytes!("../tests/fixtures/dedup/cover-2-a.png"), include_bytes!("../tests/fixtures/dedup/cover-2-b.png")),
+        (include_bytes!("../tests/fixtures/dedup/cover-3-a.png"), include_bytes!("../tests/fixtures/dedup/cover-3-b.png")),
+    ];
+
+    #[test]
+    fn screenshot_covers_with_shared_backgrounds_or_series_art_are_not_duplicates() {
+        let mut false_positives = Vec::new();
+        for (index, (a, b)) in FALSE_POSITIVE_COVERS.iter().enumerate() {
+            let left = serde_json::from_str(&decoded_cover_signature(a).unwrap()).unwrap();
+            let right = serde_json::from_str(&decoded_cover_signature(b).unwrap()).unwrap();
+            if let Some(score) = are_signatures_duplicate(&left, &right, (Some(24), None), (Some(24), None), &SignatureComparisonOptions::default()) {
+                false_positives.push((index + 1, score));
+            }
+        }
+        assert!(false_positives.is_empty(), "unrelated screenshot covers matched: {false_positives:?}");
+    }
+
+    #[test]
+    fn screenshot_covers_still_match_after_resizing_and_jpeg_compression() {
+        for (a, b) in FALSE_POSITIVE_COVERS {
+            for bytes in [a, b] {
+                let image = image::load_from_memory(bytes).unwrap().resize_exact(120, 180, image::imageops::FilterType::Triangle).to_rgb8();
+                let mut compressed = Vec::new();
+                image::codecs::jpeg::JpegEncoder::new_with_quality(&mut compressed, 75).encode_image(&image).unwrap();
+                let left = serde_json::from_str(&decoded_cover_signature(bytes).unwrap()).unwrap();
+                let right = serde_json::from_str(&decoded_cover_signature(&compressed).unwrap()).unwrap();
+                assert!(are_signatures_duplicate(&left, &right, (Some(24), None), (Some(24), None), &SignatureComparisonOptions::default()).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn matching_flat_background_cannot_outvote_different_foreground_art() {
+        let mut a = vec![240; SIGNATURE_GRID * SIGNATURE_GRID];
+        let mut b = a.clone();
+        // Shared background covers 62.5%; all of the actual artwork differs.
+        for y in 0..SIGNATURE_GRID {
+            for x in 10..22 {
+                a[y * SIGNATURE_GRID + x] = 30 + ((x * 17 + y * 23) % 70) as u8;
+                b[y * SIGNATURE_GRID + x] = 150 + ((x * 31 + y * 11) % 70) as u8;
+            }
+        }
+        let a = signature_with_luminance(a, 0.625);
+        let b = signature_with_luminance(b, 0.625);
+        assert!(are_signatures_duplicate(&a, &b, (None, None), (None, None), &SignatureComparisonOptions::default()).is_none());
+    }
+
+    #[test]
+    fn legacy_luminance_only_signature_is_readable_but_not_new_colour_evidence() {
+        let mut a = signature_with_luminance(texture_luminance(7), 0.2);
+        let b = signature_with_luminance(texture_luminance(7), 0.2);
+        let mut json = serde_json::to_value(&a).unwrap();
+        json.as_object_mut().unwrap().remove("rgb");
+        a = serde_json::from_value(json).unwrap();
+        assert!(a.rgb.is_empty());
+        assert!(are_signatures_duplicate(&a, &b, (None, None), (None, None), &SignatureComparisonOptions::default()).is_none());
     }
 
     /// 带少量结构（非均匀）的主导色封面：dominant ≥0.75 触发主导色门，但不触发均匀门。
@@ -1751,6 +1837,17 @@ fn list_sessions_filtered(
     saved_only: bool,
 ) -> Result<Vec<DedupSessionSummary>, String> {
     required_text(scope_id)?;
+    // Keep interrupted/running scans and every unresolved pair, including
+    // failed deletions. Only completed saved work with nothing left is removed.
+    connection.execute(
+        "DELETE FROM dedup_sessions WHERE scope_id=?1 AND saved=1 AND status='completed'
+         AND NOT EXISTS (
+           SELECT 1 FROM dedup_pairs p WHERE p.session_id=dedup_sessions.id
+           AND NOT EXISTS (SELECT 1 FROM dedup_deletion_outcomes o WHERE o.session_id=p.session_id AND o.deleted=1 AND o.archive_id IN (p.left_archive_id,p.right_archive_id))
+           AND NOT EXISTS (SELECT 1 FROM dedup_non_duplicates n WHERE n.scope_id=dedup_sessions.scope_id AND n.pair_key=p.pair_key AND n.tombstoned=0)
+         )",
+        [scope_id],
+    ).map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare(
             "SELECT s.id,s.scope_id,s.status,s.archive_count,
@@ -2141,12 +2238,15 @@ impl Default for SignatureComparisonOptions {
     }
 }
 
-/// 签名 v3：32×32 亮度矩阵 + 内嵌 9×8 梯度 dhash（imsearch `d_hash` 同构）。
-/// 亮度替代原 RGB 像素（信息量 ×4、存储减半），梯度哈希供比较前的廉价预筛。
+/// v4 retains spatial RGB as well as luminance: equally bright colours are not
+/// evidence of identical covers. Legacy signatures deserialize for saved scans,
+/// but cannot establish new perceptual matches without the colour grid.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredImageSignature {
     ratio: f64,
     luminance: Vec<u8>,
+    #[serde(default)]
+    rgb: Vec<u8>,
     mean: f64,
     standard_deviation: f64,
     dominant_fraction: f64,
@@ -2198,19 +2298,21 @@ fn wilson_score(scores: &[f64]) -> f64 {
         / (1.0 + z.powi(2) / count)
 }
 
-/// 给定对齐偏移，计算 64 个区块的 `1-ratio` 证据分数。
+/// Each aligned block returns joint colour/luminance agreement and whether
+/// either image has enough local contrast to be foreground evidence.
 fn aligned_block_evidence(
     left: &StoredImageSignature,
     right: &StoredImageSignature,
     offset_x: i64,
     offset_y: i64,
-) -> Vec<f64> {
+) -> Vec<(f64, bool)> {
     let width = SIGNATURE_GRID;
     let mut evidence = Vec::with_capacity(BLOCK_GRID * BLOCK_GRID);
     for block_y in 0..BLOCK_GRID {
         for block_x in 0..BLOCK_GRID {
             let mut changed = 0usize;
             let mut total = 0usize;
+            let mut ranges = [(u8::MAX, u8::MIN); 2];
             for pixel_y in 0..(SIGNATURE_GRID / BLOCK_GRID) {
                 let left_y = (block_y * (SIGNATURE_GRID / BLOCK_GRID) + pixel_y) as i64;
                 let right_y = left_y + offset_y;
@@ -2224,10 +2326,16 @@ fn aligned_block_evidence(
                         continue;
                     }
                     total += 1;
-                    let difference =
-                        left.luminance[(left_y * width as i64 + left_x) as usize]
-                            .abs_diff(right.luminance[(right_y * width as i64 + right_x) as usize]);
-                    if difference > BLOCK_PIXEL_THRESHOLD {
+                    let li = (left_y * width as i64 + left_x) as usize;
+                    let ri = (right_y * width as i64 + right_x) as usize;
+                    let values = [left.luminance[li], right.luminance[ri]];
+                    for (range, value) in ranges.iter_mut().zip(values) {
+                        range.0 = range.0.min(value);
+                        range.1 = range.1.max(value);
+                    }
+                    let colour_changed = (0..3).any(|channel|
+                        left.rgb[li * 3 + channel].abs_diff(right.rgb[ri * 3 + channel]) > 40);
+                    if values[0].abs_diff(values[1]) > BLOCK_PIXEL_THRESHOLD || colour_changed {
                         changed += 1;
                     }
                 }
@@ -2237,25 +2345,43 @@ fn aligned_block_evidence(
             } else {
                 changed as f64 / total as f64
             };
-            evidence.push(1.0 - ratio.min(1.0));
+            evidence.push((
+                1.0 - ratio.min(1.0),
+                ranges.iter().any(|(min, max)| max - min >= 24),
+            ));
         }
     }
     evidence
 }
 
-/// 块级证据判定：尝试 3×3 个 ±1 像素对齐，取最佳结果。证据只取「匹配块」
-/// （ratio ≤ 0.25 的区块，imsearch 语义：不匹配的特征不计入评分集），双门 =
-/// 匹配块 ≥ 半数 且 Wilson 下界 ≥ 0.82。返回 `Some(score)` 判重；`None` 不判重。
+/// Try ±1 pixel alignment. Require agreement in at least 70% of informative
+/// blocks before aggregating matched blocks with Wilson confidence, so shared
+/// blank areas cannot hide conflicting art. Colour is checked at the same offset.
 fn block_evidence_duplicate(
     left: &StoredImageSignature,
     right: &StoredImageSignature,
 ) -> Option<f64> {
+    let pixels = SIGNATURE_GRID * SIGNATURE_GRID;
+    if left.luminance.len() != pixels || right.luminance.len() != pixels
+        || left.rgb.len() != pixels * 3 || right.rgb.len() != pixels * 3 {
+        return None;
+    }
     let matched_minimum = 1.0 - BLOCK_MATCH_RATIO;
     let mut best: Option<f64> = None;
     for offset_y in [-1_i64, 0, 1] {
         for offset_x in [-1_i64, 0, 1] {
-            let matched: Vec<f64> = aligned_block_evidence(left, right, offset_x, offset_y)
-                .into_iter()
+            let evidence = aligned_block_evidence(left, right, offset_x, offset_y);
+            // Flat background blocks may support alignment, but cannot supply
+            // the majority of positive evidence while the subjects disagree.
+            let informative: Vec<f64> = evidence.iter()
+                .filter(|(_, informative)| *informative)
+                .map(|(score, _)| *score)
+                .collect();
+            let informative_matches = informative.iter().filter(|score| **score >= matched_minimum).count();
+            if informative.len() < 8 || informative_matches as f64 / (informative.len() as f64) < 0.70 {
+                continue;
+            }
+            let matched: Vec<f64> = evidence.into_iter().map(|(score, _)| score)
                 .filter(|score| *score >= matched_minimum)
                 .collect();
             if matched.len() < BLOCK_MIN_MATCHED {
@@ -2275,6 +2401,7 @@ fn decoded_cover_signature(bytes: &[u8]) -> Result<String, String> {
     use image::imageops::FilterType;
     let image = image::load_from_memory(bytes).map_err(|error| error.to_string())?;
     let ratio = image.width() as f64 / image.height().max(1) as f64;
+    let rgb = image.resize_exact(SIGNATURE_GRID as u32, SIGNATURE_GRID as u32, FilterType::Triangle).to_rgb8().into_raw();
     let grayscale = image::DynamicImage::ImageLuma8(image::imageops::grayscale(&image));
     let grid = grayscale
         .resize_exact(SIGNATURE_GRID as u32, SIGNATURE_GRID as u32, FilterType::Triangle)
@@ -2304,6 +2431,7 @@ fn decoded_cover_signature(bytes: &[u8]) -> Result<String, String> {
     let perceptual_hash = gradient_dhash(&thumbnail).to_vec();
     serde_json::to_string(&StoredImageSignature {
         ratio,
+        rgb,
         luminance,
         mean,
         standard_deviation,
@@ -3830,6 +3958,7 @@ async fn dedup_delete_selected_impl(
     input: DedupDeleteSelectedInput,
     sync_favorite: bool,
     database: tauri::State<'_, crate::db::Database>,
+    on_progress: Option<tauri::ipc::Channel<DedupExecutionProgress>>,
 ) -> crate::domain::result::CommandResult<DedupDeleteSelectedResult> {
     let session_id = input.session_id;
     let (server_id, selected) = {
@@ -3917,7 +4046,11 @@ async fn dedup_delete_selected_impl(
         }
         (server_id, selected)
     };
+    let total = selected.len();
     let mut outcomes = Vec::new();
+    if let Some(channel) = &on_progress {
+        let _ = channel.send(DedupExecutionProgress { processed: 0, total });
+    }
     for archive_id in selected {
         let outcome = match crate::commands::library::delete_archive_with_favorite_sync(
             server_id.clone(),
@@ -3964,6 +4097,9 @@ async fn dedup_delete_selected_impl(
                 return crate::domain::result::CommandResult::failure("UNKNOWN", error, true)
             }
         }
+        if let Some(channel) = &on_progress {
+            let _ = channel.send(DedupExecutionProgress { processed: outcomes.len(), total });
+        }
     }
     crate::domain::result::CommandResult::success(DedupDeleteSelectedResult {
         rejected_archive_ids: vec![],
@@ -3976,8 +4112,16 @@ pub async fn dedup_delete_selected(
     input: DedupDeleteSelectedInput,
     sync_favorite: Option<bool>,
     database: tauri::State<'_, crate::db::Database>,
+    on_progress: tauri::ipc::Channel<DedupExecutionProgress>,
 ) -> Result<crate::domain::result::CommandResult<DedupDeleteSelectedResult>, String> {
-    Ok(dedup_delete_selected_impl(input, sync_favorite.unwrap_or(false), database).await)
+    Ok(dedup_delete_selected_impl(input, sync_favorite.unwrap_or(false), database, Some(on_progress)).await)
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupExecutionProgress {
+    processed: usize,
+    total: usize,
 }
 #[tauri::command(async)]
 pub fn dedup_import_readoshi(

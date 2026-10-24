@@ -1,5 +1,6 @@
 import { useEffect, type RefObject } from 'react';
 import { EDGE_CLAIM_PX, EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from './motion';
+import { createWheelMotion, isDiscreteWheel } from './wheelMotion';
 
 /** Excessive sibling surfaces degrade to native scrolling rather than blocking input. */
 const MAX_BOUNCE_SURFACES = 16;
@@ -19,11 +20,14 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
     let queued = false;
     let pendingOffset = 0;
     const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const wheelMotion = createWheelMotion();
+    let wheelPainting = false;
     let surfaces: Array<{ element: HTMLElement; top: string; position: string; transition: string; translate: string; safe: boolean; relative: boolean; baseTop: number }> = [];
     const paint = (offset: number, settling = false) => {
       for (const surface of surfaces) {
         const property = surface.safe ? 'translate' : 'top';
         if (settling) surface.element.style.transition = reduced ? 'none' : `${property} ${EDGE_SETTLE_MS}ms ${EDGE_SETTLE_EASING}`;
+        else if (wheelPainting) surface.element.style.transition = reduced ? 'none' : `${property} 180ms cubic-bezier(.16,.7,.2,1)`;
         if (surface.safe) surface.element.style.translate = `0 ${offset}px`;
         else surface.element.style.top = `${surface.baseTop + offset}px`;
       }
@@ -41,6 +45,8 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       if (records.some((record) => record.target === host || surfaces.some((surface) => !surface.element.hasAttribute('data-bounce-surface') && surface.element.contains(record.target)))) reset();
     });
     const reset = () => {
+      if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
+      wheelRelease = undefined;
       observer.disconnect();
       if (frame !== undefined) window.cancelAnimationFrame(frame);
       frame = undefined; queued = false;
@@ -81,6 +87,8 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       lastY = y;
     };
     const touchStart = (event: TouchEvent) => {
+      wheelMotion.cancel();
+      wheelPainting = false;
       if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
       if (event.touches.length !== 1) { reset(); return; }
       begin(event.target, event.touches[0]!.clientX, event.touches[0]!.clientY);
@@ -165,15 +173,26 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
         begin(event.target, 0, 0, true);
         wheelTravel = 0;
       }
-      if (!host || start?.edge !== direction) { reset(); return; }
+      if (!host || start?.edge !== direction) {
+        if (host && !reduced && isDiscreteWheel(event)) {
+          const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? host.clientHeight : 1;
+          if (wheelMotion.push(host, event.deltaY * unit)) event.preventDefault();
+        } else wheelMotion.cancel();
+        reset(); return;
+      }
+      // Library has a dedicated pull-to-refresh owner; never translate it twice.
+      if (target?.closest('.library-workspace')) { reset(); return; }
+      wheelPainting = true;
       if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? host.clientHeight : 1;
       wheelTravel = Math.min(400, wheelTravel + Math.abs(event.deltaY) * unit);
       move(0, direction * wheelTravel, event);
-      wheelRelease = window.setTimeout(() => { wheelRelease = undefined; touchEnd(); }, 100);
+      wheelRelease = window.setTimeout(() => { wheelRelease = undefined; touchEnd(); }, 280);
     };
-    const visibility = () => { if (document.visibilityState !== 'visible') reset(); };
+    const visibility = () => { if (document.visibilityState !== 'visible') { wheelMotion.cancel(); reset(); } };
     root.addEventListener('wheel', wheel, { passive: false });
+    root.addEventListener('pointerdown', wheelMotion.cancel, { passive: true });
+    root.addEventListener('keydown', wheelMotion.cancel);
     root.addEventListener('touchstart', touchStart, { passive: true });
     root.addEventListener('touchmove', touchMove, { passive: false });
     root.addEventListener('touchend', touchEnd, { passive: true });
@@ -181,6 +200,9 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
     document.addEventListener('visibilitychange', visibility);
     return () => {
       reset();
+      wheelMotion.cancel();
+      root.removeEventListener('pointerdown', wheelMotion.cancel);
+      root.removeEventListener('keydown', wheelMotion.cancel);
       if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);
       root.removeEventListener('wheel', wheel);
       root.removeEventListener('touchstart', touchStart);

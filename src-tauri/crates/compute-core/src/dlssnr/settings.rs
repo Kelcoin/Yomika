@@ -31,15 +31,15 @@ pub struct PassSettings {
 
 impl Default for PassSettings {
     fn default() -> Self {
-        // 保守的默认：强度类全为 1.0（保持原样），皮肤与自动遮罩默认关闭。
+        // 保守的默认：强度类全为 1.0（保持原样），皮肤结构为 0，启用自动遮罩与界面修正。
         Self {
             style: 0,
             intensity: 1.0,
             local_tone_strength: 1.0,
             local_structure_strength: 1.0,
             skin_structure_strength: 0.0,
-            auto_mask: false,
-            ui_correction: false,
+            auto_mask: true,
+            ui_correction: true,
         }
     }
 }
@@ -124,8 +124,8 @@ mod tests {
         assert_eq!(settings.pass_count(), 1);
         assert_eq!(settings.passes[0].intensity, 1.0);
         assert_eq!(settings.passes[0].skin_structure_strength, 0.0);
-        assert!(!settings.passes[0].auto_mask);
-        assert!(!settings.passes[0].ui_correction);
+        assert!(settings.passes[0].auto_mask);
+        assert!(settings.passes[0].ui_correction);
     }
 
     #[test]

@@ -1959,7 +1959,7 @@ describe('design system contract', () => {
     // the left of the list now, so every horizontal measure is mirrored.
     expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]*--timeline-rail-center:\s*13px/);
     expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[\s\S]*left 72px top \/ 2px 100%/);
-    expect(shell).toMatch(/\.archive-row-timeline::after\s*\{[\s\S]*right:\s*var\(--timeline-rail-center\)[\s\S]*width:\s*8px[\s\S]*transform:\s*translateX\(50%\)/);
+    expect(shell).toMatch(/\.archive-row-timeline::after\s*\{[\s\S]*right:\s*var\(--timeline-rail-center\)[\s\S]*width:\s*8px[\s\S]*transform:\s*translate\(50%,\s*-50%\)/);
     expect(shell).not.toMatch(/\.archive-row-timeline::after\s*\{[\s\S]{0,400}?left:\s*var\(--timeline-rail-center\)/);
   });
 
@@ -2042,7 +2042,7 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-wrap:has\(\.archive-row-timeline\) > \.archive-row\s*\{[^}]*grid-area:\s*1 \/ 2/);
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row-wrap:has\(\.archive-row-timeline\) > \.archive-row-timeline\s*\{[^}]*grid-area:\s*1 \/ 1/);
     expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]{0,400}?justify-items:\s*end/);
-    expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]{0,700}?padding:\s*var\(--space-3\) 28px 0 0/);
+    expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]{0,700}?padding:\s*0 28px 0 0/);
     // The timeline is rendered as a sibling of the card button, never inside it.
     expect(source).toMatch(/<\/button>[\s\S]{0,400}archive-row-timeline/);
   });
@@ -2370,13 +2370,11 @@ describe('design system contract', () => {
     expect(workspace).not.toMatch(/library-refresh-hint|pullTicks/);
     // The gesture is answered by the content: one signed offset slides the list
     // past either end, and the release springs it back. 2026-10-17 改口：三种状态
-    // 各说一句话——跟手（wheel / touch）不许有过渡（每格滚轮都拖一条 100ms 的尾巴，
-    // 用户报的就是「非常卡」），回弹（settle）必须有过渡（原来触摸那档一直挂着
-    // `transition: none`，写回 0 就是瞬移），三者都要把这一层提成合成层（几千像素高
-    // 的列表，不给提示就每帧重绘它）。
+    // Touch tracks directly; discrete wheel ticks ease continuously, then both settle.
     expect(workspace).toMatch(/className="archive-list-pull"/);
     expect(workspace).toMatch(/data-overscroll=\{overscrollSettle \? 'settle' : \(overscrollGesture \?\? undefined\)\}/);
-    expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='wheel'\],\s*\.archive-list-pull\[data-overscroll='touch'\] \{ transition: none; \}/);
+    expect(ruleBody(shell, ".archive-list-pull[data-overscroll='touch']")).toMatch(/transition: none/);
+    expect(ruleBody(shell, ".archive-list-pull[data-overscroll='wheel']")).toMatch(/transition: transform 180ms cubic-bezier\(\.16,\.7,\.2,1\)/);
     expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='settle'\] \{ transition: transform 360ms cubic-bezier\(\.22, 1, \.36, 1\); \}/);
     expect(shell).toMatch(/\.archive-list-pull\[data-overscroll='wheel'\],\s*\.archive-list-pull\[data-overscroll='touch'\],\s*\.archive-list-pull\[data-overscroll='settle'\] \{ will-change: transform; \}/);
     // The disc is an overlay, not part of the sliding content: the list springs

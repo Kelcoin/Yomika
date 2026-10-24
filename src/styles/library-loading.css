@@ -33,13 +33,15 @@
 }
 
 .archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton::before {
-  top: 8px;
+  top: 50%;
   right: 8px;
+  transform: translateY(-50%);
 }
 
 .archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton .skeleton-line {
-  top: 10px;
+  top: 50%;
   right: 28px;
+  transform: translateY(-50%);
 }
 
 .archive-list-skeleton-layer.is-exiting {

@@ -13,11 +13,11 @@ import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { CardTagRows } from './CardTagRows';
+import { CardProgressBar } from './CardProgressBar';
 import { SelectField } from './SelectField';
 import { useToast } from './Toast';
 import { EmptyState } from './EmptyState';
 import { LoadingIndicator } from './LoadingIndicator';
-import { StatusLine } from './StatusLine';
 import { ArchiveDeletionConfirmation } from './ArchiveDeleteDialog';
 import { formatArchiveDate, pickCardTags } from '../lib/archiveCardPresentation';
 import { pickServer } from '../domain/server';
@@ -33,7 +33,7 @@ const library = new NativeLibraryRepository();
 const dedup = new NativeDedupRepository();
 // v3：块级证据 + Wilson 聚合（imsearch 的「多特征匹配 → 按图聚合 → Wilson 下
 // 界」思想）+ dhash 预筛 + 平移搜索；比较层对齐 imsearch 的评分思想。
-const ALGORITHM_VERSION = 'readoshi-v3';
+const ALGORITHM_VERSION = 'readoshi-v4';
 /** 结果列表渐进挂载：首批组数与每次追加的组数，重复链内部同样受限。 */
 const DEMOUNT_GROUP_CHUNK = 24;
 
@@ -140,7 +140,7 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
   const leading = useMemo(() => selectionSignals(member), [member]);
   const pageCount = Number(member.pagecount) > 0 ? Number(member.pagecount) : 0;
   const openMenu = (at: { x: number; y: number }) => onContextMenu(member.archiveId, at);
-  return <span className="dedup-member-interaction" {...longPressHandlers(openMenu)} onContextMenu={(event) => {
+  return <span className="dedup-member-interaction" data-archive-tooltip={member.title || '未命名档案'} {...longPressHandlers(openMenu)} onContextMenu={(event) => {
     event.preventDefault();
     event.stopPropagation();
     openMenu({ x: event.clientX, y: event.clientY });
@@ -149,7 +149,6 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
     role="checkbox"
     aria-checked={selected}
     aria-label={`选择 ${member.title || member.archiveId}`}
-    title={disabled ? '每条关联重复链至少保留一个档案' : member.archiveId}
     disabled={disabled}
     className={`dedup-member${selected ? ' is-selected' : ''}`}
     onClick={() => onToggle(member.archiveId)}
@@ -209,6 +208,7 @@ export function DeduplicationWorkspace() {
   useOverlayBackGuard(smartSelectPending, () => setSmartSelectPending(false));
   const [includeFilenameOnly, setIncludeFilenameOnly] = useState(false);
   const [deleteSession, setDeleteSession] = useState<{ count: number }>();
+  const [executionProgress, setExecutionProgress] = useState<{ processed: number; total: number; label: string }>();
   // 不重复关系面板：持久化的对（含历史墓碑）直接列出，可搜索、可撤销标记。
   const [relationsOpen, setRelationsOpen] = useState(false);
   const [relations, setRelations] = useState<DedupNonDuplicateRecord[]>([]);
@@ -634,77 +634,91 @@ export function DeduplicationWorkspace() {
   async function executeSelected(syncFavorite: boolean) {
     if (!result || !server) return;
     setBusy(true);
-    setDeleteSession(undefined);
-    await selectionWrites.current;
-    // 整组选择 → 组内全部两两组合标记为不重复。
-    const markedGroups = groups.filter((group) => selectedGroupKeys.has(groupKeyOf(group)));
-    // 一批一次 IPC：原先按 C(m,2) 逐对串行往返，一组五人就是十次。
-    const pairEntries = markedGroups.flatMap((group) => {
-      const entries = [];
-      for (let i = 0; i < group.length; i += 1) {
-        for (let j = i + 1; j < group.length; j += 1) {
-          entries.push({ scopeId: server.scopeId, leftArchiveId: group[i]!.archiveId, rightArchiveId: group[j]!.archiveId });
-        }
-      }
-      return entries;
-    });
-    const markedPairKeys = new Set<string>();
-    let markCount = 0;
-    if (pairEntries.length > 0) {
-      const response = await dedup.saveNonDuplicates(pairEntries);
-      if (response.ok) {
-        pairEntries.forEach((entry, index) => {
-          // 批命令按输入顺序回每条成败：只有真落库的对才算已处理，
-          // 部分失败不能把没标记的组从视图里误删。
-          if (response.value[index]) markedPairKeys.add(toPairKey(entry.leftArchiveId, entry.rightArchiveId));
-        });
-      }
-      const markFailures = pairEntries.length - markedPairKeys.size;
-      if (markFailures > 0) showToast(`${markFailures} 组标记失败，请重试`, 'error');
-      setProcessedNonDuplicatePairKeys((current) => new Set([...current, ...markedPairKeys]));
-      // 提示语按组计数：组内所有对都落库才算这一组标记完成。
-      markCount = markedGroups.filter((group) => {
+    setExecutionProgress({ processed: 0, total: selected.size, label: '准备执行' });
+    try {
+      await selectionWrites.current;
+      // 整组选择 → 组内全部两两组合标记为不重复。
+      const markedGroups = groups.filter((group) => selectedGroupKeys.has(groupKeyOf(group)));
+      // 一批一次 IPC：原先按 C(m,2) 逐对串行往返，一组五人就是十次。
+      const pairEntries = markedGroups.flatMap((group) => {
+        const entries = [];
         for (let i = 0; i < group.length; i += 1) {
           for (let j = i + 1; j < group.length; j += 1) {
-            if (!markedPairKeys.has(toPairKey(group[i]!.archiveId, group[j]!.archiveId))) return false;
+            entries.push({ scopeId: server.scopeId, leftArchiveId: group[i]!.archiveId, rightArchiveId: group[j]!.archiveId });
           }
         }
-        return true;
-      }).length;
-    }
-    const deletedIds = [...selected];
-    const actuallyDeleted = new Set<string>();
-    if (deletedIds.length > 0) {
-      const response = await dedup.deleteSelected({ sessionId: result.session.sessionId }, syncFavorite);
-      if (!response.ok) throw new Error(response.error.message);
-      // 只有确实删除的档案才从视图移除；未删除的留在原地等待重试。
-      response.value.outcomes.filter((outcome) => outcome.deleted).forEach((outcome) => actuallyDeleted.add(outcome.archiveId));
-      if (response.value.rejectedArchiveIds.length) showToast('为保护重复组，部分档案未删除', 'error');
-      else {
-        const failed = response.value.outcomes.filter((outcome) => !outcome.deleted);
-        // 执行结果不再挂在列表下方一行小字里：标记与删除的条数并进这条播报。
-        const done = `${markCount > 0 ? `标记 ${markCount} 组为不重复，` : ''}删除 ${actuallyDeleted.size} 个档案`;
-        showToast(failed.length ? `${failed.length} 个档案未删除：${failed[0]?.message ?? '请重试'}` : done, failed.length ? 'error' : 'success');
+        return entries;
+      });
+      const markedPairKeys = new Set<string>();
+      const executionTotal = pairEntries.length + selected.size;
+      setExecutionProgress({ processed: 0, total: executionTotal, label: '标记不重复关系' });
+      let markCount = 0;
+      if (pairEntries.length > 0) {
+        for (let offset = 0; offset < pairEntries.length; offset += 64) {
+          const batch = pairEntries.slice(offset, offset + 64);
+          const response = await dedup.saveNonDuplicates(batch);
+          if (response.ok) {
+            batch.forEach((entry, index) => {
+              // 批命令按输入顺序回每条成败：只有真落库的对才算已处理，
+              // 部分失败不能把没标记的组从视图里误删。
+              if (response.value[index]) markedPairKeys.add(toPairKey(entry.leftArchiveId, entry.rightArchiveId));
+            });
+          }
+          setExecutionProgress({ processed: Math.min(offset + batch.length, pairEntries.length), total: executionTotal, label: '标记不重复关系' });
+        }
+        const markFailures = pairEntries.length - markedPairKeys.size;
+        if (markFailures > 0) showToast(`${markFailures} 组标记失败，请重试`, 'error');
+        setProcessedNonDuplicatePairKeys((current) => new Set([...current, ...markedPairKeys]));
+        // 提示语按组计数：组内所有对都落库才算这一组标记完成。
+        markCount = markedGroups.filter((group) => {
+          for (let i = 0; i < group.length; i += 1) {
+            for (let j = i + 1; j < group.length; j += 1) {
+              if (!markedPairKeys.has(toPairKey(group[i]!.archiveId, group[j]!.archiveId))) return false;
+            }
+          }
+          return true;
+        }).length;
       }
-      if (actuallyDeleted.size > 0) invalidateRouteCache();
-    } else if (markCount > 0) {
-      showToast(`已标记 ${markCount} 组为不重复`, 'success');
+      const deletedIds = [...selected];
+      const actuallyDeleted = new Set<string>();
+      if (deletedIds.length > 0) {
+        setExecutionProgress({ processed: pairEntries.length, total: executionTotal, label: '删除重复档案' });
+        const response = await dedup.deleteSelected({ sessionId: result.session.sessionId }, syncFavorite, ({ processed }) => {
+          setExecutionProgress({ processed: pairEntries.length + processed, total: executionTotal, label: '删除重复档案' });
+        });
+        if (!response.ok) throw new Error(response.error.message);
+        // 只有确实删除的档案才从视图移除；未删除的留在原地等待重试。
+        response.value.outcomes.filter((outcome) => outcome.deleted).forEach((outcome) => actuallyDeleted.add(outcome.archiveId));
+        if (response.value.rejectedArchiveIds.length) showToast('为保护重复组，部分档案未删除', 'error');
+        else {
+          const failed = response.value.outcomes.filter((outcome) => !outcome.deleted);
+          // 执行结果不再挂在列表下方一行小字里：标记与删除的条数并进这条播报。
+          const done = `${markCount > 0 ? `标记 ${markCount} 组为不重复，` : ''}删除 ${actuallyDeleted.size} 个档案`;
+          showToast(failed.length ? `${failed.length} 个档案未删除：${failed[0]?.message ?? '请重试'}` : done, failed.length ? 'error' : 'success');
+        }
+        if (actuallyDeleted.size > 0) invalidateRouteCache();
+      } else if (markCount > 0) {
+        showToast(`已标记 ${markCount} 组为不重复`, 'success');
+      }
+      if (markCount > 0 || actuallyDeleted.size > 0) {
+        selectionRevision.current += 1;
+        setSavedSessionId(undefined);
+      }
+      setProcessedDeletedArchiveIds((current) => new Set([...current, ...actuallyDeleted]));
+      setSelectedGroupKeys(new Set());
+      setManuallyTouchedGroupKeys(new Set());
+      const reloaded = await dedup.loadResult(result.session.sessionId);
+      if (reloaded.ok) setResult(reloaded.value);
+      else setResult((current) => current ? { ...current, selectedArchiveIds: [] } : current);
+      await loadSessions();
+      if (actuallyDeleted.size > 0) {
+        const refreshed = await library.listArchiveIdentities(server.id);
+        if (refreshed.ok) setArchives(refreshed.value);
+      }
+      setExecutionProgress({ processed: executionTotal, total: executionTotal, label: '执行完成' });
+    } finally {
+      setBusy(false);
     }
-    if (markCount > 0 || actuallyDeleted.size > 0) {
-      selectionRevision.current += 1;
-      setSavedSessionId(undefined);
-    }
-    setProcessedDeletedArchiveIds((current) => new Set([...current, ...actuallyDeleted]));
-    setSelectedGroupKeys(new Set());
-    setManuallyTouchedGroupKeys(new Set());
-    const reloaded = await dedup.loadResult(result.session.sessionId);
-    if (reloaded.ok) setResult(reloaded.value);
-    else setResult((current) => current ? { ...current, selectedArchiveIds: [] } : current);
-    if (actuallyDeleted.size > 0) {
-      const refreshed = await library.listArchiveIdentities(server.id);
-      if (refreshed.ok) setArchives(refreshed.value);
-    }
-    setBusy(false);
   }
 
   /** 不重复关系：读取持久化对；标记/撤销都走既有命令并同步 journal。 */
@@ -752,7 +766,7 @@ export function DeduplicationWorkspace() {
   }
 
   async function saveCurrentResult() {
-    if (!result || busy || savingResult) return;
+    if (!result || busy || savingResult || groups.length === 0) return;
     const id = result.session.sessionId;
     const revision = selectionRevision.current;
     setSavingResult(true);
@@ -972,7 +986,7 @@ export function DeduplicationWorkspace() {
           {progress?.stage === 'cancelled' && <span>扫描已取消，下面是已完成部分的结果。</span>}
         </div>
         <div className="dedup-section-actions">
-          <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存结果'}</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || groups.length === 0 || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存结果'}</span></button>
           <button className="secondary-action has-action-label" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /><span className="action-label">智能选择</span></button>
           <button className="secondary-action has-action-label" type="button" aria-label="清除选择" title="清除选择" disabled={busy || (!selected.size && !selectedGroupKeys.size)} onClick={() => void clearSelection()}><Eraser aria-hidden="true" /><span className="action-label">清除选择</span></button>
           <button className="secondary-action has-action-label" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><ListChecks aria-hidden="true" /><span className="action-label">{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</span></button>
@@ -988,14 +1002,14 @@ export function DeduplicationWorkspace() {
         </div>)}
       </dl>
       <div className="dedup-filters">
-        <label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部来源' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label>
+        <label>来源<SelectField name="dedupSource" aria-label="来源" value={sourceFilter} options={[{ value: 'all', label: '全部' }, { value: 'image', label: '封面相似' }, { value: 'filename', label: '文件名' }]} onChange={(value) => setSourceFilter(value as typeof sourceFilter)} /></label>
         <label>视图<SelectField name="dedupView" aria-label="视图" value={view} options={[{ value: 'all', label: '全部' }, { value: 'groups', label: '重复组' }, { value: 'chains', label: '重复链' }, { value: 'page-gap', label: '页数差距大' }]} onChange={(value) => setView(value as typeof view)} /></label>
         {/* 已选择 / 待选择：检查这批重复还有哪些没定，或复核已经定下的那些。
             和上面两个筛选用同一种控件，三格看起来是一排。 */}
         <label>选择<SelectField name="dedupSelection" aria-label="选择" value={selectionFilter} options={[{ value: 'all', label: '全部' }, { value: 'selected', label: '已选择' }, { value: 'pending', label: '待选择' }]} onChange={(value) => setSelectionFilter(value as typeof selectionFilter)} /></label>
       </div>
     </section>}
-    {deleteSession && <ArchiveDeletionConfirmation description={`将标记 ${selectedGroupKeys.size} 组为不重复，并永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => setDeleteSession(undefined)} onConfirm={executeSelected} />}
+    {deleteSession && <ArchiveDeletionConfirmation keepOpenAfterConfirm progress={executionProgress} description={`将标记 ${selectedGroupKeys.size} 组为不重复，并永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => { setDeleteSession(undefined); setExecutionProgress(undefined); }} onConfirm={executeSelected} />}
     <Dialog.Root open={smartSelectPending} onOpenChange={setSmartSelectPending}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
@@ -1041,7 +1055,11 @@ export function DeduplicationWorkspace() {
         </ul>
       </div>
       {moreRowsMounted && <div ref={sentinelRef} aria-hidden="true" className="dedup-list-sentinel" />}
-      {!visibleGroups.length && !busy && <StatusLine>没有匹配当前筛选的重复组。</StatusLine>}
+      {!visibleGroups.length && !busy && <EmptyState
+        icon={FolderOpen}
+        title="没有匹配的重复组"
+        description="试试调整来源、视图或选择条件。"
+      />}
     </>}
     <Dialog.Root open={relationsOpen && !overviewArchive} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
       <Dialog.Portal>
@@ -1071,7 +1089,7 @@ export function DeduplicationWorkspace() {
                 {record.tombstoned ? <Undo2 aria-hidden="true" /> : <Ban aria-hidden="true" />}
               </button>
             </li>)}
-            {!visibleRelations.length && <StatusLine as="li">没有匹配的关系记录。</StatusLine>}
+            {!visibleRelations.length && <li className="dedup-relations-empty"><EmptyState compact icon={Link2Off} title="没有匹配的关系记录" /></li>}
           </ul>
         </Dialog.Content>
       </Dialog.Portal>
@@ -1098,7 +1116,6 @@ export function DeduplicationWorkspace() {
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content dedup-history-dialog" aria-describedby={undefined}>
           <Dialog.Title className="dialog-title"><History aria-hidden="true" />扫描结果</Dialog.Title>
-          {loadingSessionId && <div className="dedup-history-status" role="status"><LoadingIndicator inline />正在校验档案并读取结果…</div>}
           {historyError && <p className="dedup-history-error" role="alert">{historyError}</p>}
           {/* 空态不再伪装成一条记录：它以前是列表里的一个 <li>，于是套上了记录的
               描边、底色和两端对齐，读起来像"有一条叫这个名字的扫描结果"。 */}
@@ -1111,6 +1128,9 @@ export function DeduplicationWorkspace() {
               <div className="dedup-history-actions">
                 <button className="secondary-action is-icon" type="button" aria-label={`载入 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title={loadingSessionId === item.sessionId ? '正在载入' : '载入'} aria-busy={loadingSessionId === item.sessionId} disabled={historyBusy || item.sessionId === sessionId} onClick={() => void loadSession(item)}><FolderOpen aria-hidden="true" /></button>
                 <button className="secondary-action is-danger is-icon" type="button" aria-label={`删除 ${formatSessionTime(item.updatedAt)} 的扫描结果`} title="删除" disabled={historyBusy || savingResult} onClick={() => void removeSession(item)}><Trash2 aria-hidden="true" /></button>
+              </div>
+              <div className={'model-download-slot' + (loadingSessionId === item.sessionId ? ' is-open' : '')} aria-hidden={loadingSessionId !== item.sessionId}>
+                <CardProgressBar percent={0} indeterminate cornerAware composited label="扫描结果读取进度" />
               </div>
             </li>)}
           </ul> : historyBusy

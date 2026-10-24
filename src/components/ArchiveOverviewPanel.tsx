@@ -4,7 +4,7 @@ import type { MouseEvent } from 'react';
 
 import { formatByteSize } from '../lib/archiveCardPresentation';
 import { categorizeSearchableTags } from '../lib/tags';
-import { DetailFactGlyph, type DetailFact } from './ArchiveDetailSections';
+import { DetailFactGlyph, useSingleLineTitle, type DetailFact } from './ArchiveDetailSections';
 import { TagSearchLink } from './TagSearchLink';
 
 /** The archive overview: cover, facts and the page grid.
@@ -36,7 +36,10 @@ export interface ArchiveOverviewPanelProps {
   onPanelClick?: ((event: MouseEvent) => void) | undefined;
 }
 
+const OVERVIEW_TITLE_SIZES = ['var(--text-heading)', '20px', '18px', '16px'] as const;
+
 export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags, currentPage, thumbnailAt, registerTile, onRangeChange, onSelectPage, onClose, onPanelClick }: ArchiveOverviewPanelProps) {
+  const titleRef = useSingleLineTitle(title, OVERVIEW_TITLE_SIZES);
   const grouped = categorizeSearchableTags(tags ?? []);
   // The same two facts the detail page lists beside its cover, in the same shape
   // and with the same glyphs: as a "3 页 · 143.2 MB" line of its own this was a
@@ -47,27 +50,18 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
   ];
   return <aside className="reader-overview" aria-label="档案概览" onClick={onPanelClick}>
     <header className="reader-overview-heading">
-      <strong>{title}</strong>
+      <strong ref={titleRef}>{title}</strong>
       <button type="button" className="reader-icon-button" aria-label="关闭概览" onClick={onClose}><X aria-hidden="true" /></button>
     </header>
     <div className="reader-overview-summary">
-      {/* Page count and size sit under the cover rather than beside it: they
-          belong to the cover, and putting them in the wide column pushed the
-          tag groups down by a line for no reason. */}
+      {/* The cover and tags share the first row; compact facts span the row below. */}
       <div className="reader-overview-identity">
         {/* 封面装在一个裁切框里：SFW 的模糊与 1.12 倍放大都会画到元素盒子外面，
             没有 overflow: hidden 就会糊到旁边的页数、标签上。
             SFW 下这张封面在触屏上要"按住才看清"，而 pressFeedback 只标记可点元素：
             这个框自己不是可点元素，所以由它认领这次按压（data-press-surface）。 */}
         {cover && <span className="reader-overview-cover-frame" data-press-surface><img className="reader-overview-cover" src={cover} alt="" decoding="async" /></span>}
-        <dl className="reader-overview-stats" aria-label="档案信息">
-          {facts.map(({ kind, label, value }) => (
-            <div key={kind} data-fact={kind} title={label}>
-              <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
-              <dd>{value}</dd>
-            </div>
-          ))}
-        </dl>
+
       </div>
       <div className="reader-overview-facts">
         {grouped.length > 0 && (
@@ -83,8 +77,16 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
           </div>
         )}
       </div>
+      <dl className="reader-overview-stats" aria-label="档案信息">
+        {facts.map(({ kind, label, value }) => (
+          <div key={kind} data-fact={kind} title={label}>
+            <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
-    <VirtualPageGrid count={Math.max(0, pageCount)} minWidth={72} className={`reader-overview-thumbnails${onSelectPage ? '' : ' is-preview'}`} onRangeChange={onRangeChange}>
+    <VirtualPageGrid count={Math.max(0, pageCount)} minWidth={80} className={`reader-overview-thumbnails${onSelectPage ? '' : ' is-preview'}`} onRangeChange={onRangeChange}>
       {(index) => {
         const preview = thumbnailAt(index);
         return <button

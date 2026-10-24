@@ -1,7 +1,8 @@
 import { usePreferences } from '../app/preferences';
 import { compactNavHiddenItems } from './AppShell';
 import { SettingsRow } from './SettingsRow';
-import { StatusLine } from './StatusLine';
+import { PanelsTopLeft } from 'lucide-react';
+import { EmptyState } from './EmptyState';
 
 /** 底栏放不下的页面在这里列出来。
  *
@@ -18,7 +19,7 @@ export function MorePagesRoute() {
       <div className="settings-group">
         <h1 className="visually-hidden">更多</h1>
         {hidden.length === 0
-          ? <StatusLine>底栏已经放得下所有页面。</StatusLine>
+          ? <EmptyState icon={PanelsTopLeft} title="所有页面都在底栏中" description="可以直接通过底栏进入各个页面。" />
           : hidden.map(({ to, label, icon: Icon }) => (
             <SettingsRow
               key={to}

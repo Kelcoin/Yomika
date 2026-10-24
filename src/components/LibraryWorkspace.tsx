@@ -12,6 +12,7 @@ import { useDefaultLayout } from 'react-resizable-panels';
 import { Group, Panel, Separator } from './AdaptivePanels';
 import { usePageActive } from '../app/RetainedPage';
 import { EDGE_CLAIM_PX, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
+import { createWheelMotion, isDiscreteWheel } from '../lib/wheelMotion';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
@@ -346,16 +347,31 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     if (!pageActive || compact || !region) return undefined;
     const host = region.closest('.library-shell-list') ?? region.parentElement;
     if (!host) return undefined;
+    const motion = createWheelMotion();
+    const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     const forward = (event: Event) => {
       const wheel = event as WheelEvent;
       const target = wheel.target;
+      if (wheel.defaultPrevented || wheel.ctrlKey) return;
       if (target instanceof Element && target.closest('[data-scroll-region]')) return;
-      const scale = wheel.deltaMode === 1 ? 40 : wheel.deltaMode === 2 ? region.clientHeight : 1;
-      region.scrollTop += wheel.deltaY * scale;
+      const scale = wheel.deltaMode === 1 ? 16 : wheel.deltaMode === 2 ? region.clientHeight : 1;
+      if (!reduced && isDiscreteWheel(wheel) && Math.abs(wheel.deltaY) >= Math.abs(wheel.deltaX) && motion.push(region, wheel.deltaY * scale)) {
+        if (wheel.cancelable) wheel.preventDefault();
+      } else {
+        motion.cancel();
+        region.scrollTop += wheel.deltaY * scale;
+      }
       region.scrollLeft += wheel.deltaX * scale;
     };
-    host.addEventListener('wheel', forward, { passive: true });
-    return () => host.removeEventListener('wheel', forward);
+    host.addEventListener('wheel', forward, { passive: false });
+    host.addEventListener('pointerdown', motion.cancel, { passive: true });
+    host.addEventListener('keydown', motion.cancel);
+    return () => {
+      motion.cancel();
+      host.removeEventListener('wheel', forward);
+      host.removeEventListener('pointerdown', motion.cancel);
+      host.removeEventListener('keydown', motion.cancel);
+    };
   }, [compact, pageActive]);
   /** Undefined until something is actually chosen. Seeding it with the first
    * archive made the top row render as pressed on every visit — including on the
@@ -548,7 +564,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     const owns = (target: EventTarget | null) => target instanceof Node && rootRef.current?.contains(target);
 
     const wheel = (event: WheelEvent) => {
-      if (!owns(event.target)) return;
+      if (!owns(event.target) || event.defaultPrevented || event.ctrlKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
       // Deltas arrive in pixels, lines or pages; a line is about 16px.
       const delta = event.deltaMode === 1 ? event.deltaY * 16 : event.deltaY;
       // 每次手势重新问一次「这一格滚轮会滚谁」：绑定的宿主只决定谁收到事件，
@@ -1044,6 +1060,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {...(selectionMode && onSelectionChange
           ? { role: 'checkbox', 'aria-checked': isSelected, 'aria-label': `选择 ${archive.title}` }
           : { 'aria-pressed': pressed })}
+        data-archive-tooltip={archive.title || '未命名档案'}
         className={`archive-thumb-card${isSelected ? ' is-selected' : ''}`}
         onClick={openArchive}
         onContextMenu={openMenu}
@@ -1067,6 +1084,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         {...(selectionMode && onSelectionChange
           ? { role: 'checkbox', 'aria-checked': isSelected, 'aria-label': `选择 ${archive.title}` }
           : { 'aria-pressed': pressed })}
+        data-archive-tooltip={archive.title || '未命名档案'}
         className={`archive-row${isSelected ? ' is-selected' : ''}`}
         onClick={openArchive}
         onContextMenu={openMenu}
@@ -1091,7 +1109,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
     )}
     {/* The timeline belongs to the list rail, so it sits outside the clickable
         card and connects continuously between neighbouring cards. */}
-    {timelineByArchiveId?.get(archive.archiveId) && (
+    {timelineByArchiveId && (
       <span className="archive-row-timeline" aria-hidden="true">
         {dayLabel && <span className="archive-row-timeline-day">{dayLabel}</span>}
         <span className="archive-row-timeline-time">{timelineByArchiveId.get(archive.archiveId)?.time}</span>

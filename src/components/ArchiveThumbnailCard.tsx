@@ -167,6 +167,7 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
   const press = onContextMenu ? longPressHandlers((at) => onContextMenu(archive, at)) : {};
   return <Link
     aria-current={detailOpen ? 'page' : undefined}
+    data-archive-tooltip={archive.title || '未命名档案'}
     className={`archive-thumb-card${isWide ? ' is-wide' : ''}`}
     to={`${detailBasePath}/${archive.archiveId}?server=${encodeURIComponent(archive.serverId)}`}
     onClick={onOpen}

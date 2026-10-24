@@ -1,5 +1,6 @@
 import { useArchiveReadingProgress } from './useArchiveReadingProgress';
 import { VirtualPageGrid } from './VirtualPageGrid';
+import { EmptyState } from './EmptyState';
 import { usePageActive } from '../app/RetainedPage';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
@@ -502,7 +503,7 @@ detailBasePath?: string | undefined }) {
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
-          <VirtualPageGrid count={metadata.pageCount} className="archive-page-thumbnails-grid" minWidth={96}>
+          <VirtualPageGrid count={metadata.pageCount} className="archive-page-thumbnails-grid" minWidth={108}>
             {(index) => (
               <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)} />
             )}
@@ -515,7 +516,7 @@ detailBasePath?: string | undefined }) {
       <div role="tabpanel" aria-label="评论" hidden={detailPanel !== 'comments'}>
       {ehGallery && ehAccountId
         ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} serverId={serverId} onOpenArchive={(archive) => navigate(`${detailBasePath}/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)} />
-        : <p className="archive-comments-unavailable">此档案没有可读取的 E-Hentai 评论。</p>}
+        : <EmptyState compact icon={MessageCircle} title="评论暂不可用" description="此档案没有可读取的 E-Hentai 评论。" />}
       </div>
       {menu}
     </main>
