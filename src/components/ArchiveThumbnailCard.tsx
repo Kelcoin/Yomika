@@ -195,11 +195,12 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       tags={archive.tags}
       favorite={favorite}
       progressPage={progressPage}
-      progressVisibility={progressVisibility}
+      progressVisibility="none"
       progressScope={progressScope}
       pageCount={archive.pageCount}
       meta={<><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
     />
+    <ArchiveProgressBar page={progressPage} pageCount={archive.pageCount} visibility={progressVisibility} scope={progressScope} />
   </Link>;
 }
 

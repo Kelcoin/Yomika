@@ -4513,16 +4513,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
 .archive-rail-item > .archive-thumb-card {
-  --archive-thumb-body-height: 135px;
+  --archive-rail-cover-height: 210px;
   scroll-snap-align: none;
-  transform: translateZ(0);
+  transform: scale(1);
+  will-change: transform;
   isolation: isolate;
-  /* The progress track's centre is 2px above the body (top: -5px,
-     height: 6px). Scale around that seam, rather than the card centre:
-     otherwise hover moves the track down by about 0.7px. This also keeps
-     the seam stable on wide covers and rails without a visible track. */
-  transform-origin: 50% calc(100% - var(--archive-thumb-body-height) - 2px);
+  /* Cover and progress share this one transform, including its origin and
+     animation. Do not promote/transform the track independently. */
+  transform-origin: center;
 }
+.archive-rail-item > .archive-thumb-card > .archive-thumb-card-media { height: var(--archive-rail-cover-height); }
 .archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
@@ -4542,7 +4542,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-thumb-card.is-skeleton .archive-thumb-card-meta .skeleton-line { width: 60%; height: 100%; }
 .archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-container); }
 .archive-thumb-card-media img, .archive-thumb-card-skeleton { display: block; width: 100%; height: 100%; object-fit: cover; }
-.archive-thumb-card-body { position: relative; display: grid; align-content: start; grid-template-columns: minmax(0, 1fr); grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: var(--archive-thumb-body-height, 135px); padding: var(--space-3); }
+.archive-thumb-card-body { position: relative; display: grid; align-content: start; grid-template-columns: minmax(0, 1fr); grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
 /* 进度条压在封面与正文的接缝上，读的是「这张卡读到哪儿了」。
    两端都顶到卡片内边缘、外边不带圆角：左侧留白会让 1% 的进度看起来是一枚悬空的
    圆点，而画满时右侧的圆角会在卡片边缘留下一小块轨道底色——两种都不像这张卡
@@ -4555,7 +4555,9 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    进度条底部闪出一丝封面」。多盖 1px 与抬 z-index 各挡一个方向：正文给不出这块
    遮挡（块级背景画在内联替换内容之下）。宽行档把 height 覆写成 4px，不受影响。 */
 .archive-card-progress { position: absolute; inset: -5px 0 auto; z-index: 1; display: block; height: 6px; overflow: hidden; background: color-mix(in srgb, var(--on-surface) 12%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); box-shadow: var(--shadow-progress); pointer-events: none; }
-.archive-rail-item .archive-card-progress { transform: translateZ(0); backface-visibility: hidden; }
+.archive-thumb-card > .archive-card-progress {
+  inset: calc(var(--archive-rail-cover-height, 210px) - 5px) 0 auto;
+}
 /* 轨道底色不能用 `--surface-container-highest`：设置菜单里的选项行悬停时**正是**填这个色
    （`.settings-choice-option:hover`），于是鼠标一移上去，轨道与行的悬停底融成一片、只剩
    填充那一段——用户 2026-10-18 报「鼠标移上去就会消失」。改成一层由正文色兑出来的半透明

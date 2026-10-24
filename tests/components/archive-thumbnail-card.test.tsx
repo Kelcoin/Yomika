@@ -204,3 +204,14 @@ it('keeps rail snap targets outside the cards that animate on press', () => {
   expect(card.parentElement).toHaveClass('archive-rail-item');
   expect(card.parentElement?.parentElement).toHaveClass('archive-rail-grid');
 });
+
+it('keeps the cover and rail progress track inside one card scale layer', () => {
+  const archive = { serverId: 'server', archiveId: 'rail-progress', title: 'Rail progress', pageCount: 100, updatedAt: '', tags: [] };
+  const { container } = render(<MemoryRouter><ArchiveThumbnailRail title="Rail" archives={[archive]} scopeId="scope" serverId="server" progressByArchiveId={new Map([[archive.archiveId, 45]])} progressVisibility="all" /></MemoryRouter>);
+  const card = container.querySelector('.archive-thumb-card')!;
+  const progress = screen.getByRole('progressbar', { name: '阅读进度' });
+  expect(progress.parentElement).toBe(card);
+  expect(card.querySelector('.archive-thumb-card-media')?.parentElement).toBe(card);
+  expect(card.parentElement?.querySelector(':scope > .archive-card-progress')).toBeNull();
+  expect(progress).toHaveAttribute('aria-valuenow', '45');
+});

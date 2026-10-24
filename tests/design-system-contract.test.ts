@@ -1245,10 +1245,12 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-thumb-card\s*\{[\s\S]*width:\s*150px/);
     expect(shell).toMatch(/\.archive-thumb-card\.is-wide\s*\{[\s\S]*width:\s*316px/);
     expect(shell).toMatch(/\.archive-thumb-card-media\s*\{[\s\S]*height:\s*210px/);
-    expect(shell).toMatch(/\.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*36px 48px 15px[\s\S]*height:\s*var\(--archive-thumb-body-height, 135px\)/);
+    expect(shell).toMatch(/\.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*36px 48px 15px[\s\S]*height:\s*135px/);
     const railCard = ruleBody(shell, '.archive-rail-item > .archive-thumb-card');
-    expect(railCard).toMatch(/--archive-thumb-body-height:\s*135px/);
-    expect(railCard).toMatch(/transform-origin:\s*50% calc\(100% - var\(--archive-thumb-body-height\) - 2px\)/);
+    expect(railCard).toMatch(/transform-origin:\s*center/);
+    const railProgress = ruleBody(shell, '.archive-thumb-card > .archive-card-progress');
+    expect(railProgress).toMatch(/inset:\s*calc\(var\(--archive-rail-cover-height, 210px\) - 5px\) 0 auto/);
+    expect(railProgress).not.toMatch(/(?:transform|translate|scale|transition)\s*:/);
     expect(shell).toMatch(/\.archive-thumb-card-tags\s*\{[\s\S]*align-items:\s*flex-start[\s\S]*align-content:\s*flex-start/);
     // The rail card and the library grid share one tag geometry: a 20px chip in a
     // 48px two-row slot, so two rows need 44px and keep 4px clearance — the second
