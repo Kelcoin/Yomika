@@ -7,15 +7,28 @@
 .archive-row {
   transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp), filter var(--motion-standard);
 }
-.archive-list.is-thumbnail .archive-thumb-card-media,
-.archive-row-thumb {
+.archive-list.is-thumbnail .archive-thumb-card-media {
   transition: transform var(--motion-crisp), filter var(--motion-standard);
 }
 
+/* Keep the list cover's clipping frame fixed. Scaling that frame promotes its
+   raster at fractional edges (100x142 -> 102x144.84), softening the image and
+   making the rounded edge appear to drift. Expand the absolute image equally
+   on each side instead, repainting at the target size inside a stationary frame.
+   The independent SFW filter/transform still owns privacy and reveal behavior. */
+.archive-row .archive-row-thumb img {
+  transition: inset var(--motion-crisp), width var(--motion-crisp), height var(--motion-crisp),
+              filter var(--motion-standard), transform var(--motion-standard);
+}
+
 @media (hover: hover) {
-  .archive-thumb-card:hover:not(:active):not(.is-pressed),
-  .archive-row:hover .archive-row-thumb {
+  .archive-thumb-card:hover:not(:active):not(.is-pressed) {
     transform: scale(1.02);
+  }
+  .archive-row:hover .archive-row-thumb img {
+    inset: -1px;
+    width: calc(100% + 2px);
+    height: calc(100% + 2px);
   }
 }
 
@@ -32,8 +45,13 @@
   .archive-row { transition: none; }
   .archive-thumb-card:is(.is-pressed, :active),
   .archive-thumb-card:hover:not(:active):not(.is-pressed),
-  .archive-row:hover .archive-row-thumb,
   .archive-row:is(.is-pressed, :active) { transform: none; }
+  .archive-row .archive-row-thumb img { transition: none; }
+  .archive-row:hover .archive-row-thumb img {
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
 }
 
 /* ---- Gradient Button Enhancement --------------------------------------- */
