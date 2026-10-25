@@ -11,11 +11,11 @@
   transition: transform var(--motion-crisp), filter var(--motion-standard);
 }
 
-/* Both card layouts scale as one surface: cover, text and progress stay aligned.
-   Never add a second hover zoom to the list cover or its clipping frame. */
+/* Full-width list rows keep their original hover geometry and 0.99 press scale:
+   the 4px list gutter cannot contain a percentage expansion on a desktop row.
+   Their covers follow the card, without an independent image/frame hover zoom. */
 @media (hover: hover) {
-  .archive-thumb-card:hover:not(:active):not(.is-pressed),
-  .archive-row:hover:not(:active):not(.is-pressed) {
+  .archive-thumb-card:hover:not(:active):not(.is-pressed) {
     transform: scale(1.02);
   }
 }
@@ -33,7 +33,6 @@
   .archive-row { transition: none; }
   .archive-thumb-card:is(.is-pressed, :active),
   .archive-thumb-card:hover:not(:active):not(.is-pressed),
-  .archive-row:hover:not(:active):not(.is-pressed),
   .archive-row:is(.is-pressed, :active) { transform: none; }
 }
 

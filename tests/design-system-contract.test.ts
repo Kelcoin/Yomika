@@ -2316,9 +2316,9 @@ describe('design system contract', () => {
     // 行高由虚拟列表给死，且没有把卡片重新量一遍的钩子——这是「别的卡片不会跟着动」的依据。
     expect(workspace).toMatch(/className="archive-thumb-grid-row"[\s\S]{0,320}?height: virtualRow\.size/);
     expect(workspace).not.toMatch(/measureElement/);
-    // 两类卡片的悬停都缩放整张卡；封面不再单独缩放。
+    // 保留缩略卡悬停放大；列表行只保留原有按压缩放，封面不再独立缩放。
     expect(polish).not.toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \.archive-thumb-card-media/);
-    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\),\s*\.archive-row:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
+    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
     // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-copy \{\s*transform-origin: left center;/);
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
@@ -2473,14 +2473,17 @@ describe('design system contract', () => {
     }
   });
 
-  it('scales list cards as one surface, like thumbnail cards, without independently zooming covers', () => {
+  it('preserves original full-width list geometry and press scale without a separate cover zoom', () => {
     const polish = read('src/styles/visual-enhancements.css');
-    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\),\s*\.archive-row:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
-    expect(polish).not.toMatch(/\.archive-row:hover \.archive-row-thumb/);
-    expect(polish).not.toContain('width: calc(100% + 2px)');
+    // A 2% full-width zoom exceeds the list's 4px gutters on desktop and clips its corners.
+    expect(polish).not.toMatch(/\.archive-row:hover/);
     expect(polish).not.toMatch(/\.archive-row \.archive-row-thumb img\s*\{/);
+    expect(polish).not.toContain('width: calc(100% + 2px)');
+    expect(polish).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.99\);/);
+    const shell = read('src/styles/shell.css');
+    expect(shell).toContain('.archive-row:hover:not([aria-pressed=');
     const reduced = polish.slice(polish.indexOf('@media (prefers-reduced-motion: reduce)'));
-    expect(reduced).toMatch(/\.archive-row:hover:not\(:active\):not\(\.is-pressed\),/);
+    expect(reduced).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \{ transform: none;/);
   });
 
   it('keeps every hover rule behind a hover capability guard', () => {
