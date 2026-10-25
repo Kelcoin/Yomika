@@ -2728,9 +2728,18 @@ body::-webkit-scrollbar,
      overscroll glow or hand the gesture to an ancestor. */
   overscroll-behavior: contain;
   background: var(--surface-panel);
-  /* Keep a small focus-ring inset. The status bar already has its own layout
-     track, so reserving its height again creates a blank scroll tail. */
-  padding: 4px;
+  /* Hover growth on a row is a transform, and a transformed box adds to the
+     scroller scrollable overflow: without this the list picked up a couple of
+     pixels of sideways scroll that no scrollbar shows. clip keeps the vertical
+     scroller and drops that range - scrollLeft stays 0 whatever the rows do. */
+  overflow-x: clip;
+  /* Keep a small focus-ring inset, and give the row's hover growth room to
+     move: this 8px gutter is the whole budget, because each edge travels row
+     width x (k - 1) / 2. 8px therefore buys a 3200px row at 0.5%; widening the
+     gutter (here) or narrowing the row is the only way to afford more. The
+     status bar has its own layout track, so reserving its height again creates
+     a blank scroll tail. */
+  padding: 8px;
   scrollbar-width: none;
 }
 
@@ -2911,9 +2920,9 @@ body::-webkit-scrollbar,
    rail reaches both edges at rest and never moves during a pull or bounce. */
 .archive-list.has-timeline {
   /* 82px timeline column, node centre 13px from its inner edge, plus the
-     scroller's 4px side padding: the rail sits 73px from the padding box's left
-     edge — and therefore 72px is where the 2px line is painted. */
-  background: linear-gradient(var(--outline-variant), var(--outline-variant)) no-repeat left 72px top / 2px 100%;
+     scroller's 8px side padding: the rail sits 77px from the padding box's left
+     edge — and therefore 76px is where the 2px line is painted. */
+  background: linear-gradient(var(--outline-variant), var(--outline-variant)) no-repeat left 76px top / 2px 100%;
 }
 
 /* …and this is the gutter the right-hand quick-jump rail lives in, so the ticks

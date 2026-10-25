@@ -1959,12 +1959,18 @@ describe('design system contract', () => {
   it('centres the history rail node on the rail line', () => {
     const shell = read('src/styles/shell.css');
     // The rail is the scroller's own background: 82px timeline column minus the
-    // 13px node centre, plus the scroller's 4px side padding, puts the 2px line
+    // 13px node centre, plus the scroller's 8px side padding, puts the 2px line
     // exactly under the node by construction. Desktop only — the compact layout
     // resets it and groups by the dated section bars instead. The rail runs down
     // the left of the list now, so every horizontal measure is mirrored.
     expect(shell).toMatch(/\.archive-row-timeline\s*\{[\s\S]*--timeline-rail-center:\s*13px/);
-    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[\s\S]*left 72px top \/ 2px 100%/);
+    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[\s\S]*left 76px top \/ 2px 100%/);
+    // 轨线横坐标不是随便一个数：内边距 + 82px 时间轴列 − 13px 节点心 − 1px 线宽。
+    // 内边距一改而轨线没跟着走，时间轴节点就不在线上。
+    const listPadding = Number(/(?:^|\n)\s*padding:\s*(\d+)px;/.exec(ruleBody(shell, '.archive-list'))?.[1]);
+    expect(shell, '轨线的横坐标要跟着列表内边距走').toMatch(
+      new RegExp(`no-repeat left ${listPadding + 82 - 13 - 1}px top / 2px 100%`),
+    );
     expect(shell).toMatch(/\.archive-row-timeline::after\s*\{[\s\S]*right:\s*var\(--timeline-rail-center\)[\s\S]*width:\s*8px[\s\S]*transform:\s*translate\(50%,\s*-50%\)/);
     expect(shell).not.toMatch(/\.archive-row-timeline::after\s*\{[\s\S]{0,400}?left:\s*var\(--timeline-rail-center\)/);
   });
@@ -2115,9 +2121,9 @@ describe('design system contract', () => {
     // 就是「第一次切页闪一下」；那层不透明底色还会盖上列表背景画的时间轴轨线。
     expect(shell).toMatch(/\.archive-list\s*\{[\s\S]{0,400}?background:\s*var\(--surface-panel\)/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer')).not.toMatch(/background/);
-    // 内边距和行距照抄真列表：4px 内边距（缩略图档位 12px）加行自己的 4px margin-block，
+    // 内边距和行距照抄真列表：8px 内边距（缩略图档位 12px）加行自己的 4px margin-block，
     // 步距仍旧是 158 + 8，占位卡和落地后的卡片落在同一格上。
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton')).toMatch(/padding:\s*4px/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton')).toMatch(/padding:\s*8px/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-thumbnail')).toMatch(/padding:\s*var\(--space-3\)/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-wide')).toMatch(/gap:\s*0/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-wide .archive-row-skeleton')).toMatch(/margin-block:\s*4px/);
@@ -2125,10 +2131,10 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[^}]*margin-block:\s*4px;[^}]*height:\s*158px/);
     // 时间轴那一栏是行的第一列：真行是 82px 的网格列，骨架行也让出同样的 82px（而不是
     // 靠容器的 padding-left），轨线由列表背景画，占位层不再重复画一根。
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline')).toMatch(/padding-left:\s*4px/);
+    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline')).toMatch(/padding-left:\s*8px/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-row-skeleton')).toMatch(/margin-left:\s*82px/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton')).toMatch(/border-right:\s*0/);
-    // 节点和日期跟着真行摆：真节点圆心在列表左边缘 73px、真日期右端在 58px（= 列宽 82px
+    // 节点和日期跟着真行摆：真节点圆心在列表左边缘 77px、真日期右端在 58px（= 列宽 82px
     // 减 `.archive-row-timeline` 的 28px 右内边距）处。
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton::before')).toMatch(/right:\s*8px/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton .skeleton-line')).toMatch(/right:\s*28px/);
@@ -2293,7 +2299,7 @@ describe('design system contract', () => {
     // rest, pinned to the edges mid-gesture, never scrollable — and explicitly
     // reset in the compact block so the phone groups by the day bars instead.
     expect(workspace).toMatch(/timelineByArchiveId \? 'has-timeline'/);
-    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[^}]*no-repeat left 72px top \/ 2px 100%/);
+    expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{[^}]*no-repeat left 76px top \/ 2px 100%/);
     expect(shell).toMatch(/\.archive-list\.has-timeline\s*\{\s*background:\s*none/);
     expect(shell).not.toMatch(/archive-row-timeline::before/);
     expect(card).toMatch(/headingIcon/);
@@ -2316,7 +2322,7 @@ describe('design system contract', () => {
     // 行高由虚拟列表给死，且没有把卡片重新量一遍的钩子——这是「别的卡片不会跟着动」的依据。
     expect(workspace).toMatch(/className="archive-thumb-grid-row"[\s\S]{0,320}?height: virtualRow\.size/);
     expect(workspace).not.toMatch(/measureElement/);
-    // 保留缩略卡悬停放大；列表行只保留原有按压缩放，封面不再独立缩放。
+    // 缩略卡悬停放大 2%；列表行那一档有自己的有界比例（另一条单独钉住），封面不再独立缩放。
     expect(polish).not.toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \.archive-thumb-card-media/);
     expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
     // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
@@ -2473,17 +2479,83 @@ describe('design system contract', () => {
     }
   });
 
-  it('preserves original full-width list geometry and press scale without a separate cover zoom', () => {
+  it('grows a hovered list row by a ratio the 8px gutter can contain, and never sideways', () => {
     const polish = read('src/styles/visual-enhancements.css');
-    // A 2% full-width zoom exceeds the list's 4px gutters on desktop and clips its corners.
-    expect(polish).not.toMatch(/\.archive-row:hover/);
+    const shell = read('src/styles/shell.css');
+    // 用户 2026-10-25 要「参考缩略图档案卡片给列表档案卡片加一点点悬停放大，注意两侧不要溢出」。
+    // 227 轮把缩略卡那档 1.02 直接搬到整行：满宽行每侧外扩 11px，顶穿了列表当时的 4px 留白（228 轮撤回）。
+    // 现在这一档是**有界的比例**——外扩 = 行宽 × (k-1) / 2——所以判据不是「写了个数」，而是
+    // 「这个数与留白对得上」：k 换回 1.02、内边距被改大或改小，下面那条算出来的行宽就不够了。
+    // 单档比例不可能对所有宽度都成立：外扩 = 行宽 × (k-1) / 2，与行宽成正比，
+    // 所以这一档是**按视口分档的阶梯**——每一档都要在自己管到的最宽行宽里把两边
+    // 留在 8px 留白内。判据不是「写了个数」，而是「这条阶梯没有缝」：k 换回 1.02、
+    // 删掉宽视口那一档、阈值挪过头、内边距被改，下面任一条都会红。
+    // 每一档是一个 `@media (hover: hover)` 块：基档不带宽度门槛，其余每档自带 min-width。
+    // 用大括号配对切出每个块的规则体，避免非贪婪正则跨块串味。
+    const blocks: { minViewport: number; factor: number }[] = [];
+    const rowRule = /\.archive-row:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\((1\.\d+)\);/;
+    const opener = /@media \(hover: hover\)(?: and \(min-width: (\d+)px\))? \{/g;
+    for (let match = opener.exec(polish); match; match = opener.exec(polish)) {
+      let depth = 1;
+      let cursor = match.index + match[0].length;
+      while (cursor < polish.length && depth > 0) {
+        const char = polish[cursor];
+        if (char === '{') depth += 1;
+        else if (char === '}') depth -= 1;
+        cursor += 1;
+      }
+      const body = polish.slice(match.index + match[0].length, cursor - 1);
+      const row = rowRule.exec(body);
+      if (row) blocks.push({ minViewport: Number(match[1] ?? 0), factor: Number(row[1]) });
+    }
+    // 每一处列表行的悬停放大都要落在这种块里：搬到块外的规则会多出一处匹配。
+    expect(
+      polish.match(/\.archive-row:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(/g)?.length ?? 0,
+      '列表行的悬停放大必须关在 @media (hover: hover) 里',
+    ).toBe(blocks.length);
+    const tiers = blocks.sort((left, right) => left.minViewport - right.minViewport);
+    const gutter = Number(/(?:^|\n)\s*padding:\s*(\d+)px;/.exec(ruleBody(shell, '.archive-list'))?.[1]);
+    expect(gutter, '列表的 8px 内边距是这一档能放多大的唯一依据（外扩 = 行宽 x (k-1) / 2）').toBe(8);
+    // 行宽的上界要按**最窄**的侧栏算：收折态只有 65px，比展开态宽出一百多像素的行宽。
+    // 用展开态算会乐观几十像素——0.3% 那一档恰好就差在这几十像素上。
+    const expandedRail = Number(/\.app-shell \{[\s\S]*?grid-template-columns:\s*(\d+)px/.exec(shell)?.[1]);
+    const collapsedRail = Number(/\.app-shell\.is-sidebar-collapsed \{[^}]*?grid-template-columns:\s*(\d+)px/.exec(shell)?.[1]);
+    expect(expandedRail, '展开态侧栏宽度变了，下面的行宽上界就不成立了').toBeGreaterThanOrEqual(88);
+    expect(collapsedRail, '收折态侧栏没读到，行宽上界会偏小').toBeGreaterThan(0);
+    expect(collapsedRail, '收折态该是最窄的一档').toBeLessThan(expandedRail);
+    const rail = collapsedRail;
+    const widestRow = (viewport: number) => viewport - rail - 2 * gutter;
+    const lastViewport = 5120; // 5K：本应用要支持到的最宽屏
+    expect(tiers.map((tier) => tier.minViewport), '档位要按视口从小到大排，且就这两档').toEqual([0, 3280]);
+    // 用户 2026-10-25 定的就是 0.5%：这一档不能被悄悄改回 0.3%。
+    expect(tiers[0]?.factor, '最活跃那一档要是 0.5%').toBe(1.005);
+    for (const [index, tier] of tiers.entries()) {
+      expect(tier.factor, '得真的放大').toBeGreaterThan(1);
+      if (index > 0) expect(tier.factor, '越宽的视口只能放得越小').toBeLessThan(tiers[index - 1]!.factor);
+      const upTo = (tiers[index + 1]?.minViewport ?? lastViewport + 1) - 1;
+      const worstRow = widestRow(upTo);
+      expect(
+        (2 * gutter) / (tier.factor - 1),
+        `${tier.minViewport}px 这一档要管到 ${upTo}px 视口，行宽 ${worstRow}px 已经超出这条比例能容的宽度`,
+      ).toBeGreaterThanOrEqual(worstRow);
+    }
+    // 放大不许靠改宽度、也不许让封面自己再缩一次（223 / 226 两轮的形状）。
     expect(polish).not.toMatch(/\.archive-row \.archive-row-thumb img\s*\{/);
     expect(polish).not.toContain('width: calc(100% + 2px)');
+    expect(polish).not.toMatch(/\.archive-row:hover[^{]*\{[^}]*(?:inset|width|margin)/);
+    // 两侧不溢出的机制：滚动容器横向 clip。缩放是 transform，它的溢出会计进滚动容器的可滚区域，
+    // 没有这一句时列表会多出几个像素的横向滚动（滚动条是藏着的，所以只表现为能横向滑一点）。
+    const list = ruleBody(shell, '.archive-list');
+    expect(list, '纵向仍要能滚').toMatch(/overflow:\s*auto;/);
+    expect(list, '横向要 clip').toMatch(/overflow-x:\s*clip;/);
+    expect(list, 'clip 换成 hidden 就把横向区间还给了程序化滚动').not.toMatch(/overflow-x:\s*hidden/);
+    // 按压档照旧；悬停规则自己排除了 :active / .is-pressed，两档不会同时命中。
     expect(polish).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \{\s*transform: scale\(0\.99\);/);
-    const shell = read('src/styles/shell.css');
-    expect(shell).toContain('.archive-row:hover:not([aria-pressed=');
     const reduced = polish.slice(polish.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(reduced, '减少动态时这档放大要一起归零').toMatch(/\.archive-row:hover:not\(:active\):not\(\.is-pressed\),/);
     expect(reduced).toMatch(/\.archive-row:is\(\.is-pressed, :active\) \{ transform: none;/);
+    // 本档只加几何：换色仍留在 shell.css 那一条（含按下与选中态的守卫）。
+    expect(shell).toContain('.archive-row:hover:not([aria-pressed=');
   });
 
   it('keeps every hover rule behind a hover capability guard', () => {

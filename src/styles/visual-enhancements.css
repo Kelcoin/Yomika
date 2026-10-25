@@ -11,12 +11,33 @@
   transition: transform var(--motion-crisp), filter var(--motion-standard);
 }
 
-/* Full-width list rows keep their original hover geometry and 0.99 press scale:
-   the 4px list gutter cannot contain a percentage expansion on a desktop row.
-   Their covers follow the card, without an independent image/frame hover zoom. */
+/* The thumbnail card 2% zoom moves each edge about 1.8px. A full-width row is
+   ~5.5x wider, so 0.5% spends a comparable number of pixels on the edges
+   rather than a comparable ratio: the motion reads the same at arm's length.
+   What it has to fit into is the 8px gutter between the row and the list
+   padding edge. The travel is row width x (k - 1) / 2 - proportional to the
+   width - so no single ratio fits every width. 16px / (k - 1) is the widest row
+   that still lands inside the gutter: 3200px at 0.5%, 5333px at 0.3%. Measured
+   against the narrowest rail (65px, collapsed sidebar) plus both gutters that
+   makes the single viewport threshold 3280px. The covers follow the card,
+   without an independent image/frame hover zoom. */
 @media (hover: hover) {
   .archive-thumb-card:hover:not(:active):not(.is-pressed) {
     transform: scale(1.02);
+  }
+  .archive-row:hover:not(:active):not(.is-pressed) {
+    transform: scale(1.005);
+  }
+}
+
+/* Past a 3279px viewport a 0.5% edge travel would cross the 8px gutter on a wide
+   row, so the ladder steps down to the largest tier the gutter still holds:
+   0.3% keeps both edges inside out to a 5413px viewport, which covers a 5120px
+   screen (5039px of row). Kept as its own capability + width query rather than
+   a clamp so the windowed app keeps the livelier tier. */
+@media (hover: hover) and (min-width: 3280px) {
+  .archive-row:hover:not(:active):not(.is-pressed) {
+    transform: scale(1.003);
   }
 }
 
@@ -33,6 +54,7 @@
   .archive-row { transition: none; }
   .archive-thumb-card:is(.is-pressed, :active),
   .archive-thumb-card:hover:not(:active):not(.is-pressed),
+  .archive-row:hover:not(:active):not(.is-pressed),
   .archive-row:is(.is-pressed, :active) { transform: none; }
 }
 
