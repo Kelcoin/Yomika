@@ -2316,9 +2316,9 @@ describe('design system contract', () => {
     // 行高由虚拟列表给死，且没有把卡片重新量一遍的钩子——这是「别的卡片不会跟着动」的依据。
     expect(workspace).toMatch(/className="archive-thumb-grid-row"[\s\S]{0,320}?height: virtualRow\.size/);
     expect(workspace).not.toMatch(/measureElement/);
-    // 封面那层只剩悬停的放大：按下的缩放已经移到盒子上。
+    // 两类卡片的悬停都缩放整张卡；封面不再单独缩放。
     expect(polish).not.toMatch(/\.archive-thumb-card:is\(\.is-pressed, :active\) \.archive-thumb-card-media/);
-    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
+    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\),\s*\.archive-row:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
     // 设置行缩的是行里那几块内容；原点错开，间距看起来才是整体缩小。
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-copy \{\s*transform-origin: left center;/);
     expect(base).toMatch(/\.settings-row-button:is\(\.is-pressed, :active\) > \.settings-row-icon,[\s\S]{0,240}?transform-origin: right center;/);
@@ -2473,18 +2473,14 @@ describe('design system contract', () => {
     }
   });
 
-  it('keeps list cover frames stationary and avoids scaling their raster on hover', () => {
+  it('scales list cards as one surface, like thumbnail cards, without independently zooming covers', () => {
     const polish = read('src/styles/visual-enhancements.css');
-    expect(polish).not.toMatch(/\.archive-row:hover \.archive-row-thumb\s*\{/);
-    const hover = ruleBody(polish, '.archive-row:hover .archive-row-thumb img');
-    expect(hover).toMatch(/inset: -1px/);
-    expect(hover).toMatch(/width: calc\(100% \+ 2px\)/);
-    expect(hover).toMatch(/height: calc\(100% \+ 2px\)/);
-    expect(hover).not.toMatch(/transform:|filter:|will-change:/);
-    const motion = ruleBody(polish, '.archive-row .archive-row-thumb img');
-    expect(motion).toMatch(/width var\(--motion-crisp\)/);
-    expect(motion).toMatch(/height var\(--motion-crisp\)/);
-    expect(motion).toMatch(/inset var\(--motion-crisp\)/);
+    expect(polish).toMatch(/\.archive-thumb-card:hover:not\(:active\):not\(\.is-pressed\),\s*\.archive-row:hover:not\(:active\):not\(\.is-pressed\) \{\s*transform: scale\(1\.02\);/);
+    expect(polish).not.toMatch(/\.archive-row:hover \.archive-row-thumb/);
+    expect(polish).not.toContain('width: calc(100% + 2px)');
+    expect(polish).not.toMatch(/\.archive-row \.archive-row-thumb img\s*\{/);
+    const reduced = polish.slice(polish.indexOf('@media (prefers-reduced-motion: reduce)'));
+    expect(reduced).toMatch(/\.archive-row:hover:not\(:active\):not\(\.is-pressed\),/);
   });
 
   it('keeps every hover rule behind a hover capability guard', () => {
