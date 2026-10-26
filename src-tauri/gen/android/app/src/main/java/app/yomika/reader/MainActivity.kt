@@ -19,6 +19,14 @@ import org.json.JSONObject
 import java.io.File
 
 class MainActivity : TauriActivity() {
+  override fun onWebViewCreate(webView: WebView) {
+    super.onWebViewCreate(webView)
+    // WebView vibrates for native long presses even when the page suppresses
+    // contextmenu (blank canvas and reader images have no long-press action).
+    // Real app actions use MobileHost.vibrate, independently of View feedback.
+    webView.isHapticFeedbackEnabled = false
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     // 先挂上崩溃记录再走 super：`WryActivity.onCreate` 正是 Rust 与 WebView 起来的地方，
     // 那里出的异常同样要留痕。

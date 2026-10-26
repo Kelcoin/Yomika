@@ -141,6 +141,7 @@ const DERIVED_SESSION_CEILING_BYTES = 256 * 1024 * 1024;
  * 见 `runDerivedQueue`。 */
 type DerivedTier = 'visible' | 'neighbour' | 'background';
 const DERIVED_TIER_ORDER: Record<DerivedTier, number> = { visible: 0, neighbour: 1, background: 2 };
+type DerivedJob = { pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier; retryAt?: number; remoteFailures?: number };
 
 /** 加载态 / 失败态那条顶栏的外壳：和阅读态那两条栏共用 `useReaderChrome`。
  *
@@ -417,6 +418,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // Native deadline cancellation is not a request from the reader to retry
   // forever. Preserve a per-page budget across background/visible requeues.
   const derivedFailuresRef = useRef(new Map<number, number>());
+  const derivedSourceFailuresRef = useRef(new Map<number, number>());
   const visiblePagesRef = useRef<ReadonlySet<number>>(new Set());
   /** 这一页最终由谁来算：远端的桌面端 > 本机 DLSSNR > 本机超分。三者是同一
    * 件事的三种做法，不叠着跑（叠起来一页要过三个模型，而它们的产物都只是中间
@@ -424,7 +426,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    *
    * `remoteChain` 是交给远端的那一串（按顺序做哪几档），做几档由**阅读器里开着
    * 哪几档**决定，模型与参数不跟着走。 */
-  const derivedQueueRef = useRef<Array<{ pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier; retryAt?: number; remoteFailures?: number }>>([]);
+  const derivedQueueRef = useRef<DerivedJob[]>([]);
+  // Loading and enhancement are two stages of the same page job. Source loads
+  // join the screen's existing request; only ready originals occupy compute.
+  const derivedSourcesPendingRef = useRef(new Map<number, DerivedJob>());
+  const derivedWantedRef = useRef<ReadonlySet<number>>(new Set());
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
   const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController }>();
@@ -606,7 +612,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedFailuresRef.current.clear();
+    derivedSourceFailuresRef.current.clear();
     derivedQueueRef.current = [];
+    derivedSourcesPendingRef.current.clear();
+    derivedWantedRef.current = new Set();
     derivedTierRef.current.clear();
     derivedSweepRef.current = undefined;
     derivedWarmedRef.current.clear();
@@ -717,9 +726,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * replaces it when it is ready; because that is a `src` swap on a slot whose
    * transform never changes, the zoom survives it.
    *
-   * One at a time, and only for pages actually on screen: prefetched neighbours
-   * are not worth an ONNX run each, and running several at once only made every
-   * one of them slower. */
+   * Original fetching and enhancement share a page job. Originals can load in
+   * parallel; ready pages enter serial inference in visible/neighbour/sweep
+   * order, so a slow original does not occupy the compute stage. */
   const [derivedPages, setDerivedPages] = useState<ReadonlyMap<number, string>>(() => new Map());
   /** 正在处理（超分 / DLSSNR）的页。一页在 CPU 上要好几秒，两样一起开更久——
    * 手上没有别的信号，用户会以为按钮点了个寂寞。 */
@@ -768,7 +777,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     derivedPeakBytesRef.current = 0;
     derivedAttemptedRef.current.clear();
     derivedFailuresRef.current.clear();
+    derivedSourceFailuresRef.current.clear();
     derivedQueueRef.current = [];
+    derivedSourcesPendingRef.current.clear();
+    derivedWantedRef.current = new Set();
     derivedTierRef.current.clear();
     derivedSweepRef.current = undefined;
     derivedWarmedRef.current.clear();
@@ -840,6 +852,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 变化都要重扫两百条。 */
   const pumpSweep = useCallback(() => {
     if (Date.now() < derivedBackgroundRetryAtRef.current) return;
+    // Keep speculative fetching bounded while visible/prefetch sources may load
+    // concurrently. A slow server must not queue an entire book in memory.
+    if ([...derivedSourcesPendingRef.current.values()].some(job => job.tier === 'background')) return;
     const context = contextRef.current;
     const sweep = derivedSweepRef.current;
     if (!context || !sweep || sweep.generation !== derivedGenerationRef.current) return;
@@ -848,6 +863,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       const pageIndex = sweep.order.shift();
       if (pageIndex === undefined) break;
       if (derivedAttemptedRef.current.has(pageIndex) || derivedWarmedRef.current.has(pageIndex)) continue;
+      if ((derivedSourceFailuresRef.current.get(pageIndex) ?? 0) >= 3) continue;
       if (derivedQueueRef.current.some((job) => job.pageIndex === pageIndex)) continue;
       derivedQueueRef.current.push({ pageIndex, generation: sweep.generation, ...config, tier: 'background' });
       return;
@@ -870,7 +886,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (!pageActiveRef.current || !documentVisibleRef.current) break;
         // 队列空了就从后台游标补一件。前台任务永远排在它前面——预处理是顺手做的，
         // 不是承诺：正在读的那一页等不到结果，这个功能就是坏的。
-        if (derivedQueueRef.current.length === 0) pumpSweep();
+        // A page waiting for its source retry must not stall the entire sweep.
+        if (derivedQueueRef.current.every(job => (job.retryAt ?? 0) > Date.now())) pumpSweep();
         if (derivedQueueRef.current.length === 0) break;
         derivedQueueRef.current.sort((a, b) => DERIVED_TIER_ORDER[a.tier] - DERIVED_TIER_ORDER[b.tier]);
         const now = Date.now();
@@ -882,23 +899,47 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const { pageIndex } = job;
         const context = contextRef.current;
         if (!context || !mountedRef.current) break;
+        if (job.generation !== derivedGenerationRef.current) continue;
         derivedAttemptedRef.current.add(pageIndex);
-        if (!await loadPage(pageIndex, undefined, false)) {
-          // 源页这一次没读出来（LRR 掉线 / 超时 / 一时取不到）。这一页**没有**做过，
-          // 不能把「尝试过」记在它头上：记上以后整本预扫剩下的部分和用户真的翻到它时
-          // 都会跳过它，于是这一页在这次阅读里永远是原图——「翻页了也不处理」。
-          derivedAttemptedRef.current.delete(pageIndex);
+        if (!pageHandlesRef.current.has(pageIndex)) {
+          derivedSourcesPendingRef.current.set(pageIndex, job);
+          // Do not await I/O while holding the compute loop. The shared raw-page
+          // request itself advances this job when ready, including screen retries.
+          void loadPage(pageIndex, undefined, false).then(source => {
+            if (derivedSourcesPendingRef.current.get(pageIndex) !== job) return;
+            derivedSourcesPendingRef.current.delete(pageIndex);
+            if (job.generation !== derivedGenerationRef.current || contextRef.current !== context || !mountedRef.current) return;
+            derivedAttemptedRef.current.delete(pageIndex);
+            if (job.tier !== 'background' && !derivedWantedRef.current.has(pageIndex)) {
+              if (!screenOwnedPagesRef.current.has(pageIndex)) releasePage(pageIndex);
+            } else if (source) {
+              derivedSourceFailuresRef.current.delete(pageIndex);
+              derivedQueueRef.current.push(job);
+              // A newly ready foreground original takes precedence over the sweep.
+              const active = activeDerivedRef.current;
+              if (job.tier === 'visible' && active && active.tier !== 'visible') active.controller.abort();
+            } else {
+              const failures = (derivedSourceFailuresRef.current.get(pageIndex) ?? 0) + 1;
+              derivedSourceFailuresRef.current.set(pageIndex, failures);
+              if (failures < 3) {
+                derivedQueueRef.current.push({ ...job, retryAt: Date.now() + 500 * 2 ** (failures - 1) });
+              }
+            }
+            void drainDerivedQueue();
+          });
           continue;
         }
+        derivedSourceFailuresRef.current.delete(pageIndex);
+        // Preserve a microtask boundary for consecutive toolbar changes: they
+        // may replace this plan before it submits a native job, even on a raw
+        // memory-cache hit. This yields no frame and does not wait for I/O.
+        await Promise.resolve();
+        if (job.generation !== derivedGenerationRef.current || contextRef.current !== context || !mountedRef.current) continue;
         if (!documentVisibleRef.current) {
           derivedAttemptedRef.current.delete(pageIndex);
           derivedQueueRef.current.unshift(job);
           if (contextRef.current === context && !screenOwnedPagesRef.current.has(pageIndex)) releasePage(pageIndex);
           break;
-        }
-        if (job.generation !== derivedGenerationRef.current) {
-          if (contextRef.current === context && !screenOwnedPagesRef.current.has(pageIndex)) releasePage(pageIndex);
-          continue;
         }
         // 从这一刻起页面上会压一枚「处理中」的小胶囊，失败与否都在 finally 里收掉。
         markDeriving(pageIndex, true);
@@ -1260,6 +1301,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       ? getPrefetchPages(indexes[0]!, context.paths.length, prefetchDistance)
       : [];
     const wanted = [...new Set([...indexes, ...neighbours])];
+    derivedWantedRef.current = new Set(wanted);
     const active = activeDerivedRef.current;
     if (active) {
       // 不在这次要的范围内就叫停——后台预处理那一件除外：它按定义就不在可见页的
@@ -1278,10 +1320,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // 「队列不跟着翻页更新」。升档不是丢活，`neighbour` ↔ `visible` 之间来回换不影响
     // `derivedAttemptedRef`，也不影响后台游标。
     const visible = new Set(indexes);
+    for (const job of derivedSourcesPendingRef.current.values()) {
+      if (visible.has(job.pageIndex)) job.tier = 'visible';
+      else if (wanted.includes(job.pageIndex)) job.tier = 'neighbour';
+    }
     derivedQueueRef.current = derivedQueueRef.current
       .filter((job) => job.tier === 'background' || wanted.includes(job.pageIndex))
       .map((job) => {
-        if (job.tier === 'background') return job;
+        if (job.tier === 'background' && !wanted.includes(job.pageIndex)) return job;
         const tier: DerivedTier = visible.has(job.pageIndex) ? 'visible' : 'neighbour';
         return tier === job.tier ? job : { ...job, tier };
       });

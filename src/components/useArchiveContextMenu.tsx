@@ -97,10 +97,12 @@ export function useArchiveContextMenu(options: {
       const prefix = (event as CustomEvent<{ prefix?: string }>).detail?.prefix;
       if (!prefix || prefix === 'state:' || prefix === 'favorites:') refresh();
     };
-    if (!sameCard) refresh();
+    refresh();
     window.addEventListener('yomika:route-cache-invalidated', invalidate);
     return () => { membershipRequest.current += 1; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
-  }, [target, showToast]);
+  // A hold and its native contextmenu may update the anchor for the same card.
+  // Only a change of identity may cancel the in-flight membership lookup.
+  }, [target?.archive.serverId, target?.archive.archiveId, showToast]);
   const toggleMembership = (archive: ArchiveRecord, list: 'reading' | 'favorites', next: boolean) => {
     if (!membership) return;
     void (async () => {

@@ -2005,6 +2005,8 @@ describe('reader route', () => {
     probeFailures?: number;
     localModel?: string;
     pageCount?: number;
+    rawPage?: (pageIndex: number) => unknown;
+    prefetchPages?: number;
   }): { calls: Array<[string, Record<string, unknown> | undefined]> } {
     const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     let probes = 0;
@@ -2015,7 +2017,7 @@ describe('reader route', () => {
           ok: true,
           value: {
             theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648,
-            prefetchPages: 0, coverConcurrency: 4,
+            prefetchPages: options.prefetchPages ?? 0, coverConcurrency: 4,
             // 本机一个模型都没有：这三枚按钮能亮，只可能是因为对面报了可用。
             upscaleBackend: options.localModel ? 'cpu' : 'off', upscaleModel: options.localModel ?? '',
             remoteComputeUrl: '192.168.1.9:47653',
@@ -2057,7 +2059,7 @@ describe('reader route', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'remote-reader', title: 'Reader', pages: Array.from({ length: options.pageCount ?? 1 }, (_, index) => `${index}.jpg`) } };
       if (command === 'load_reading_progress') return { ok: true, value: null };
-      if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
+      if (command === 'load_reader_page') return options.rawPage ? options.rawPage(Number(args?.pageIndex)) : { ok: true, value: [1, 2, 3] };
       if (command === 'save_preferences') return { ok: true, value: (args?.input ?? {}) };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
@@ -2081,6 +2083,101 @@ describe('reader route', () => {
     expect(request.params.chain).toEqual(['upscale', 'dlssnr']);
     expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
     expect(calls.some(([name]) => name === 'dlssnr_apply_page')).toBe(false);
+  });
+
+  it('continues the complete remote chain on adjacent pages without a page turn', async () => {
+    installHost();
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true }, pageCount: 5 });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await screen.findByRole('button', { name: '开启超分' });
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+      fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    });
+    await waitFor(() => {
+      const requests = calls.filter(([name]) => name === 'remote_compute_process').map(([, args]) => args?.input as { pageIndex: number; params: { chain: string[] } });
+      expect(new Set(requests.map(request => request.pageIndex))).toEqual(new Set([0, 1, 2, 3, 4]));
+      expect(requests.every(request => request.params.chain.join(',') === 'upscale,dlssnr')).toBe(true);
+    });
+  });
+
+  it('processes ready prefetched pages while another original is still loading, then automatically processes that original once', async () => {
+    installHost();
+    let finish!: (value: unknown) => void;
+    const slowOriginal = new Promise(resolve => { finish = resolve; });
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true }, pageCount: 3, prefetchPages: 2,
+      rawPage: pageIndex => pageIndex === 1 ? slowOriginal : { ok: true, value: [1, 2, 3] },
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await screen.findByRole('button', { name: '开启超分' });
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+      fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    });
+    const processed = () => calls.filter(([name]) => name === 'remote_compute_process')
+      .map(([, args]) => args?.input as { pageIndex: number; params: { chain: string[] } });
+    try {
+      await waitFor(() => expect(processed().some(request => request.pageIndex === 2)).toBe(true));
+      expect(processed().some(request => request.pageIndex === 1)).toBe(false);
+      await act(async () => { finish({ ok: true, value: [1, 2, 3] }); });
+      await waitFor(() => expect(processed().filter(request => request.pageIndex === 1)).toHaveLength(1));
+      expect(processed().every(request => request.params.chain.join(',') === 'upscale,dlssnr')).toBe(true);
+      expect(calls.filter(([name, args]) => name === 'load_reader_page' && args?.pageIndex === 1)).toHaveLength(1);
+    } finally {
+      await act(async () => { finish({ ok: true, value: [1, 2, 3] }); });
+    }
+  });
+
+  it('resumes remote preprocessing after a temporary source-page failure without navigation', async () => {
+    installHost();
+    let failed = false;
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true }, pageCount: 5, rawPage: pageIndex => {
+      if (pageIndex === 3 && !failed) {
+        failed = true;
+        return { ok: false, error: { code: 'NETWORK', message: 'temporary source failure', retryable: true } };
+      }
+      return { ok: true, value: [1, 2, 3] };
+    } });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    await screen.findByRole('button', { name: '开启超分' });
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+      fireEvent.click(screen.getByRole('button', { name: '开启 DLSSNR' }));
+    });
+    await waitFor(() => {
+      expect(failed).toBe(true);
+      expect(calls.some(([name, args]) => name === 'remote_compute_process' && (args?.input as { pageIndex: number }).pageIndex === 3)).toBe(true);
+    }, { timeout: 2500 });
+  });
+
+  it('bounds failed source retries and lets later remote pages run during backoff', async () => {
+    installHost();
+    let failures = 0;
+    let laterPageStartedBeforeRetry = false;
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: false }, pageCount: 5,
+      rawPage: pageIndex => {
+        if (pageIndex === 3) {
+          failures += 1;
+          return { ok: false, error: { code: 'NETWORK', message: 'source offline', retryable: true } };
+        }
+        return { ok: true, value: [1, 2, 3] };
+      },
+      process: args => {
+        if ((args?.input as { pageIndex: number }).pageIndex === 4) laterPageStartedBeforeRetry = failures === 1;
+        return [0x89, 0x50, 0x4e, 0x47];
+      },
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(failures).toBe(3), { timeout: 3000 });
+    expect(laterPageStartedBeforeRetry).toBe(true);
+    expect(calls.filter(([name]) => name === 'remote_compute_process')).toHaveLength(4);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 600)); });
+    expect(failures).toBe(3);
   });
 
   it('reprobes changed remote settings and retries with the newly advertised revision', async () => {

@@ -1393,7 +1393,6 @@ body::-webkit-scrollbar,
   .archive-list.is-wide .archive-row:hover:not([aria-pressed='true']),
   .archive-row:hover:not([aria-pressed='true']) {
     background: var(--surface-container-highest);
-    box-shadow: var(--shadow-card-hover);
   }
 }
 
@@ -1401,7 +1400,6 @@ body::-webkit-scrollbar,
 .archive-list.is-wide .archive-row,
 .archive-row {
   transition: background-color var(--motion-standard),
-              box-shadow var(--motion-standard),
               transform var(--motion-crisp),
               outline-color var(--motion-standard);
 }

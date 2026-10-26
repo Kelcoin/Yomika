@@ -3489,14 +3489,22 @@ it('keeps 仅历史记录 scoped to the two places the setting means', () => {
 });
 
 describe('the 2026-10-17 UI batch', () => {
-  it('keeps the card hover shadow inside the list padding, and smaller than it was', () => {
+  it('drops the list hover shadow instead of trying to fit it into the 8px gutter', () => {
+    const shell = read('src/styles/shell.css');
     const tokens = read('src/styles/tokens.css');
-    const shadows = [...tokens.matchAll(/--shadow-card-hover:\s*([^;]+);/g)].map((match) => match[1] ?? '');
-    expect(shadows.length, '亮/暗两档都要有这张卡片阴影').toBeGreaterThanOrEqual(2);
-    for (const shadow of shadows) {
-      expect(shadow, '横向模糊要收进列表两侧的内边距（12px）里，否则两侧被 overflow 裁掉').toContain('12px');
-      expect(shadow, '24px 那一版就是用户看到的「阴影左右被切」').not.toContain('24px');
-    }
+    // 用户口径（2026-10-25）：「卡片本体没有溢出，但是阴影效果溢出了，把悬停时的阴影效果
+    // 去掉吧」。上一轮把 24px 模糊收成 12px、以为能塞进列表留白，其实阴影是按盒子矩形画的、
+    // 模糊半径整圈朝外扩，留白只有 8px（`overflow-x: clip`），任何一圈模糊都必然被裁掉——
+    // 露在留白里的那半圈就是用户看到的「溢出」。所以整条撤掉：悬停只上一层色调，令牌也删掉，
+    // 免得以后有人拿它改回来。
+    const start = shell.indexOf(".archive-row:hover:not([aria-pressed='true'])");
+    expect(start, '列表卡的悬停规则要在').toBeGreaterThan(-1);
+    const open = shell.indexOf('{', start);
+    const body = shell.slice(open + 1, shell.indexOf('}', open));
+    expect(body, '悬停只上一层色调，别的什么都不画').toContain('background: var(--surface-container-highest);');
+    expect(body, '悬停不许再画阴影（模糊半径一圈都装不进 8px 留白）').not.toContain('box-shadow');
+    expect(shell, '列表卡/行不再引用卡片悬停阴影').not.toContain('--shadow-card-hover');
+    expect(tokens, '这张阴影已经没有使用者，令牌一并删掉').not.toContain('--shadow-card-hover');
   });
 
   it('keeps the detail title skeleton inside the title line box', () => {
