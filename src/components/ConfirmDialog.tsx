@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Check, CircleHelp, Trash2, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -49,10 +50,9 @@ function ConfirmDialogContent({ title, description, confirmLabel = '确认', dan
   useOverlayBackGuard(true, close);
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) close(); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content">
-          <Dialog.Title className="dialog-title">{danger ? <Trash2 aria-hidden="true" /> : <CircleHelp aria-hidden="true" />}{title}</Dialog.Title>
+      
+        <DialogSurface>
+          <DialogHeading icon={danger ? <Trash2 aria-hidden="true" /> : <CircleHelp aria-hidden="true" />}>{title}</DialogHeading>
           <Dialog.Description className={danger ? 'visually-hidden' : undefined}>{description}</Dialog.Description>
           <div className="dialog-actions">
             <button className="secondary-action" type="button" disabled={busy} onClick={close}><X aria-hidden="true" />取消</button>
@@ -64,8 +64,8 @@ function ConfirmDialogContent({ title, description, confirmLabel = '确认', dan
               onClick={() => void confirm()}
             ><Check aria-hidden="true" />{confirmLabel}</button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
   );
 }

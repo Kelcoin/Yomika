@@ -444,7 +444,9 @@ export async function loadLocalRenditions(options: LocalRenditionOptions): Promi
       identity: options.enhancedFromPageIdentity,
       onEngine: (engine) => onEngine(upscaleModel, engine),
     }],
-    submit: (bridge) => bridge.submitReaderPage({ ...base, modelId: upscaleModel }),
+    submit: (bridge) => bridge.submitReaderPage({ ...base, modelId: upscaleModel,
+      ...(options.enhancedFromPageIdentity.outputScale !== undefined ? { outputScale: options.enhancedFromPageIdentity.outputScale } : {}),
+    }),
     signal,
     // `exactOptionalPropertyTypes` 下不能把 `undefined` 显式塞进可选字段：要么给函数，
     // 要么这个键根本不在。少了这一条话就传不出去——那条链失败时日志里会一行都没有。

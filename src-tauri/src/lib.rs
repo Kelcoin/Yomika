@@ -113,7 +113,7 @@ use dedup::{
 use inference::{
     inference_cancel, inference_cancel_page, inference_checkpoint, inference_clear_cache,
     inference_get_job, inference_import_model_path,
-    inference_install_model, inference_list_models,
+    inference_install_model, inference_list_models, inference_remove_models,
     inference_pause, inference_release_sessions, inference_probe, inference_resume, inference_start,
     inference_validate_model,
 };
@@ -573,6 +573,7 @@ pub fn run() {
             inference_install_model,
             inference_import_model_path,
             inference_list_models,
+            inference_remove_models,
             inference_clear_cache,
             app_release_latest,
             model_release_url,

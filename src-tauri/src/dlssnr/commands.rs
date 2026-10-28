@@ -488,6 +488,8 @@ pub struct DlssnrPageInput {
     /// 的指纹），所以要算出同一个 revision 才读得到；`reader-page` 起点不需要它。
     #[serde(default)]
     pub upscale_model: Option<String>,
+    #[serde(default)]
+    pub upscale_output_scale: Option<u32>,
     /// 层参数由前端给（设置页那份就是唯一真相）。
     #[serde(default)]
     pub settings: Option<DlssnrSettings>,
@@ -556,6 +558,7 @@ fn apply_cached_page(
         data_dir,
         rendition,
         input.upscale_model.as_deref(),
+        input.upscale_output_scale,
     ) {
         Ok(revision) => revision,
         Err(error) => return CommandResult::failure(error.code, error.message, false),
@@ -803,6 +806,7 @@ mod tests {
             settings,
             task_id: Some("reader-task".into()),
             upscale_model: None,
+            upscale_output_scale: None,
             priority: None,
         }
     }
@@ -1042,6 +1046,7 @@ mod tests {
             settings: None,
             task_id: None,
             upscale_model: None,
+            upscale_output_scale: None,
             priority: None,
         };
         let result = apply_cached_page(&database, None, Priority::Background, dir.path(), &input);
@@ -1062,6 +1067,7 @@ mod tests {
             settings: None,
             task_id: None,
             upscale_model: None,
+            upscale_output_scale: None,
             priority: None,
         };
         let result = apply_cached_page(&database, None, Priority::Background, dir.path(), &input);
@@ -1083,6 +1089,7 @@ mod tests {
             settings: None,
             task_id: Some("reader-task".into()),
             upscale_model: None,
+            upscale_output_scale: None,
             priority: None,
         };
         let error = expect_failure(apply_cached_page(&database, None, Priority::Background, dir.path(), &input));
@@ -1182,6 +1189,7 @@ mod tests {
             settings: None,
             task_id: None,
             upscale_model: None,
+            upscale_output_scale: None,
             priority: None,
         };
         let result = apply_cached_page(&database, None, Priority::Background, dir.path(), &input);

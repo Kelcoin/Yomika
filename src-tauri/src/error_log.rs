@@ -300,6 +300,12 @@ fn read_file(directory: &Path, name: &str, carried: bool) -> Vec<ErrorLogEntry> 
     };
     let entries = entries
         .into_iter()
+        // Older Android builds recorded successful host registration as a warn
+        // breadcrumb. It is normal startup, not a failure; keep actual failures.
+        .filter(|entry| !(entry.source == "core/mobile-host"
+            && entry.message == "原生宿主已注册"
+            && entry.level == "warn"
+            && entry.detail.is_none()))
         .map(|mut entry| {
             entry.source = crate::diagnostics::redact_text(&entry.source);
             entry.message = crate::diagnostics::redact_text(&entry.message);
@@ -706,6 +712,32 @@ mod tests {
         assert_eq!(entries.len(), MAX_ENTRIES);
         assert_eq!(entries[0].at, format!("epoch:{}", 25));
         assert_eq!(entries[entries.len() - 1].at, format!("epoch:{}", MAX_ENTRIES + 24));
+    }
+
+    #[test]
+    fn successful_mobile_host_registration_is_not_an_error_even_in_retained_logs() {
+        let dir = std::env::temp_dir().join(format!("yomika-host-log-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let entries = [
+            ErrorLogEntry { at: "epoch:1".into(), level: "warn".into(), source: "core/mobile-host".into(), message: "原生宿主已注册".into(), detail: None },
+            ErrorLogEntry { at: "epoch:2".into(), level: "warn".into(), source: "core/mobile-host".into(), message: "原生宿主注册失败：plugin unavailable".into(), detail: None },
+            ErrorLogEntry { at: "epoch:3".into(), level: "error".into(), source: "core/panic".into(), message: "原生宿主已注册".into(), detail: Some("panic context".into()) },
+        ];
+        for (name, carried) in [(CRASH_LOG, false), (CRASH_PREVIOUS, true), (ERROR_LOG, false), (ERROR_PREVIOUS, true)] {
+            let contents = entries.iter().map(|entry| if name.starts_with("error") {
+                text_line(entry)
+            } else {
+                serde_json::to_string(entry).expect("entry")
+            }).collect::<Vec<_>>().join("\n") + "\n";
+            fs::write(dir.join(name), contents).expect("seed");
+            let read = read_file(&dir, name, carried);
+            assert_eq!(read.len(), 2);
+            assert!(read[0].message.starts_with("原生宿主注册失败"));
+            assert_eq!(read[1].source, format!("{}core/panic", if carried { CARRIED_PREFIX } else { "" }));
+            // Old retained records are migrated too, so rereading stays clean.
+            assert_eq!(read_file(&dir, name, carried), read);
+        }
+        fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     #[test]

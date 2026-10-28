@@ -4,7 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { CircleHelp, Download, Layers, Loader2, Plus, Save, Trash2, Wand } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
-import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
+import { SettingsChoice, SettingsMenu, SettingsNumber, SettingsOption } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { OverlayLayer } from './OverlayLayer';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
@@ -406,6 +406,15 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
     if (entry) catalogFiles.add(entry.file);
   }
 
+  function backLayerMenu() {
+    if (presetMenu) { setPresetMenu(false); return; }
+    window.clearTimeout(helpTimer.current);
+    setHelpPinned(false);
+    setHelpHover(false);
+    if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); }
+    else setLayerMenu(false);
+  }
+
   return (
     <div className="settings-group" role="region" aria-label="DLSSNR">
       <SettingsSwitch
@@ -472,46 +481,29 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
           // 系列由这一行说。挤进同一行时 420px 的面板放不下，会退化成换行——用户上一轮报的正是
           // 「选项内的文字会换行」。
           const series = formatSeries(variant.series);
-          return <div className={`settings-choice-option${active ? ' is-active' : ''}`} key={variant.id}>
-            {/* 兼容性那句话不占第二行：行里只留变体名，说明挂在这一行的 title 上，
-                鼠标停一下还是看得到——和模型菜单那种「一行一个选项」是同一套行式。 */}
-            <button
-              className="settings-choice-option-main"
-              type="button"
-              disabled={downloading !== undefined || switching !== undefined}
-              aria-pressed={active}
-              title={variant.note || '下载后会被校验再装上'}
-              onClick={() => { if (active) return; if (local) void activateVariant(local); else void downloadVariant(variant.id); }}
-            >
-              <span className="settings-choice-option-name">{label}</span>
-              {series && <span className="settings-choice-option-series">{series}</span>}
-            </button>
-            {/* 已安装项点击行体切换；未安装或有更新的项提供下载。 */}
-            <ModelDownloadButton
-              option={{ value: variant.id, label }}
-              installed={installed}
-              outdated={outdated}
+          return <SettingsOption key={variant.id} active={active}
+            disabled={downloading !== undefined || switching !== undefined}
+            title={variant.note || '下载后会被校验再装上'}
+            onClick={() => { if (active) return; if (local) void activateVariant(local); else void downloadVariant(variant.id); }}
+            action={<ModelDownloadButton
+              option={{ value: variant.id, label }} installed={installed} outdated={outdated}
               pending={downloading !== undefined || switching !== undefined}
-              className="select-option-download"
-              onDownload={() => void downloadVariant(variant.id)}
-            />
-            {/* 进度槽**常驻挂载**，用 `open` 开关（和超分模型菜单那一处同一个槽、同一套写法）：
-                条件渲染会在下载结束/重渲染那一刻摘掉节点，卸载的节点没有过渡可放，「消失」就只能
-                是啪一下不见——用户 2026-10-18 报「页面出现任何更新就会消失」。 */}
-            <ModelDownloadSlot open={busy} label={variant.label} progress={download} />
-          </div>;
+              className="select-option-download" onDownload={() => void downloadVariant(variant.id)}
+            />}
+            status={<ModelDownloadSlot open={busy} label={variant.label} progress={download} />}
+          >
+            <span className="settings-choice-option-name">{label}</span>
+            {series && <span className="settings-choice-option-series">{series}</span>}
+          </SettingsOption>;
         })}
       {installedVariants.filter((entry) => !catalogFiles.has(entry.file)).map((variant) => {
         const name = installedSnippetName(variant, catalog);
-        return <div className={'settings-choice-option' + (variant.active ? ' is-active' : '')} key={variant.file}>
-          <button className="settings-choice-option-main" type="button"
-            disabled={downloading !== undefined || switching !== undefined}
-            aria-pressed={variant.active} title={variant.file}
-            onClick={() => { if (!variant.active) void activateVariant(variant); }}>
-            <span className="settings-choice-option-name">{name}</span>
-            {(variant.version || variant.sha256) && <span className="settings-choice-option-series">{variant.version ?? variant.sha256?.slice(0, 12)}</span>}
-          </button>
-        </div>;
+        return <SettingsOption key={variant.file} active={variant.active}
+          disabled={downloading !== undefined || switching !== undefined}
+          title={variant.file} onClick={() => { if (!variant.active) void activateVariant(variant); }}>
+          <span className="settings-choice-option-name">{name}</span>
+          {(variant.version || variant.sha256) && <span className="settings-choice-option-series">{variant.version ?? variant.sha256?.slice(0, 12)}</span>}
+        </SettingsOption>;
       })}
       </div>
       </SettingsMenu>}
@@ -536,14 +528,11 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
             <CircleHelp aria-hidden="true" />
           </button>
         ),
-      })} onClose={() => {
-        // 预设是一层临时视图，退出先回到层列表；再退才关菜单。
-        if (presetMenu) { setPresetMenu(false); return; }
-        window.clearTimeout(helpTimer.current);
-        setHelpPinned(false);
-        setHelpHover(false);
-        if (selectedLayer !== undefined) { setSelectedLayer(undefined); setDraftPass(undefined); } else setLayerMenu(false);
-      }}>
+      })}
+        onBack={presetMenu || selectedLayer !== undefined ? backLayerMenu : undefined}
+        backLabel="返回层列表"
+        onClose={backLayerMenu}
+      >
       {helpOpen && selectedLayer !== undefined && helpAnchor && (
         <LayerHelpBubble anchor={helpAnchor} onEnter={holdHelp} onLeave={releaseHelp} />
       )}

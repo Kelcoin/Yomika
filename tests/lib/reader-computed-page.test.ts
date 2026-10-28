@@ -719,6 +719,14 @@ function local(
 }
 
 describe('loadLocalRenditions', () => {
+  it.each([0, 1, 2])('passes output scale %i through to the host plan', async (outputScale) => {
+    const b = bridge({ artifacts: [artifact({ stageId: READER_UPSCALE_STAGE_ID })], submit: () => success() });
+    const { cache } = readonlyCache();
+    const result = await local(b, cache, { enhancedFromPageIdentity: { ...ENHANCED_FROM_PAGE, outputScale } });
+    expect(b.submitReaderPage).toHaveBeenCalledWith(expect.objectContaining({ modelId: UPSCALE_MODEL, outputScale }));
+    cache.release(result.enhanced!);
+  });
+
   it('returns host cancellation separately from a failed upscale stage', async () => {
     const b = bridge();
     const { cache } = readonlyCache();

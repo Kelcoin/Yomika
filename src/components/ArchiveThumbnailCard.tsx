@@ -221,10 +221,36 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
 }
 
 export function ArchiveThumbnailRail({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined; resetScrollKey?: string | undefined }) {
-  // A rail that will have content shows its shape while loading. One that has
-  // finished with nothing to show is not a rail at all.
-  if (!archives.length && !loading) return null;
+  // Keep the presence owner mounted when empty so the last card can finish its exit.
   return <ArchiveThumbnailRailContent resetScrollKey={resetScrollKey} title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} progressScope={progressScope} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
+}
+
+type RailItem = { archive: ArchiveRecord; phase: 'entering' | 'present' | 'leaving' };
+
+/** Keep keyed cards alive through exit without resetting unchanged image/gesture state. */
+function useRailItems(archives: ArchiveRecord[], scope: string) {
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
+  const active = usePageActive();
+  const [state, setState] = useState(() => ({ archives, scope, items: archives.map((archive): RailItem => ({ archive, phase: 'entering' })) }));
+  if (state.archives !== archives || state.scope !== scope) {
+    const previousItems = state.scope === scope ? state.items : [];
+    const previous = new Map(previousItems.map((item) => [item.archive.archiveId, item]));
+    const ids = new Set(archives.map((archive) => archive.archiveId));
+    const items = archives.map((archive): RailItem => ({ archive, phase: previous.get(archive.archiveId)?.phase === 'leaving' ? 'present' : previous.get(archive.archiveId)?.phase ?? 'entering' }));
+    if (!reducedMotion && active) previousItems.forEach((item, index) => {
+      if (!ids.has(item.archive.archiveId)) items.splice(Math.min(index, items.length), 0, { ...item, phase: 'leaving' });
+    });
+    setState({ archives, scope, items });
+  }
+  const finish = (id: string) => setState((current) => ({ ...current, items: current.items.flatMap((item): RailItem[] =>
+    item.archive.archiveId !== id ? [item] : item.phase === 'leaving' ? [] : [{ ...item, phase: 'present' }]) }));
+  useEffect(() => {
+    if (!state.items.some((item) => item.phase === 'leaving')) return;
+    // Animation events can be lost when a cached page hides. Bound retained exits.
+    const timer = window.setTimeout(() => setState((current) => ({ ...current, items: current.items.filter((item) => item.phase !== 'leaving') })), reducedMotion || !active ? 0 : 260);
+    return () => window.clearTimeout(timer);
+  }, [state.items, reducedMotion, active]);
+  return { items: state.items, finish };
 }
 
 /** `headingHidden` keeps the accessible name but drops the visible heading row,
@@ -233,6 +259,8 @@ export function ArchiveThumbnailRail({ resetScrollKey, title, archives, scopeId,
  * above the rail, which put them visually outside the panel they belong to. */
 function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; progressScope: 'history' | 'elsewhere' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string; resetScrollKey: string | undefined }) {
   const scroller = useHorizontalScroller();
+  const { items, finish } = useRailItems(archives, JSON.stringify([scopeId, serverId]));
+  const visible = items.length > 0 || loading;
   useLayoutEffect(() => {
     if (resetScrollKey !== undefined) scroller.resetScroll();
   }, [resetScrollKey, scroller.resetScroll]);
@@ -245,10 +273,11 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
     const observer = new ResizeObserver(measure);
     observer.observe(element);
     return () => observer.disconnect();
-  }, [scroller.elementRef]);
+  }, [scroller.elementRef, visible]);
   const visibleSkeletonCount = railWidth > 0
     ? Math.max(1, Math.ceil((railWidth + 12) / 162))
     : skeletonCount;
+  if (!items.length && !loading) return null;
   return <section className="archive-rail" aria-label={title}>
     {!headingHidden && <div className="archive-rail-heading">
       {headingContent ?? <h2>{headingIcon}<span>{title}</span></h2>}
@@ -258,9 +287,18 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
     </div>}
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       <div className="archive-rail-track" data-horizontal-content="">
-      {archives.length === 0 && loading
+      {items.length === 0 && loading
         ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
-        : archives.map((archive) => <div className="archive-rail-item" key={archive.archiveId}><ArchiveThumbnailCard archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} progressScope={progressScope} detailBasePath={detailBasePath} /></div>)}
+        : items.map(({ archive, phase }) => <div
+          className={`archive-rail-item${phase === 'entering' ? ' is-entering' : phase === 'leaving' ? ' is-leaving' : ''}`}
+          key={JSON.stringify([scopeId, serverId, archive.archiveId])} aria-hidden={phase === 'leaving' || undefined}
+          ref={(node) => {
+            if (!node) return;
+            node.toggleAttribute('inert', phase === 'leaving');
+            if (phase === 'leaving') node.style.setProperty('--rail-exit-width', `${(node.firstElementChild as HTMLElement)?.offsetWidth ?? 150}px`);
+          }}
+          onAnimationEnd={(event) => { if (event.target === event.currentTarget) finish(archive.archiveId); }}
+        ><ArchiveThumbnailCard archive={archive} scopeId={scopeId} serverId={serverId} onContextMenu={onArchiveContextMenu} progressPage={progressByArchiveId?.get(archive.archiveId)} progressVisibility={progressVisibility} progressScope={progressScope} detailBasePath={detailBasePath} /></div>)}
       </div>
     </div>
   </section>;

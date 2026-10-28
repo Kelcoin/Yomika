@@ -107,6 +107,7 @@ export const ReaderPagePayloadSchema = z
     pageIndex: z.number().int().nonnegative(),
     /** 超分模型的 id（设置页里看到的那个），不是路径、不是文件名。 */
     modelId: z.string().min(1),
+    outputScale: z.number().int().min(0).max(4).optional(),
     /** 阅读器世代（§9.1）：换设置就换代，旧一代整个作废。 */
     generation: z.number().int().nonnegative(),
     priority: ComputePrioritySchema,

@@ -1,0 +1,8 @@
+{
+  "onnxSha256": "3bd55b489f136c502dbedfd03d77b6912ac7dfb75c98d93ed2c9ab552f285272",
+  "tfliteSha256": "d6486c46768a905a80a77b441541cd157517525fd688e3035a1169d426b39420",
+  "scale": 2,
+  "layout": "NHWC-RGB-FP32-256",
+  "cpuMae": 4.985538715322446e-05,
+  "cpuPsnrDb": 84.16091755035299
+}

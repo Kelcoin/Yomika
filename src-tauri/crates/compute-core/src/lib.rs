@@ -59,3 +59,6 @@ pub mod resources;
 pub mod tensor;
 pub mod upscale;
 pub mod ncnn;
+
+#[cfg(all(target_os = "android", feature = "ncnn-vulkan"))]
+pub mod mobile_npu;

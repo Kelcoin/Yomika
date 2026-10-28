@@ -1,4 +1,4 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { vi } from 'vitest';
 
@@ -215,4 +215,66 @@ it('keeps the cover and rail progress track inside one card scale layer', () => 
   expect(card.querySelector('.archive-thumb-card-media')?.parentElement).toBe(card);
   expect(card.parentElement?.querySelector(':scope > .archive-card-progress')).toBeNull();
   expect(progress).toHaveAttribute('aria-valuenow', '45');
+});
+
+
+it('animates new rail cards and keeps removed cards only until their exit completes', () => {
+  const a = { serverId: 'server', archiveId: 'a', title: 'A', pageCount: 10, updatedAt: '', tags: [] };
+  const b = { ...a, archiveId: 'b', title: 'B' };
+  const view = (archives: typeof a[]) => <MemoryRouter><ArchiveThumbnailRail title="Rail" archives={archives} scopeId="scope" serverId="server" /></MemoryRouter>;
+  const { container, rerender } = render(view([a]));
+  const first = container.querySelector('.archive-rail-item')!;
+  fireEvent.animationEnd(first);
+  rerender(view([b]));
+  expect(container.querySelectorAll('.archive-rail-item')).toHaveLength(2);
+  const leaving = container.querySelector('.archive-rail-item.is-leaving')!;
+  expect(leaving).toHaveAttribute('aria-hidden', 'true');
+  expect(leaving).toHaveAttribute('inert');
+  expect(container.querySelector('.archive-rail-item.is-entering')).toHaveTextContent('B');
+  fireEvent.animationEnd(leaving);
+  expect(container.querySelectorAll('.archive-rail-item')).toHaveLength(1);
+  rerender(view([]));
+  expect(container.querySelector('.archive-rail-item.is-leaving')).not.toBeNull();
+  fireEvent.animationEnd(container.querySelector('.archive-rail-item.is-leaving')!);
+  expect(screen.queryByRole('region', { name: 'Rail' })).toBeNull();
+});
+
+it('cancels an exit when the same archive returns during a refresh', () => {
+  const a = { serverId: 'server', archiveId: 'again', title: 'Again', pageCount: 10, updatedAt: '', tags: [] };
+  const view = (archives: typeof a[]) => <MemoryRouter><ArchiveThumbnailRail title="Rail" archives={archives} scopeId="scope" serverId="server" /></MemoryRouter>;
+  const { container, rerender } = render(view([a]));
+  const card = container.querySelector('.archive-thumb-card');
+  rerender(view([]));
+  rerender(view([a]));
+  expect(container.querySelectorAll('.archive-rail-item')).toHaveLength(1);
+  expect(container.querySelector('.archive-thumb-card')).toBe(card);
+  expect(container.querySelector('.archive-rail-item')).not.toHaveAttribute('inert');
+  fireEvent.animationEnd(container.querySelector('.archive-rail-item')!);
+  expect(container.querySelector('.archive-thumb-card')).toBe(card);
+});
+
+
+it('cleans up exits even when the browser does not deliver animationend', () => {
+  vi.useFakeTimers();
+  try {
+    const archive = { serverId: 'server', archiveId: 'timeout', title: 'Timeout', pageCount: 10, updatedAt: '', tags: [] };
+    const view = (archives: typeof archive[]) => <MemoryRouter><ArchiveThumbnailRail title="Rail" archives={archives} scopeId="scope" serverId="server" /></MemoryRouter>;
+    const { container, rerender } = render(view([archive]));
+    rerender(view([]));
+    expect(container.querySelector('.archive-rail-item.is-leaving')).not.toBeNull();
+    act(() => { vi.advanceTimersByTime(300); });
+    expect(container.querySelector('.archive-rail')).toBeNull();
+  } finally { vi.useRealTimers(); }
+});
+
+it('does not replay entry animations or replace card nodes for an unchanged refresh', () => {
+  const archive = { serverId: 'server', archiveId: 'same', title: 'Same', pageCount: 10, updatedAt: '', tags: [] };
+  const view = (archives: typeof archive[]) => <MemoryRouter><ArchiveThumbnailRail title="Rail" archives={archives} scopeId="scope" serverId="server" /></MemoryRouter>;
+  const { container, rerender } = render(view([archive]));
+  const item = container.querySelector('.archive-rail-item')!;
+  fireEvent.animationEnd(item);
+  rerender(view([{ ...archive, title: 'Updated' }]));
+  expect(container.querySelector('.archive-rail-item')).toBe(item);
+  expect(item).not.toHaveClass('is-entering');
+  expect(item).toHaveTextContent('Updated');
 });

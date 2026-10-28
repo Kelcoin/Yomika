@@ -186,6 +186,7 @@ export class NativeComputeCenterRepository {
     /** 建键时用的那一版（能力清单给的）。对面回包说它实际用的是另一版时报错，不落缓存。 */
     expectedRevision?: string;
     upscaleModel?: string;
+    upscaleOutputScale?: number;
     taskId?: string;
     /** 远端有自己的队列（不占本机 GPU 那一件）：档位管的是远端任务之间谁先走。 */
     priority?: 'foreground' | 'background';

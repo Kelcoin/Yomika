@@ -2,6 +2,7 @@
 /docs/*
 # Public build instructions linked from the user-facing README.
 !/docs/BUILDING.md
+!/docs/UI_STANDARDS.md
 
 # Planning state
 /.planning/

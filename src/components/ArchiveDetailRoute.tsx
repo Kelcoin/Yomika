@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import { useArchiveReadingProgress } from './useArchiveReadingProgress';
 import { VirtualPageGrid } from './VirtualPageGrid';
 import { EmptyState } from './EmptyState';
@@ -471,10 +472,9 @@ detailBasePath?: string | undefined }) {
       {/* Confirms the long press. Incognito changes what the app records, so it
           says what it will not do rather than switching mode silently. */}
       <Dialog.Root open={incognitoAsk} onOpenChange={setIncognitoAsk}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="dialog-overlay" />
-          <Dialog.Content className="dialog-content">
-            <Dialog.Title className="dialog-title"><EyeOff aria-hidden="true" />无痕阅读</Dialog.Title>
+        
+          <DialogSurface>
+            <DialogHeading icon={<EyeOff aria-hidden="true" />}>无痕阅读</DialogHeading>
             <Dialog.Description>本次阅读不会记录进度，也不会写入历史。</Dialog.Description>
             <div className="dialog-actions">
               <Dialog.Close asChild><button className="secondary-action" type="button"><X aria-hidden="true" />取消</button></Dialog.Close>
@@ -483,8 +483,8 @@ detailBasePath?: string | undefined }) {
                 navigate(`/reader/${encodeURIComponent(archiveId)}?incognito=1${serverId ? `&server=${encodeURIComponent(serverId)}` : ''}`);
               }}><EyeOff aria-hidden="true" />无痕阅读</button>
             </div>
-          </Dialog.Content>
-        </Dialog.Portal>
+          </DialogSurface>
+        
       </Dialog.Root>
 
       <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容">

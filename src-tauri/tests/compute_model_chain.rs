@@ -176,6 +176,7 @@ fn request(model_id: &str, source: Option<&Path>) -> SubmitRequest {
             relative_path: None,
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "stage-a".to_string(),
             model_spec_id: model_id.to_string(),
             // 模型授权与最小边长都留给宿主填：调用方不许指名模型文件。
@@ -626,6 +627,7 @@ fn a_reader_page_identity_becomes_a_real_run() {
         archive_id: "archive-a".to_string(),
         page_index: 11,
         model_id: model_id.to_string(),
+        output_scale: 2,
         generation: 3,
         priority: Priority::Foreground,
         deadline_ms: 0,

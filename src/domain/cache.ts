@@ -21,6 +21,8 @@ export interface ImageCacheIdentity {
   /** Upscale model this rendition was produced with. Part of the key so
    * switching models does not serve the previous one's output. */
   modelId?: string;
+  /** 0 = native scale; participates in derived rendition identity. */
+  outputScale?: number;
   /** Which rendition a derived step reads as its input: the plain page or the
    * enlarged one. Part of the key — the same model over a different source is a
    * different picture. */
@@ -45,6 +47,7 @@ export function createImageCacheKey(identity: ImageCacheIdentity): string {
     // source path the same page index would keep serving the old image.
     identity.sourcePath ?? '',
     identity.modelId ?? '',
+    String(identity.outputScale ?? 2),
     identity.source ?? '',
     identity.transform ?? '',
   ];

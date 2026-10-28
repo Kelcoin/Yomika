@@ -1,3 +1,5 @@
+import { PositionedMenu } from './PositionedMenu';
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import { ContentSkeleton } from './ContentSkeleton';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
@@ -1011,23 +1013,21 @@ export function DeduplicationWorkspace() {
     </section>}
     {deleteSession && <ArchiveDeletionConfirmation keepOpenAfterConfirm progress={executionProgress} description={`将标记 ${selectedGroupKeys.size} 组为不重复，并永久删除所选的 ${deleteSession.count} 个重复档案，此操作不可撤销。`} onClose={() => { setDeleteSession(undefined); setExecutionProgress(undefined); }} onConfirm={executeSelected} />}
     <Dialog.Root open={smartSelectPending} onOpenChange={setSmartSelectPending}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-smart-dialog" aria-describedby={undefined}>
-          <Dialog.Title className="dialog-title"><WandSparkles aria-hidden="true" />智能选择确认</Dialog.Title>
+      
+        <DialogSurface className="dedup-smart-dialog" aria-describedby={undefined}>
+          <DialogHeading icon={<WandSparkles aria-hidden="true" />}>智能选择确认</DialogHeading>
           <SettingsSwitch label="包含仅文件名匹配的组" hint="默认跳过，仅在确认文件名足以判断重复时启用。" checked={includeFilenameOnly} onToggle={() => setIncludeFilenameOnly((value) => !value)} />
           <div className="dialog-actions">
             <button className="secondary-action" type="button" onClick={() => setSmartSelectPending(false)}>取消</button>
             <button className="primary-action" type="button" aria-label="执行智能选择" onClick={() => void smartSelect(includeFilenameOnly)}><WandSparkles aria-hidden="true" />开始智能选择</button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
     <Dialog.Root open={helpOpen} onOpenChange={setHelpOpen}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-help-dialog">
-          <Dialog.Title className="dialog-title"><CircleHelp aria-hidden="true" />查重使用说明</Dialog.Title>
+      
+        <DialogSurface className="dedup-help-dialog">
+          <DialogHeading icon={<CircleHelp aria-hidden="true" />}>查重使用说明</DialogHeading>
           <Dialog.Description>查重仅辅助筛选；请复核版本、页数和内容后再执行删除。</Dialog.Description>
           <ol className="dedup-help-steps">
             <li><strong>选择范围并扫描</strong><p>按档案加入日期限定范围，结合封面相似度与文件名查找疑似重复档案。</p></li>
@@ -1035,8 +1035,8 @@ export function DeduplicationWorkspace() {
             <li><strong>智能选择并复核</strong><p>优先保留汉语、非渣翻、无修正、无外部广告、体积较大的版本；手动调整过的组不会被覆盖。仅文件名匹配的组默认跳过，页数差较大时会提醒。</p></li>
             <li><strong>执行或保存</strong><p>执行会保存不重复关系并删除勾选的档案；删除需再次确认。点击“本次扫描”的保存按钮可保留结果供以后处理。</p></li>
           </ol>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
     {result && <>
       {/* CSS handles column changes without regrouping/remounting card nodes. */}
@@ -1062,10 +1062,9 @@ export function DeduplicationWorkspace() {
       />}
     </>}
     <Dialog.Root open={relationsOpen && !overviewArchive} onOpenChange={(open) => { if (!open) setRelationsOpen(false); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-relations-dialog" aria-describedby={undefined} tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); (event.target as HTMLElement).focus(); }} onCloseAutoFocus={(event) => event.preventDefault()}>
-          <Dialog.Title className="dialog-title"><Link2Off aria-hidden="true" />不重复关系</Dialog.Title>
+      
+        <DialogSurface className="dedup-relations-dialog" aria-describedby={undefined} tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); (event.target as HTMLElement).focus(); }} onCloseAutoFocus={(event) => event.preventDefault()}>
+          <DialogHeading icon={<Link2Off aria-hidden="true" />}>不重复关系</DialogHeading>
           <input className="dedup-relations-search" aria-label="搜索不重复关系" value={relationsQuery} onChange={(event) => setRelationsQuery(event.target.value)} placeholder={`在 ${relations.length} 条不重复关系中搜索`} spellCheck={false} autoComplete="off" />
           <ul className="dedup-relations-list">
             {visibleRelations.map((record) => <li key={record.pairKey} className={record.tombstoned ? 'is-tombstoned' : ''}>
@@ -1091,14 +1090,11 @@ export function DeduplicationWorkspace() {
             </li>)}
             {!visibleRelations.length && <li className="dedup-relations-empty"><EmptyState compact icon={Link2Off} title="没有匹配的关系记录" /></li>}
           </ul>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
     {/* 关系行标题打开的档案概览：就地看，查重页的筛选、滚动和选择都留着。 */}
-    {contextMenuTarget && <DropdownMenu.Root modal={false} open onOpenChange={(open) => { if (!open) setContextMenuTarget(undefined); }}>
-      <DropdownMenu.Trigger asChild><span aria-hidden="true" style={{ position: 'fixed', left: contextMenuTarget.x, top: contextMenuTarget.y, width: 0, height: 0 }} /></DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label={contextMenuTarget.archive.title + ' 操作'}>
+    {contextMenuTarget && <PositionedMenu at={contextMenuTarget} label={contextMenuTarget.archive.title + ' 操作'} onClose={() => setContextMenuTarget(undefined)}>
           <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => {
             setOverviewArchiveId(contextMenuTarget.archive.archiveId);
             setContextMenuTarget(undefined);
@@ -1107,15 +1103,12 @@ export function DeduplicationWorkspace() {
             void openExternalUrl(contextGalleryUrl).then((response) => { if (!response.ok) showToast(response.error.message, 'error'); });
             setContextMenuTarget(undefined);
           }}><ExternalLink aria-hidden="true" />跳转画廊</DropdownMenu.Item>}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>}
+        </PositionedMenu>}
     {overviewArchive && server && <ArchiveOverviewDialog archive={overviewArchive} scopeId={server.scopeId} serverId={server.id} onClose={() => setOverviewArchiveId(undefined)} />}
     <Dialog.Root open={historyOpen} onOpenChange={(open) => { if (!open) setHistoryOpen(false); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content dedup-history-dialog" aria-describedby={undefined}>
-          <Dialog.Title className="dialog-title"><History aria-hidden="true" />扫描结果</Dialog.Title>
+      
+        <DialogSurface className="dedup-history-dialog" aria-describedby={undefined}>
+          <DialogHeading icon={<History aria-hidden="true" />}>扫描结果</DialogHeading>
           {historyError && <p className="dedup-history-error" role="alert">{historyError}</p>}
           {/* 空态不再伪装成一条记录：它以前是列表里的一个 <li>，于是套上了记录的
               描边、底色和两端对齐，读起来像"有一条叫这个名字的扫描结果"。 */}
@@ -1140,8 +1133,8 @@ export function DeduplicationWorkspace() {
               title="还没有保存的扫描结果"
               description="在本次扫描中点击保存，即可在这里重新载入结果。"
             />}
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
   </div>;
 }

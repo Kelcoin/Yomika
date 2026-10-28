@@ -76,6 +76,8 @@ try {
     foreach ($property in $runtimeVariables.PSObject.Properties) {
         [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
     }
+    & python (Join-Path $PSScriptRoot "prepare-mobile-npu.py")
+    if ($LASTEXITCODE -ne 0) { throw "Android NPU runtime preparation failed." }
     & python (Join-Path $PSScriptRoot "prepare-mobile-ncnn.py")
     if ($LASTEXITCODE -ne 0) { throw "Android Vulkan runtime preparation failed." }
     $ncnnEnvironment = Get-Content (Join-Path $repoRoot "src-tauri/target/mobile-ncnn/cargo-env.json") -Raw | ConvertFrom-Json

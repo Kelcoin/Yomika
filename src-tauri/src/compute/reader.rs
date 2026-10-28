@@ -18,9 +18,9 @@ use yomika_compute_protocol::messages::{EnginePolicy, PipelineStage, RunInput};
 use super::manager::{SourceFile, SubmitRequest};
 use super::scheduler::{JobKey, Priority};
 use crate::cache::CacheImageIdentity;
-use crate::inference::{
-    enhanced_revision, resolve_upscaler, source_identity, ResolvedUpscaler, ENHANCED_OUTPUT_SCALE,
-};
+use crate::inference::{resolve_upscaler, source_identity, ResolvedUpscaler};
+#[cfg(test)]
+use crate::inference::{enhanced_revision, ENHANCED_OUTPUT_SCALE};
 
 /// 超分那一步在管线里的名字。旧命令、代理、这里都用同一个：同一件事只有一个名字。
 pub const UPSCALE_STAGE_ID: &str = "upscale";
@@ -67,6 +67,8 @@ pub struct ReaderPageRequest {
     pub page_index: i64,
     /// 超分模型的 id（不是路径，也不是文件名）。
     pub model_id: String,
+    /// 0 = native scale; otherwise final output cap.
+    pub output_scale: u32,
     /// 阅读器世代（§9.1）：翻页换代，旧一代整批丢掉。
     pub generation: u64,
     pub priority: Priority,
@@ -174,6 +176,7 @@ pub fn plan_reader_page(
     models_data: &Path,
     request: &ReaderPageRequest,
 ) -> Result<ReaderPageJob, ReaderPlanError> {
+    if request.output_scale > 4 { return Err(ReaderPlanError::bad("输出倍率必须为原生或 1–4 倍")); }
     if request.page_index < 0 {
         return Err(ReaderPlanError::bad(format!(
             "页码不能是负数：{}",
@@ -192,7 +195,7 @@ pub fn plan_reader_page(
             "{}:{}:{}",
             request.scope_id, request.archive_id, request.page_index
         ),
-        settings_id: enhanced_revision(&Some(resolved)),
+        settings_id: crate::inference::enhanced_revision_with_scale(&Some(resolved), request.output_scale),
         source_revision: READER_PAGE_RENDITION.to_string(),
         backend: engine_policy_label().to_string(),
         source_identity: source_identity(
@@ -203,7 +206,7 @@ pub fn plan_reader_page(
         ),
         model_spec_id: model_id.to_string(),
         scale,
-        output_scale: Some(ENHANCED_OUTPUT_SCALE),
+        output_scale: (request.output_scale != 0).then_some(request.output_scale),
         generation: request.generation,
         priority: request.priority,
         deadline_ms: request.deadline_ms,
@@ -237,6 +240,7 @@ pub fn into_request(job: ReaderPageJob, source: SourceFile) -> SubmitRequest {
             relative_path: None,
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: UPSCALE_STAGE_ID.to_string(),
             model_spec_id: job.model_spec_id,
             // 模型授权与最小边长由宿主在派发前补齐（`manager::prepare_run`）——调用方
@@ -307,10 +311,30 @@ mod tests {
             archive_id: "archive-a".to_string(),
             page_index: 11,
             model_id: model_id.to_string(),
+            output_scale: ENHANCED_OUTPUT_SCALE,
             generation: 3,
             priority: Priority::Foreground,
             deadline_ms: 0,
         }
+    }
+
+    #[test]
+    fn output_size_changes_both_the_worker_stage_and_the_source_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let mut req = request("anime4k-hq");
+        let default = plan_reader_page(root.path(), &req).unwrap();
+        req.output_scale = 1;
+        let original_size = plan_reader_page(root.path(), &req).unwrap();
+        assert_eq!(original_size.scale, default.scale, "native inference scale is fixed");
+        assert_eq!(original_size.output_scale, Some(1));
+        assert_ne!(original_size.settings_id, default.settings_id);
+        assert_eq!(crate::inference::source_revision(root.path(), "enhanced", Some("anime4k-hq"), Some(1)).unwrap(), Some(original_size.settings_id));
+        req.output_scale = 0;
+        let native = plan_reader_page(root.path(), &req).unwrap();
+        assert_eq!(native.output_scale, None);
+        assert_ne!(native.settings_id, default.settings_id);
+        req.output_scale = 5;
+        assert!(plan_reader_page(root.path(), &req).is_err());
     }
 
     /// 索引里查到的那一行，走产品里同样那一步转换（`From`）：测试要钉的正是

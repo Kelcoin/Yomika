@@ -242,6 +242,7 @@ fn request_with_policy(
             relative_path: None,
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "stage-a".to_string(),
             model_spec_id: model_id.to_string(),
             model: None,

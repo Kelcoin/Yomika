@@ -8,11 +8,18 @@
 #include <mutex>
 #include <string>
 
+extern "C" void kmp_set_defaults(const char*);
 namespace {
 std::once_flag instance;
 thread_local std::string last_error;
 int gpu_index() {
-    std::call_once(instance, [] { ncnn::create_gpu_instance(); });
+    std::call_once(instance, [] {
+        // Android CPU hotplug can invalidate libomp's affinity topology snapshot.
+        setenv("KMP_AFFINITY", "disabled", 1); setenv("KMP_TOPOLOGY_METHOD", "flat", 1);
+        setenv("OMP_PROC_BIND", "false", 1); unsetenv("OMP_PLACES");
+        kmp_set_defaults("KMP_AFFINITY=disabled|KMP_TOPOLOGY_METHOD=flat");
+        ncnn::create_gpu_instance();
+    });
     for (int i = 0; i < ncnn::get_gpu_count(); ++i)
         if (ncnn::get_gpu_info(i).type() <= 1) return i;
     return -1;

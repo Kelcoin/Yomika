@@ -129,6 +129,7 @@ fn request(input_id: &str, page: u32, deadline_ms: u64) -> SubmitRequest {
             relative_path: None,
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "stage-a".to_string(),
             model_spec_id: "echo".to_string(),
             // 这条 IT 走的是宿主默认的 echo 引擎（宿主此刻不传 `--engine`）：没有模型，

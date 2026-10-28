@@ -141,7 +141,7 @@ const DERIVED_SESSION_CEILING_BYTES = 256 * 1024 * 1024;
  * 见 `runDerivedQueue`。 */
 type DerivedTier = 'visible' | 'neighbour' | 'background';
 const DERIVED_TIER_ORDER: Record<DerivedTier, number> = { visible: 0, neighbour: 1, background: 2 };
-type DerivedJob = { pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier; retryAt?: number; remoteFailures?: number };
+type DerivedJob = { pageIndex: number; generation: number; upscaleModel: string; engine: 'remote' | 'dlssnr' | 'local'; remoteChain: readonly RemoteService[]; tier: DerivedTier; retryAt?: number };
 
 /** 加载态 / 失败态那条顶栏的外壳：和阅读态那两条栏共用 `useReaderChrome`。
  *
@@ -232,7 +232,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const remoteRevisionRef = useRef('');
   remoteRevisionRef.current = remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value.revision : '';
   const [remoteProbeFailed, setRemoteProbeFailed] = useState<string>();
+  const remoteUsable = remoteConfigured && remoteProbeFailed !== remoteAddress;
   const [remoteProbeEpoch, setRemoteProbeEpoch] = useState(0);
+  // Circuit state is independent of the user's enhancement switches and the
+  // rendition generation. Taking a server offline must not cancel local fallback.
+  const remoteHealthRef = useRef({ address: '', checkedAt: 0, retryAt: 0 });
   const lastRejectedRemoteRevisionRef = useRef<string>();
   useEffect(() => {
     if (!remoteConfigured) {
@@ -249,6 +253,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const result = await centerRepository.remoteCapabilities(remoteAddress, preferences.remoteComputeToken);
         if (cancelled) return;
         if (result.ok) {
+          remoteHealthRef.current = { address: remoteAddress, checkedAt: Date.now(), retryAt: 0 };
           setRemoteProbeFailed(undefined);
           setRemoteCapabilities({ address: remoteAddress, value: result.value });
           return;
@@ -257,12 +262,20 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         if (cancelled) return;
       }
       setRemoteProbeFailed(remoteAddress);
+      remoteHealthRef.current = { address: remoteAddress, checkedAt: 0, retryAt: Date.now() + 30_000 };
     })();
     return () => { cancelled = true; };
   }, [centerRepository, remoteConfigured, remoteAddress, preferences.remoteComputeToken, remoteProbeEpoch]);
+  // Recover without retrying on every page. Preserve the last revision while
+  // offline so publishing local availability does not cancel an active fallback.
+  useEffect(() => {
+    if (!pageActive || !remoteConfigured || remoteProbeFailed !== remoteAddress) return;
+    const timer = window.setTimeout(() => setRemoteProbeEpoch((epoch) => epoch + 1), 30_000);
+    return () => window.clearTimeout(timer);
+  }, [pageActive, remoteConfigured, remoteProbeFailed, remoteAddress, remoteProbeEpoch]);
   /** 只有「这一台」的清单算数：换设备的瞬间旧答案（另一个地址）一律过期。 */
   const remoteServiceUp = (service: RemoteService) => remoteServiceReady(
-    remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value : undefined,
+    remoteUsable && remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value : undefined,
     service,
   );
   /** DLSSNR 与远端处理要先检查本机能力或配对信息。
@@ -279,7 +292,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   useEffect(() => {
     // 走远端时这一趟本机不跑 DLSSNR：本地那份检查（有没有 DLL、版本对不对）说的不是
     // 这一件事，而且它在手机上必然失败——真去问，就会把用户手动打开的开关自动关掉。
-    if (remoteConfigured) return;
+    if (remoteUsable) return;
     if (!dlssnrRequested) {
       setDlssnrReady(false);
       dlssnrNoticeRef.current = undefined;
@@ -289,6 +302,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     void checkDlssnrAvailability(true).then((availability) => {
       if (cancelled) return;
       setDlssnrReady(availability.ready);
+      // Losing the remote must not disable its persisted DLSSNR preference.
+      if (remoteConfigured) return;
       if (availability.ready) {
         dlssnrNoticeRef.current = undefined;
         return;
@@ -308,7 +323,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       void save({ ...current, dlssnrEnabled: false });
     });
     return () => { cancelled = true; };
-  }, [dlssnrRequested, remoteConfigured, save, showToast]);
+  }, [dlssnrRequested, remoteConfigured, remoteUsable, save, showToast]);
   const [dlssnrWanted, setDlssnrWanted] = useState(false);
   // 队列回调只依赖稳定值，设置改了就靠这两个 ref 取最新的一份（改设置本身会让
   // derived 重新排队，见下面的 enhancementToken）。
@@ -328,7 +343,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     : localUpscaleConfigured;
   // Settings grant availability; every reading session starts with original images.
   /** 一档在这一次阅读里到底能不能用：远端看对面的清单，本机看自己跑不跑得起来。 */
-  const dlssnrAvailable = remoteConfigured ? remoteServiceUp('dlssnr') : dlssnrRequested && dlssnrReady;
+  const dlssnrAvailable = remoteUsable ? remoteServiceUp('dlssnr') : dlssnrRequested && dlssnrReady;
   const dlssnrConfigured = dlssnrAvailable && dlssnrWanted;
   /** Per-session overrides for the two enhancements, driven from the reader's own
    * toolbar. Settings decide whether a model exists; these decide whether this
@@ -960,11 +975,35 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         let jobFailure: ReaderPageFailure | undefined;
         try {
           const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
+          // Fixed-scale models always run their native graph; the worker caps display at 2x.
+          const outputScale = 0;
           // Remote owns the complete chain: upload the original once and only
           // download the final result. Local compute is a fallback, never a prerequisite.
           let derived: ImageHandle | undefined;
           let remotePlanChanged = false;
-          if (job.engine === 'remote') {
+          let remoteOnline = job.engine === 'remote';
+          if (remoteOnline) {
+            const health = remoteHealthRef.current;
+            if (health.address === remoteAddress && health.retryAt > Date.now()) {
+              remoteOnline = false;
+              jobFailure = { code: 'REMOTE_UNAVAILABLE', message: '远端暂时离线，尝试本地处理' };
+            } else if (health.address !== remoteAddress || Date.now() - health.checkedAt > 15_000) {
+              const probe = await centerRepository.remoteCapabilities(remoteAddress, preferences.remoteComputeToken);
+              if (controller.signal.aborted) continue;
+              if (probe.ok) {
+                remoteHealthRef.current = { address: remoteAddress, checkedAt: Date.now(), retryAt: 0 };
+                remoteRevisionRef.current = probe.value.revision;
+                setRemoteProbeFailed(undefined);
+                setRemoteCapabilities({ address: remoteAddress, value: probe.value });
+              } else {
+                remoteOnline = false;
+                remoteHealthRef.current = { address: remoteAddress, checkedAt: 0, retryAt: Date.now() + 30_000 };
+                setRemoteProbeFailed(remoteAddress);
+                jobFailure = { code: probe.error.code, message: probe.error.message };
+              }
+            }
+          }
+          if (remoteOnline) {
             setDerivingStage('remote');
             derived = await imageCache.load({
               ...identity,
@@ -1007,16 +1046,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           }
           const transientRemoteFailure = job.engine === 'remote' && jobFailure !== undefined
             && ['NETWORK', 'REMOTE_UNAVAILABLE', 'REMOTE_TIMEOUT', 'COMPUTE_TIMEOUT', 'TIMEOUT'].includes(jobFailure.code);
-          if (transientRemoteFailure && !controller.signal.aborted) {
-            // A transport failure is not evidence that the local device should run this model.
-            // Retry the same remote job with backoff; preserve the original in the meantime.
-            derivedAttemptedRef.current.delete(pageIndex);
-            const delay = Math.min(30_000, 3_000 * 2 ** Math.min(job.remoteFailures ?? 0, 4));
-            job.remoteFailures = (job.remoteFailures ?? 0) + 1;
-            job.retryAt = Date.now() + delay;
-            derivedBackgroundRetryAtRef.current = job.retryAt;
-            derivedQueueRef.current.push(job);
-            continue;
+          if (transientRemoteFailure && remoteOnline && !controller.signal.aborted) {
+            // One failed transfer opens the circuit for the whole queue. Do not
+            // upload each neighbouring page to the same dead service forever.
+            remoteHealthRef.current = { address: remoteAddress, checkedAt: 0, retryAt: Date.now() + 30_000 };
+            setRemoteProbeFailed(remoteAddress);
           }
           if (!derived) {
             if (job.upscaleModel) setDerivingStage('upscale');
@@ -1024,6 +1058,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               ...identity,
               rendition: 'enhanced',
               modelId: job.upscaleModel,
+              outputScale,
               source: 'reader-page',
               priority,
               taskId: `${taskBase}:enhanced`,
@@ -1071,7 +1106,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 transform: dlssnrTransform(baseRendition, serializeDlssnrPasses(
                   parseDlssnrPasses(dlssnrPassesRef.current),
                 )),
-                ...(job.upscaleModel ? { modelId: job.upscaleModel } : {}),
+                ...(job.upscaleModel ? { modelId: job.upscaleModel, outputScale } : {}),
                 priority,
                 taskId: `${taskBase}:dlssnr`,
               }, { signal: controller.signal }).catch((error: unknown) => {
@@ -1181,7 +1216,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       // 队列排空了（这一趟没有新的活进来）：过一会儿把 DLSSNR 的工作区交回。
       scheduleWorkspaceRelease();
     }
-  }, [cancelWorkspaceRelease, loadPage, retainDerived, markDeriving, noticeStageFailure, noticeEngineFallback, noticeUpscaleFailure, prefetchDistance, releasePage, scheduleWorkspaceRelease, sessionPurged]);
+  }, [cancelWorkspaceRelease, centerRepository, remoteAddress, preferences.remoteComputeToken, preferences.remoteComputeUrl, loadPage, retainDerived, markDeriving, noticeStageFailure, noticeEngineFallback, noticeUpscaleFailure, prefetchDistance, releasePage, scheduleWorkspaceRelease, sessionPurged]);
 
   useEffect(() => { if (pageActive) void runDerivedQueue(); }, [pageActive, runDerivedQueue]);
 
@@ -1272,12 +1307,12 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       derivedSweepRef.current = undefined;
       return;
     }
-    const useRemote = remoteConfigured
+    const useRemote = remoteUsable
       && (!upscaleEnabled || remoteServiceUp('upscale'))
       && (!dlssnrConfigured || remoteServiceUp('dlssnr'));
     const engine: 'remote' | 'dlssnr' | 'local' = useRemote
       ? 'remote'
-      : !remoteConfigured && dlssnrConfigured
+      : !remoteUsable && dlssnrConfigured
         ? 'dlssnr'
         : 'local';
     /** 交给远端的那一串：阅读器里开着哪几档就做哪几档，顺序固定「超分 → DLSSNR」
@@ -1362,7 +1397,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // 队列里可能已经有后台那一档的活，所以这里不能只看 `queued`。
     // 等清理落地那一关在 `runDerivedQueue` 里（闸门只设一处）。
     if (queued || derivedQueueRef.current.length > 0) void runDerivedQueue();
-  }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, preferences.upscaleBackend, remoteConfigured, remoteCapabilities, remoteAddress, runDerivedQueue, upscaleEnabled]);
+  }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, preferences.upscaleBackend, remoteUsable, remoteCapabilities, remoteAddress, runDerivedQueue, upscaleEnabled]);
 
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.
@@ -1373,6 +1408,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     enhancementToken,
     preferences.dlssnrPasses,
     preferences.upscaleModel,
+    preferences.upscaleOutputScale,
     releaseDerived,
     remoteConfigured,
     remoteCapabilities?.address === remoteAddress ? remoteCapabilities.value.revision : undefined,

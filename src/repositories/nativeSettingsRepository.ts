@@ -30,6 +30,8 @@ export const PreferenceSnapshotSchema = z.object({
   cardStyle: z.enum(['wide', 'thumbnail']).default('wide'),
   upscaleBackend: z.enum(['off', 'cpu', 'auto']).default('off'),
   upscaleModel: z.string().max(128).default(''),
+  /** 0 uses the model native scale; smaller scales resample its output. */
+  upscaleOutputScale: z.number().int().min(0).max(4).default(0),
   /** Readoshi-style auto-enable: a session opens upscaled when the archive's
    * average page size (bytes/page) reaches the threshold. Needs a model; the
    * switch locks while upscale itself is off. */
@@ -124,6 +126,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   cardStyle: 'wide',
   upscaleBackend: 'off',
   upscaleModel: '',
+  upscaleOutputScale: 0,
   upscaleAutoEnable: false,
   upscaleAutoTagMode: 'whitelist',
   upscaleAutoWhitelist: 'category:doujinshi\ncategory:manga',

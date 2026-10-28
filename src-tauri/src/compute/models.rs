@@ -31,6 +31,7 @@ pub enum StagedModel {
     /// 模型目录里的一份 ONNX：worker 拿着这只只读授权自己再核一遍长度与哈希。
     File {
         grant: GrantedFile,
+        accelerator: Option<GrantedFile>,
         /// 清单里的 `minInputEdge`。搬进 worker 是因为引擎要拿它判断「这张图对这个模型
         /// 来说太小了」——那是模型自带的事实，不该让调用方猜。
         min_input_edge: u32,
@@ -138,7 +139,9 @@ impl ModelCatalog {
                 detail: format!("{}：{}", error.code(), error.message()),
             }
         })?;
+        let accelerator = stage_accelerator(inputs_root, &path, manifest.scale);
         Ok(StagedModel::File {
+            accelerator,
             grant: GrantedFile {
                 relative_path,
                 content_hash,
@@ -149,6 +152,25 @@ impl ModelCatalog {
             min_input_edge: manifest.min_input_edge.max(1),
         })
     }
+}
+
+/// Companion fingerprints and RGB contract are checked before worker handoff.
+fn stage_accelerator(inputs_root: &Path, onnx: &Path, scale: u32) -> Option<GrantedFile> {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Export { onnx_sha256: String, tflite_sha256: String, scale: u32, layout: String }
+    let directory = onnx.parent()?;
+    let export: Export = serde_json::from_slice(&std::fs::read(directory.join("yomika-accelerator.json")).ok()?).ok()?;
+    if export.scale != scale || export.layout != "NHWC-RGB-FP32-256" { return None; }
+    let source = std::fs::read(onnx).ok()?;
+    if format!("{:x}", Sha256::digest(&source)) != export.onnx_sha256 { return None; }
+    let companion = directory.join("model.tflite");
+    let bytes = std::fs::read(&companion).ok()?;
+    if format!("{:x}", Sha256::digest(&bytes)) != export.tflite_sha256 { return None; }
+    let (byte_length, content_hash) = hash_file(&companion).ok()?;
+    let relative_path = inputs::stage(inputs_root, &companion, &content_hash).ok()?;
+    Some(GrantedFile { relative_path, content_hash, byte_length })
 }
 
 #[cfg(test)]
@@ -210,6 +232,31 @@ mod tests {
     }
 
     #[test]
+    fn accelerator_requires_both_fingerprints_and_keeps_the_onnx_fallback() {
+        use sha2::{Digest, Sha256};
+        let sandbox = Sandbox::new("accelerator");
+        let model = sandbox.install("demo", "1", b"original model", 1);
+        let root = model.parent().unwrap();
+        std::fs::write(root.join("model.tflite"), b"converted model").unwrap();
+        let export = serde_json::json!({
+            "onnxSha256": format!("{:x}", Sha256::digest(b"original model")),
+            "tfliteSha256": format!("{:x}", Sha256::digest(b"converted model")),
+            "scale": 2, "layout": "NHWC-RGB-FP32-256"
+        });
+        std::fs::write(root.join("yomika-accelerator.json"), export.to_string()).unwrap();
+        let inputs = sandbox.inputs();
+        let StagedModel::File { accelerator: Some(grant), .. } = catalog(&sandbox).stage(&inputs,"demo").unwrap() else { panic!("valid companion missing") };
+        assert_eq!(std::fs::read(blob_path(&inputs,&grant.relative_path)).unwrap(), b"converted model");
+        // A stale or damaged conversion must not prevent the original from running.
+        std::fs::write(root.join("model.tflite"), b"damaged").unwrap();
+        assert!(matches!(catalog(&sandbox).stage(&inputs,"demo").unwrap(), StagedModel::File { accelerator: None, .. }));
+        std::fs::write(root.join("model.tflite"), b"converted model").unwrap();
+        std::fs::write(&model, b"different original").unwrap();
+        assert!(stage_accelerator(&inputs,&model,2).is_none());
+        assert!(stage_accelerator(&inputs,&model,4).is_none());
+    }
+
+    #[test]
     fn an_installed_model_is_handed_over_as_a_declaration_and_a_real_file() {
         let sandbox = Sandbox::new("install");
         let bytes = b"pretend this is 5 MB of weights".to_vec();
@@ -222,6 +269,7 @@ mod tests {
         let StagedModel::File {
             grant,
             min_input_edge,
+            ..
         } = staged
         else {
             panic!("模型目录里的一份 ONNX 该走文件那条来路");

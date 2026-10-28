@@ -224,6 +224,7 @@ mod tests {
 
     fn stage(dlssnr: Option<DlssnrGrant>) -> PipelineStage {
         PipelineStage {
+            accelerator: None,
             stage_id: "s0".to_string(),
             model_spec_id: "dlssnr".to_string(),
             engine_policy: EnginePolicy::Gpu,

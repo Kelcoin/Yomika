@@ -545,6 +545,7 @@ fn run_message(job_id: &str, stages: &[&str]) -> Message {
         pipeline: stages
             .iter()
             .map(|stage| PipelineStage {
+                accelerator: None,
                 stage_id: (*stage).to_string(),
                 model_spec_id: "realcugan-2x-conservative".to_string(),
                 // 协议会话测试用 echo 引擎：没有模型授权（模型那一路由

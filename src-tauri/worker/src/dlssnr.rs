@@ -493,6 +493,7 @@ mod tests {
 
     fn stage(dlssnr: Option<DlssnrGrant>, model: Option<GrantedFile>) -> PipelineStage {
         PipelineStage {
+            accelerator: None,
             stage_id: "dlssnr".to_string(),
             model_spec_id: "dlssnr".to_string(),
             engine_policy: EnginePolicy::Gpu,

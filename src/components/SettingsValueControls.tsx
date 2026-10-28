@@ -1,11 +1,45 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Dispatch, type SetStateAction, type ButtonHTMLAttributes, type KeyboardEventHandler } from 'react';
 import { FocusScope } from '@radix-ui/react-focus-scope';
-import { Minus, Plus } from 'lucide-react';
+import { ArrowLeft, Minus, Plus } from 'lucide-react';
 
 import { OverlayLayer } from './OverlayLayer';
 import { SettingsRow } from './SettingsRow';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { usePageActive } from '../app/RetainedPage';
+
+const SettingsMenuContext = createContext<{ title: string; setNestedCount: Dispatch<SetStateAction<number>> } | undefined>(undefined);
+
+/** A centred choice with an independent trailing action slot and progress. */
+export function SettingsOption({ active, action, status, align = 'center', children, ...buttonProps }: Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className'> & {
+  active?: boolean;
+  action?: ReactNode;
+  status?: ReactNode;
+  align?: 'center' | 'start';
+}) {
+  return <div className={`settings-choice-option settings-option-row${active ? ' is-active' : ''}`}>
+    <button type="button" className={`settings-choice-option-main${align === 'start' ? ' settings-device-option' : ''}`} aria-pressed={active} {...buttonProps}>{children}</button>
+    {action && <div className="settings-option-actions">{action}</div>}
+    {status}
+  </div>;
+}
+
+/** A settings row whose secondary content uses the common menu lifecycle. */
+export function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, children }: {
+  icon?: ReactNode;
+  label: string;
+  hint?: string | undefined;
+  value?: string | undefined;
+  ariaLabel?: string | undefined;
+  onClose?: (() => void) | undefined;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = () => { setOpen(false); onClose?.(); };
+  return <>
+    <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} />
+    {open && <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={close}>{children}</SettingsMenu>}
+  </>;
+}
 
 /** 设置行背后那套「一行 + 浮层菜单」的控件：选择、数字步进。
  *
@@ -29,13 +63,41 @@ import { usePageActive } from '../app/RetainedPage';
  * `action` 是给「菜单自己的动作」留的口子（层参数说明的问号就是这样进来的）：
  * 它钉在标题行右端，因为标题行是这一屏里唯一一条横跨整个面板、又只属于菜单的
  * 条带。放进内容区就得为它单开一行，而那行会跟着内容一起滚走。 */
-export function SettingsMenu({ title, icon, action, onClose, children }: { title: string; icon?: ReactNode; action?: ReactNode; onClose: () => void; children: ReactNode }) {
+export function SettingsMenu({ title, icon, action, onClose, onBack, backLabel, role = 'dialog', onKeyDown, children }: { title: string; icon?: ReactNode; action?: ReactNode; onClose: () => void; onBack?: (() => void) | undefined; backLabel?: string; role?: 'dialog' | 'menu'; onKeyDown?: KeyboardEventHandler<HTMLDivElement>; children: ReactNode }) {
   const pageActive = usePageActive();
+  const parent = useContext(SettingsMenuContext);
+  const [nestedCount, setNestedCount] = useState(0);
+  const context = useMemo(() => ({ title, setNestedCount }), [title]);
+  const back = onBack ?? (parent ? onClose : undefined);
+  const dismiss = back ?? onClose;
+  const covered = nestedCount > 0;
+  useLayoutEffect(() => {
+    if (!parent || !pageActive) return;
+    parent.setNestedCount((count) => count + 1);
+    return () => parent.setNestedCount((count) => count - 1);
+  }, [parent, pageActive]);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const body = bodyRef.current;
+    const content = contentRef.current;
+    if (!pageActive || !body || !content || typeof ResizeObserver === 'undefined') return;
+    // Measure natural content, never the animated/scroll-constrained viewport:
+    // observing the viewport itself would feed every animation frame back in.
+    const measure = () => {
+      const height = `${content.offsetHeight}px`;
+      if (body.style.height !== height) body.style.height = height;
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [pageActive]);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   useLayoutEffect(() => { if (!pageActive) closeRef.current(); }, [pageActive]);
   // 返回手势先关菜单，而不是把下面的页面带走（见 overlayBackGuard）。
-  useOverlayBackGuard(pageActive, onClose);
+  useOverlayBackGuard(pageActive, dismiss);
   /** 「点外面关闭」判定的是按下的落点，不是那次 click 的落点。
    *
    * 面板里的 textarea 自带右下角的缩放柄：按下在面板里，松开时指针已经在面板外。浏览器
@@ -48,37 +110,46 @@ export function SettingsMenu({ title, icon, action, onClose, children }: { title
    * `stopPropagation` 也不会让遮罩看不到这一次按下。 */
   const pressOutsideRef = useRef(true);
   useEffect(() => {
-    if (!pageActive) return;
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing) onClose(); };
+    if (!pageActive || covered) return;
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented && !event.isComposing) dismiss(); };
     document.addEventListener('keydown', close);
     return () => document.removeEventListener('keydown', close);
-  }, [onClose, pageActive]);
+  }, [dismiss, pageActive, covered]);
   if (!pageActive) return null;
   return (
     <OverlayLayer>
       <div className="settings-choice-overlay"
+        data-menu-covered={covered || undefined}
+        aria-hidden={covered || undefined}
         role="presentation"
         onPointerDownCapture={(event) => { pressOutsideRef.current = event.target === event.currentTarget; }}
         onClick={() => { if (pressOutsideRef.current) onClose(); }}
       >
-        <FocusScope asChild trapped loop><div
+        <FocusScope asChild trapped={!covered} loop><div
           className="settings-choice-panel"
-          role="dialog"
-          aria-modal="true"
+          role={role}
+          aria-modal={role === 'dialog' ? true : undefined}
           aria-label={title}
           onClick={(event) => event.stopPropagation()}
           onKeyDown={(event) => {
+            onKeyDown?.(event);
+            if (event.defaultPrevented) return;
             if (event.key === 'Escape' && !event.nativeEvent.isComposing) {
-              event.preventDefault(); event.stopPropagation(); onClose();
+              event.preventDefault(); event.stopPropagation(); dismiss();
             }
           }}
         >
-          <h2 className="settings-choice-title">
+          <SettingsMenuContext.Provider value={context}>
+          <h2 className="settings-choice-title" data-has-navigation={Boolean(back || action) || undefined}>
+            {back && <button className="settings-choice-back icon-action" type="button" aria-label={backLabel ?? (parent ? `返回${parent.title}` : '返回上一级')} onClick={back}><ArrowLeft aria-hidden="true" /></button>}
             {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
             {title}
             {action && <span className="settings-choice-action">{action}</span>}
           </h2>
-          <div className="settings-menu-body">{children}</div>
+          <div className="settings-menu-body" ref={bodyRef}>
+            <div className="settings-menu-content" ref={contentRef}>{children}</div>
+          </div>
+          </SettingsMenuContext.Provider>
         </div></FocusScope>
       </div>
     </OverlayLayer>
@@ -87,7 +158,7 @@ export function SettingsMenu({ title, icon, action, onClose, children }: { title
 
 
 /** A setting whose answer is one of a few. */
-export function SettingsChoice({ icon, label, hint, ariaLabel, mark, value, options, onChange, optionAction, optionStatus, children }: {
+export function SettingsChoice({ icon, label, hint, ariaLabel, mark, value, options, onChange, optionAction, optionStatus, optionDisabled, children }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
@@ -102,6 +173,7 @@ export function SettingsChoice({ icon, label, hint, ariaLabel, mark, value, opti
   optionAction?: ((option: { value: string; label: string }) => ReactNode) | undefined;
   /** 挂在某一项下面的一行状态（模型下载进度）：它和那一项同处一层，点完就看得见。 */
   optionStatus?: ((option: { value: string; label: string }) => ReactNode) | undefined;
+  optionDisabled?: ((option: { value: string; label: string }) => boolean) | undefined;
   /** The hidden compat input the tests and the old markup rely on. */
   children?: ReactNode;
 }) {
@@ -125,13 +197,10 @@ export function SettingsChoice({ icon, label, hint, ariaLabel, mark, value, opti
         <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={() => setOpen(false)}>
           <div className="settings-choice-list">
             {options.map((option) => (
-              <div className={`settings-choice-option${option.value === value ? ' is-active' : ''}`} key={option.value}>
-                <button type="button" className="settings-choice-option-main" onClick={() => { onChange(option.value); setOpen(false); }}>
-                  <span>{option.label}</span>
-                </button>
-                {optionAction?.(option)}
-                {optionStatus?.(option)}
-              </div>
+              <SettingsOption key={option.value} active={option.value === value} disabled={optionDisabled?.(option)}
+                onClick={() => { onChange(option.value); setOpen(false); }}
+                action={optionAction?.(option)} status={optionStatus?.(option)}
+              ><span>{option.label}</span></SettingsOption>
             ))}
             {options.length === 0 && <p className="settings-choice-empty">暂无可选项</p>}
           </div>

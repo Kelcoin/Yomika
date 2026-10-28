@@ -402,10 +402,10 @@ describe('design system contract', () => {
     // `<div` 与 `className` 之间允许换行：属性一多就会被折成多行，那是排版不是形状，
     // 条款只该钉「浮层是 OverlayLayer 的直接子节点」这件事。
     expect(controls).toMatch(/<OverlayLayer>\s*<div\s+className="settings-choice-overlay"/);
-    expect(preset).toMatch(/<OverlayLayer>\s*<div\s+className="search-preset-overlay"/);
+    expect(preset).toContain('<SettingsMenu');
     // 浮层挂出去以后，面板里的点击不再算「在 field 里」，外点关闭必须放过它，
     // 否则指针一按下按钮就被卸载，click 永远到不了按钮。
-    expect(preset).toContain("if (target?.closest?.('.search-preset-overlay')) return;");
+    expect(preset).not.toContain("document.addEventListener('pointerdown'");
 
     // 入场动画不能留填充值：translateY(0) 也是一个不是 none 的 transform，它会让
     // .workspace 同时变成层叠上下文和 position: fixed 子元素的包含块（浮层被裁到
@@ -652,9 +652,8 @@ describe('design system contract', () => {
     expect(title).toMatch(/font-weight:\s*var\(--weight-semibold\)/);
     expect(title).toMatch(/gap:\s*var\(--space-3\)/);
     // 搜索预设那条标题不跟着居中：它下面是一列预设，标题与行文字左对齐读起来才是一组。
-    const preset = ruleBody(shell, '.search-preset-title');
-    expect(preset).toMatch(/justify-content:\s*flex-start/);
-    expect(preset).toMatch(/padding-inline-start:\s*var\(--space-3\)/);
+    expect(read('src/components/SearchPresetField.tsx')).toContain('<SettingsMenu');
+    expect(shell).not.toContain('.search-preset-title {');
     // 32px 的图标槽仍由标题行自己出：标题块的高度与图标尺寸都跟着它。
     expect(shell).toMatch(/\.settings-choice-icon \{[^}]*width:\s*32px/);
     expect(shell).toMatch(/\.settings-choice-icon svg \{\s*width:\s*18px;\s*height:\s*18px/);
@@ -782,7 +781,7 @@ describe('design system contract', () => {
     expect(shell).not.toMatch(/radius-overlay\)\s*-\s*8\.7px/);
     expect(shell).not.toMatch(/settings-choice-option:last-child\s*\{[^}]*border-bottom/);
     // 同一族里另一个 28px 外壳也按同一个内缩走。
-    expect(ruleBody(shell, '.search-preset-panel')).toMatch(/padding:\s*var\(--space-4\)/);
+    expect(ruleBody(shell, '.settings-choice-panel')).toMatch(/padding:\s*var\(--space-4\)/);
 
     // 面板**里面**那层滚动容器不许再添内缩。它从前带一圈 2px「给焦点环的余量」，
     // 于是行落在 18px 上：同心半径变成 28 − 18 = 10（又不在尺度上），行里第一行文字
@@ -1885,7 +1884,7 @@ describe('design system contract', () => {
     expect(choice).toMatch(/<span className="settings-row-mark">\{mark\}<\/span>/);
     expect(choice).toMatch(/mark\?: ReactNode \| undefined;/);
     const settings = read('src/components/SettingsWorkspace.tsx');
-    expect(settings).toMatch(/mark=\{outdatedUpscaleIds\.size > 0 \? '有更新' : undefined\}/);
+    expect(settings).toMatch(/outdatedUpscaleIds\.size > 0 && <span className="settings-row-mark">有更新<\/span>/);
     // 第二个挂点（DLSSNR 组件那一行）走的是 `SettingsRow`：同一枚 pill、同一个画法，
     // 名字后面跟着它，可访问名仍然只算名字（标记是装饰，不参与命名）。
     const row = read('src/components/SettingsRow.tsx');
@@ -2190,10 +2189,10 @@ describe('design system contract', () => {
     // which is the jump between sections.
     expect(settings).not.toMatch(/model-feature-block/);
     expect(shell).not.toMatch(/model-feature-block|model-stage-row/);
-    expect(shell).toMatch(/\.search-preset-overlay,\n\.settings-choice-overlay \{/);
+    expect(shell).toMatch(/\.settings-choice-overlay \{/);
     // Both panels share one sheet shape, but a settings menu is allowed to be
     // taller than a preset list, so the panel rules are separate now.
-    expect(shell).toMatch(/\.search-preset-panel \{[^}]*max-height:\s*min\(70dvh, 520px\)/);
+    expect(shell).not.toContain('.search-preset-panel {');
     expect(shell).toMatch(/\.settings-choice-panel \{[^}]*max-height:\s*min\(85dvh, 760px\)/);
     expect(read('src/components/SettingsRow.tsx')).toMatch(/export function SettingsRow\(/);
     // 选择控件住在 SettingsValueControls：设置页只是它的调用方。
@@ -3068,7 +3067,7 @@ describe('design system contract', () => {
     // 源码：那条已经没人用的 `.dlssnr-variant-copy` 规则由协调者从 shell.css 里删。
     const source = read('src/components/DlssnrSettingsGroup.tsx');
     expect(source).not.toContain('dlssnr-variant-copy');
-    expect(source).toMatch(/className="settings-choice-option-main"/);
+    expect(source).toContain('<SettingsOption');
     expect(source).toMatch(/className="select-option-download"/);
   });
 
@@ -3078,7 +3077,7 @@ describe('design system contract', () => {
     expect(source).not.toContain('这台机器上装了这些片段');
     expect(source).toContain('repository.activateVariant(variant.file)');
     expect(source).toContain('if (local) void activateVariant(local)');
-    expect(source).toContain('settings-choice-option-main');
+    expect(source).toContain('<SettingsOption');
     expect(source).not.toContain('dlssnr-library');
   });
 
@@ -3144,7 +3143,7 @@ describe('design system contract', () => {
     // 偏左 25px——半行宽无关，只看这一块。补一块等宽的镜像留白把中心顶回去；已安装的行
     // 不渲染按钮，同一列里才会「有的居中有的偏左」，所以镜像槽必须按按钮在不在生效。
     expect(shell).toMatch(
-      /\.settings-choice-option:has\(> \.select-option-download\)\s*\{\s*padding-left:\s*calc\(40px \+ 2px \+ var\(--space-2\)\)/,
+      /\.settings-option-row:has\(\.settings-option-actions > :nth-child\(1\)\)\s*\{\s*--choice-action-space:\s*36px/,
     );
   });
 
@@ -3175,11 +3174,11 @@ describe('design system contract', () => {
     // 是同一个根因。只给面板内的子项再上一阶，面板外的同类行不动。
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
     expect(shell).toMatch(
-      /\.settings-choice-panel \.settings-row-button:hover:not\(:disabled\),\s*\.settings-choice-panel \.settings-menu-check:hover:not\(:disabled\),\s*\.settings-choice-panel \.custom-scheme-card:hover,\s*\.search-preset-panel \.search-preset-apply:hover\s*\{\s*background:\s*var\(--surface-container-highest\)/,
+      /\.settings-choice-panel \.settings-row-button:hover:not\(:disabled\),\s*\.settings-choice-panel \.settings-menu-check:hover:not\(:disabled\),\s*\.settings-choice-panel \.custom-scheme-card:hover,\s*\.settings-choice-panel \.search-preset-apply:hover\s*\{\s*background:\s*var\(--surface-container-highest\)/,
     );
     const touchBlock = shell.slice(shell.lastIndexOf('@media (hover: none) {'));
     expect(touchBlock).toMatch(
-      /\.settings-choice-panel \.settings-row-button:is\(\.is-pressed, :active\):not\(:disabled\),\s*\.settings-choice-panel \.settings-menu-check:is\(\.is-pressed, :active\):not\(:disabled\),\s*\.settings-choice-panel \.custom-scheme-card:is\(\.is-pressed, :active\),\s*\.search-preset-panel \.search-preset-apply:is\(\.is-pressed, :active\)\s*\{\s*background:\s*var\(--surface-container-highest\)/,
+      /\.settings-choice-panel \.settings-row-button:is\(\.is-pressed, :active\):not\(:disabled\),\s*\.settings-choice-panel \.settings-menu-check:is\(\.is-pressed, :active\):not\(:disabled\),\s*\.settings-choice-panel \.custom-scheme-card:is\(\.is-pressed, :active\),\s*\.settings-choice-panel \.search-preset-apply:is\(\.is-pressed, :active\)\s*\{\s*background:\s*var\(--surface-container-highest\)/,
     );
   });
 

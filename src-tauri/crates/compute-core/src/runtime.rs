@@ -420,14 +420,20 @@ fn nnapi_hardware_available() -> bool {
     // The app supports API 24; NNAPI enumeration was added in API 29.
     // Resolve it dynamically so older Android can still launch and use Vulkan.
     use std::ffi::{c_void,c_char};
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     #[link(name="dl")]
     unsafe extern "C" {
         fn dlopen(name:*const c_char, flags:i32)->*mut c_void;
         fn dlsym(handle:*mut c_void,name:*const c_char)->*mut c_void;
-        fn dlclose(handle:*mut c_void)->i32;
     }
-    unsafe {
-        let lib=dlopen(c"libneuralnetworks.so".as_ptr(),2);
+    *AVAILABLE.get_or_init(|| unsafe {
+        // NNAPI installs pthread TLS destructors. Android can run those after
+        // this probe returns, when the worker exits. Unloading here leaves a
+        // dangling destructor (reproduced SIGSEGV in pthread_key_clean_all).
+        // Pin once for the process lifetime; never dlclose this handle.
+        const RTLD_NOW: i32 = 2;
+        const RTLD_NODELETE: i32 = 0x1000;
+        let lib=dlopen(c"libneuralnetworks.so".as_ptr(),RTLD_NOW | RTLD_NODELETE);
         if lib.is_null(){return false;}
         let count=dlsym(lib,c"ANeuralNetworks_getDeviceCount".as_ptr());
         let device=dlsym(lib,c"ANeuralNetworks_getDevice".as_ptr());
@@ -442,6 +448,6 @@ fn nnapi_hardware_available() -> bool {
                 device(i,&mut d)==0 && !d.is_null() && kind(d,&mut t)==0 && matches!(t,3|4)
             })
         };
-        dlclose(lib);result
-    }
+        result
+    })
 }

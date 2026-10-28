@@ -1,3 +1,4 @@
+import { PositionedMenu } from './PositionedMenu';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { BookOpen, Bookmark, BookmarkX, Clipboard, EyeOff, FolderPlus, Pencil, Trash2, Download, Heart, HeartOff, ExternalLink, RotateCcw } from 'lucide-react';
 import type { DETAIL_ACTIONS } from '../repositories/nativeSettingsRepository';
@@ -73,15 +74,7 @@ export function ArchiveContextMenu({
   const archive = target.archive;
   const galleryUrl = archiveSourceUrl(archive.tags);
   return (
-    <DropdownMenu.Root modal={false} open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DropdownMenu.Trigger asChild>
-        <span
-          aria-hidden="true"
-          style={{ position: 'fixed', left: target.x, top: target.y, width: 0, height: 0 }}
-        />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label={`${archive.title} 操作`}>
+    <PositionedMenu at={target} label={`${archive.title} 操作`} onClose={onClose}>
           {!hiddenActions.includes('read') && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onRead(archive)}>
             <BookOpen aria-hidden="true" />阅读
           </DropdownMenu.Item>}
@@ -148,9 +141,7 @@ export function ArchiveContextMenu({
               </DropdownMenu.Item>
             </>
           )}
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+        </PositionedMenu>
   );
 }
 
@@ -178,15 +169,7 @@ export function LocalArchiveContextMenu({ target, onClose, onOpen, onDelete }: {
 }) {
   if (!target) return null;
   return (
-    <DropdownMenu.Root modal={false} open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DropdownMenu.Trigger asChild>
-        <span
-          aria-hidden="true"
-          style={{ position: 'fixed', left: target.x, top: target.y, width: 0, height: 0 }}
-        />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label={`${target.title} 操作`}>
+    <PositionedMenu at={target} label={`${target.title} 操作`} onClose={onClose}>
           <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onOpen(target)}>
             <BookOpen aria-hidden="true" />查看详情
           </DropdownMenu.Item>
@@ -194,8 +177,6 @@ export function LocalArchiveContextMenu({ target, onClose, onOpen, onDelete }: {
           <DropdownMenu.Item className="archive-context-menu-item is-danger" onSelect={() => onDelete(target)}>
             <Trash2 aria-hidden="true" />删除本地档案
           </DropdownMenu.Item>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+        </PositionedMenu>
   );
 }

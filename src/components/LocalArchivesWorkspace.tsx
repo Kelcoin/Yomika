@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useStableVirtualRows } from '../lib/useStableVirtualRows';
 import { ArchiveCardTags } from './CardTagRows';
@@ -626,10 +627,9 @@ export function LocalArchivesWorkspace() {
       />
       {deletePaths && (
         <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) setDeletePaths(undefined); }}>
-          <Dialog.Portal>
-            <Dialog.Overlay className="dialog-overlay" />
-            <Dialog.Content className="dialog-content local-delete-dialog">
-              <Dialog.Title className="dialog-title"><Trash2 aria-hidden="true" />删除本地档案</Dialog.Title>
+          
+            <DialogSurface className="local-delete-dialog">
+              <DialogHeading icon={<Trash2 aria-hidden="true" />}>删除本地档案</DialogHeading>
               <Dialog.Description className="visually-hidden">
                 将从磁盘删除{deletePaths.length > 1 ? `选中的 ${deletePaths.length} 个文件` : '这个本地文件'}，服务器上的档案不受影响。此操作不可撤销。
               </Dialog.Description>
@@ -637,8 +637,8 @@ export function LocalArchivesWorkspace() {
                 <button className="secondary-action" type="button" disabled={busy} onClick={() => setDeletePaths(undefined)}><X aria-hidden="true" />取消</button>
                 <button className="primary-action" type="button" disabled={busy} onClick={() => void remove(deletePaths)}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
               </div>
-            </Dialog.Content>
-          </Dialog.Portal>
+            </DialogSurface>
+          
         </Dialog.Root>
       )}
     </div>

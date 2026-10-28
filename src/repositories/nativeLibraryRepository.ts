@@ -179,7 +179,12 @@ export class NativeLibraryRepository {
   setReadingList(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
     return queuedWrite(`reading-list\0${scopeId}\0${archiveId}`, () => invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves));
   }
-  listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
+  async listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
+    // Progress may remove a finished archive; pending additions/removals must
+    // also land before a refresh reads the shelf.
+    await Promise.all([...pendingWrites].filter(([key]) =>
+      key.startsWith(`reading-list\0${scopeId}\0`) || key.startsWith(`progress\0${scopeId}\0`))
+      .map(([, write]) => write));
     return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
   }
   /** 右键菜单要的两个布尔：两个 PK 点查就够，犯不着拉全量列表。 */
@@ -461,10 +466,28 @@ export class NativeLibraryRepository {
   /** For the shelves, which know their archive ids and only need the records
    * behind them — reading the whole library to resolve a dozen titles scaled
    * with the library instead of with the shelf. Answers in the requested id
-   * order and silently drops ids the local index has not seen. */
+   * order. Resolve missing metadata without pulling the entire index. */
   async listArchivesByIds(serverId: string, archiveIds: string[]): Promise<CommandResult<ArchiveRecord[]>> {
     if (archiveIds.length === 0) return { ok: true, value: [] };
-    return invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema));
+    const cached = await invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema));
+    if (!cached.ok) return cached;
+    const found = new Set(cached.value.map(archive => archive.archiveId));
+    const missing = [...new Set(archiveIds)].filter(id => !found.has(id)).slice(0, 64);
+    if (missing.length === 0) return cached;
+    let cursor = 0;
+    let resolved = false;
+    await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
+      while (cursor < missing.length) {
+        const id = missing[cursor++]!;
+        // Native metadata loading persists the record. Offline failures leave
+        // the existing shelf usable; a later refresh can try missing ids again.
+        const result = await this.loadArchiveMetadata(serverId, id);
+        if (result.ok) resolved = true;
+      }
+    }));
+    return resolved
+      ? invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema))
+      : cached;
   }
   /** The library list, straight from LANraragi.
    *

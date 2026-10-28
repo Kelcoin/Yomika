@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
@@ -106,12 +107,11 @@ function ArchiveOverviewContent({ archive, scopeId, serverId, onClose }: Archive
   }, []);
 
   return <Dialog.Root open onOpenChange={(open) => { if (!open) onClose(); }}>
-    <Dialog.Portal>
-      <Dialog.Overlay className="dialog-overlay" />
+    
       {/* The panel brings its own heading, so the dialog's title is the archive
           name for assistive tech and the visible header stays the panel's. */}
-      <Dialog.Content className="dialog-content archive-overview-dialog" aria-describedby={undefined}>
-        <Dialog.Title className="visually-hidden">{archive.title || archive.archiveId}</Dialog.Title>
+      <DialogSurface className="archive-overview-dialog" aria-describedby={undefined}>
+        <DialogHeading hidden>{archive.title || archive.archiveId}</DialogHeading>
         <ArchiveOverviewPanel
           title={archive.title || archive.archiveId}
           pageCount={archive.pageCount}
@@ -122,7 +122,7 @@ function ArchiveOverviewContent({ archive, scopeId, serverId, onClose }: Archive
           registerTile={registerTile}
           onClose={onClose}
         />
-      </Dialog.Content>
-    </Dialog.Portal>
+      </DialogSurface>
+    
   </Dialog.Root>;
 }

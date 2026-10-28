@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
@@ -100,10 +101,9 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm, p
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
   return <Dialog.Root open onOpenChange={(open) => { if (!open && !busyRef.current) onClose(); }}>
-    <Dialog.Portal>
-      <Dialog.Overlay className="dialog-overlay" />
-      <Dialog.Content className="dialog-content archive-delete-dialog">
-        <Dialog.Title className="dialog-title"><Trash2 aria-hidden="true" />确认删除</Dialog.Title>
+    
+      <DialogSurface className="archive-delete-dialog">
+        <DialogHeading icon={<Trash2 aria-hidden="true" />}>确认删除</DialogHeading>
         <Dialog.Description className="visually-hidden">{description}</Dialog.Description>
         {loadError && <div role="alert">
           <p>{loadError}</p>
@@ -124,7 +124,7 @@ function ArchiveDeletionConfirmationContent({ description, onClose, onConfirm, p
             <button className="primary-action" type="button" disabled={busy || syncFavorite === undefined} onClick={() => void remove()}><Trash2 aria-hidden="true" />{busy ? '删除中…' : '确认删除'}</button>
           </>}
         </div>
-      </Dialog.Content>
-    </Dialog.Portal>
+      </DialogSurface>
+    
   </Dialog.Root>;
 }

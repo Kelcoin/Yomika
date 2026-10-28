@@ -55,6 +55,9 @@ const InstalledModelResponse = InstalledModelSchema as unknown as z.ZodType<Inst
 export type InferenceCacheClearResult = z.infer<typeof InferenceCacheClearResultSchema>;
 
 export class NativeInferenceRepository {
+  removeModels(modelIds: string[]): Promise<CommandResult<InstalledModel[]>> {
+    return invokeCommand('inference_remove_models', { modelIds }, InstalledModelResponse.array());
+  }
   validateReleaseManifest(manifest: unknown): Promise<CommandResult<void>> {
     return invokeCommand('model_release_validate', { manifest }, VoidResponseSchema);
   }

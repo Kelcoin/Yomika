@@ -5,7 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Link2, Monitor, MonitorSmartphone, Plus, Save, Server, Smartphone, Tablet, Unlink, Wand2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
-import { SettingsMenu } from './SettingsValueControls';
+import { SettingsMenu, SettingsOption } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { useToast } from './Toast';
 import { deviceDisplayName, deviceKind } from '../lib/deviceIdentity';
@@ -97,6 +97,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   const remoteRequest = useRef(0);
   const [probingRemote, setProbingRemote] = useState(false);
   const [pairMenu, setPairMenu] = useState(false);
+  const [pairFromDevices, setPairFromDevices] = useState(false);
   const [deviceMenu, setDeviceMenu] = useState(false);
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [address, setAddress] = useState('');
@@ -392,42 +393,34 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
         {remoteOps.pairedDevices.length === 0 && <SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />}
         {deviceMenu && <SettingsMenu title="已配对设备" icon={<Server />} onClose={() => setDeviceMenu(false)}>
           <div className="settings-choice-list">
-            {remoteOps.pairedDevices.map((device) => <div className="settings-choice-option" key={device.address}>
-              <button
-                className="settings-choice-option-main settings-device-option"
-                type="button"
-                aria-pressed={preferences.remoteComputeUrl === device.address}
-                onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}
-              >
+            {remoteOps.pairedDevices.map((device) => <SettingsOption key={device.address} align="start" active={preferences.remoteComputeUrl === device.address} 
+              onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}
+            >
                 <DeviceRowBody name={device.name} address={device.address} />
                 {/* 清单属于**这一台**：`remoteAddress` 记着最近一次问出来的是谁，`remote`
                     只在同一台重探时留着（keep-last-good，见 `connectRemote`），所以它此刻
                     描述的就是被选中的那一行。 */}
                 {remote && preferences.remoteComputeUrl === device.address && <CapabilityChips capabilities={remote.capabilities} />}
-              </button>
-            </div>)}
+              </SettingsOption>)}
             {remoteOps.pairedDevices.length === 0 && <p className="settings-choice-empty">还没有配对过的设备</p>}
           </div>
           <div className="settings-menu-actions">
             <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新服务</button>
             {/* 「添加设备」那一行在配过设备之后是收起来的，换设备只能从这里进；
                 替换语义（配对成功顶掉现在这一台）在配对那张菜单里由按钮文字自己说清。 */}
-            {remoteOps.pairedDevices.length > 0 && <button className="secondary-action" type="button" onClick={() => { setDeviceMenu(false); setPairMenu(true); void scanDevices(); }}><Plus aria-hidden="true" />添加设备</button>}
+            {remoteOps.pairedDevices.length > 0 && <button className="secondary-action" type="button" onClick={() => { setDeviceMenu(false); setPairFromDevices(true); setPairMenu(true); void scanDevices(); }}><Plus aria-hidden="true" />添加设备</button>}
           </div>
         </SettingsMenu>}
-        {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />} onClose={() => { if (pairPending.current) return; setPairMenu(false); setRequestId(''); setCode(''); }}>
+        {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />}
+          onBack={pairFromDevices ? () => { if (pairPending.current) return; setPairMenu(false); setPairFromDevices(false); setDeviceMenu(true); setRequestId(''); setCode(''); } : undefined}
+          backLabel="返回已配对设备"
+          onClose={() => { if (pairPending.current) return; setPairMenu(false); setPairFromDevices(false); setRequestId(''); setCode(''); }}>
           <div className="settings-choice-list">
-            {unpairedDevices.map((device) => <div className="settings-choice-option" key={device.address}>
-              <button
-                className="settings-choice-option-main settings-device-option"
-                type="button"
-                aria-pressed={address === device.address}
-                disabled={pairBusy}
-                onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}
-              >
+            {unpairedDevices.map((device) => <SettingsOption key={device.address} align="start" active={address === device.address} disabled={pairBusy}
+              onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}
+            >
                 <DeviceRowBody name={device.name} address={device.address} />
-              </button>
-            </div>)}
+              </SettingsOption>)}
             {unpairedDevices.length === 0 && <p className="settings-choice-empty">
               {devices.length > 0 ? '搜到的设备都已配对过' : '没搜到设备，直接填地址'}
             </p>}

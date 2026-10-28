@@ -439,6 +439,7 @@ fn a_remote_reader_gets_a_turn_under_local_reading_memory_pressure() {
     let planned = reader::plan_reader_page(&sandbox.root, &ReaderPageRequest {
         scope_id: "local".into(), archive_id: "reading".into(), page_index: 0,
         model_id: REMOTE_MODEL.into(), generation: 1, priority: Priority::Foreground, deadline_ms: 0,
+        output_scale: 2,
     }).unwrap();
     let local_input = planned.input_id.clone();
     let local = manager.submit(reader::into_request(planned, SourceFile {

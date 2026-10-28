@@ -1286,9 +1286,26 @@ fn favorite_form_fields(body: &str) -> Option<(bool, Vec<(String, String)>)> {
             fields.push((name.to_string(), value));
         }
     }
-    // EH leaves all ten category radios unchecked for a gallery not favorited.
-    // An incomplete/unrecognized form must never be mistaken for that state.
+    // This is the form's selection, not authoritative membership: EH can
+    // preselect a default category even after the favorite has been removed.
     (favorite || explicit_empty || categories.len() == 10).then_some((favorite, fields))
+}
+
+/// Only the gallery's favorite control describes membership. Never search the
+/// entire HTML: scripts and navigation can contain the same labels.
+fn gallery_favorite_state(body: &str) -> Option<bool> {
+    use std::sync::LazyLock;
+    static CONTROL: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?is)<div\b[^>]*\bid\s*=\s*(?:"gdf"|'gdf'|gdf\b)[^>]*>(.*?)</div\s*>"#).unwrap()
+    });
+    static LINK: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?is)<a\b[^>]*\bonclick\s*=\s*(?:"[^"]*\bpop_fav\([^"<>]*"|'[^']*\bpop_fav\([^'<>]*')[^>]*>(.*?)</a\s*>"#).unwrap()
+    });
+    let control = CONTROL.captures(body)?;
+    let link = LINK.captures(&control[1])?;
+    let label = decode_html_text(&strip_tags(&link[1]));
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() { None } else { Some(!label.eq_ignore_ascii_case("Add to Favorites")) }
 }
 
 async fn remove_eh_favorite_request(
@@ -1313,10 +1330,9 @@ async fn remove_eh_favorite_request(
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
     }
-    let Some((favorite, mut fields)) = favorite_form_fields(&body) else {
+    let Some((_selection, mut fields)) = favorite_form_fields(&body) else {
         return CommandResult::failure("EH_UNEXPECTED_PAGE", "无法读取 E-Hentai 收藏表单，已保留档案", false);
     };
-    if !favorite { return CommandResult::success(()); }
     fields.retain(|(name, _)| !matches!(name.as_str(), "favcat" | "favnote" | "apply" | "update"));
     fields.extend([("favcat", "favdel"), ("favnote", ""), ("apply", "Apply Changes"), ("update", "1")]
         .into_iter().map(|(name, value)| (name.to_string(), value.to_string())));
@@ -1331,11 +1347,11 @@ async fn remove_eh_favorite_request(
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
     }
-    // A 200 response may still be an error page or the unchanged form. Verify
-    // membership before allowing any caller to delete the LANraragi archive.
-    let verify = client.get(&url)
-        .query(&[("gid", gallery_id), ("t", token), ("act", "addfav")])
-        .header("Cookie", cookie).header("Cache-Control", "no-cache");
+    // The popup may still preselect a category for an unfavorited gallery.
+    // Verify the actual gallery control instead, before permitting deletion.
+    let verify = client.get(format!("https://{host}/g/{gallery_id}/{token}/"))
+        .header("Cookie", cookie).header("Cache-Control", "no-cache, no-store")
+        .header("Pragma", "no-cache");
     let (status, body) = match read_http_response(verify).await {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
@@ -1343,9 +1359,9 @@ async fn remove_eh_favorite_request(
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
     }
-    match favorite_form_fields(&body) {
-        Some((false, _)) => CommandResult::success(()),
-        Some((true, _)) => CommandResult::failure("EH_UNAVAILABLE", "E-Hentai 收藏仍然存在，已保留档案", true),
+    match gallery_favorite_state(&body) {
+        Some(false) => CommandResult::success(()),
+        Some(true) => CommandResult::failure("EH_UNAVAILABLE", "E-Hentai 收藏仍然存在，已保留档案", true),
         None => CommandResult::failure("EH_UNEXPECTED_PAGE", "无法确认 E-Hentai 收藏已删除，已保留档案", false),
     }
 }
@@ -3251,6 +3267,20 @@ mod tests {
     }
 
     // ── remove_eh_favorite tests ──────────────────────────────────────────
+
+    #[test]
+    fn gallery_membership_is_independent_of_popup_default_category() {
+        let popup = "<input type=radio name=favcat value=0 checked>";
+        assert!(favorite_form_fields(popup).unwrap().0);
+        let removed = r##"<div id="gdf"><a href="#" onclick="return pop_fav()">Add to Favorites</a></div>"##;
+        assert_eq!(gallery_favorite_state(removed), Some(false));
+        let present = r#"<div class='x' id='gdf'><a onclick='return pop_fav()'><span>Favorites 0</span></a></div>"#;
+        assert_eq!(gallery_favorite_state(present), Some(true));
+        assert_eq!(gallery_favorite_state("<script>var label='Add to Favorites'</script>"), None);
+        assert_eq!(gallery_favorite_state("<div id='gdf'>Temporarily unavailable</div>"), None);
+        assert_eq!(gallery_favorite_state("<div id='gdf'><a href='/login'>Add to Favorites</a></div>"), None);
+        assert_eq!(gallery_favorite_state("<div id='gdf'><a onclick='return pop_fav()'></a></div>"), None);
+    }
 
     #[test]
     fn favorite_popup_detects_membership_and_preserves_submission_fields() {

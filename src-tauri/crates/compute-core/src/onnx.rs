@@ -81,6 +81,50 @@ pub struct OnnxEngine {
     /// 长大，答完再裁回来。
     min_input_edge: u32,
     fixed_input: Option<(u32, u32)>,
+    whole_frame: bool,
+}
+
+// Read only protobuf wire fields needed for Model.graph -> Graph.node ->
+// Node.op_type. Unlike a filename check this also covers renamed imports.
+fn protobuf_bytes(mut data: &[u8], wanted: u64) -> Option<Vec<&[u8]>> {
+    fn varint(data: &mut &[u8]) -> Option<u64> {
+        let mut value = 0u64;
+        for shift in (0..64).step_by(7) {
+            let (&byte, rest) = data.split_first()?;
+            *data = rest;
+            if shift == 63 && byte > 1 { return None; }
+            value |= u64::from(byte & 127) << shift;
+            if byte < 128 { return Some(value); }
+        }
+        None
+    }
+    let mut found = Vec::new();
+    while !data.is_empty() {
+        let tag = varint(&mut data)?;
+        let count = match tag & 7 {
+            0 => { varint(&mut data)?; continue; }
+            1 => 8,
+            2 => usize::try_from(varint(&mut data)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        let value = data.get(..count)?;
+        data = &data[count..];
+        if tag >> 3 == wanted && tag & 7 == 2 { found.push(value); }
+    }
+    Some(found)
+}
+
+pub fn graph_requires_whole_frame(model: &[u8]) -> bool {
+    // Conservatively treat reductions as non-local even when axes are dynamic.
+    // A channel-only reduction may lose tiling, but never gains incorrect tiles.
+    protobuf_bytes(model, 7).into_iter().flatten().any(|graph|
+        protobuf_bytes(graph, 1).into_iter().flatten().any(|node|
+            protobuf_bytes(node, 4).into_iter().flatten().any(|op|
+                op.starts_with(b"Reduce") || op.starts_with(b"Global")
+            )
+        )
+    )
 }
 
 // NNAPI graph compilation needs concrete dimensions. Keep a reusable, bounded
@@ -162,6 +206,8 @@ impl OnnxEngine {
         let fixed_input = session.inputs().first().and_then(|input| input.dtype().tensor_shape())
             .and_then(|shape| static_input_dimensions(shape));
         Ok(Self {
+            whole_frame: graph_requires_whole_frame(&std::fs::read(path)
+                .map_err(|error| ComputeError::InvalidInput(format!("read ONNX graph: {error}")))?),
             session: Mutex::new(session),
             runtime,
             scale,
@@ -481,6 +527,7 @@ fn check_tile_shape(rgba: &[u8], width: u32, height: u32) -> Result<(), ComputeE
 }
 
 impl UpscaleEngine for OnnxEngine {
+    fn requires_whole_frame(&self) -> bool { self.whole_frame }
     fn fixed_input_size(&self) -> Option<(u32, u32)> { self.fixed_input }
     fn scale(&self) -> u32 {
         self.scale
@@ -568,6 +615,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn graph_policy_reads_operations_not_names_or_weights() {
+        fn field(tag: u8, data: &[u8]) -> Vec<u8> {
+            let mut result = vec![tag, data.len() as u8];
+            result.extend_from_slice(data); result
+        }
+        let graph = |op: &[u8]| field(58, &field(10, &field(34, op)));
+        assert!(graph_requires_whole_frame(&graph(b"ReduceMean")));
+        assert!(graph_requires_whole_frame(&graph(b"GlobalAveragePool")));
+        assert!(!graph_requires_whole_frame(&graph(b"Conv")));
+        assert!(!graph_requires_whole_frame(&field(10, b"ReduceMean")));
+        assert!(!graph_requires_whole_frame(&[58, 127, 10]));
+    }
+
+    #[test]
     fn cancelling_model_probe_stops_before_opening_or_falling_back() {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancel = crate::cancel::CancelToken::watch(flag.clone());
@@ -640,6 +701,7 @@ mod tests {
         let shape = session.inputs()[0].dtype().tensor_shape().unwrap();
         assert_eq!(shape.as_ref(), &[1, 3, 128, 128]);
         let engine = OnnxEngine {
+            whole_frame: false,
             fixed_input: static_input_dimensions(shape), session: Mutex::new(session),
             runtime: RuntimeId::Cpu, scale: 2, max_pixels: 64_000_000, min_input_edge: 1,
         };

@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Check, PencilLine, X } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -80,10 +81,9 @@ function TextInputDialogContent({
 
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!busyRef.current) onOpenChange(next); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content" {...(!description ? { 'aria-describedby': undefined } : {})}>
-          <Dialog.Title className="dialog-title"><PencilLine aria-hidden="true" />{title}</Dialog.Title>
+      
+        <DialogSurface  {...(!description ? { 'aria-describedby': undefined } : {})}>
+          <DialogHeading icon={<PencilLine aria-hidden="true" />}>{title}</DialogHeading>
           {description && <Dialog.Description>{description}</Dialog.Description>}
           <label className="text-input-dialog-field">
             {label}
@@ -109,8 +109,8 @@ function TextInputDialogContent({
             <Dialog.Close asChild><button className="secondary-action" type="button" disabled={busy}><X aria-hidden="true" />取消</button></Dialog.Close>
             <button className="primary-action" type="button" disabled={busy || Boolean(problem)} aria-busy={busy} onClick={() => void submit()}><Check aria-hidden="true" />{confirmLabel}</button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
   );
 }

@@ -41,6 +41,61 @@ function renderSettings(section?: string) {
   );
 }
 
+it.each(['realcugan-2x-denoise3x', 'waifu2x-upconv7'])('opens adjustable weights with a selected default when the active model is %s', async (activeModel) => {
+  const user = userEvent.setup();
+  const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, upscaleBackend: 'auto', upscaleModel: activeModel } };
+    if (command === 'save_preferences') return { ok: true, value: args?.input };
+    if (command === 'inference_list_models') return { ok: true, value: ['realcugan-2x-conservative', 'realcugan-2x-denoise3x'].map((id) => ({ id, version: '1', scale: 2, kind: 'upscale', components: [] })) };
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderSettings('advanced');
+  await user.click(await screen.findByRole('button', { name: '超分模型' }));
+  expect(within(screen.getByRole('dialog', { name: '超分模型' })).getAllByRole('button', { name: 'Real-CUGAN' })).toHaveLength(1);
+  await user.click(screen.getByRole('button', { name: '设置Real-CUGAN' }));
+  const menu = screen.getByRole('dialog', { name: 'Real-CUGAN 设置' });
+  expect(within(menu).getByRole('group', { name: '降噪力度' })).toBeInTheDocument();
+  expect(within(menu).getByRole('button', { name: activeModel === 'waifu2x-upconv7' ? '保守' : '强降噪' })).toHaveAttribute('aria-pressed', 'true');
+  expect(within(menu).getAllByRole('heading')).toHaveLength(1);
+  expect(within(menu).queryByText('2×')).toBeNull();
+  await user.click(within(menu).getByRole('button', { name: '保守' }));
+  await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ upscaleModel: 'realcugan-2x-conservative', upscaleOutputScale: 0 }) }));
+  await user.click(screen.getByRole('button', { name: '返回模型列表' }));
+  expect(screen.getByRole('dialog', { name: '超分模型' })).toBeInTheDocument();
+  await user.keyboard('{Escape}');
+  expect(screen.queryByRole('button', { name: '降噪力度' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '超分倍率' })).toBeNull();
+});
+
+it('deletes downloaded family weights after confirmation and selects a remaining model', async () => {
+  const user = userEvent.setup();
+  let models = ['waifu2x-upconv7', 'realcugan-2x-conservative', 'realcugan-2x-denoise3x', 'span-nomosuni-photo'].map((id) => ({ id, version: '1', scale: 2, kind: 'upscale', components: [] }));
+  const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, upscaleBackend: 'auto', upscaleModel: 'realcugan-2x-denoise3x' } };
+    if (command === 'save_preferences') return { ok: true, value: args?.input };
+    if (command === 'inference_list_models') return { ok: true, value: models };
+    if (command === 'inference_remove_models') {
+      models = models.filter((model) => !(args?.modelIds as string[]).includes(model.id));
+      return { ok: true, value: models };
+    }
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderSettings('advanced');
+  await user.click(await screen.findByRole('button', { name: '超分模型' }));
+  expect(screen.queryByRole('button', { name: '删除Waifu2x' })).toBeNull();
+  expect(screen.queryByRole('button', { name: /设置NomosUni/ })).toBeNull();
+  expect(screen.getByRole('button', { name: /删除NomosUni/ })).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '删除Real-CUGAN' }));
+  expect(adapter).not.toHaveBeenCalledWith('inference_remove_models', expect.anything());
+  await user.click(screen.getByRole('button', { name: '确认删除Real-CUGAN' }));
+  expect(adapter).toHaveBeenCalledWith('inference_remove_models', { modelIds: ['realcugan-2x-conservative', 'realcugan-2x-denoise3x'] });
+  await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ upscaleModel: 'waifu2x-upconv7', upscaleBackend: 'auto' }) }));
+  expect(screen.getByRole('dialog', { name: '超分模型' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '删除Real-CUGAN' })).toBeNull();
+});
+
 /** 本机导出的那份记录文本：`export_scoped_data` 的回包，也是迁移文件里 records 的内容。 */
 const SCOPED_EXPORT_TEXT = '{"kind":"yomika-scope-export","schemaVersion":1,"document":{"version":1,"epoch":0,"objects":{"a":1,"b":2}}}';
 
@@ -472,8 +527,8 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(adapter);
     renderSettings('advanced');
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
-    expect(await screen.findByRole('button', { name: 'waifu2x' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '下载waifu2x' })).toBeNull();
+    expect(await screen.findByRole('button', { name: 'Waifu2x' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '下载Waifu2x' })).toBeNull();
   });
 
   it('lists the built-in Anime4K chains as choices with nothing to download', async () => {
@@ -540,7 +595,7 @@ describe('settings workspace', () => {
     const order = [...menu.querySelectorAll('.settings-choice-option-main')].map((row) => row.textContent ?? '');
     // 断言自带实际顺序：顺序类缺陷的失败信息必须能直接读出「现在是怎样」。
     expect(order[0], `实际顺序：${order.join(' | ')}`).toContain('Anime4K');
-    expect(order[1]).toContain('waifu2x');
+    expect(order[1]).toContain('Waifu2x');
     // 其余按 id 排：realcugan… 在 realesr… 之前。这条断言是「顺序不随安装状态走」的
     // 承重部分——目录里 realesr 排在 waifu2x 前面，装没装都改不了它落到最后。
     expect(order[2]).toContain('Real-CUGAN');
@@ -569,7 +624,7 @@ describe('settings workspace', () => {
 
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
     const menu = screen.getByRole('dialog', { name: '超分模型' });
-    expect(within(menu).getAllByRole('button', { name: 'waifu2x' })).toHaveLength(1);
+    expect(within(menu).getAllByRole('button', { name: 'Waifu2x' })).toHaveLength(1);
   });
 
   it('loads saved servers from the native repository', async () => {
@@ -890,7 +945,7 @@ describe('settings workspace', () => {
     // Installed models are offered by name, with the scale the model itself
     // produces; typing a name from memory was a silent failure at upscale time.
     await user.click(screen.getByRole('button', { name: '超分模型' }));
-    expect(await screen.findByRole('button', { name: 'Real-CUGAN 2x 通用' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Real-CUGAN' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /下载Real-CUGAN/ })).toBeNull();
     expect(screen.getAllByLabelText('超分模型').length).toBeGreaterThan(0);
     await user.keyboard('{Escape}');
@@ -960,7 +1015,7 @@ describe('settings workspace', () => {
     expect(screen.queryByText('有更新')).toBeNull();
 
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
-    await user.click(await screen.findByRole('button', { name: '下载waifu2x' }));
+    await user.click(await screen.findByRole('button', { name: '下载Waifu2x' }));
     expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'waifu2x-upconv7' });
     await user.keyboard('{Escape}');
   });
@@ -1017,14 +1072,14 @@ describe('settings workspace', () => {
     renderSettings('advanced');
 
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
-    await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
+    await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-conservative' }));
 
     const menu = screen.getByRole('dialog', { name: '超分模型' });
     // 已安装的 anime4k-hq 只有一行：目录里同名那条不再另起一行，也就没有下载
     // 按钮。行名取目录那份——装之前装之后是同一个名字。
-    expect(within(menu).getAllByRole('button', { name: 'Anime4K 重复项' })).toHaveLength(1);
-    expect(within(menu).queryByRole('button', { name: '下载Anime4K 重复项' })).toBeNull();
+    expect(within(menu).getAllByRole('button', { name: 'Anime4K' })).toHaveLength(1);
+    expect(within(menu).queryByRole('button', { name: '下载Anime4K' })).toBeNull();
   });
 
   it('offers the update on a model whose catalog version moved on', async () => {
@@ -1068,8 +1123,8 @@ describe('settings workspace', () => {
     expect(mark.closest('.settings-row-copy')).not.toBeNull();
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
     // 同一个下载动作，只是说法变了：装着的那个不是最新版，就该能再点一次。
-    const update = await screen.findByRole('button', { name: '更新Real-CUGAN 2x 漫画（强降噪）' });
-    expect(screen.queryByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' })).toBeNull();
+    const update = await screen.findByRole('button', { name: '更新Real-CUGAN' });
+    expect(screen.queryByRole('button', { name: '下载Real-CUGAN' })).toBeNull();
     await user.click(update);
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
   });
@@ -1108,9 +1163,9 @@ describe('settings workspace', () => {
 
     // 下载入口只有二级菜单里那一个。行上曾经还有一个：同一件事两个入口，而值那一格
     // 本来只放得下一句话，多一个按钮就先把它挤没了。行负责选，下载在选项自己那一行。
-    expect(screen.queryByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '下载Real-CUGAN' })).toBeNull();
     await user.click(await screen.findByRole('button', { name: '超分模型' }));
-    await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN 2x 漫画（强降噪）' }));
+    await user.click(await screen.findByRole('button', { name: '下载Real-CUGAN' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('model_release_download_default', { modelId: 'realcugan-2x-denoise3x' }));
 
     // 设置项那边不再画第二条：两条进度同时出现时，看的人不知道该信哪一条。
@@ -1121,7 +1176,7 @@ describe('settings workspace', () => {
     const menu = screen.getByRole('dialog', { name: '超分模型' });
     const status = menu.querySelector('.archive-card-progress');
     expect(status).not.toBeNull();
-    expect(status?.closest('.settings-choice-option')?.textContent).toContain('Real-CUGAN 2x 漫画（强降噪）');
+    expect(status?.closest('.settings-choice-option')?.textContent).toContain('Real-CUGAN');
     // 槽是常驻的，出现/消失靠 is-open：卸载的节点没有过渡可放。
     expect(status?.closest('.model-download-slot')).toHaveClass('is-open');
     // 画的条就是档案卡那一条：同一个组件、同一套类名，不是另写一条像它的。
@@ -1129,7 +1184,7 @@ describe('settings workspace', () => {
     // 右边不写百分比：条的长短已经把话说完了。
     expect(status?.textContent ?? '').not.toContain('%');
     expect(status).toHaveAttribute('role', 'progressbar');
-    expect(status).toHaveAttribute('aria-label', 'Real-CUGAN 2x 漫画（强降噪）下载进度');
+    expect(status).toHaveAttribute('aria-label', 'Real-CUGAN下载进度');
     // 后端还没报总数时是不定量条：没有 aria-valuenow，走扫光。
     expect(status).not.toHaveAttribute('aria-valuenow');
     expect(status).toHaveClass('is-indeterminate');

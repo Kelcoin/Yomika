@@ -95,5 +95,5 @@ it('revalidates warm history on mount and when returning to a retained home', as
   fireEvent.click(screen.getByText('Return home'));
   await waitFor(() => expect(reads).toBeGreaterThan(before));
   expect(await screen.findByText('History newer')).toBeInTheDocument();
-  expect(screen.queryByText('History new')).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText('History new')).not.toBeInTheDocument());
 });

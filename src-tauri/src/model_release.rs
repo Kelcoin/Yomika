@@ -94,7 +94,6 @@ pub struct ModelReleaseManifest {
 pub const HOSTED_UPSCALE_MODEL_IDS: &[&str] = &[
     // Real-CUGAN 2x, the manga upscaler this reader is meant to use: a safe
     // general-purpose pass first, then the strong denoise for noisy scans.
-    // Real-ESRGAN used to be listed here too and no longer is.
     "realcugan-2x-conservative",
     "realcugan-2x-denoise3x",
 ];
@@ -260,11 +259,15 @@ fn upscale_catalog_urls(owner_repo: &str) -> Vec<String> {
 
 fn fetch_upscale_catalog_with_fallback(owner_repo: &str) -> Result<UpscaleCatalog, String> {
     let mut errors = Vec::new();
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(8))
+        .build().map_err(|error| error.to_string())?;
     for url in upscale_catalog_urls(owner_repo) {
-        match reqwest::blocking::get(&url).and_then(|response| response.error_for_status()) {
+        match client.get(&url).send().and_then(|response| response.error_for_status()) {
             Ok(response) => match response.json::<UpscaleCatalog>() {
                 Ok(catalog) => match validate_upscale_catalog(&catalog) {
-                    Ok(()) => return Ok(catalog),
+                    Ok(()) => return with_upstream_models(catalog),
                     Err(error) => errors.push(format!("{url}: {error}")),
                 },
                 Err(error) => errors.push(format!("{url}: {error}")),
@@ -272,10 +275,24 @@ fn fetch_upscale_catalog_with_fallback(owner_repo: &str) -> Result<UpscaleCatalo
             Err(error) => errors.push(format!("{url}: {error}")),
         }
     }
-    Err(format!(
-        "all upscale catalog sources failed: {}",
-        errors.join("; ")
-    ))
+    // The verified upstream entry is usable even while the project catalog is
+    // private/unreachable. Its pinned URL and digest do not depend on that repo.
+    eprintln!("upscale catalog unavailable: {}", errors.join("; "));
+    with_upstream_models(UpscaleCatalog { tag: MODEL_RELEASE_TAG.into(), models: vec![] })
+}
+
+fn with_upstream_models(mut catalog: UpscaleCatalog) -> Result<UpscaleCatalog, String> {
+    let model = upstream_realesrgan()?;
+    if !catalog.models.iter().any(|entry| entry.id == model.id) {
+        catalog.models.push(model);
+    }
+    validate_upscale_catalog(&catalog)?;
+    Ok(catalog)
+}
+
+fn upstream_realesrgan() -> Result<UpscaleCatalogModel, String> {
+    serde_json::from_str(include_str!("../resources/models/realesrgan-catalog.json"))
+        .map_err(|error| error.to_string())
 }
 
 pub const MIRROR_PRESETS: &[(&str, &str)] = &[
@@ -925,7 +942,13 @@ fn install_hosted_upscale_model(
     data: &std::path::Path,
     model_id: &str,
 ) -> Result<(), String> {
-    let catalog = fetch_upscale_catalog_with_fallback(MODEL_RELEASE_REPO)?;
+    let upstream = upstream_realesrgan()?;
+    let catalog = if model_id == upstream.id {
+        // A known, pinned upstream does not need the project catalog online.
+        with_upstream_models(UpscaleCatalog { tag: MODEL_RELEASE_TAG.into(), models: vec![] })?
+    } else {
+        fetch_upscale_catalog_with_fallback(MODEL_RELEASE_REPO)?
+    };
     let model = catalog
         .models
         .iter()
@@ -974,6 +997,10 @@ fn install_hosted_upscale_model(
             )?;
         }
         let manifest = hosted_model_manifest(model)?;
+        if model.id == "realesrgan-x4plus" {
+            std::fs::write(staging.join("LICENSE.txt"), include_str!("../resources/models/Real-ESRGAN-LICENSE.txt"))
+                .map_err(|error| error.to_string())?;
+        }
         std::fs::write(
             staging.join(crate::inference::MODEL_MANIFEST_FILE),
             serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
@@ -1169,6 +1196,18 @@ pub fn model_release_activate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realesrgan_is_installable_without_the_project_catalog_and_merges_once() {
+        let catalog = with_upstream_models(UpscaleCatalog { tag: MODEL_RELEASE_TAG.into(), models: vec![] }).unwrap();
+        let model = &catalog.models[0];
+        assert_eq!(model.id, "realesrgan-x4plus");
+        assert_eq!(model.scale, 4);
+        let manifest = hosted_model_manifest(model).unwrap();
+        assert_eq!(manifest.sha256, "1c0fc21d1d6d7df7f39c1fa23c73138a87a01ea0b3ac56ebd0ea943e62e12800");
+        assert!(model.model_file().unwrap().direct_url.as_ref().unwrap().contains("e2a8b86b2d947b18e024c3975aa13eadcd7751e6"));
+        assert_eq!(with_upstream_models(catalog).unwrap().models.len(), 1);
+    }
 
     #[test]
     fn source_order_is_reused_for_other_assets_on_the_same_sources() {

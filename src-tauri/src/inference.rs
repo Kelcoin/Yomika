@@ -837,8 +837,62 @@ pub fn listed_upscale_models_in(app_data_dir: &std::path::Path) -> Vec<Installed
     models
 }
 
-/// Lets the settings page offer the models that are actually installed instead
-/// of asking the user to type a model name and hope.
+/// Removes all downloaded versions of selected models; bundled models are protected.
+pub fn remove_downloaded_models(
+    app_data_dir: &std::path::Path,
+    model_ids: &[String],
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    // Validate the entire request before touching disk, including bundled IDs.
+    if model_ids.is_empty() || model_ids.iter().any(|id| {
+        !safe_model_identity_segment(id) || id.starts_with('.')
+            || id == "waifu2x-upconv7" || builtin_upscaler(id).is_some()
+    }) {
+        return Err(Error::new(ErrorKind::InvalidInput, "不能删除随包模型或无效模型"));
+    }
+    let data = app_data_dir.canonicalize()?;
+    let models = data.join("models");
+    if !models.exists() { return Ok(()); }
+    if models.canonicalize()? != models {
+        return Err(Error::new(ErrorKind::InvalidInput, "模型目录不能是外部链接"));
+    }
+    let mut roots = Vec::new();
+    for id in model_ids {
+        let root = models.join(id);
+        match std::fs::symlink_metadata(&root) {
+            Ok(metadata) => {
+                if !metadata.is_dir() || metadata.file_type().is_symlink() || root.canonicalize()? != root {
+                    return Err(Error::new(ErrorKind::InvalidInput, "模型路径无效"));
+                }
+                if !roots.contains(&root) { roots.push(root); }
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+    }
+    for root in roots { std::fs::remove_dir_all(root)?; }
+    // Discovery must not revive an old model-index snapshot after deletion.
+    let _ = std::fs::remove_file(data.join("model-index.json"));
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn inference_remove_models(
+    app: tauri::AppHandle,
+    model_ids: Vec<String>,
+) -> crate::domain::result::CommandResult<Vec<InstalledModel>> {
+    let result = model_data_dir(&app).and_then(|data| {
+        remove_downloaded_models(&data, &model_ids)?;
+        Ok(listed_upscale_models_in(&data))
+    });
+    match result {
+        Ok(models) => crate::domain::result::CommandResult::success(models),
+        Err(error) => crate::domain::result::CommandResult::failure(
+            "MODEL_REMOVE_FAILED", format!("删除模型失败：{error}"), true,
+        ),
+    }
+}
+
 #[tauri::command(async)]
 pub fn inference_list_models(
     app: tauri::AppHandle,
@@ -1209,6 +1263,14 @@ pub(crate) fn enhanced_revision(resolved: &Option<ResolvedUpscaler>) -> String {
     )
 }
 
+/// Final output dimensions are part of the artifact identity, not the engine's
+/// native scale. Keep the existing default identity for older callers.
+pub(crate) fn enhanced_revision_with_scale(resolved: &Option<ResolvedUpscaler>, output_scale: u32) -> String {
+    if output_scale == ENHANCED_OUTPUT_SCALE { return enhanced_revision(resolved); }
+    derived_cache_revision(&upscaler_fingerprint(resolved), "reader-page",
+        &format!("{UPSCALE_PIPELINE_REVISION}:output:{output_scale}"), declared_backend_label())
+}
+
 /// 缓存修订里的「运行库」那一栏。
 ///
 /// 它**不再问宿主自己链着什么**：`ort` 一升级，底下的内核与算子实现就换了，同一份模型
@@ -1250,7 +1312,7 @@ fn declared_backend_label() -> &'static str {
 
 /// 流水线口径的版本。修订号里没有别的字段能表达「同一份模型、同一份起点，但中间
 /// 多了一道处理」——阶段顺序、参数、后处理改了就把对应的这个 +1，旧产物当场作废。
-const UPSCALE_PIPELINE_REVISION: &str = "upscale:3-neutral-chroma-128mp-lanczos3";
+const UPSCALE_PIPELINE_REVISION: &str = "upscale:6-processing-scale-display2";
 
 /// 派生图（超分产物）的缓存修订号。
 ///
@@ -1303,6 +1365,7 @@ pub(crate) fn source_revision(
     models_data: &std::path::Path,
     rendition: &str,
     upscale_model: Option<&str>,
+    output_scale: Option<u32>,
 ) -> Result<Option<String>, SourceRevisionError> {
     match rendition {
         "reader-page" => Ok(None),
@@ -1310,7 +1373,7 @@ pub(crate) fn source_revision(
             let upscale = upscale_model
                 .filter(|value| !value.is_empty())
                 .and_then(|id| resolve_upscaler(models_data, id));
-            Ok(Some(enhanced_revision(&upscale)))
+            Ok(Some(enhanced_revision_with_scale(&upscale, output_scale.unwrap_or(ENHANCED_OUTPUT_SCALE))))
         }
         other => Err(SourceRevisionError {
             code: "INVALID_RESPONSE",
@@ -2111,6 +2174,34 @@ pub use yomika_compute_core::cpu_scale::cpu_scale_rgba;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn downloaded_model_removal_preserves_bundles_and_other_models() {
+        let data = tempfile::tempdir().unwrap();
+        for id in ["waifu2x-upconv7", "realcugan-2x-conservative", "realcugan-2x-denoise3x", "keep"] {
+            std::fs::create_dir_all(data.path().join("models").join(id).join("1")).unwrap();
+            std::fs::create_dir_all(data.path().join("models").join(id).join("2")).unwrap();
+        }
+        std::fs::write(data.path().join("model-index.json"), b"stale").unwrap();
+        let ids = vec!["realcugan-2x-conservative".into(), "realcugan-2x-denoise3x".into()];
+        remove_downloaded_models(data.path(), &ids).unwrap();
+        for id in ids { assert!(!data.path().join("models").join(id).exists()); }
+        assert!(data.path().join("models/waifu2x-upconv7/1").exists());
+        assert!(data.path().join("models/keep/2").exists());
+        assert!(!data.path().join("model-index.json").exists());
+        remove_downloaded_models(data.path(), &["missing".into()]).unwrap();
+    }
+
+    #[test]
+    fn downloaded_model_removal_rejects_invalid_requests_before_deleting() {
+        let data = tempfile::tempdir().unwrap();
+        let keep = data.path().join("models/downloaded/1");
+        std::fs::create_dir_all(&keep).unwrap();
+        for invalid in ["../outside", ".", "..", "", ".hidden", "waifu2x-upconv7", "anime4k-hq", "anime4k-ultra"] {
+            assert!(remove_downloaded_models(data.path(), &["downloaded".into(), invalid.into()]).is_err());
+            assert!(keep.exists());
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn reader_inference_does_not_block_the_async_executor() {
         // 这条会真的走一遍全局 `HEAVY_QUEUE`（`run_heavy`）：与那几条直接摆弄队列的
@@ -2322,9 +2413,9 @@ mod tests {
 
         // 起点那一步的身份：原图没有 revision；只有超分一条链了。
         let models_data = std::path::Path::new("no-such-models-root");
-        assert_eq!(source_revision(models_data, "reader-page", None).unwrap(), None);
+        assert_eq!(source_revision(models_data, "reader-page", None, None).unwrap(), None);
         // 不认识的 rendition 是明确的错误，不是一个静默的空 revision。
-        assert!(source_revision(models_data, "nonsense", None).is_err());
+        assert!(source_revision(models_data, "nonsense", None, None).is_err());
 
         // 运行库那一栏现在是协议里的常量（宿主摘掉 ORT 之后就问不了自己的运行库了：
         // 那件事只有 worker 说得清，所以由它启动时证明），但内容仍必须是那条运行库的

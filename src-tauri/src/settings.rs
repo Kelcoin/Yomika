@@ -26,6 +26,7 @@ const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
 const CARD_STYLE_KEY: &str = "preferences.card_style";
 const UPSCALE_BACKEND_KEY: &str = "preferences.upscale_backend";
 const UPSCALE_MODEL_KEY: &str = "preferences.upscale_model";
+const UPSCALE_OUTPUT_SCALE_KEY: &str = "preferences.upscale_output_scale";
 const UPSCALE_AUTO_ENABLE_KEY: &str = "preferences.upscale_auto_enable";
 const UPSCALE_AUTO_TAG_MODE_KEY: &str = "preferences.upscale_auto_tag_mode";
 const UPSCALE_AUTO_WHITELIST_KEY: &str = "preferences.upscale_auto_whitelist";
@@ -138,6 +139,9 @@ pub struct PreferenceSnapshot {
     pub upscale_backend: String,
     #[serde(default)]
     pub upscale_model: String,
+    /// 0 = native model scale; otherwise cap final output to 1–4x.
+    #[serde(default = "default_upscale_output_scale")]
+    pub upscale_output_scale: u32,
     /// 自动开启超分：进入阅读器时按档案的每页平均体积决定本次会话是否直接
     /// 开启超分（Readoshi 的做法——小图不吃超分，大图才需要）。需要模型已
     /// 选择；关闭超分时该开关一并锁定。
@@ -260,6 +264,8 @@ fn default_card_style() -> String {
     "wide".to_string()
 }
 fn default_progress_bar_visibility() -> String { "history".into() }
+fn default_upscale_output_scale() -> u32 { 0 }
+
 fn default_upscale_backend() -> String {
     "off".to_string()
 }
@@ -316,6 +322,7 @@ impl Default for PreferenceSnapshot {
             card_style: default_card_style(),
             upscale_backend: default_upscale_backend(),
             upscale_model: String::new(),
+            upscale_output_scale: default_upscale_output_scale(),
             upscale_auto_enable: false,
             upscale_auto_tag_mode: default_upscale_auto_tag_mode(),
             upscale_auto_whitelist: default_upscale_auto_whitelist(),
@@ -373,6 +380,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || !matches!(value.card_style.as_str(), "wide" | "thumbnail")
         || !matches!(value.upscale_backend.as_str(), "off" | "cpu" | "auto")
         || value.upscale_model.len() > 128
+        || value.upscale_output_scale > 4
         || value.upscale_auto_whitelist.len() > 2000
         || !matches!(value.upscale_auto_tag_mode.as_str(), "whitelist" | "blacklist")
         || value.upscale_auto_blacklist.len() > 2000
@@ -475,6 +483,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         card_style: map_value(&stored, CARD_STYLE_KEY, defaults.card_style)?,
         upscale_backend: map_value(&stored, UPSCALE_BACKEND_KEY, defaults.upscale_backend)?,
         upscale_model: map_value(&stored, UPSCALE_MODEL_KEY, defaults.upscale_model)?,
+        upscale_output_scale: map_value(&stored, UPSCALE_OUTPUT_SCALE_KEY, defaults.upscale_output_scale)?,
         upscale_auto_enable: map_value(
             &stored,
             UPSCALE_AUTO_ENABLE_KEY,
@@ -602,6 +611,7 @@ pub(crate) fn write_preference_keys(
             UPSCALE_MODEL_KEY,
             serde_json::to_string(&value.upscale_model),
         ),
+        (UPSCALE_OUTPUT_SCALE_KEY, serde_json::to_string(&value.upscale_output_scale)),
         (
             UPSCALE_AUTO_ENABLE_KEY,
             serde_json::to_string(&value.upscale_auto_enable),
@@ -994,6 +1004,7 @@ mod tests {
             card_style: "thumbnail".into(),
             upscale_backend: "cpu".into(),
             upscale_model: "real-esrgan-anime-x2".into(),
+            upscale_output_scale: 1,
             upscale_auto_enable: true,
             upscale_auto_tag_mode: "blacklist".into(),
             upscale_auto_threshold_bytes: 1024 * 1024,

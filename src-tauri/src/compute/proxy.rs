@@ -68,6 +68,7 @@ fn upscale_stage(
     output_scale: Option<u32>,
 ) -> PipelineStage {
     PipelineStage {
+        accelerator: None,
         stage_id: stage_id.to_string(),
         model_spec_id: model_spec_id.to_string(),
         // 模型授权与最小边长由宿主在派发前补齐（`manager::prepare_run`）
@@ -258,6 +259,7 @@ pub fn dlssnr(
         priority: job.priority,
         input: staged,
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: job.stage_id.to_string(),
             model_spec_id: DLSSNR_STAGE_ID.to_string(),
             // 模型是「哪一份片段」，走 `dlssnr` 那一栏；`model` 是 ONNX 模型那条路。

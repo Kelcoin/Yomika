@@ -65,6 +65,7 @@ fn a_run_message_round_trips() {
             relative_path: None,
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "s0".into(),
             model_spec_id: "realcugan-2x-conservative".into(),
             engine_policy: EnginePolicy::Gpu,
@@ -188,6 +189,16 @@ fn plain_pipeline_stage(message: &Message) -> &PipelineStage {
         panic!("expected a run, got {}", message.kind());
     };
     run.pipeline.first().expect("一个阶段")
+}
+
+#[test]
+fn accelerator_cannot_cross_the_boundary_without_a_model_or_with_an_unsafe_path() {
+    let grant = r#"{ "relativePath": "ab/abcd.tflite", "contentHash": "deadbeef", "byteLength": 100 }"#;
+    let body = RUN.replacen(r#""tile": 512 }"#, &format!(r#""tile": 512, "accelerator": {grant} }}"#),1);
+    assert!(parse(body.as_bytes()).is_err());
+    let body = RUN.replacen(r#""tile": 512 }"#, &format!(r#""tile": 512, "model": {grant}, "accelerator": {grant} }}"#),1);
+    assert!(parse(body.as_bytes()).is_ok());
+    assert!(parse(body.replace("ab/abcd.tflite","C:/escape.tflite").as_bytes()).is_err());
 }
 
 #[test]

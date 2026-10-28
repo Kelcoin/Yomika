@@ -152,6 +152,7 @@ fn request(input_id: &str, page: u32) -> SubmitRequest {
             relative_path: None,
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "stage-a".to_string(),
             model_spec_id: "echo".to_string(),
             model: None,

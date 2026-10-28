@@ -2304,9 +2304,11 @@ impl Supervisor {
                 match staged {
                     super::models::StagedModel::File {
                         grant,
+                        accelerator,
                         min_input_edge,
                     } => {
                         stage.model = Some(grant);
+                        stage.accelerator = accelerator;
                         stage.min_input_edge = Some(min_input_edge);
                     }
                     super::models::StagedModel::Builtin(chain) => {

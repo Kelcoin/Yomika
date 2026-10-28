@@ -326,6 +326,9 @@ pub struct PipelineStage {
     /// 只读授权之后填在这里。不填 = 这一阶段不需要模型（echo 引擎这类）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<GrantedFile>,
+    /// Verified FP32 NHWC LiteRT companion of this exact ONNX graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accelerator: Option<GrantedFile>,
     /// 这一阶段是 **DLSSNR** 阶段时要填的两样东西。与 `model` 相互排斥：这一阶段的输入
     /// 是页面本身，同一页没法既按 DLSSNR 的一层参数重绘、又拿去当超分的输入。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -858,6 +861,12 @@ impl PipelineStage {
         }
         if let Some(model) = &self.model {
             granted_file("model", model)?;
+        }
+        if let Some(companion) = &self.accelerator {
+            granted_file("accelerator", companion)?;
+            if self.model.is_none() {
+                return Err(out_of_range("accelerator", "requires an ONNX model grant"));
+            }
         }
         // 两样都给 = 一次说不清的请求：这个阶段的输入是页面本身，引擎没法同时按
         // 「拿模型把图变形」和「按 DLSSNR 的一层参数重绘」两种解码方式来用它。

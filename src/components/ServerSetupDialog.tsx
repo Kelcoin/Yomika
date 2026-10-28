@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil, Save, Server, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
@@ -157,10 +158,9 @@ function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action'
           title={server ? '编辑服务器' : undefined}
         >{server ? <Pencil aria-hidden="true" /> : '添加服务器'}</button></Dialog.Trigger>
       )}
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content
-          className="dialog-content"
+      
+        <DialogSurface
+          
           onOpenAutoFocus={(event) => {
             // Radix 的自动聚焦会选中第一个文本框的全部内容；编辑服务器时那正是
             // 名称，光标应该落在末尾，免得一次击键抹掉整个名字。
@@ -174,7 +174,7 @@ function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action'
           {/* 标题直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
               而 ✕ 已经去掉了——关闭走点空白处、Esc 与返回手势。顶部也不再挂说明
               小字：连接信息存哪里不影响用户做决定，地址框自己会说话。 */}
-          <Dialog.Title className="dialog-title"><Server aria-hidden="true" />{server ? '更新 LANraragi' : '添加 LANraragi'}</Dialog.Title>
+          <DialogHeading icon={<Server aria-hidden="true" />}>{server ? '更新 LANraragi' : '添加 LANraragi'}</DialogHeading>
           <form className="server-form" onSubmit={handleSubmit}>
             <label>名称（可选）<input disabled={pending} ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input disabled={pending} name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
@@ -201,8 +201,8 @@ function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action'
               onConfirm={handleDelete}
             />
           )}
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
   );
 }

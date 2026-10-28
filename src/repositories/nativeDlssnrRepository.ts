@@ -224,6 +224,7 @@ export class NativeDlssnrRepository {
     pageIndex: number;
     source?: 'reader-page' | 'enhanced';
     upscaleModel?: string;
+    upscaleOutputScale?: number;
     settings: { passes: DlssnrPass[] };
     taskId?: string;
     /** `foreground`＝用户正看的那一页，排在后台预扫前面；后台正在跑时会被取消。 */

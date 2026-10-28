@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { listen } from '@tauri-apps/api/event';
 import { Check, Copy, Link2 } from 'lucide-react';
@@ -63,10 +64,9 @@ export function PairingCodeNotice() {
   const code = shown.code.padStart(6, '0');
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open) close(); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content pairing-code-dialog">
-          <Dialog.Title className="dialog-title"><Link2 aria-hidden="true" />远端配对</Dialog.Title>
+      
+        <DialogSurface className="pairing-code-dialog">
+          <DialogHeading icon={<Link2 aria-hidden="true" />}>远端配对</DialogHeading>
           <Dialog.Description>
             {shown.name ? `「${shown.name}」` : '一台设备'}（{shown.address}）请求与这台设备配对，
             请在<strong>发起配对的设备</strong>上输入下面的配对码。
@@ -88,8 +88,8 @@ export function PairingCodeNotice() {
             </button>
             <button className="primary-action" type="button" onClick={close}><Check aria-hidden="true" />确定</button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
   );
 }

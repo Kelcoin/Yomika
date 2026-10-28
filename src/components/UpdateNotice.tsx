@@ -1,3 +1,4 @@
+import { DialogSurface, DialogHeading } from './DialogSurface';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Download, Sparkles, X } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
@@ -116,10 +117,9 @@ export function UpdateNotice() {
   if (!prompt) return null;
   return (
     <Dialog.Root open onOpenChange={(open) => { if (!open && !busy) close(prompt); }}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="dialog-overlay" />
-        <Dialog.Content className="dialog-content">
-          <Dialog.Title className="dialog-title"><Download aria-hidden="true" />{prompt.title}</Dialog.Title>
+      
+        <DialogSurface>
+          <DialogHeading icon={<Download aria-hidden="true" />}>{prompt.title}</DialogHeading>
           <Dialog.Description>{prompt.description}</Dialog.Description>
           <div className="dialog-actions">
             {/* 跳过记的是「这个版本」，不是「永远别再问」：下一版还会来说一声。 */}
@@ -145,8 +145,8 @@ export function UpdateNotice() {
               }}
             >{prompt.url ? <Download aria-hidden="true" /> : <Sparkles aria-hidden="true" />}{prompt.confirmLabel}</button>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
+        </DialogSurface>
+      
     </Dialog.Root>
   );
 }

@@ -23,6 +23,68 @@ afterEach(() => {
  * 绝对值（收藏、待看是 `added`，进度是页码），所以同一个键上的两次派发必须自己排好序，
  * 否则连点两次会倒着落库：界面上是取消收藏，库里还留着那一行。 */
 describe('repository write ordering', () => {
+  it('waits for pending reading-list writes before refreshing', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const calls: string[] = [];
+    setInvokeAdapterForTests(async command => {
+      calls.push(command);
+      if (command === 'set_reading_list') {
+        await gate;
+        return { ok: true, value: watchlistRecord(true) };
+      }
+      return { ok: true, value: [watchlistRecord(true)] };
+    });
+    const repository = new NativeLibraryRepository();
+    const write = repository.setReadingList('s', 'a', true);
+    const read = repository.listReadingList('s');
+    await Promise.resolve();
+    expect(calls).toEqual(['set_reading_list']);
+    release();
+    await write;
+    expect((await read).ok).toBe(true);
+    expect(calls).toEqual(['set_reading_list', 'list_reading_list']);
+  });
+
+  it('resolves missing shelf records through metadata and re-reads the local mirror', async () => {
+    const calls: string[] = [];
+    let reads = 0;
+    setInvokeAdapterForTests(async (command, args) => {
+      calls.push(command);
+      if (command === 'list_archives_by_ids') {
+        reads++;
+        return { ok: true, value: reads === 1 ? [] : [{
+          serverId: 's', archiveId: 'new-archive', title: 'New', pageCount: 12, updatedAt: 'now',
+        }] };
+      }
+      expect(args?.archiveId).toBe('new-archive');
+      return { ok: true, value: {
+        archiveId: 'new-archive', title: 'New', filename: 'new.zip', tags: '', extension: 'zip',
+        pageCount: 12, size: 100, progress: 0, lastReadTime: 0,
+      } };
+    });
+    const result = await new NativeLibraryRepository().listArchivesByIds('s', ['new-archive', 'new-archive']);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.value.map(archive => archive.archiveId)).toEqual(['new-archive']);
+    expect(reads).toBe(2);
+    expect(calls).toEqual(['list_archives_by_ids', 'load_archive_metadata', 'list_archives_by_ids']);
+  });
+
+  it('does not repeatedly resolve existing metadata or fail a shelf when offline', async () => {
+    const calls: string[] = [];
+    setInvokeAdapterForTests(async command => {
+      calls.push(command);
+      return command === 'list_archives_by_ids'
+        ? { ok: true, value: [{ serverId: 's', archiveId: 'cached', title: 'Cached', pageCount: 12, updatedAt: 'now' }] }
+        : { ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } };
+    });
+    const repository = new NativeLibraryRepository();
+    await repository.listArchivesByIds('s', ['cached']);
+    expect(calls).toEqual(['list_archives_by_ids']);
+    const result = await repository.listArchivesByIds('s', ['cached', 'missing']);
+    expect(result.ok && result.value[0]?.archiveId).toBe('cached');
+    expect(calls).toEqual(['list_archives_by_ids', 'list_archives_by_ids', 'load_archive_metadata']);
+  });
   it('does not dispatch a second write for the same key before the first lands', async () => {
     const dispatched: string[] = [];
     let releaseFirst!: () => void;

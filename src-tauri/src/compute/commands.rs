@@ -331,6 +331,8 @@ pub struct ReaderPagePayload {
     pub page_index: i64,
     /// 超分模型的 id（设置页里看到的那个），不是路径、不是文件名。
     pub model_id: String,
+    #[serde(default = "default_reader_output_scale")]
+    pub output_scale: u32,
     /// 阅读器世代（§9.1）：翻页换代，旧一代整批丢掉。
     pub generation: u64,
     /// `foreground` / `background`。
@@ -338,6 +340,8 @@ pub struct ReaderPagePayload {
     /// 0 = 用调度器的默认期限。
     pub deadline_ms: u64,
 }
+
+fn default_reader_output_scale() -> u32 { crate::inference::ENHANCED_OUTPUT_SCALE }
 
 impl ReaderPagePayload {
     /// 只挡**一眼就不合法**的请求（空 id、超长、优先级拼错、期限超上限）。
@@ -359,6 +363,7 @@ impl ReaderPagePayload {
             archive_id: self.archive_id,
             page_index: self.page_index,
             model_id: self.model_id,
+            output_scale: self.output_scale,
             generation: self.generation,
             priority: parse_priority(&self.priority)?,
             deadline_ms: self.deadline_ms,
@@ -841,6 +846,7 @@ mod tests {
             }),
             source: None,
             pipeline: vec![PipelineStage {
+                accelerator: None,
                 stage_id: "stage-a".to_string(),
                 model_spec_id: "realcugan-2x-conservative".to_string(),
                 // 这条测试只走 `plan()`（提交前的本地护栏），到不了 worker：没带模型，
@@ -1046,6 +1052,7 @@ mod tests {
             archive_id: "archive-a".to_string(),
             page_index: 11,
             model_id: "realesr".to_string(),
+            output_scale: 2,
             generation: 3,
             priority: "foreground".to_string(),
             deadline_ms: 60_000,

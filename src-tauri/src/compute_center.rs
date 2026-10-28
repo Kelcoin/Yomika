@@ -523,6 +523,7 @@ pub struct RemoteSettings {
     pub upscale_backend: String,
     /// 服务端默认的超分模型 id（空 = 没配）。
     pub upscale_model: String,
+    pub upscale_output_scale: u32,
     /// DLSSNR 的层参数（JSON 文本，空 = 用默认那一套）。
     pub dlssnr_passes: String,
 }
@@ -532,6 +533,7 @@ impl Default for RemoteSettings {
         Self {
             upscale_backend: "auto".to_string(),
             upscale_model: String::new(),
+            upscale_output_scale: crate::inference::ENHANCED_OUTPUT_SCALE,
             dlssnr_passes: String::new(),
         }
     }
@@ -543,6 +545,8 @@ impl RemoteSettings {
         Self {
             upscale_backend: preferences.upscale_backend.clone(),
             upscale_model: preferences.upscale_model.clone(),
+            // Fixed-scale graphs follow the native model, including old preferences.
+            upscale_output_scale: 0,
             dlssnr_passes: preferences.dlssnr_passes.clone(),
         }
     }
@@ -551,6 +555,18 @@ impl RemoteSettings {
     pub fn upscale_off(&self) -> bool {
         self.upscale_backend == "off"
     }
+}
+
+#[cfg(test)]
+#[test]
+fn fixed_scale_server_settings_ignore_legacy_output_caps() {
+    let preferences = crate::settings::PreferenceSnapshot {
+        upscale_model: "realesrgan-x4plus".into(), upscale_output_scale: 1,
+        ..Default::default()
+    };
+    let settings = RemoteSettings::from_preferences(&preferences);
+    assert_eq!(settings.upscale_model, preferences.upscale_model);
+    assert_eq!(settings.upscale_output_scale, 0, "use the native graph, then downsample for display");
 }
 
 /// 客户端显式点名要「没有模型的最近邻」时用的 id。
@@ -569,6 +585,7 @@ pub struct ProcessPlan {
     pub model_id: String,
     /// 最近邻的放大倍数。
     pub scale: Option<u32>,
+    pub output_scale: u32,
     /// 归一化之后的 DLSSNR 参数（这也是它进身份的那一版）。
     pub dlssnr: serde_json::Value,
     /// 这一页什么都不做、原样交回（动图，且链里没有逐帧那一档）。
@@ -684,7 +701,7 @@ impl ProcessPlan {
         };
         let dll_content = if wants_dlssnr { dll_content(data) } else { String::new() };
         let engine_policy = plan_engine_policy(&steps, settings);
-        let mut revision = plan_revision(&steps, &model_id, &model_content, &dlssnr, &dll_content, &engine_policy);
+        let mut revision = plan_revision(&steps, &model_id, &model_content, &dlssnr, &dll_content, &format!("{engine_policy}:output:{}", settings.upscale_output_scale));
         if explicit_nearest {
             revision = blake3::hash(format!("{revision}:scale:{}", params.scale.unwrap_or(2)).as_bytes()).to_hex().to_string();
         }
@@ -692,10 +709,11 @@ impl ProcessPlan {
             steps,
             model_id,
             scale: params.scale,
+            output_scale: settings.upscale_output_scale,
             dlssnr,
             passthrough,
             skipped,
-            upscale_revision: crate::inference::enhanced_revision(&resolved),
+            upscale_revision: crate::inference::enhanced_revision_with_scale(&resolved, settings.upscale_output_scale),
             model_content,
             dll_content,
             engine_policy,
@@ -734,7 +752,7 @@ fn plan_revision(
     engine_policy: &str,
 ) -> String {
     let canonical = serde_json::json!({
-        "revision": 2, // Source-guided neutral chroma preservation changes output pixels.
+        "revision": 3, // Native model processing; delivery is capped at 2x.
         "protocol": PROTOCOL_VERSION,
         "steps": steps,
         "model": model_id,
@@ -762,7 +780,7 @@ fn settings_revision(model_data: &Path, data: &Path, settings: &RemoteSettings) 
         &crate::inference::upscaler_content_revision(&resolved),
         &dlssnr,
         &dll_content(data),
-        &format!("{}:{}", settings.upscale_backend, plan_engine_policy(&["upscale".into()], settings)),
+        &format!("{}:{}:output:{}", settings.upscale_backend, plan_engine_policy(&["upscale".into()], settings), settings.upscale_output_scale),
     )
 }
 
@@ -991,7 +1009,7 @@ fn upscale_bytes(
             priority: crate::compute::scheduler::Priority::Foreground,
             // 倍数由模型说了算（`scale` 是模型自己的属性），这里不再让请求体
             // 覆盖它——覆盖会让同一份输入因参数不同落进两个任务身份。
-            output_scale: None,
+            output_scale: (plan.output_scale != 0).then_some(plan.output_scale),
             stage: crate::compute::proxy::StageSpec {
                 stage_id: crate::compute::reader::UPSCALE_STAGE_ID,
                 model_spec_id,
@@ -2537,6 +2555,8 @@ pub struct RemoteProcessInput {
     /// 模型存，要算出同一个 revision 才读得到）。
     #[serde(default)]
     pub upscale_model: Option<String>,
+    #[serde(default)]
+    pub upscale_output_scale: Option<u32>,
     /// 前端给这次任务起的号：翻页之后就不必再发出去了。
     #[serde(default)]
     pub task_id: Option<String>,
@@ -2589,6 +2609,7 @@ async fn remote_process_cached_page(
         data_dir,
         rendition,
         input.upscale_model.as_deref(),
+        input.upscale_output_scale,
     ) {
         Ok(revision) => revision,
         Err(error) => return CommandResult::failure(error.code, error.message, false),
@@ -3359,6 +3380,7 @@ mod tests {
         let settings = RemoteSettings {
             upscale_backend: "auto".into(),
             upscale_model: "server-model".into(),
+            upscale_output_scale: 2,
             dlssnr_passes: String::new(),
         };
         let plan =
@@ -3668,9 +3690,18 @@ mod tests {
         let settings = RemoteSettings {
             upscale_backend: "auto".into(),
             upscale_model: "server-model".into(),
+            upscale_output_scale: 2,
             dlssnr_passes: String::new(),
         };
         let before = settings_revision(dir.path(), dir.path(), &settings);
+        let resized = RemoteSettings { upscale_output_scale: 1, ..settings.clone() };
+        assert_ne!(before, settings_revision(dir.path(), dir.path(), &resized), "output size must invalidate the client's remote cache");
+        let params = ProcessParams { chain: vec![], op: "upscale".into(), model_id: None, scale: None, dlssnr: None };
+        let normal_plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &settings, false).unwrap();
+        let resized_plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &resized, false).unwrap();
+        assert_eq!(resized_plan.output_scale, 1);
+        assert_ne!(normal_plan.revision, resized_plan.revision);
+        assert_ne!(normal_plan.upscale_revision, resized_plan.upscale_revision);
         assert_eq!(before.len(), 64, "身份是 blake3 十六进制：{before}");
         assert_eq!(
             before,
@@ -3894,7 +3925,7 @@ mod tests {
     fn acceptance_server_policy_and_scale_are_part_of_the_frozen_plan() {
         let dir = tempfile::tempdir().unwrap();
         let settings = RemoteSettings { upscale_backend: "cpu".into(),
-            upscale_model: "anime4k-hq".into(), dlssnr_passes: String::new() };
+            upscale_model: "anime4k-hq".into(), upscale_output_scale: 2, dlssnr_passes: String::new() };
         let params = ProcessParams { chain: vec![], op: "upscale".into(),
             model_id: None, scale: Some(2), dlssnr: None };
         let plan = ProcessPlan::resolve(dir.path(), dir.path(), &params, &settings, false).unwrap();

@@ -8,7 +8,7 @@ import { Languages, ArrowDownWideNarrow,
   ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy,
   CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive,
   HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
-  Paintbrush, Palette, PanelBottom, Pencil, Plus, Rocket, RotateCcw, Save, Scale, ShieldCheck, X, Check,
+  Paintbrush, Palette, PanelBottom, Pencil, Plus, Rocket, RotateCcw, Save, Settings2, Trash2, ShieldCheck, X, Check,
   SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
 } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
@@ -26,12 +26,14 @@ import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { SYNC_COMPLETED_EVENT, autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
 import { formatSyncAge } from '../lib/syncTime';
 import { availableModelUpdates } from '../lib/modelUpdates';
+import { CUGAN_VARIANTS, chooseUpscaleFamily, groupUpscaleOptions, upscaleFamily, upscaleModelLabel } from '../lib/upscaleParameters';
+import { useTimedConfirmation } from '../lib/useTimedConfirmation';
 import { OverlayLayer } from './OverlayLayer';
 import { ComputeCenterSettingsGroup } from './ComputeCenterSettingsGroup';
 import { DlssnrSettingsGroup } from './DlssnrSettingsGroup';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
 import { SettingsRow, SettingsRowBody } from './SettingsRow';
-import { SettingsChoice, SettingsMenu, SettingsNumber } from './SettingsValueControls';
+import { SettingsChoice, SettingsMenu, SettingsNumber, SettingsOption, SettingsPanel } from './SettingsValueControls';
 import { StatusLine } from './StatusLine';
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } from './SyncSettings';
@@ -105,31 +107,6 @@ function ErrorLogSetting() {
 
 /** A setting edited through an arbitrary block of controls — text areas, file
  * pickers, cache reports. */
-function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, children }: {
-  icon?: ReactNode;
-  label: string;
-  hint?: string | undefined;
-  value?: string | undefined;
-  ariaLabel?: string | undefined;
-  /** Runs when the menu closes, by Escape, an outside click or the row again —
-   * a draft that only meant something inside the menu dies with it. */
-  onClose?: (() => void) | undefined;
-  children: ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  const close = () => { setOpen(false); onClose?.(); };
-  return (
-    <>
-      <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} />
-      {open && (
-        <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={close}>
-          {children}
-        </SettingsMenu>
-      )}
-    </>
-  );
-}
-
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
 
 const repository = new NativeLibraryRepository();
@@ -183,11 +160,7 @@ function builtInRank(id: string): number {
 
 /** Keep the selector compact: version and scale are implementation metadata. */
 function modelOption(model: InstalledModel): { value: string; label: string } {
-  // 行名的兜底：目录拿不到时（离线）也要有个像样的名字，而不是把 id 里的连字符
-  // 换成空格。在线时目录里的 label 优先，这里只取它们的前半段以保持一致。
-  const names: Record<string, string> = { 'waifu2x-upconv7': 'waifu2x', 'aletheia-lens': 'Aletheia Lens', 'realesr-general-x4v3': 'Real-ESRGAN', 'realesr-general': 'Real-ESRGAN', 'realcugan-2x-conservative': 'Real-CUGAN 2x 通用', 'realcugan-2x-denoise3x': 'Real-CUGAN 2x 漫画', '4x-Fatal-Pixels': 'Fatal Pixels', anime4k: 'Anime4K', 'anime4k-hq': 'Anime4K', 'imported-model': '导入的模型' };
-  const name = names[model.id] ?? model.id.replaceAll('-', ' ');
-  return { value: model.id, label: name };
+  return { value: model.id, label: upscaleModelLabel(model.id) };
 }
 
 /** One row per id. The backend lists one record per installed version (newest
@@ -355,6 +328,16 @@ export function SettingsWorkspace() {
    * stays closed until verification returns — see 「shows cached model detection
    * while refreshing after a restart」 in tests/components/settings-workspace.test.tsx. */
   const [modelsVerified, setModelsVerified] = useState(false);
+  const [upscaleMenu, setUpscaleMenu] = useState<'models' | 'realcugan'>();
+  const [confirmRemoveModel, setConfirmRemoveModel] = useState<string>();
+  useTimedConfirmation(confirmRemoveModel, setConfirmRemoveModel, modelPending);
+  const closeUpscaleMenu = () => { setUpscaleMenu(undefined); setConfirmRemoveModel(undefined); };
+  useEffect(() => {
+    if (selectedSettingsSection !== 'settings-advanced') {
+      setUpscaleMenu(undefined);
+      setConfirmRemoveModel(undefined);
+    }
+  }, [selectedSettingsSection]);
   // A model with no recorded scale cannot be run, so it is not a choice. One row
   // per id: see firstPerId.
   const runnableModels = firstPerId(installedModels?.filter((model) => model.scale && model.kind === 'upscale') ?? []);
@@ -374,12 +357,12 @@ export function SettingsWorkspace() {
    * 行名以目录为准：装之前叫「Real-ESRGAN 通用 x4」，装完还叫这个，不会退回
    * 内置那份按 id 拼出来的名字。 */
   const hostedLabels = new Map((upscaleCatalog ?? []).map((hosted) => [hosted.id, hosted.label] as const));
-  const upscaleModelOptions = [
+  const upscaleModelOptions = groupUpscaleOptions([
     ...runnableModels.map((model) => ({ value: model.id, label: hostedLabels.get(model.id) ?? modelOption(model).label })),
     ...(upscaleCatalog ?? [])
       .filter((hosted) => !runnableModels.some((installed) => installed.id === hosted.id))
       .map((hosted) => ({ value: hosted.id, label: hosted.label })),
-  ].sort((left, right) => builtInRank(left.value) - builtInRank(right.value) || left.value.localeCompare(right.value));
+  ].sort((left, right) => builtInRank(left.value) - builtInRank(right.value) || left.value.localeCompare(right.value)));
   /** 已装、但目录里报了新版本的那些。更新就是同一个下载动作，只是按钮换个说法：
    * 后端把版本编进安装路径（`models/<id>/<version>`），新版本落一个新目录，取用时
    * 认的是最新的那一版，所以不需要先卸载旧的。 */
@@ -387,9 +370,21 @@ export function SettingsWorkspace() {
   /** 这一行显示哪个模型。下载在二级菜单里按选项走，所以这里不需要配一份「当前选项」。
    * 兜底仍然是**已装的第一个**（旧行为）：列表现在是按内置优先排的，拿列表头当兜底
    * 会顺手把「开启超分时默认选谁」也改掉——那是另一件事，用户没让改。 */
-  const upscaleSelectedModel = preferenceDraft.upscaleModel || runnableModels[0]?.id || upscaleModelOptions[0]?.value || '';
+  const upscaleSelectedModel = preferenceDraft.upscaleModel || runnableModels[0]?.id || chooseUpscaleFamily(upscaleModelOptions[0]?.value ?? '', '', (upscaleCatalog ?? []).map((model) => model.id)) || '';
   // 选择器的值不能为空：命令失败时列表可能真的是空的，退回随包 waifu2x。
-  if (!upscaleModelOptions.length) upscaleModelOptions.push({ value: 'waifu2x-upconv7', label: 'waifu2x' });
+  if (!upscaleModelOptions.length) upscaleModelOptions.push({ value: 'waifu2x-upconv7', label: 'Waifu2x' });
+  const selectedUpscaleFamily = upscaleFamily(upscaleSelectedModel);
+  const familyModel = (family: string) => chooseUpscaleFamily(family, upscaleSelectedModel, [...runnableModels.map((model) => model.id), ...(upscaleCatalog ?? []).map((model) => model.id)]);
+  const modelDownloadAction = (id: string, label: string) => <ModelDownloadButton
+    option={{ value: id, label }}
+    installed={runnableModels.some((model) => model.id === id)}
+    outdated={outdatedUpscaleIds.has(id)} pending={modelPending}
+    className="select-option-download" onDownload={() => void downloadModel(id, label)}
+  />;
+  const modelDownloadStatus = (id: string, label: string) => <ModelDownloadSlot
+    open={pendingModel?.id === id} label={pendingModel?.label ?? label} progress={modelDownload}
+  />;
+
   const statsRequestedRef = useRef(false);
   const autosaveTimer = useRef<number>();
   const pendingPreferences = useRef<PreferenceSnapshot>();
@@ -521,6 +516,31 @@ export function SettingsWorkspace() {
     if (models.ok) {
       setInstalledModels(models.value);
       writeAdvancedCache('yomika.advanced-models', models.value);
+      return models.value;
+    }
+  }
+
+  async function removeModelFamily(family: string, label: string) {
+    if (modelPending) return;
+    if (confirmRemoveModel !== family) { setConfirmRemoveModel(family); return; }
+    setModelPending(true);
+    try {
+      const ids = runnableModels.filter((model) => upscaleFamily(model.id) === family).map((model) => model.id);
+      const result = await inferenceRepository.removeModels(ids);
+      const models = result.ok ? result.value : await refreshModels();
+      if (models) {
+        setInstalledModels(models);
+        writeAdvancedCache('yomika.advanced-models', models);
+        if (!models.some((model) => model.id === upscaleSelectedModel)) {
+          const fallback = models.find((model) => model.scale && model.kind === 'upscale');
+          editPreferences({ upscaleModel: fallback?.id ?? '', ...(!fallback ? { upscaleBackend: 'off' as const } : {}) });
+        }
+      }
+      if (result.ok) showToast(`已删除 ${label}`, 'success');
+      else showToast(result.error.message, 'error');
+    } finally {
+      setConfirmRemoveModel(undefined);
+      setModelPending(false);
     }
   }
 
@@ -1632,31 +1652,58 @@ export function SettingsWorkspace() {
                     editPreferences({ upscaleBackend: 'auto', upscaleModel: preferenceDraft.upscaleModel || runnableModels[0]?.id || upscaleModelOptions[0]!.value });
                   }}
                 />
-                <SettingsChoice
+                <SettingsRow
                   icon={<ImageUpscale />}
-                  label="超分模型"
-                  /* 更新是同一个下载动作，只是入口在菜单里那一行：这一枚小签是
-                     「进去看看」的唯一提示——不打开菜单也该知道有东西该换了。 */
-                  mark={outdatedUpscaleIds.size > 0 ? '有更新' : undefined}
-                  value={upscaleSelectedModel}
-                  options={upscaleModelOptions}
-                  onChange={(value) => editPreferences({ upscaleModel: value })}
-                  /* 下载入口只在这里——二级菜单里每一个还没装上的选项自己那一行。行上
-                     不再另放一个：同一件事两个入口，而值那一格本来只放得下一句话。 */
-                  optionAction={(option) => <ModelDownloadButton
-                    option={option}
-                    installed={Boolean(runnableModels?.some((model) => model.id === option.value))}
-                    outdated={outdatedUpscaleIds.has(option.value)}
-                    pending={modelPending}
-                    className="select-option-download"
-                    onDownload={() => void downloadModel(option.value, option.label)}
-                  />}
-                  optionStatus={(option) => <ModelDownloadSlot
-                    open={pendingModel?.id === option.value}
-                    label={pendingModel?.label ?? option.label}
-                    progress={modelDownload}
-                  />}
+                  label={<>超分模型{outdatedUpscaleIds.size > 0 && <span className="settings-row-mark">有更新</span>}</>}
+                  ariaLabel="超分模型"
+                  value={upscaleModelOptions.find((option) => option.value === selectedUpscaleFamily)?.label}
+                  onClick={() => setUpscaleMenu('models')}
+                  expanded={upscaleMenu !== undefined}
                 />
+                {upscaleMenu && <SettingsMenu
+                  title={upscaleMenu === 'models' ? '超分模型' : 'Real-CUGAN 设置'}
+                  icon={upscaleMenu === 'models' ? <ImageUpscale /> : <Settings2 />}
+                  onClose={closeUpscaleMenu}
+                  onBack={upscaleMenu !== 'models' ? () => setUpscaleMenu('models') : undefined}
+                  backLabel="返回模型列表"
+                >
+                  {upscaleMenu === 'models' ? <div className="settings-choice-list">
+                    {upscaleModelOptions.map((option) => {
+                      const id = familyModel(option.value);
+                      const installed = runnableModels.some((model) => upscaleFamily(model.id) === option.value);
+                      const downloaded = installed && !BUILT_IN_HEAD.includes(option.value);
+                      return <SettingsOption key={option.value} active={option.value === selectedUpscaleFamily}
+                        disabled={modelPending} onClick={() => { editPreferences({ upscaleModel: id }); closeUpscaleMenu(); }}
+                        action={<>
+                          {modelDownloadAction(id, option.label)}
+                          {downloaded && option.value === 'realcugan' && <button className="select-option-download" type="button" aria-label={`设置${option.label}`} title="模型设置" disabled={modelPending} onClick={() => { setConfirmRemoveModel(undefined); setUpscaleMenu('realcugan'); }}><Settings2 aria-hidden="true" /></button>}
+                          {downloaded && <button className={`select-option-download${confirmRemoveModel === option.value ? ' is-danger' : ''}`} type="button" aria-label={`${confirmRemoveModel === option.value ? '确认删除' : '删除'}${option.label}`} title={confirmRemoveModel === option.value ? '确认删除模型' : '删除模型'} disabled={modelPending} onClick={() => void removeModelFamily(option.value, option.label)}>{confirmRemoveModel === option.value ? <Check aria-hidden="true" /> : <Trash2 aria-hidden="true" />}</button>}
+                        </>}
+                        status={modelDownloadStatus(id, option.label)}
+                      ><span>{option.label}</span></SettingsOption>;
+                    })}
+                  </div> : <>
+                    <div className="settings-parameter-row">
+                      <span className="settings-parameter-label"><SlidersHorizontal aria-hidden="true" />降噪力度</span>
+                      <div className="settings-parameter-options" role="group" aria-label="降噪力度">
+                        {CUGAN_VARIANTS.map((variant) => <button
+                          type="button" key={variant.value}
+                          className={variant.value === familyModel('realcugan') ? 'is-active' : ''}
+                          aria-pressed={variant.value === familyModel('realcugan')}
+                          disabled={modelPending || !runnableModels.some((model) => model.id === variant.value)}
+                          onClick={() => editPreferences({ upscaleModel: variant.value })}
+                        >{variant.label}</button>)}
+                      </div>
+                    </div>
+                    {CUGAN_VARIANTS.some((variant) => !runnableModels.some((model) => model.id === variant.value) || outdatedUpscaleIds.has(variant.value)) && <div className="settings-choice-list">
+                      {CUGAN_VARIANTS.filter((variant) => !runnableModels.some((model) => model.id === variant.value) || outdatedUpscaleIds.has(variant.value)).map((variant) => <SettingsOption key={variant.value}
+                        disabled={modelPending} onClick={() => void downloadModel(variant.value, `Real-CUGAN · ${variant.label}`)}
+                        action={modelDownloadAction(variant.value, `Real-CUGAN · ${variant.label}`)}
+                        status={modelDownloadStatus(variant.value, variant.label)}
+                      ><span>{variant.label}</span></SettingsOption>)}
+                    </div>}
+                  </>}
+                </SettingsMenu>}
                 <SettingsChoice
                   icon={<WandSparkles />}
                   label="自动开启超分"

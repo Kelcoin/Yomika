@@ -174,6 +174,7 @@ fn run_message_with_input(
             relative_path: input.map(|(relative, _, _)| relative.to_string()),
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "stage-a".to_string(),
             model_spec_id: "realcugan-2x-conservative".to_string(),
             // echo 路径不读模型：这一栏只有真引擎（`--engine onnx`）才要用，真进程测试里
@@ -797,6 +798,7 @@ fn run_message_with_model(
             relative_path: Some(input.0.clone()),
         },
         pipeline: vec![PipelineStage {
+            accelerator: None,
             stage_id: "stage-a".to_string(),
             model_spec_id: "realcugan-2x-conservative".to_string(),
             model: Some(GrantedFile {

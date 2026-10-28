@@ -216,11 +216,12 @@ impl UpscaleEngine {
         max_pixels: usize,
         min_input_edge: u32,
         model_label: &str,
+        accelerator: Option<&Path>,
         cancel: &yomika_compute_core::cancel::CancelToken,
         progress: &dyn Fn(u32),
     ) -> Result<(AnyEngine, String, &'static str, String, Option<EngineFallback>), StageError> {
         let key = format!(
-            "{model_label}:{scale}:{max_pixels}:{min_input_edge}:{}",
+            "{model_label}:{accelerator:?}:{scale}:{max_pixels}:{min_input_edge}:{}",
             policy.as_str()
         );
         // 中毒的锁不该让整个 worker 报废：会话本身没有跨线程不变量，丢了重开一份更省事。
@@ -228,6 +229,31 @@ impl UpscaleEngine {
         if let Some(cached) = slot.as_ref() {
             if cached.key == key {
                 return Ok((Arc::clone(&cached.engine), cached.device.clone(), cached.engine_id, cached.version.clone(), cached.fallback.clone()));
+            }
+        }
+        // The executor is serial. Release the old weights/workspaces before
+        // compiling a replacement rather than briefly keeping two large mobile
+        // inference sessions alive at once.
+        *slot = None;
+        #[cfg(target_os = "android")]
+        if policy == EnginePolicy::Auto {
+            if let Some(companion) = accelerator {
+                check_cancelled(cancel)?;
+                progress(12);
+                let non_local = std::fs::read(path).map(|bytes| yomika_compute_core::onnx::graph_requires_whole_frame(&bytes)).unwrap_or(true);
+                if !non_local {
+                    match yomika_compute_core::mobile_npu::NpuEngine::open(companion, scale, max_pixels) {
+                        Ok(engine) => {
+                            let device = "npu:fully-delegated".to_string();
+                            let engine: AnyEngine = Arc::new(engine);
+                            let engine_id = yomika_compute_core::mobile_npu::ENGINE_ID;
+                            let version = yomika_compute_core::mobile_npu::VERSION.to_string();
+                            *slot = Some(CachedSession { key, engine: engine.clone(), device: device.clone(), engine_id, version: version.clone(), fallback: None });
+                            return Ok((engine, device, engine_id, version, None));
+                        }
+                        Err(error) => eprintln!("NPU preparation failed, trying Vulkan/ORT: {error}"),
+                    }
+                }
             }
         }
         #[cfg(target_os = "android")]
@@ -337,7 +363,8 @@ impl Engine for UpscaleEngine {
         let source = std::fs::read(input.path())
             .map_err(|error| StageError::input_invalid(format!("读不到这一阶段的输入：{error}")))?;
         let (probe_width, probe_height) = probe_dimensions(&source)?;
-        let delivery_scale = stage.output_scale.unwrap_or(scale).min(scale).max(1);
+        let processing_scale = stage.output_scale.unwrap_or(scale).min(scale).clamp(1, 4);
+        let delivery_scale = processing_scale.min(2);
         let source_pixels = u64::from(probe_width).saturating_mul(u64::from(probe_height));
         // Keep the decode guard: preprocessing cannot rescue an allocation that
         // is already too large to decode. Only the delivery projection adapts.
@@ -387,6 +414,13 @@ impl Engine for UpscaleEngine {
                 .map_err(|error| StageError::failed(error.code(), error.message()))?;
             inputs::verify_file(&model_path, &grant.content_hash, grant.byte_length)
                 .map_err(|error| StageError::failed(error.code(), error.message()))?;
+            let accelerator_path = stage.accelerator.as_ref().map(|companion| {
+                let path = inputs::resolve_granted(&self.input_root, &companion.relative_path)
+                    .map_err(|error| StageError::failed(error.code(), error.message()))?;
+                inputs::verify_file(&path, &companion.content_hash, companion.byte_length)
+                    .map_err(|error| StageError::failed(error.code(), error.message()))?;
+                Ok::<_,StageError>(path)
+            }).transpose()?;
             let (onnx, device, engine_id, version, fallback) = self.open_for(
                 &model_path,
                 stage.engine_policy,
@@ -394,6 +428,7 @@ impl Engine for UpscaleEngine {
                 max_pixels,
                 min_input_edge,
                 &grant.relative_path,
+                accelerator_path.as_deref(),
                 request.cancel,
                 request.progress,
             )?;
@@ -421,11 +456,23 @@ impl Engine for UpscaleEngine {
         let fixed = engine.fixed_input_size();
         let padding = upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
         let adaptive = resources::auto_tile_size(gpu_memory, scale, padding, min_input_edge, fixed);
+        // Non-local models use an area budget for one coherent frame. Do not
+        // apply the ordinary 1024px tile ceiling to a GPU with ample headroom.
+        let adaptive = if engine.requires_whole_frame() && fixed.is_none() {
+            let available = if device == RuntimeId::Cpu.as_str() {
+                resources::system_memory().map(|m| m.available_commit_bytes / 4)
+                    .unwrap_or(256 << 20)
+            } else { resources::gpu_available_bytes(gpu_memory) };
+            ((available / (256 * u64::from(scale).pow(2))) as f64).sqrt()
+                .min(f64::from(width.max(height))) as u32
+        } else { adaptive }.max(min_input_edge);
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let adaptive = adaptive.min(resources::mobile_tile_edge_for_pixel_budget(request.run.budgets.max_pixels)).max(min_input_edge);
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let tile = tile.min(adaptive);
         let options = UpscaleOptions {
+            // Run native-scale tiles, then downsample while assembling the 2x
+            // display frame, avoiding a full-frame 4x allocation and transfer.
             output_scale: Some(delivery_scale),
             tile_size: if tile == 0 { adaptive } else { fixed.map(|_| tile.min(adaptive)).unwrap_or(tile) },
             tile_sleep_ms: 0,
@@ -445,17 +492,14 @@ impl Engine for UpscaleEngine {
         //     编码出来的 PNG 又是几十 MB，而宿主只要 2 倍的那一份，晚一步做就是把这
         //     两笔内存连同编码时间白花掉（docs/71 §5.3）。缩放本身在核心的 `fit` 里，
         //     宿主那条内联路径（Anime4K / 最近邻）用的是同一份实现。
-        let (final_rgba, final_width, final_height) = match stage.output_scale {
-            Some(cap) => fit::fit_rgba_scale(
+        let (final_rgba, final_width, final_height) = fit::fit_rgba_scale(
                 upscaled.rgba,
                 upscaled.width,
                 upscaled.height,
                 width,
                 height,
-                cap,
-            ),
-            None => (upscaled.rgba, upscaled.width, upscaled.height),
-        };
+                delivery_scale,
+            );
 
         // 4. 编码成 PNG：无损、带 alpha，解回来就是刚算出来的像素（宿主因此可以自己
         //    对照一遍，不必信 worker 报的尺寸）。
@@ -544,6 +588,7 @@ mod tests {
         image::RgbaImage::from_pixel(20, 10, image::Rgba([90, 50, 20, 255])).save(&path).unwrap();
         let preset = anime4k::preset_by_id("anime4k").unwrap();
         let stage = PipelineStage {
+            accelerator: None,
             stage_id: "adaptive".into(), model_spec_id: "anime4k".into(),
             engine_policy: EnginePolicy::Cpu, scale: Some(2), output_scale: Some(2),
             tile: Some(32), layers: None, settings_id: None, model: None, dlssnr: None,
@@ -566,6 +611,18 @@ mod tests {
         assert_eq!(output.engine.id, ANIME4K_ENGINE_ID);
         let decoded = image::open(root.join(&output.relative_name)).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (20, 10));
+        // The UI's output multiplier caps delivery, never the model's graph.
+        let mut original_size = stage.clone();
+        original_size.stage_id = "original-size".into();
+        original_size.output_scale = Some(1);
+        let mut larger_budget = run.clone();
+        larger_budget.budgets.max_pixels = 1000;
+        let resized = engine.execute(StageRequest { run: &larger_budget, stage: &original_size, input: Some(&input), cancel: &cancel, sink: &sink, progress: &|_| {} }).unwrap();
+        assert_eq!((resized.width, resized.height), (20, 10));
+        original_size.stage_id = "native-size".into();
+        original_size.output_scale = None;
+        let native = engine.execute(StageRequest { run: &larger_budget, stage: &original_size, input: Some(&input), cancel: &cancel, sink: &sink, progress: &|_| {} }).unwrap();
+        assert_eq!((native.width, native.height), (40, 20));
         // A second upscale in a chain must independently fit the previous output.
         let previous = StageInput::Previous { relative: output.relative_name.clone(), path: root.join(output.relative_name) };
         let mut next = stage.clone();

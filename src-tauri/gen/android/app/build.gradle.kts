@@ -19,6 +19,11 @@ val releaseKeyAlias = System.getenv("ANDROID_KEY_ALIAS")
 val releaseKeyPassword = System.getenv("ANDROID_KEY_PASSWORD")
 
 android {
+    // Vendor compiler plugins must be discoverable as files in nativeLibraryDir.
+    packaging {
+        jniLibs.useLegacyPackaging = true
+        jniLibs.keepDebugSymbols.add("**/libQnnHtpV*Skel.so")
+    }
     compileSdk = 36
     // Pinned to the NDK the mobile-build workflow installs; without this AGP
     // falls back to its own default NDK and auto-downloads it on CI.
@@ -130,6 +135,8 @@ fun yomikaStripNativeLibs(taskName: String, roots: List<File>, ndk: File?, log: 
     }
     val taskDirs = roots.filter { it.isDirectory }.flatMap { root -> root.walkTopDown().filter { it.isDirectory && it.name == taskName }.toList() }
     for (lib in taskDirs.flatMap { dir -> dir.walkTopDown().filter { it.isFile && it.extension == "so" }.toList() }) {
+        // Signed DSP payloads must retain their upstream bytes.
+        if (lib.name.matches(Regex("libQnnHtpV[0-9]+Skel\\.so"))) continue
         val before = lib.length()
         val process = ProcessBuilder(strip.absolutePath, "--strip-all", lib.absolutePath).redirectErrorStream(true).start()
         val output = process.inputStream.bufferedReader().use { it.readText() }

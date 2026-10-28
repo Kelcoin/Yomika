@@ -5,6 +5,10 @@ use std::{
 };
 
 const FILES: &[(&str, &[u8])] = &[
+    #[cfg(target_os = "android")]
+    ("model.tflite", include_bytes!("../resources/models/waifu2x-upconv7/model.tflite")),
+    #[cfg(target_os = "android")]
+    ("yomika-accelerator.json", include_bytes!("../resources/models/waifu2x-upconv7/yomika-accelerator.json")),
     (
         "model.onnx",
         include_bytes!("../resources/models/waifu2x-upconv7/model.onnx"),

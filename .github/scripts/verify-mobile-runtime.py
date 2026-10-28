@@ -22,6 +22,10 @@ def verify_apk(path, readelf):
         for name in libraries:
             assert name.startswith("lib/arm64-v8a/"), f"Unexpected ABI: {name}"
             data = apk.read(name)
+            if re.fullmatch(r"libQnnHtpV(?:68|69|73|75|79|81)Skel\.so", Path(name).name):
+                # Signed Hexagon DSP payload, intentionally not an ARM library.
+                assert data[:4] == b"\x7fELF" and struct.unpack_from("<H", data, 18)[0] == 164, f"Not Hexagon: {name}"
+                continue
             assert data[:5] == b"\x7fELF\x02", f"Not ELF64: {name}"
             assert struct.unpack_from("<H", data, 18)[0] == 183, f"Not AArch64: {name}"
             extracted = Path(temp) / Path(name).name
@@ -35,6 +39,8 @@ def verify_apk(path, readelf):
                     "does not fix an ort-sys build without ORT_LIB_PATH"
                 )
             for needed in dependencies:
+                if needed == "libcdsprpc.so" and re.fullmatch(r"libQnnHtpV(?:68|69|73|75|79|81)Stub\.so", Path(name).name):
+                    continue  # Optional vendor driver declared in AndroidManifest.xml.
                 assert needed in packaged | system, f"Unpackaged dependency {needed} in {name}"
             if name == ort:
                 symbols = subprocess.check_output([readelf, "--dyn-syms", "--wide", str(extracted)], text=True)

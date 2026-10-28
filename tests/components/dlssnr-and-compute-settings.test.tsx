@@ -756,6 +756,7 @@ describe('DLSS5 settings group', () => {
       await user.click(within(editor).getByRole('button', { name: label }));
       const stepper = await screen.findByRole('dialog', { name: label });
       expect(within(stepper).getByRole('spinbutton', { name: label })).toHaveAttribute('step', '0.1');
+      await user.keyboard('{Escape}');
     }
   });
 
@@ -774,12 +775,14 @@ describe('DLSS5 settings group', () => {
     await user.click(within(editor).getByRole('button', { name: '强度' }));
     const strength = await screen.findByRole('dialog', { name: '强度' });
     expect(within(strength).getByRole('spinbutton', { name: '强度' })).toHaveAttribute('max', '1');
+    await user.keyboard('{Escape}');
 
     // 另外三个还是 0–2：它们两头都真的在动，没有被压过。
     for (const label of ['局部色调', '局部结构', '皮肤结构']) {
       await user.click(within(editor).getByRole('button', { name: label }));
       const stepper = await screen.findByRole('dialog', { name: label });
       expect(within(stepper).getByRole('spinbutton', { name: label })).toHaveAttribute('max', '2');
+      await user.keyboard('{Escape}');
     }
   });
 

@@ -1,0 +1,16 @@
+{
+  "id": "realesrgan-x4plus",
+  "label": "Real-ESRGAN x4plus · 4×（高质量）",
+  "scale": 4,
+  "version": "e2a8b86b2d94",
+  "source": "https://huggingface.co/anakhiu/realesrgan-onnx/tree/e2a8b86b2d947b18e024c3975aa13eadcd7751e6",
+  "minInputEdge": 1,
+  "files": [
+    {
+      "name": "realesrgan_x4plus.onnx",
+      "size": 67051616,
+      "sha256": "1c0fc21d1d6d7df7f39c1fa23c73138a87a01ea0b3ac56ebd0ea943e62e12800",
+      "directUrl": "https://huggingface.co/anakhiu/realesrgan-onnx/resolve/e2a8b86b2d947b18e024c3975aa13eadcd7751e6/realesrgan_x4plus.onnx"
+    }
+  ]
+}

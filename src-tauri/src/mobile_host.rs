@@ -40,7 +40,6 @@ pub fn plugin() -> TauriPlugin<Wry> {
         .setup(|app, api| {
             let state = match api.register_android_plugin(HOST_PACKAGE, HOST_CLASS) {
                 Ok(handle) => {
-                    crate::error_log::record_step(app, "core/mobile-host", "原生宿主已注册");
                     MobileHostState(Mutex::new(Some(handle)))
                 }
                 Err(error) => {

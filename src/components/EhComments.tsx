@@ -1,3 +1,4 @@
+import { PositionedMenu } from './PositionedMenu';
 import { ContentSkeleton } from './ContentSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
@@ -272,15 +273,10 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
         <AutoTextarea value={body} onChange={(event) => setBody(event.target.value)} aria-label="发表评论" placeholder="发表评论…" rows={3} />
         <button className="primary-action" type="button" disabled={posting || !body.trim()} onClick={() => void post()} aria-label="发送评论"><Send aria-hidden="true" />{posting ? '发送中…' : '发送'}</button>
       </div>
-      {linkMenu && <DropdownMenu.Root open onOpenChange={(open) => { if (!open) setLinkMenu(undefined); }}>
-        <DropdownMenu.Trigger asChild><span aria-hidden="true" style={{ position: 'fixed', left: linkMenu.x, top: linkMenu.y, width: 0, height: 0 }} /></DropdownMenu.Trigger>
-        <DropdownMenu.Portal>
-          <DropdownMenu.Content className="archive-context-menu" align="start" sideOffset={2} aria-label="评论链接操作">
+      {linkMenu && <PositionedMenu at={linkMenu} label="评论链接操作" onClose={() => setLinkMenu(undefined)}>
             <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => openExternal(linkMenu.url)}><ExternalLink aria-hidden="true" />打开链接</DropdownMenu.Item>
             {linkMenu.archives.map((archive) => <DropdownMenu.Item key={archive.archiveId} className="archive-context-menu-item" onSelect={() => onOpenArchive?.(archive)}><BookOpen aria-hidden="true" />{linkMenu.archives.length === 1 ? '打开档案详情' : `打开档案详情：${archive.title}`}</DropdownMenu.Item>)}
-          </DropdownMenu.Content>
-        </DropdownMenu.Portal>
-      </DropdownMenu.Root>}
+          </PositionedMenu>}
     </section>
   );
 }

@@ -2218,7 +2218,7 @@ describe('reader route', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
   });
 
-  it('retries a transient remote failure without launching local inference', async () => {
+  it('falls back locally after a remote transport failure without retrying forever', async () => {
     installHost();
     let requests = 0;
     const { calls } = remoteReader({
@@ -2230,11 +2230,11 @@ describe('reader route', () => {
     await screen.findByRole('img', { name: '第 1 页' });
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
-    await waitFor(() => expect(requests).toBeGreaterThanOrEqual(2), { timeout: 7000 });
-    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
+    await waitFor(() => expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(true));
+    expect(requests).toBe(1);
   });
 
-  it('processes a newly visible remote page while the previous page waits to retry', async () => {
+  it('keeps the offline circuit open for adjacent pages and processes them locally', async () => {
     installHost();
     const requested: number[] = [];
     const { calls } = remoteReader({
@@ -2253,8 +2253,66 @@ describe('reader route', () => {
     fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
     await waitFor(() => expect(requested).toEqual([0]));
     fireEvent.keyDown(reader, { key: 'ArrowRight' });
-    await waitFor(() => expect(requested).toContain(1));
-    expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(false);
+    await waitFor(() => expect(calls.filter(([name]) => name === 'compute_submit_reader_page').length).toBeGreaterThanOrEqual(2));
+    expect(requested).toEqual([0]);
+  });
+
+  it('updates remote-only controls after disconnection while preserving local upscale', async () => {
+    installHost();
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: true }, localModel: 'local-model',
+      process: () => ({ ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } }),
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(await screen.findByRole('button', { name: '开启 DLSSNR' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(calls.some(([name]) => name === 'compute_submit_reader_page')).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '开启 DLSSNR' })).toBeNull());
+    expect(screen.getByRole('button', { name: '关闭超分' })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
+    expect(calls.filter(([name]) => name === 'remote_compute_process')).toHaveLength(1);
+  });
+
+  it('removes remote upscale availability when disconnected without a local model', async () => {
+    installHost();
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false },
+      process: () => ({ ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } }),
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(calls.some(([name]) => name === 'remote_compute_process')).toBe(true));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: '开启超分' })).toBeNull();
+      expect(screen.queryByRole('button', { name: '关闭超分' })).toBeNull();
+    });
+  });
+
+  it('restores remote controls after the offline cooldown probe succeeds', async () => {
+    installHost();
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: true }, localModel: 'local-model',
+      process: () => ({ ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } }),
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByRole('button', { name: '开启超分' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.queryByRole('button', { name: '开启 DLSSNR' })).toBeNull();
+      expect(calls.filter(([name]) => name === 'remote_compute_capabilities')).toHaveLength(1);
+      await act(async () => { await vi.advanceTimersByTimeAsync(29_000); });
+      expect(calls.filter(([name]) => name === 'remote_compute_capabilities')).toHaveLength(1);
+      // Turn processing off so this checks recovery, not another transport failure.
+      fireEvent.click(screen.getByRole('button', { name: '关闭超分' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      expect(calls.filter(([name]) => name === 'remote_compute_capabilities')).toHaveLength(2);
+      fireEvent.mouseMove(screen.getByRole('main', { name: '漫画阅读器' }), { clientY: 700 });
+      expect(screen.getByRole('button', { name: '开启 DLSSNR' })).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
   });
 
   it('offers local upscale when the remote machine cannot provide it', async () => {

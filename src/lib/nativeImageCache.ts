@@ -120,6 +120,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         pageIndex: identity.pageIndex,
         source,
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
+        ...(identity.outputScale !== undefined ? { upscaleOutputScale: identity.outputScale } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
         ...(identity.priority ? { priority: identity.priority } : {}),
         settings: { passes: parseDlssnrPasses(passes) },
@@ -148,6 +149,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
         // 就说明处理计划的身份在我们眼皮底下变了，这一份产物不能按老版本存下来（R11）。
         ...(remote.revision ? { expectedRevision: remote.revision } : {}),
         ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
+        ...(identity.outputScale !== undefined ? { upscaleOutputScale: identity.outputScale } : {}),
         ...(identity.taskId ? { taskId: identity.taskId } : {}),
         // 远端有自己的队列（不占本机 GPU 那一件），档位管的是远端任务之间谁先走：
         // 当前页插到整本预扫前面。

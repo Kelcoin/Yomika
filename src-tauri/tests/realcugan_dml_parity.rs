@@ -45,6 +45,80 @@ const DEFAULT_HEIGHT: usize = 64;
 const CONSERVATIVE: &str = "realcugan-2x-conservative";
 const DENOISE: &str = "realcugan-2x-denoise3x";
 
+#[test]
+#[ignore = "requires the exported NomosUni fixture and a DirectML GPU"]
+fn nomosuni_cpu_gpu_contract() {
+    use yomika_compute_core::{onnx::OnnxEngine, runtime::RuntimeId, upscale::UpscaleEngine};
+    let path = root().join("src-tauri/target/nomosuni.onnx");
+    let cpu = OnnxEngine::open_with_runtime(&path,RuntimeId::Cpu,2,1_000_000,1).unwrap();
+    let gpu = OnnxEngine::open_with_runtime(&path,RuntimeId::DirectMl,2,1_000_000,1).unwrap();
+    let rgba: Vec<u8> = (0..32*40).flat_map(|i| [(i%32*7) as u8,(i/32*5) as u8,127,255]).collect();
+    let expected=cpu.upscale_tile(&rgba,32,40).unwrap();
+    let actual=gpu.upscale_tile(&rgba,32,40).unwrap();
+    assert_eq!(actual.len(),64*80*4);
+    let mae=expected.iter().zip(actual).map(|(a,b)|f64::from(a.abs_diff(b))).sum::<f64>()/expected.len() as f64;
+    assert!(mae<1.0,"NomosUni CPU/DirectML MAE={mae}");
+}
+
+#[test]
+#[ignore = "requires the pinned Real-ESRGAN model and a DirectML GPU"]
+fn realesrgan_x4plus_cpu_gpu_contract() {
+    use yomika_compute_core::{onnx::OnnxEngine, runtime::RuntimeId, upscale::UpscaleEngine};
+    let path = root().join("src-tauri/target/realesrgan_x4plus.onnx");
+    let bytes = std::fs::read(&path).expect("download the pinned catalog model first");
+    use sha2::{Digest, Sha256};
+    assert_eq!(format!("{:x}", Sha256::digest(&bytes)), "1c0fc21d1d6d7df7f39c1fa23c73138a87a01ea0b3ac56ebd0ea943e62e12800");
+    let cpu = OnnxEngine::open_with_runtime(&path, RuntimeId::Cpu, 4, 16_000_000, 1).unwrap();
+    let gpu = OnnxEngine::open_with_runtime(&path, RuntimeId::DirectMl, 4, 16_000_000, 1).unwrap();
+    let rgba: Vec<u8> = (0..32*40).flat_map(|i| [(i%32*7) as u8, (i/32*5) as u8, 127, 255]).collect();
+    let reference = cpu.upscale_tile(&rgba,32,40).unwrap();
+    let result = gpu.upscale_tile(&rgba,32,40).unwrap();
+    assert_eq!(result.len(), 128*160*4);
+    let error = reference.iter().zip(&result).map(|(a,b)|f64::from(a.abs_diff(*b))).sum::<f64>()/result.len() as f64;
+    assert!(error < 1.0, "Real-ESRGAN CPU/GPU mismatch: {error}");
+}
+
+/// Opt-in regression on an actual page; vary shapes within one cached session.
+/// YOMIKA_PARITY_IMAGE points at a local image, never a network archive.
+#[test]
+#[ignore = "requires a local page fixture and DirectML GPU"]
+fn real_page_tiles_match_cpu() {
+    use yomika_compute_core::{onnx::OnnxEngine, runtime::RuntimeId, upscale::UpscaleEngine};
+    let image_path = std::env::var("YOMIKA_PARITY_IMAGE").expect("YOMIKA_PARITY_IMAGE");
+    let page = image::load_from_memory(&std::fs::read(image_path).unwrap()).unwrap().to_rgba8();
+    for stem in [CONSERVATIVE, DENOISE] {
+        let suffix = std::env::var("YOMIKA_PARITY_MODEL_SUFFIX").unwrap_or_else(|_| "-dml1".into());
+        let model = root().join("docs/models").join(format!("{stem}{suffix}.onnx"));
+        let cpu = OnnxEngine::open_with_runtime(&model, RuntimeId::Cpu, 2, 16_000_000, 20).unwrap();
+        let gpu = OnnxEngine::open_with_runtime(&model, RuntimeId::DirectMl, 2, 16_000_000, 20).unwrap();
+        let edge = std::env::var("YOMIKA_PARITY_TILE").ok().map(|s| s.parse().unwrap()).unwrap_or(1024);
+        let tiles = yomika_compute_core::upscale::plan_tiles(page.width(),page.height(),edge,8);
+        let mut assembled = vec![0;page.width() as usize*page.height() as usize*16];
+        for planned in tiles {
+            let (x,y,w,h)=(planned.padded_x,planned.padded_y,planned.padded_width,planned.padded_height);
+            let tile = image::imageops::crop_imm(&page,x,y,w,h).to_image();
+            let a = cpu.upscale_tile(tile.as_raw(), w,h).unwrap();
+            let b = gpu.upscale_tile(tile.as_raw(), w,h).unwrap();
+            yomika_compute_core::upscale::blit_tile(&mut assembled,page.width()*2,&planned,2,&b).unwrap();
+            if x == 0 && y == 0 {
+                image::save_buffer(std::env::temp_dir().join(format!("yomika-{stem}-tile.png")), &b, w*2,h*2,image::ColorType::Rgba8).unwrap();
+            }
+            let mean = a.iter().zip(&b).map(|(a,b)| f64::from(a.abs_diff(*b))).sum::<f64>() / a.len() as f64;
+            eprintln!("{stem} tile {x},{y} {w}x{h}: mean byte error {mean}");
+            assert!(mean < 1.0, "GPU diverges on real page: {mean}");
+        }
+        image::save_buffer(std::env::temp_dir().join(format!("yomika-{stem}-{edge}-page.png")), &assembled,page.width()*2,page.height()*2,image::ColorType::Rgba8).unwrap();
+        assert!(gpu.requires_whole_frame());
+        let corrected = yomika_compute_core::upscale::upscale_rgba(&gpu,page.as_raw(),page.width(),page.height(),
+            yomika_compute_core::upscale::UpscaleOptions { tile_size: 2048, max_pixels:16_000_000, ..Default::default() }).unwrap();
+        assert_eq!(corrected.tiles,1,"global attention was split into independent tiles");
+        let reference = cpu.upscale_tile(page.as_raw(),page.width(),page.height()).unwrap();
+        let error = reference.iter().zip(&corrected.rgba).map(|(a,b)|f64::from(a.abs_diff(*b))).sum::<f64>() / reference.len() as f64;
+        assert!(error < 1.0,"whole-page reference mismatch: {error}");
+        image::save_buffer(std::env::temp_dir().join(format!("yomika-{stem}-corrected-page.png")),&corrected.rgba,corrected.width,corrected.height,image::ColorType::Rgba8).unwrap();
+    }
+}
+
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

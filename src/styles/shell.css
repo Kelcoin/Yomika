@@ -1379,7 +1379,7 @@ body::-webkit-scrollbar,
   .settings-choice-panel .settings-row-button:hover:not(:disabled),
   .settings-choice-panel .settings-menu-check:hover:not(:disabled),
   .settings-choice-panel .custom-scheme-card:hover,
-  .search-preset-panel .search-preset-apply:hover {
+  .settings-choice-panel .search-preset-apply:hover {
     background: var(--surface-container-highest);
   }
 
@@ -1460,13 +1460,102 @@ body::-webkit-scrollbar,
   overflow: hidden;
 }
 
-/* 行尾有下载/更新按钮时，左边补出同样宽度的一段留白，文字才回到这一行的中心。
-   按钮宽 40px + `margin-right: 2px`，再加行内 `gap: var(--space-2)` = 50px：
-   缺这段镜像留白时 `main` 比行窄 50px，文字中心比行中心偏左 25px（实测 25.0px，
-   与行宽无关）。更难看的是同一菜单里会跳——已装的模型不再渲染按钮，于是这一列里
-   有的行居中、有的偏左。`:has()` 只给真的有按钮的行补，没按钮的行本来就居中。 */
-.settings-choice-option:has(> .select-option-download) {
-  padding-left: calc(40px + 2px + var(--space-2));
+.settings-option-row {
+  --choice-action-space: 0px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+
+/* Text always uses the full row's centre, independent of trailing actions. */
+.settings-option-row:has(.settings-option-actions > :nth-child(1)) { --choice-action-space: 36px; }
+.settings-option-row:has(.settings-option-actions > :nth-child(2)) { --choice-action-space: 70px; }
+.settings-option-row:has(.settings-option-actions > :nth-child(3)) { --choice-action-space: 104px; }
+
+.settings-option-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-inline-end: 2px;
+  grid-area: 1 / 1;
+  justify-self: end;
+  position: relative;
+}
+
+.settings-option-actions .select-option-download {
+  width: 32px;
+  flex-basis: 32px;
+  margin: 0;
+}
+
+.settings-option-actions:empty { display: none; }
+.settings-option-actions .is-danger { color: var(--error); }
+
+.settings-parameter-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+}
+
+.settings-parameter-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+}
+
+.settings-parameter-label svg { width: 18px; height: 18px; }
+
+.settings-parameter-options {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border: 1px solid color-mix(in srgb, var(--ink-secondary) 18%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--surface-elevated);
+}
+
+.settings-parameter-options button {
+  min-height: 32px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--ink-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--motion-standard), color var(--motion-standard);
+}
+
+.settings-parameter-options button.is-active {
+  background: var(--control-selected-background);
+  color: var(--control-selected-text);
+}
+
+@media (hover: none) {
+  .settings-parameter-options button:is(.is-pressed, :active):not(:disabled):not(.is-active) {
+    background: color-mix(in srgb, var(--ink-primary) 8%, transparent);
+    color: var(--ink-primary);
+  }
+}
+
+@media (hover: hover) {
+  .settings-parameter-options button:hover:not(:disabled):not(.is-active) {
+    background: color-mix(in srgb, var(--ink-primary) 8%, transparent);
+    color: var(--ink-primary);
+  }
+}
+
+@media (max-width: 360px) {
+  .settings-parameter-row { gap: var(--space-2); padding-inline: var(--space-2); }
+  .settings-parameter-options button { padding-inline: var(--space-2); }
 }
 
 /* 选项文字居中——用户报的：模型选择菜单里的名字全贴着左边排，和高亮块/面板不是
@@ -3916,8 +4005,7 @@ body::-webkit-scrollbar,
 /* Portals live outside the retained workspace. Only the visible Windows
    workspace has title chrome; the fullscreen reader and mobile start at 0. */
 body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
-  .dialog-overlay, .archive-cover-preview, .settings-choice-overlay,
-  .search-preset-overlay
+  .dialog-overlay, .archive-cover-preview, .settings-choice-overlay
 ) {
   top: calc(44px + var(--safe-top));
 }
@@ -4524,6 +4612,20 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* Snap uses an untransformed wrapper: pressing the first card must not
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
+.archive-rail-item.is-entering { animation: archive-rail-enter var(--motion-standard) backwards; }
+.archive-rail-item.is-leaving { animation: archive-rail-leave var(--motion-fast) forwards; overflow: hidden; pointer-events: none; scroll-snap-align: none; }
+@keyframes archive-rail-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes archive-rail-leave {
+  from { opacity: 1; width: var(--rail-exit-width, 150px); margin-inline-end: 0; }
+  to { opacity: 0; width: 0; margin-inline-end: calc(-1 * var(--space-3)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .archive-rail-item.is-entering, .archive-rail-item.is-leaving { animation: none; }
+}
+
 .archive-rail-item > .archive-thumb-card {
   --archive-rail-cover-height: 210px;
   scroll-snap-align: none;
@@ -5503,7 +5605,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    its own surface; this reuses the dialog's radius, elevation and scroll rules. */
 /* The one floating panel: the preset menu and every settings choice open in the
    same masked sheet, so the two read as the same kind of thing. */
-.search-preset-overlay,
 .settings-choice-overlay {
   position: fixed;
   z-index: var(--z-overlay);
@@ -5516,19 +5617,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   animation: settings-overlay-in var(--motion-fast) backwards;
 }
 
-.search-preset-panel {
-  display: grid;
-  gap: 2px;
-  width: min(100%, 420px);
-  max-height: min(70dvh, 520px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding: var(--space-4);
-  border: 1px solid var(--outline-variant);
-  border-radius: var(--radius-overlay);
-  background: var(--surface-container-high);
-  box-shadow: var(--shadow-overlay);
-}
 
 /* A settings menu can hold a whole workspace (E-Hentai accounts, the WebDAV
    form), so it is allowed more height than a preset list — and only its body
@@ -5567,7 +5655,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* 二级菜单的内容常常是「点一下多一块」：配对码、远端模型、设备详情。新挂上来的每一行
    走一段极短的进场，尺寸变化读起来是「长出来」，而不是硬跳一截。已有的节点不会被
    React 重建，所以这段只在真的多出东西时跑。 */
-.settings-menu-body > *,
+.settings-menu-content > *,
 .settings-choice-panel > .settings-menu-actions {
   animation: settings-row-in var(--motion-fast) backwards;
 }
@@ -5586,9 +5674,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 @media (prefers-reduced-motion: reduce) {
   .settings-choice-overlay,
-  .search-preset-overlay,
-  .settings-choice-panel,
-  .settings-menu-body > *,
+    .settings-choice-panel,
+  .settings-menu-content > *,
   .settings-choice-panel > .settings-menu-actions { animation: none; }
 }
 
@@ -5607,21 +5694,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    搜索预设那条标题不跟着走：它下面是一列预设，标题跟行起点左对齐读起来才是一组。
    两处共用的字号/字重保留 2026-10-14 压下来的 `--text-md`/`--weight-semibold`
    （当时 20px/700 被指「头重脚轻」——头比行还轻、四周留白又厚）。 */
-.search-preset-title {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: var(--space-3);
-  /* 标题行里可能钉着菜单自己的动作（层参数说明的问号），它相对这一行定位。 */
-  position: relative;
-  /* 图标槽那份内缩只给这条标题，不给标题行本身：`.settings-choice-action` 钉在行右端，
-     整行内缩会让它跟着挪。 */
-  padding-inline-start: var(--space-3);
-  margin: 0 0 var(--space-2);
-  color: var(--on-surface);
-  font-size: var(--text-md);
-  font-weight: var(--weight-semibold);
-}
 
 .settings-choice-title {
   display: flex;
@@ -5633,6 +5705,23 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   color: var(--on-surface);
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
+}
+
+.settings-choice-overlay[data-menu-covered] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.settings-choice-title[data-has-navigation] {
+  min-height: 40px;
+  padding-inline: 40px;
+}
+
+.settings-choice-title > .settings-choice-back {
+  position: absolute;
+  inset-inline-start: 0;
+  inset-block: 0;
+  margin-block: auto;
 }
 
 .settings-choice-icon {
@@ -5754,8 +5843,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    自己的边界，于是最后一行永久有一截落在视野之外（下面那段注释记着这次实测）。
    面板四边同内缩之后这里不再需要抵任何东西，最后一行离面板底正好是 `--space-4`。 */
 .settings-menu-body {
-  display: grid;
-  gap: var(--space-3);
+  display: block;
+  transition: height var(--motion-standard);
   /* 内容区吃掉面板剩下的高度，并在里面滚动：表单再长也够得着保存/取消。 */
   flex: 1 1 auto;
   min-width: 0;
@@ -5771,6 +5860,22 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
      的最后那一点残留就来自这里。做到 0 之后，四边内缩就是 `--space-4`，`--radius-card`
      是它唯一正确的内半径。 */
   padding: 0;
+}
+
+/* Natural-size measurement stays independent of the shrinking scroll viewport. */
+.settings-option-row > .settings-choice-option-main {
+  grid-area: 1 / 1;
+  padding-inline: calc(var(--choice-action-space) + var(--space-2));
+}
+
+.settings-menu-content {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-menu-body { transition: none; }
 }
 
 .settings-menu-desc {
@@ -6811,7 +6916,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .settings-choice-panel .settings-row-button:is(.is-pressed, :active):not(:disabled),
   .settings-choice-panel .settings-menu-check:is(.is-pressed, :active):not(:disabled),
   .settings-choice-panel .custom-scheme-card:is(.is-pressed, :active),
-  .search-preset-panel .search-preset-apply:is(.is-pressed, :active) {
+  .settings-choice-panel .search-preset-apply:is(.is-pressed, :active) {
     background: var(--surface-container-highest);
   }
 

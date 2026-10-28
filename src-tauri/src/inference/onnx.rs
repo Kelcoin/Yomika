@@ -190,76 +190,23 @@ mod tests {
         assert_ne!(upscaled.rgba, nearest);
     }
 
-    /// 分块不是整页，而且**换多大的边距都救不回来**：这几份图里各有四处 `ReduceMean`
-    /// 在**每块自己的特征图上**做空间池化（结构上由
-    /// `tests/gpu/realcugan-parity/scan_global_attention.py -ScanTiling` 扫出来），
-    /// 于是「这一块算出来的东西」取决于这块有多大、里面有什么。要是把注意力那几处
-    /// 的池化在整页统计上做，或者整页一次推理，才谈得上精确；tile 变大只是把差距
-    /// 压小（docs/89 的曲线）。
-    ///
-    /// 这条钉的是**曲线的方向**（大块更接近整页）与数量级，不是某台机器的绝对值：
-    /// 换 CPU、换一版 ORT，绝对值会动，方向不会。整页与分块两边都是真模型真推理，
-    /// 所以它同时是「分块管道没被改坏」的回归线。
+    /// Non-local attention must use one frame even when a caller requests tiles.
     #[test]
-    fn a_tiled_page_is_not_the_whole_page_and_a_bigger_tile_comes_closer() {
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/models");
-        let model = directory.join("realcugan-2x-conservative.onnx");
-        if !model.exists() {
-            eprintln!("skipping: {} is not present", model.display());
-            return;
-        }
-        let (width, height) = (1024_u32, 768_u32);
-        let rgba = gradient_rgba(width, height);
-        let engine = OnnxEngine::open(&model, 2, 64_000_000, 20).expect("engine");
-        let whole = engine
-            .upscale_tile(&rgba, width, height)
-            .expect("the whole page in one pass");
-        let error = |tile: u32| -> (f64, usize) {
-            let options = crate::inference::upscale::UpscaleOptions {
-                tile_size: tile,
-                tile_padding: crate::inference::upscale::DEFAULT_TILE_PADDING,
-                max_pixels: 64_000_000,
-                ..crate::inference::upscale::UpscaleOptions::default()
-            };
-            let tiled =
-                crate::inference::upscale::upscale_rgba(&engine, &rgba, width, height, options)
-                    .expect("upscale the page in tiles");
-            let difference = tiled
-                .rgba
-                .iter()
-                .zip(whole.iter())
-                .map(|(tiled, page)| tiled.abs_diff(*page) as f64)
-                .sum::<f64>()
-                / whole.len() as f64;
-            (difference, tiled.tiles)
-        };
-        let (small, small_tiles) = error(128);
-        let (big, big_tiles) = error(512);
-        assert!(
-            small_tiles > big_tiles && big_tiles > 1,
-            "两条都要真的是分块：tile 128 走了 {small_tiles} 块，tile 512 走了 {big_tiles} 块"
-        );
-        eprintln!(
-            "分块 vs 整页 {width}x{height}（平均字节差，1/255 = {:.3e}）：tile 128 = {small:.3e}（{small_tiles} 块），tile 512 = {big:.3e}（{big_tiles} 块）",
-            1.0 / 255.0
-        );
-        // 方向要**明显**：实测这条梯度页上 128 是 512 的 1.76 倍，结构化页上是 2.14 倍，
-        // 所以 1.3 倍是留了余量的下限；只写 `> big` 的话，差了 0.1% 也算过。
-        assert!(
-            small > big * 1.3,
-            "tile 变大不再明显更接近整页：128 = {small:.3e}，512 = {big:.3e}"
-        );
-        assert!(
-            big > 0.0,
-            "分块与整页逐位相同——图里的空间池化不见了，这条断言要先重写"
-        );
-        // 上限只是「有没有别的东西坏掉了」的报警线，不是质量指标：这条梯度页离自然图像
-        // 统计很远（一条纯斜坡），绝对值比 docs/89 里那些页状输入大一个量级，实测
-        // 8.952e-02，所以线放在 2e-1。真要收紧质量，得拿页状输入去测。
-        assert!(
-            small < 2.0e-1,
-            "分块与整页的差距比实测大了一个量级：{small:.3e}"
-        );
+    fn global_attention_uses_one_coherent_frame() {
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/models/realcugan-2x-conservative.onnx");
+        if !model.exists() { return; }
+        let engine = OnnxEngine::open(&model, 2, 64_000_000, 20).unwrap();
+        assert!(engine.requires_whole_frame());
+        let (w, h) = (129, 137);
+        let rgba = gradient_rgba(w, h);
+        let expected = engine.upscale_tile(&rgba, w, h).unwrap();
+        let result = crate::inference::upscale::upscale_rgba(&engine, &rgba, w, h,
+            crate::inference::upscale::UpscaleOptions {
+                tile_size: 256, ..Default::default()
+            }).unwrap();
+        assert_eq!(result.tiles, 1);
+        assert_eq!(result.rgba, expected);
     }
 
     #[cfg(windows)]

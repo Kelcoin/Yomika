@@ -25,6 +25,48 @@ pub const DEFAULT_TILE_PADDING: u32 = 8;
 mod recovery_tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+    #[test]
+    fn native_four_times_tiles_are_delivered_at_two_times_without_cascading() {
+        struct NativeFour { calls: AtomicU32 }
+        impl UpscaleEngine for NativeFour {
+            fn scale(&self) -> u32 { 4 }
+            fn upscale_tile(&self, rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, ComputeError> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(cpu_scale_rgba(rgba, width, height, 4, 1024)?.rgba)
+            }
+        }
+        let engine = NativeFour { calls: AtomicU32::new(0) };
+        let result = upscale_rgba(&engine, &vec![120; 8 * 8 * 4], 8, 8,
+            UpscaleOptions { output_scale: Some(2), max_pixels: 256, ..Default::default() }).unwrap();
+        assert_eq!((result.width, result.height), (16, 16));
+        assert_eq!(engine.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(result.rgba.len(), 16 * 16 * 4);
+    }
+
+    struct Global { limit: u32, calls: std::sync::Mutex<Vec<(u32,u32)>> }
+    impl UpscaleEngine for Global {
+        fn scale(&self) -> u32 { 1 }
+        fn requires_whole_frame(&self) -> bool { true }
+        fn upscale_tile(&self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, ComputeError> {
+            self.calls.lock().unwrap().push((w,h));
+            if w > self.limit { return Err(ComputeError::InvalidInput("E_OUTOFMEMORY".into())); }
+            Ok(rgba.to_vec())
+        }
+    }
+    #[test]
+    fn global_statistics_never_split_even_during_allocation_recovery() {
+        let engine = Global { limit: 64, calls: Default::default() };
+        let source = vec![200;128*256*4];
+        let result = upscale_rgba_with_allocation_recovery(&engine,&source,128,256,
+            UpscaleOptions { tile_size: 256, ..Default::default() },1).unwrap();
+        assert_eq!(result.tiles,1);
+        assert_eq!((result.width,result.height),(128,256));
+        assert!(result.rgba.iter().all(|v| *v==200));
+        let calls = engine.calls.lock().unwrap();
+        assert_eq!(calls.len(),3);
+        assert!(calls.iter().all(|(w,h)| *h >= *w * 2));
+        assert!(calls[2].0 < calls[1].0 && calls[1].0 < calls[0].0);
+    }
     struct Limited { calls: AtomicU32, fail_above: u32, fixed: bool, message: &'static str }
     impl UpscaleEngine for Limited {
         fn scale(&self) -> u32 { 1 }
@@ -193,6 +235,8 @@ pub fn blit_tile(
 /// below never needs to know which engine it is talking to.
 pub trait UpscaleEngine {
     fn scale(&self) -> u32;
+    /// Spatial attention/pooling must see the entire page, not each tile's statistics.
+    fn requires_whole_frame(&self) -> bool { false }
     /// Static NCHW input dimensions, with zero denoting a dynamic axis.
     /// The engine pads smaller boundary tiles to each fixed axis.
     fn fixed_input_size(&self) -> Option<(u32, u32)> { None }
@@ -215,6 +259,7 @@ pub trait UpscaleEngine {
 /// E0117，因为 `Arc` 也是外部的）——所以 ONNX 会话的共享类型只要能自己实现
 /// [`UpscaleEngine`]，Arc 这一格就自动成立。
 impl<T: UpscaleEngine + ?Sized> UpscaleEngine for std::sync::Arc<T> {
+    fn requires_whole_frame(&self) -> bool { (**self).requires_whole_frame() }
     fn fixed_input_size(&self) -> Option<(u32, u32)> { (**self).fixed_input_size() }
     fn scale(&self) -> u32 {
         (**self).scale()
@@ -340,6 +385,37 @@ pub fn upscale_rgba_with_progress(
             pixels,
             max_pixels: options.max_pixels,
         });
+    }
+
+    if engine.requires_whole_frame() {
+        options.check_cancelled()?;
+        // tile_size is a working-area budget here, never permission to split a
+        // non-local model. Keep aspect ratio, and restore delivery dimensions.
+        let budget = u64::from(options.tile_size.max(1)).pow(2);
+        let (mut w, mut h) = crate::fit::processing_dimensions(width, height, 1, budget)
+            .ok_or_else(|| ComputeError::InvalidInput("empty whole-frame budget".into()))?;
+        if let Some((fw, fh)) = engine.fixed_input_size() {
+            let ratio = (if fw > 0 { f64::from(fw) / f64::from(w) } else { 1.0 })
+                .min(if fh > 0 { f64::from(fh) / f64::from(h) } else { 1.0 }).min(1.0);
+            w = (f64::from(w) * ratio).floor().max(1.0) as u32;
+            h = (f64::from(h) * ratio).floor().max(1.0) as u32;
+        }
+        let input = if (w, h) == (width, height) { None } else {
+            let view = image::RgbaImage::from_raw(width, height, source.to_vec())
+                .expect("source dimensions checked above");
+            Some(image::imageops::resize(&view, w, h, image::imageops::FilterType::Lanczos3))
+        };
+        progress(0, 1);
+        let rgba = engine.upscale_tile(input.as_ref().map(|i| i.as_raw().as_slice()).unwrap_or(source), w, h)?;
+        options.check_cancelled()?;
+        let output = image::RgbaImage::from_raw(w * native_scale, h * native_scale, rgba)
+            .ok_or_else(|| ComputeError::InvalidInput("engine frame output dimensions do not match".into()))?;
+        let rgba = if output.dimensions() == (output_width, output_height) { output.into_raw() } else {
+            image::imageops::resize(&output, output_width, output_height, image::imageops::FilterType::Lanczos3).into_raw()
+        };
+        options.check_cancelled()?;
+        progress(1, 1);
+        return Ok(UpscaledImage { rgba, width: output_width, height: output_height, tiles: 1 });
     }
 
     // The engine's own reach is a floor: a caller asking for less padding than
