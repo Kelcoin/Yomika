@@ -741,7 +741,9 @@ impl GpuContext {
         let gpu = self.video_memory();
         let system = crate::resources::system_memory();
         let keep_spares = keep_spare_workspaces(gpu, system);
-        let limit = if keep_spares { workspace::MAX_WORKSPACES } else if gpu.is_some() && system.is_some() { 0 } else { 1 };
+        let limit = if keep_spares { workspace::MAX_WORKSPACES }
+            else if workspace::warm_workspace_fits(gpu, system) { 1 }
+            else { 0 };
         while self.workspaces.len() > limit {
             if let Some(mut dropped) = self.workspaces.pop() {
                 dropped.release(&self.runtime);
@@ -1197,10 +1199,8 @@ fn info_queue_messages(device: &ID3D12Device) -> Vec<String> {
 
 /// 这台机器愿不愿意留备用工作区（`GpuContext::release_workspace` 的那条判据）。
 ///
-/// 产品路径就是内存策略：提交量超过物理内存四分之一时，刚交回的那一份会被立刻丢掉，
-/// 于是每页各建一次工作区。那是策略按自己的规矩办事，不是回归——但测试里量「同尺寸
-/// 复用」的那几条判据会因此忽绿忽红（跑测试时提交量本来就高）。测试可以用
-/// [`force_spare_workspaces`] 把这条钉成确定值，判据就只量复用本身。
+/// This only controls spare buckets. The most recently used bucket has its own
+/// retention policy, so refusing extra allocations does not force feature rebuilds.
 fn keep_spare_workspaces(
     gpu: Option<super::gpu::VideoMemory>,
     system: Option<crate::resources::SystemMemory>,

@@ -244,6 +244,16 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
     setPortMenu(false);
   }
 
+  async function toggleWindowsService() {
+    if (busy) return;
+    setBusy(true);
+    const result = await repository.configureWindowsService(!status?.windowsServiceInstalled);
+    setBusy(false);
+    if (!result.ok) { showToast(result.error.message, 'error'); void refresh(); return; }
+    publishStatus(result.value);
+    showToast(result.value.windowsServiceInstalled ? 'Windows 服务已注册，关闭客户端后仍可处理图片' : 'Windows 服务已卸载，改由客户端提供服务', 'success');
+  }
+
   /** 连一次对面并取能力清单。
    *
    *  `quiet` 是给「打开这一组时顺带问一次」用的：对面没开着是常态，那一次失败不该弹错误。
@@ -334,6 +344,14 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
           checked={serving}
           onToggle={() => void toggleServing(!serving)}
         />
+        {(serving || preferences.computeCenterEnabled) && status?.windowsServiceSupported && <SettingsSwitch
+          icon={<Server />}
+          label="注册为 Windows 服务"
+          hint="登录 Windows 后自动运行，无需打开客户端；更改需要管理员授权，请勿移动数据目录"
+          checked={status.windowsServiceInstalled}
+          disabled={busy}
+          onToggle={() => void toggleWindowsService()}
+        />}
         {serving && <SettingsRow
           icon={<Server />}
           label="端口"

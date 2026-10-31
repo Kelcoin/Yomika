@@ -726,7 +726,7 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
         ><MoreVertical aria-hidden="true" /></button>
       </header>
       <div className="archive-detail-overview">
-        <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} />
+        <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} serverId={serverCopy?.serverId} archiveId={serverCopy?.archiveId} />
         <div className="archive-detail-overview-copy">
           <ArchiveDetailFacts facts={facts} />
         </div>

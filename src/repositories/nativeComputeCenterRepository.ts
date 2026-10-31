@@ -15,6 +15,8 @@ export type ComputeCapability = z.output<typeof ComputeCapabilitySchema>;
 
 export const ComputeCenterStatusSchema = z.object({
   running: z.boolean(),
+  windowsServiceSupported: z.boolean().default(false),
+  windowsServiceInstalled: z.boolean().default(false),
   port: z.number().int(),
   /** 本机在局域网里的地址，照着念给移动端。 */
   addresses: z.array(z.string()),
@@ -158,6 +160,10 @@ export class NativeComputeCenterRepository {
 
   revokePairing(id: string): Promise<CommandResult<ComputeCenterStatus>> {
     return invokeCommand('compute_center_revoke_pairing', { id }, ComputeCenterStatusSchema);
+  }
+
+  configureWindowsService(enabled: boolean): Promise<CommandResult<ComputeCenterStatus>> {
+    return invokeCommand('compute_windows_service_configure', { enabled }, ComputeCenterStatusSchema);
   }
 
   /** 连一次远端，拿它的能力清单。 */

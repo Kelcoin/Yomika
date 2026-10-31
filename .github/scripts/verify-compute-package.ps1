@@ -63,6 +63,40 @@ function Get-Sha256([string] $FilePath) {
     return (Get-FileHash -LiteralPath $FilePath -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+# DLL filenames can be packaging metadata (the service installer copies
+# DirectML.dll). Check actual PE imports separately from linked ORT symbols.
+function Get-PeImports([byte[]] $Bytes) {
+    $pe = [BitConverter]::ToInt32($Bytes, 0x3c)
+    if ([BitConverter]::ToUInt32($Bytes, $pe) -ne 0x4550) { throw 'Invalid PE signature' }
+    $optional = $pe + 24
+    $magic = [BitConverter]::ToUInt16($Bytes, $optional)
+    $directories = if ($magic -eq 0x20b) { $optional + 112 } elseif ($magic -eq 0x10b) { $optional + 96 } else { throw 'Invalid PE optional header' }
+    $rva = [BitConverter]::ToUInt32($Bytes, $directories + 8)
+    if ($rva -eq 0) { return @() }
+    $sections = $optional + [BitConverter]::ToUInt16($Bytes, $pe + 20)
+    $count = [BitConverter]::ToUInt16($Bytes, $pe + 6)
+    $toOffset = {
+        param([uint32] $Address)
+        for ($i = 0; $i -lt $count; $i++) {
+            $section = $sections + $i * 40
+            $start = [BitConverter]::ToUInt32($Bytes, $section + 12)
+            $length = [Math]::Max([BitConverter]::ToUInt32($Bytes, $section + 8), [BitConverter]::ToUInt32($Bytes, $section + 16))
+            if ($Address -ge $start -and $Address -lt $start + $length) { return [int]($Address - $start + [BitConverter]::ToUInt32($Bytes, $section + 20)) }
+        }
+        throw 'PE import RVA outside sections'
+    }
+    $offset = & $toOffset $rva
+    while ($offset + 20 -le $Bytes.Length) {
+        $name = [BitConverter]::ToUInt32($Bytes, $offset + 12)
+        if ($name -eq 0) { break }
+        $start = & $toOffset $name
+        $end = $start
+        while ($end -lt $Bytes.Length -and $Bytes[$end] -ne 0) { $end++ }
+        [Text.Encoding]::ASCII.GetString($Bytes, $start, $end - $start).ToLowerInvariant()
+        $offset += 20
+    }
+}
+
 # `deps/`、`build/`、`.fingerprint/`、`incremental/`、`.npm-cache/`、`examples/` 是构建
 # 残渣，不是包；`data/` 另外处理（跑起来之后它会装满用户的东西）。
 $script:skipDirs = @('deps', 'build', '.fingerprint', 'incremental', '.npm-cache', 'examples')
@@ -346,9 +380,10 @@ if ($hostExists) {
     # 拿它当派生缓存身份、与 worker 报的核对（宿主不再链 ORT，问不了运行库自己），所以
     # 它**本来就该**在这份宿主的字节里。拿它当「宿主链了 ORT」的证据会误报——这一条就是
     # 被这个误报教出来的：第一版查了，新编的宿主上红了，而红的那一串是设计的一部分。
-    $found = Find-Literals $hostBytes @('d3d12.dll', 'DirectML.dll', 'onnxruntime')
+    $found = @(Find-Literals $hostBytes @('d3d12.dll', 'onnxruntime', 'OrtGetApiBase'))
+    $found += @(Get-PeImports $hostBytes | Where-Object { $_ -in @('d3d12.dll', 'directml.dll', 'onnxruntime.dll') })
     $ok = $found.Count -eq 0
-    $detail = '宿主字节里没有 D3D12/DirectML/ONNX Runtime 的痕迹'
+    $detail = '宿主没有 D3D12/DirectML/ONNX Runtime 导入或 ORT 引擎符号；允许复制运行库的文件名'
     if (-not $ok) { $detail = "宿主字节里有：$($found -join ', ')" }
     Note 'no-host-ort' $ok $detail
 }

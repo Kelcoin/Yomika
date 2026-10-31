@@ -51,6 +51,20 @@ pub const BUCKET_STEP: u32 = 64;
 /// 条数用于防止小尺寸缓存无限增长；实际资源预算优先。
 pub const MAX_WORKSPACES: usize = 4;
 
+/// Retaining an already allocated bucket needs no extra allocation. Use actual
+/// exhaustion thresholds here; the stricter spare-allocation policy would
+/// otherwise destroy the hot feature after every page under moderate pressure.
+pub fn warm_workspace_fits(
+    gpu: Option<super::gpu::VideoMemory>,
+    system: Option<crate::resources::SystemMemory>,
+) -> bool {
+    let gpu_safe = gpu.is_none_or(|m| m.used_bytes <= m.budget_bytes.saturating_mul(9) / 10);
+    let system_safe = system.is_none_or(|m| {
+        m.available_commit_bytes >= (m.physical_bytes / 32).max(256 << 20)
+    });
+    gpu_safe && system_safe
+}
+
 /// Cached buckets may coexist only when there is room for the next allocation
 /// in BOTH budgets. Unknown telemetry cannot justify keeping a spare bucket.
 pub fn spare_allocation_fits(
@@ -337,6 +351,17 @@ pub fn set_size_parameters(parameters: &Parameters, width: u32, height: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retains_hot_bucket_under_moderate_pressure_but_not_exhaustion() {
+        let system = crate::resources::SystemMemory { physical_bytes: 32 << 30, available_commit_bytes: 10 << 30, private_commit_bytes: 10 << 30 };
+        let gpu = super::super::gpu::VideoMemory { budget_bytes: 8 << 30, used_bytes: 6 << 30 };
+        assert!(!spare_allocation_fits(Some(gpu), Some(system), 0, 0));
+        assert!(warm_workspace_fits(Some(gpu), Some(system)));
+        assert!(!warm_workspace_fits(Some(super::super::gpu::VideoMemory { used_bytes: 8 << 30, ..gpu }), Some(system)));
+        assert!(!warm_workspace_fits(Some(gpu), Some(crate::resources::SystemMemory { available_commit_bytes: 128 << 20, ..system })));
+        assert!(warm_workspace_fits(None, None));
+    }
 
     #[test]
     fn spare_buckets_follow_both_live_budgets() {

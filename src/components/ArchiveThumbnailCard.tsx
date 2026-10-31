@@ -6,7 +6,7 @@ import { Heart } from 'lucide-react';
 import { Link, matchPath, useLocation } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
-import { CARD_TAG_LIMIT_THUMBNAIL, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberWideCoverMark } from '../lib/archiveCardPresentation';
+import { CARD_TAG_LIMIT_THUMBNAIL, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberCoverRatio } from '../lib/archiveCardPresentation';
 import { peekCachedImageUrl } from '../lib/unifiedImageCache';
 import { useHorizontalScroller } from '../lib/horizontalScroller';
 import { longPressHandlers } from '../lib/longPressMenu';
@@ -202,7 +202,7 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       archiveId={archive.archiveId}
       onAspectRatio={(ratio) => {
         // 量到真实比例后记一份到跨路由的 store（窄→宽、宽→窄都写），下次进来第一帧就能直接用。
-        rememberWideCoverMark(serverId, archive.archiveId, isWideCoverRatio(ratio));
+        rememberCoverRatio(serverId, archive.archiveId, ratio);
         setAspectRatio(ratio);
       }}
     />

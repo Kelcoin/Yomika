@@ -448,7 +448,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const derivedWantedRef = useRef<ReadonlySet<number>>(new Set());
   const derivedGenerationRef = useRef(0);
   const derivedBusyRef = useRef(false);
-  const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController }>();
+  const activeDerivedRef = useRef<{ pageIndex: number; tier: DerivedTier; controller: AbortController; job: DerivedJob }>();
   /** 正在跑 / 排队的那一页属于哪一档。叫停的时候要按档位判断：后台预处理那一档
    * 按定义就不在可见页的范围内，不能因为它「不在范围内」被掐掉。 */
   const derivedTierRef = useRef(new Map<number, DerivedTier>());
@@ -932,7 +932,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               derivedQueueRef.current.push(job);
               // A newly ready foreground original takes precedence over the sweep.
               const active = activeDerivedRef.current;
-              if (job.tier === 'visible' && active && active.tier !== 'visible') active.controller.abort();
+              if (job.tier === 'visible' && active && active.pageIndex !== pageIndex && active.tier !== 'visible') active.controller.abort();
             } else {
               const failures = (derivedSourceFailuresRef.current.get(pageIndex) ?? 0) + 1;
               derivedSourceFailuresRef.current.set(pageIndex, failures);
@@ -965,7 +965,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         const controller = new AbortController();
         derivedAbortsRef.current.set(pageIndex, controller);
         derivedTierRef.current.set(pageIndex, job.tier);
-        activeDerivedRef.current = { pageIndex, tier: job.tier, controller };
+        activeDerivedRef.current = { pageIndex, tier: job.tier, controller, job };
         // 用户正看着的这几页是前台：原生那侧让它们插到后台整本预扫前面，并且会掐掉
         // 正在跑的后台那一件。判据是 tier——`visible` 是当前窗口里的页，其它（预扫
         // 的 `background`、邻页的 `neighbour`）都往后站。
@@ -1181,8 +1181,16 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             derivedAttemptedRef.current.delete(pageIndex);
             // 被「让位」掐掉的后台任务退回游标队首：整本预处理不该因为让了一次路就
             // 永远漏掉这一页（让位只发生在用户翻页时，所以它很快会再轮到）。
-            if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
-            else if (!documentVisibleRef.current && job.generation === derivedGenerationRef.current) derivedQueueRef.current.unshift(job);
+            if (job.generation === derivedGenerationRef.current) {
+              if (derivedWantedRef.current.has(pageIndex)) {
+                // A cancelled neighbour may have re-entered the window before
+                // its old request settled. Navigation saw the attempted marker
+                // and could not enqueue it; resume it here without another turn.
+                if (!derivedQueueRef.current.some(item => item.pageIndex === pageIndex)) {
+                  derivedQueueRef.current.unshift({ ...job, tier: visiblePagesRef.current.has(pageIndex) ? 'visible' : 'neighbour' });
+                }
+              } else if (job.tier === 'background') derivedSweepRef.current?.order.unshift(pageIndex);
+            }
           }
           // The sweep owns only background-only sources. The screen may retain
           // this page beyond visible+prefetch, or claim it during computation.
@@ -1334,11 +1342,19 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // local stages so turning to a preloaded page shows its finished rendition.
     const neighbours = context && indexes.length > 0
       ? getPrefetchPages(indexes[0]!, context.paths.length, prefetchDistance)
+        .sort((a, b) => Math.abs(a - indexes[0]!) - Math.abs(b - indexes[0]!) || b - a)
       : [];
     const wanted = [...new Set([...indexes, ...neighbours])];
     derivedWantedRef.current = new Set(wanted);
     const active = activeDerivedRef.current;
     if (active) {
+      if (indexes.includes(active.pageIndex) && !active.controller.signal.aborted) {
+        // Promote the in-flight job too, not just entries still in the queue.
+        // A ready original must never cancel its own running enhancement.
+        active.tier = 'visible';
+        active.job.tier = 'visible';
+        derivedTierRef.current.set(active.pageIndex, 'visible');
+      }
       // 不在这次要的范围内就叫停——后台预处理那一件除外：它按定义就不在可见页的
       // 范围里，拿 `wanted` 去筛它等于整本预处理永远只做第一页。这也是原来「只处理
       // 视口内的图片」的另一半原因。

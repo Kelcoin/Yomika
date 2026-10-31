@@ -106,7 +106,8 @@ arboard = "3"
 # 自带这个 feature，不用多拉一个依赖。
 # Win32_System_Console 只为了 `GetConsoleWindow`：判据要问「这一路拉起的子进程有没有
 # 控制台窗口」（`tests/console_window_contract.rs`），宿主自己不建控制台，量不到别的。
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_System_Environment", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
+windows-service = "0.8"
 # DLSSNR 引擎（8-g④）：`docs/71` Task 8 的出口要求宿主不再持有 NGX 资源，而 NGX 只能
 # 在计算进程里初始化、worker 又不许依赖 Tauri（§5.2），所以引擎住在核心那一层，这边
 # 只留壳（命令 + DLL 的下载策略，见 `src/dlssnr/mod.rs`）。

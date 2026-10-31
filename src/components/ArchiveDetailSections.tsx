@@ -5,7 +5,7 @@ import { OverlayLayer } from './OverlayLayer';
 import { myTagChipStyle, normalizeMyTagKey, prioritizeByMyTags } from '../lib/ehMyTags';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { usePageActive } from '../app/RetainedPage';
-import { isWideCoverRatio } from '../lib/archiveCardPresentation';
+import { isWideCoverRatio, readCoverRatio, rememberCoverRatio } from '../lib/archiveCardPresentation';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { categorizeSearchableTags, type SearchableTagGroup } from '../lib/tags';
 import { TagSearchLink } from './TagSearchLink';
@@ -83,9 +83,18 @@ export function useArchiveCover({ scopeId, serverId, archiveId, enabled = true }
     setCover(undefined);
     setLoading(true);
     void getNativeImageCache().load({ scopeId, serverId, archiveId, rendition: 'cover', pageIndex: 0 }, { signal: controller.signal })
-      .then((value) => {
+      .then(async (value) => {
         if (!active) { getNativeImageCache().release(value); return; }
         handle = value;
+        // Decode before publishing the URL: the detail cover must know its
+        // geometry on its first painted frame, including direct navigation.
+        const image = new Image();
+        image.src = value.url;
+        if (typeof image.decode === 'function') {
+          await image.decode().catch(() => undefined);
+          rememberCoverRatio(serverId, archiveId, image.naturalWidth / image.naturalHeight);
+        }
+        if (!active) return;
         setCover(value.url);
       })
       .catch(() => undefined)
@@ -101,7 +110,7 @@ export function useArchiveCover({ scopeId, serverId, archiveId, enabled = true }
 
 /** 封面那一格，点开是全屏大图。预览覆盖层跟着它一起走（Esc 也归它关），调用方
  * 不用再管。 */
-export function ArchiveDetailCover({ title, cover, loading = false }: { title: string; cover?: string | undefined; loading?: boolean }) {
+export function ArchiveDetailCover({ title, cover, loading = false, serverId = '', archiveId = '' }: { title: string; cover?: string | undefined; loading?: boolean; serverId?: string | undefined; archiveId?: string | undefined }) {
   const pageActive = usePageActive();
   const [preview, setPreview] = useState<'closed' | 'open' | 'closing'>('closed');
   const [coverShape, setCoverShape] = useState<{ url: string; wide: boolean }>();
@@ -109,6 +118,8 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
   const previewImage = useRef<HTMLImageElement>(null);
   const animation = useRef<Animation>();
   const previewOpen = preview === 'open';
+  const knownRatio = readCoverRatio(serverId, archiveId);
+  const wide = coverShape && coverShape.url === cover ? coverShape.wide : isWideCoverRatio(knownRatio);
   const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
   const close = () => setPreview(reducedMotion ? 'closed' : 'closing');
   useLayoutEffect(() => { if (!pageActive) setPreview('closed'); }, [pageActive]);
@@ -160,10 +171,11 @@ export function ArchiveDetailCover({ title, cover, loading = false }: { title: s
   // 返回手势先关预览这一层（见 overlayBackGuard）。
   useOverlayBackGuard(previewOpen, close);
   return <>
-    <div className={`archive-detail-route-cover${coverShape?.url === cover && coverShape?.wide ? ' is-wide' : ''}`}>
+    <div className={`archive-detail-route-cover${wide ? ' is-wide' : ''}`} style={knownRatio ? { '--cover-ratio': knownRatio } as React.CSSProperties : undefined}>
       {cover
         ? <button className="archive-detail-cover-trigger" type="button" data-preview-open={preview !== 'closed' ? '' : undefined} onClick={() => setPreview('open')} aria-label={`查看${title}大图`} title="查看大图"><img ref={triggerImage} src={cover} alt={`${title} 封面`} decoding="async" onLoad={(event) => {
           const image = event.currentTarget;
+          rememberCoverRatio(serverId, archiveId, image.naturalWidth / image.naturalHeight);
           setCoverShape({ url: cover, wide: isWideCoverRatio(image.naturalWidth / image.naturalHeight) });
         }} /></button>
         : <div className={`archive-detail-cover-placeholder${loading ? ' is-skeleton' : ''}`} aria-label={loading ? '正在加载封面' : '暂无封面'} />}

@@ -113,6 +113,11 @@ pub fn start(app: &tauri::AppHandle) -> Result<ComputeHandle, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let worker_path = PathBuf::new(); // Mobile links the worker library; no executable is extracted.
     let mut config = SupervisorConfig::new(worker_path, &staging_root);
+    // Explicit developer opt-in only; never inherit the host's full environment.
+    #[cfg(windows)]
+    if std::env::var_os("YOMIKA_NGX_LOG").is_some() {
+        config.extra_env.push(("YOMIKA_NGX_LOG".into(), "1".into()));
+    }
     // 模型和页面走**同一条**只读输入根（`models` 的模块注释）：worker 因此只保留一条
     // 能被允许读用户数据的路，而不是「页面一条、模型一条」。
     config.models = Some(models::ModelCatalog::new(&data_root));

@@ -25,7 +25,7 @@ import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, 
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberWideCoverMark, CARD_TAG_LIMIT_THUMBNAIL, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberCoverRatio, CARD_TAG_LIMIT_THUMBNAIL, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
 import { ARCHIVE_DAY_DIVIDER_HEIGHT, ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
@@ -1038,7 +1038,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
       : {};
     const cover = <LazyThumbnail archive={archive} onLoad={onLoadThumbnail} onRelease={onReleaseThumbnail} peek={peekThumbnail} onAspectRatio={(ratio) => {
       // 量到的比例既留在本次会话（组件态，立刻重排），也记进跨路由的那份记录。
-      rememberWideCoverMark(archive.serverId, archive.archiveId, isWideCoverRatio(ratio));
+      rememberCoverRatio(archive.serverId, archive.archiveId, ratio);
       setWideCoverIds((current) => withWideCoverMark(current, archive.archiveId, isWideCoverRatio(ratio)));
     }} eager={eager} />;
     /* 紧凑档不画「详情已打开」那条高亮：手机上详情本来就是整屏盖住的，列表上留着的那圈

@@ -171,6 +171,7 @@ fn center_with(sandbox: &Sandbox, manager: &Arc<ComputeManager>) -> (ComputeCent
         data: sandbox.root.clone(),
         app: None,
         manager: Some(Arc::clone(manager)),
+        dlssnr_manager: None,
     };
     let center = ComputeCenter::new();
     center.set_token(TOKEN);

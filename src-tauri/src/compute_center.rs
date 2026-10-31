@@ -102,6 +102,8 @@ pub struct ComputeCenterStatus {
     /// 保留旧字段供前端状态解析；服务可以在尚未安装模型时启动。
     pub can_start: bool,
     pub paired_clients: Vec<PairedClient>,
+    pub windows_service_supported: bool,
+    pub windows_service_installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -787,12 +789,10 @@ fn settings_revision(model_data: &Path, data: &Path, settings: &RemoteSettings) 
 /// DLSSNR 那一份片段 DLL 的内容版本（读不到就是空串：那也是「这台机器上没有它」这个事实）。
 #[cfg(windows)]
 fn dll_content(data: &Path) -> String {
-    let Ok(mut file) = std::fs::File::open(crate::dlssnr::dll_path(data)) else { return String::new() };
-    let mut hasher = blake3::Hasher::new();
-    match std::io::copy(&mut file, &mut hasher) {
-        Ok(_) => format!("blake3:{}", hasher.finalize().to_hex()),
-        Err(_) => String::new(),
-    }
+    // Share the content fingerprint used by import/probing. It is invalidated
+    // on installation and keyed by file metadata, rather than reading the whole
+    // DLL at capabilities, plan creation and both ends of every page request.
+    crate::dlssnr::dll_identity(data)
 }
 
 #[cfg(not(windows))]
@@ -915,6 +915,15 @@ pub fn process_planned(
     bytes: &[u8],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<(Vec<u8>, ProcessPlan), String> {
+    process_planned_with_managers(manager, manager, model_data, data, params, settings, bytes, cancelled)
+}
+
+fn process_planned_with_managers(
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    dlssnr_manager: Option<&crate::compute::manager::ComputeManager>,
+    model_data: &Path, data: &Path, params: &ProcessParams,
+    settings: &RemoteSettings, bytes: &[u8], cancelled: &dyn Fn() -> bool,
+) -> Result<(Vec<u8>, ProcessPlan), String> {
     if bytes.is_empty() {
         return Err("请求体是空的（要发图片字节）".to_string());
     }
@@ -935,7 +944,7 @@ pub fn process_planned(
         }
         current = match step.as_str() {
             "upscale" => upscale_bytes(manager, model_data, &plan, &current, cancelled)?,
-            "dlssnr" => dlssnr_bytes(manager, data, &plan, &current, cancelled)?,
+            "dlssnr" => dlssnr_bytes(dlssnr_manager, data, &plan, &current, cancelled)?,
             other => return Err(format!("不认识的处理方式：{other}")),
         };
     }
@@ -1403,6 +1412,8 @@ pub struct ServerContext {
     /// 能起「真中心 + 真调度器 + 真 worker」而手里没有 AppHandle。「谁算这一页」只该有一个
     /// 来源，所以两条来路都由 [`ServerContext::manager`] 收口。
     pub manager: Option<Arc<crate::compute::manager::ComputeManager>>,
+    /// Windows service isolates NGX from ONNX's process-wide driver state.
+    pub dlssnr_manager: Option<Arc<crate::compute::manager::ComputeManager>>,
 }
 
 impl ServerContext {
@@ -1635,7 +1646,7 @@ async fn handle_connection(
 
     // 配对那两个端点只收一小段 JSON：体上限比数据端点小得多（docs/175 R05）。
     let pairing_endpoint = matches!(head.path.as_str(), "/v2/pair/request" | "/v2/pair/confirm");
-    if pairing_endpoint && head.content_length > MAX_PAIR_BODY {
+    if (pairing_endpoint || head.path == "/v2/local-control") && head.content_length > MAX_PAIR_BODY {
         let error = RequestError {
             status: 413,
             reason: "Payload Too Large",
@@ -1697,6 +1708,27 @@ async fn handle_connection(
         body,
     };
 
+    // Control is loopback-only AND requires the host token, never a paired
+    // client's token. This lets the GUI inspect pair codes/revoke a device
+    // while a Session-0 Windows service owns the listener.
+    if request.path == "/v2/local-control" {
+        let expected = token.read().map(|value| value.clone()).unwrap_or_default();
+        if !stream.peer_addr().map_err(|e| e.to_string())?.ip().is_loopback()
+            || !token_matches(&expected, request.headers.get("x-yomika-token").map(String::as_str).unwrap_or_default()) {
+            return write_json(&mut stream, 403, "Forbidden", &error_body("UNAUTHORIZED", "本机控制权限不足")).await;
+        }
+        if request.method == "POST" {
+            let payload: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            if let Some(id) = payload.get("revoke").and_then(|id| id.as_str()) {
+                if let Err(error) = pairing.revoke(id) { return write_json(&mut stream, 500, "Error", &error_body("UNKNOWN", &error)).await; }
+            }
+        }
+        let pending = pairing.pending.lock().ok().and_then(|value| value.as_ref().filter(|p| p.expires > std::time::Instant::now()).map(|p| serde_json::json!({
+            "code": p.code, "name": p.name, "address": p.peer, "expiresInSeconds": p.expires.saturating_duration_since(std::time::Instant::now()).as_secs(),
+        })));
+        return write_json(&mut stream, 200, "OK", &serde_json::json!({ "pairedClients": pairing.listed(), "pending": pending }).to_string()).await;
+    }
+
     // 配对入口只给出临时请求号；凭据必须凭被配对端显示的六位码取得。
     if request.path == "/v2/pair/request" && request.method == "POST" {
         let peer = stream.peer_addr().map_err(|error| error.to_string())?.ip().to_string();
@@ -1744,7 +1776,17 @@ async fn handle_connection(
             }
         },
         // 没有壳（单测直接起中心的那种用法）：没有本机偏好可读，那就是「什么都没配」。
-        None => RemoteSettings::default(),
+        None => {
+            #[cfg(windows)]
+            if context.data.join("yomika.sqlite3").exists() {
+                match crate::windows_compute_service::read_preferences(&context.data) {
+                    Ok(snapshot) => RemoteSettings::from_preferences(&snapshot),
+                    Err(error) => return write_json(&mut stream, 503, "Service Unavailable", &error_body("UNAVAILABLE", &error)).await,
+                }
+            } else { RemoteSettings::default() }
+            #[cfg(not(windows))]
+            { RemoteSettings::default() }
+        },
     };
 
     match (request.method.as_str(), request.path.as_str()) {
@@ -1807,6 +1849,7 @@ async fn handle_connection(
             // 用法）或编排还没起来时取到的是 `None`，那不是错误——真要 worker 的那一档会在
             // 自己那一层给出明确的说法。
             let manager = context.manager();
+            let dlssnr_manager = context.dlssnr_manager.clone().or_else(|| manager.clone());
             // 三条来路现在都是**等**计算进程（DLSSNR 也走了 worker，见 `dlssnr_bytes`），最长
             // 可以等到字节桥自己那 660 秒预算。占着本机重活闸等这么久，会把用户当前那一页的
             // 活一起堵在门外，所以它们只用一条普通阻塞线程等，不占闸——这与 `run_remote` 让
@@ -1836,8 +1879,9 @@ async fn handle_connection(
                 // Keep the body budget until the blocking task actually releases the body.
                 let _reservation = _reservation;
                 let revision = settings_revision(&model_data, &data, &settings);
-                process_planned(
+                process_planned_with_managers(
                     manager.as_deref(),
+                    dlssnr_manager.as_deref(),
                     &model_data,
                     &data,
                     &params,
@@ -2211,7 +2255,12 @@ impl RemoteFailure {
 
     fn response(status: u16, body: &str) -> Self {
         // A received server error can be an engine/protocol defect, not a link failure.
-        Self { code: "REMOTE_UNAVAILABLE", message: describe_error(status, body), retryable: status >= 500 }
+        let code = match status {
+            500 => "INFERENCE_UNAVAILABLE",
+            429 => "REMOTE_RATE_LIMIT",
+            _ => "REMOTE_UNAVAILABLE",
+        };
+        Self { code, message: describe_error(status, body), retryable: status >= 500 || status == 429 }
     }
 
     fn protocol(message: String) -> Self {
@@ -2338,6 +2387,11 @@ fn current_port(app: &tauri::AppHandle) -> u16 {
 pub fn restore_on_launch(app: &tauri::AppHandle) -> Result<(), String> {
     let mut snapshot = preferences(app)?;
     if !snapshot.compute_center_enabled { return Ok(()); }
+    #[cfg(windows)]
+    if crate::windows_compute_service::installed() {
+        watch_service_pairing(app.clone());
+        return Ok(());
+    }
     if snapshot.compute_center_token.is_empty() {
         snapshot.compute_center_token = fresh_token();
         snapshot = store_preferences(app, snapshot)?;
@@ -2345,13 +2399,17 @@ pub fn restore_on_launch(app: &tauri::AppHandle) -> Result<(), String> {
     let (model_data, data) = paths(app)?;
     let center = center_of(app)?;
     center.set_token(&snapshot.compute_center_token);
-    center.start(ServerContext { model_data, data, app: Some(app.clone()), manager: None }, snapshot.compute_center_port)?;
+    center.start(ServerContext { model_data, data, app: Some(app.clone()), manager: None, dlssnr_manager: None }, snapshot.compute_center_port)?;
     Ok(())
 }
 
 /// 算力中心的现状：开没开、端口、地址、令牌。
 #[tauri::command(async)]
 pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCenterStatus> {
+    #[cfg(windows)]
+    let service = crate::windows_compute_service::installed();
+    #[cfg(not(windows))]
+    let service = false;
     let center = match center_of(&app) {
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
@@ -2360,7 +2418,7 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
         Ok(paths) => paths,
         Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false),
     };
-    center.pairing.set_storage(&data);
+    if !service { center.pairing.set_storage(&data); }
     let token = preferences(&app)
         .map(|snapshot| snapshot.compute_center_token)
         .unwrap_or_default();
@@ -2371,14 +2429,17 @@ pub fn compute_center_status(app: tauri::AppHandle) -> CommandResult<ComputeCent
         &data,
         crate::compute::manager_from_app(&app).as_deref(),
     );
+    let service_state = if service { local_service_control(&app, None).ok() } else { None };
     CommandResult::success(ComputeCenterStatus {
-        running: center.is_running(),
+        running: center.is_running() || service_state.is_some(),
         port: center.running_port().unwrap_or_else(|| current_port(&app)),
         addresses: local_addresses(),
         token,
         capabilities: local_capabilities,
         can_start: true,
-        paired_clients: center.pairing.listed(),
+        paired_clients: service_state.and_then(|v| serde_json::from_value(v["pairedClients"].clone()).ok()).unwrap_or_else(|| center.pairing.listed()),
+        windows_service_supported: cfg!(windows),
+        windows_service_installed: service,
     })
 }
 
@@ -2415,6 +2476,31 @@ pub fn compute_center_configure(
     }
     snapshot.compute_center_enabled = enabled;
 
+    #[cfg(windows)]
+    if crate::windows_compute_service::installed() {
+        if rotate_token.unwrap_or(false) { return CommandResult::failure("INVALID_RESPONSE", "请先关闭 Windows 服务再更换配对令牌", false); }
+        let previous = preferences(&app).ok();
+        if let Err(error) = store_preferences(&app, snapshot) { return CommandResult::failure("UNKNOWN", error, true); }
+        if enabled && !crate::windows_compute_service::running() {
+            if let Err(error) = crate::windows_compute_service::configure(true) {
+                if let Some(previous) = previous { let _ = store_preferences(&app, previous); }
+                return CommandResult::failure("PLATFORM_UNAVAILABLE", error, true);
+            }
+        }
+        // Service observes committed settings once a second. Never bind the
+        // same port in the GUI or write into its worker workspace.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if local_service_control(&app, None).is_ok() == enabled { break; }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if local_service_control(&app, None).is_ok() != enabled {
+            if let Some(previous) = previous { let _ = store_preferences(&app, previous); }
+            return CommandResult::failure("NETWORK", "Windows 服务未能应用设置，已恢复之前的设置；请检查服务日志", true);
+        }
+        return compute_center_status(app);
+    }
+
     let center = match center_of(&app) {
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
@@ -2446,11 +2532,12 @@ pub fn compute_center_configure(
             data: data.clone(),
             app: Some(app.clone()),
             manager: None,
+            dlssnr_manager: None,
         };
         if let Err(error) = center.start(context, snapshot.compute_center_port) {
             if let Some(old_port) = previous_port {
                 if changing_port {
-                    let fallback = ServerContext { model_data, data, app: Some(app.clone()), manager: None };
+                    let fallback = ServerContext { model_data, data, app: Some(app.clone()), manager: None, dlssnr_manager: None };
                     let _ = center.start(fallback, old_port);
                 }
             }
@@ -2476,11 +2563,18 @@ pub fn compute_center_configure(
         capabilities: local_capabilities,
         can_start: true,
         paired_clients: center.pairing.listed(),
+        windows_service_supported: cfg!(windows),
+        windows_service_installed: false,
     })
 }
 
 #[tauri::command(async)]
 pub fn compute_center_revoke_pairing(app: tauri::AppHandle, id: String) -> CommandResult<ComputeCenterStatus> {
+    #[cfg(windows)]
+    if crate::windows_compute_service::installed() {
+        if let Err(error) = local_service_control(&app, Some(&id)) { return CommandResult::failure("NETWORK", error, true); }
+        return compute_center_status(app);
+    }
     let center = match center_of(&app) {
         Ok(center) => center,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
@@ -2489,6 +2583,77 @@ pub fn compute_center_revoke_pairing(app: tauri::AppHandle, id: String) -> Comma
         return CommandResult::failure("UNKNOWN", error, false);
     }
     compute_center_status(app)
+}
+
+fn local_service_control(app: &tauri::AppHandle, revoke: Option<&str>) -> Result<serde_json::Value, String> {
+    let preferences = preferences(app)?;
+    let client = reqwest::blocking::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(2)).build().map_err(|e| e.to_string())?;
+    let url = format!("http://127.0.0.1:{}/v2/local-control", preferences.compute_center_port);
+    let request = if let Some(id) = revoke { client.post(url).json(&serde_json::json!({ "revoke": id })) } else { client.get(url) };
+    request.header("x-yomika-token", preferences.compute_center_token).send().and_then(|response| response.error_for_status()).and_then(|response| response.json()).map_err(|e| e.to_string())
+}
+
+#[cfg(windows)]
+fn watch_service_pairing(app: tauri::AppHandle) {
+    static WATCHING: AtomicBool = AtomicBool::new(false);
+    if WATCHING.swap(true, Ordering::SeqCst) { return; }
+    std::thread::spawn(move || {
+        let mut last_code = String::new();
+        let mut last_clients = serde_json::Value::Null;
+        while crate::windows_compute_service::installed() {
+            if let Ok(value) = local_service_control(&app, None) {
+                if let Some(code) = value["pending"]["code"].as_str() {
+                    if code != last_code {
+                        last_code = code.to_string();
+                        let context = ServerContext { data: Default::default(), model_data: Default::default(), app: Some(app.clone()), manager: None, dlssnr_manager: None };
+                        notify_pairing_code(&context, code, value["pending"]["name"].as_str().unwrap_or("设备"), value["pending"]["address"].as_str().unwrap_or(""));
+                    }
+                } else { last_code.clear(); }
+                if last_clients != value["pairedClients"] {
+                    last_clients = value["pairedClients"].clone();
+                    let _ = tauri::Emitter::emit(&app, PAIRING_CHANGED_EVENT, ());
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        WATCHING.store(false, Ordering::SeqCst);
+    });
+}
+
+#[tauri::command(async)]
+pub fn compute_windows_service_configure(app: tauri::AppHandle, enabled: bool) -> CommandResult<ComputeCenterStatus> {
+    #[cfg(not(windows))]
+    { let _ = (app, enabled); CommandResult::failure("PLATFORM_UNAVAILABLE", "仅 Windows 支持注册系统服务", false) }
+    #[cfg(windows)]
+    {
+        let snapshot = match preferences(&app) { Ok(snapshot) => snapshot, Err(error) => return CommandResult::failure("UNKNOWN", error, true) };
+        if enabled && !snapshot.compute_center_enabled { return CommandResult::failure("INVALID_RESPONSE", "请先开启本机远程后处理服务", false); }
+        if let Ok(center) = center_of(&app) { center.stop(); }
+        if let Err(error) = crate::windows_compute_service::configure(enabled) {
+            let _ = restore_on_launch(&app);
+            return CommandResult::failure("PLATFORM_UNAVAILABLE", error, true);
+        }
+        if enabled {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            while local_service_control(&app, None).is_err() {
+                if std::time::Instant::now() >= deadline {
+                    return CommandResult::failure("NETWORK", "Windows 服务已注册，但独立处理进程未能就绪；请查看服务日志或关闭此开关重试", true);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            watch_service_pairing(app.clone());
+        }
+        else {
+            // The service was the sole writer while installed. Discard the
+            // GUI's pre-handoff copy before it starts authenticating clients.
+            if let Ok(center) = center_of(&app) {
+                if let Ok(mut storage) = center.pairing.storage.lock() { *storage = None; }
+                if let Ok(mut clients) = center.pairing.clients.lock() { clients.clear(); }
+            }
+            if let Err(error) = restore_on_launch(&app) { return CommandResult::failure("NETWORK", error, true); }
+        }
+        compute_center_status(app)
+    }
 }
 
 /// 连一次远端，拿它的能力清单（移动端「连接」按钮）。
@@ -2594,6 +2759,21 @@ pub async fn remote_compute_process(
     Ok(crate::domain::result::into_binary_response(result))
 }
 
+// Remote outputs share the reader-session cache and quota with local outputs.
+// Bind them to both the actual source bytes and the advertised plan; retaining
+// only the JS blob made an evicted prefetched page run over the network again.
+fn remote_output_identity(input: &RemoteProcessInput, source: &[u8]) -> Option<crate::cache::CacheImageIdentity> {
+    let revision = input.expected_revision.as_deref().filter(|value| !value.is_empty())?;
+    let key = serde_json::to_vec(&(&input.url, revision, &input.params, input.source.as_deref().unwrap_or("reader-page"))).ok()?;
+    let mut hash = blake3::Hasher::new();
+    hash.update(&key);
+    hash.update(source);
+    let rendition = if input.params.op == "dlssnr" || input.params.chain.iter().any(|op| op == "dlssnr") { "dlssnr" } else { "enhanced" };
+    let mut identity = crate::cache::CacheImageIdentity::new(&input.scope_id, &input.archive_id, rendition, input.page_index);
+    identity.revision = Some(format!("remote:{}", hash.finalize().to_hex()));
+    Some(identity)
+}
+
 async fn remote_process_cached_page(
     database: &crate::db::Database,
     data_dir: &std::path::Path,
@@ -2634,6 +2814,10 @@ async fn remote_process_cached_page(
     if guard.cancelled() {
         return CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false);
     }
+    let output_identity = remote_output_identity(input, &page.bytes);
+    if let Some(bytes) = output_identity.as_ref().and_then(|identity| crate::inference::cached_derived(database, data_dir, identity)) {
+        return CommandResult::success(bytes);
+    }
 
     match remote_process_cancellable(
         &input.url,
@@ -2650,7 +2834,13 @@ async fn remote_process_cached_page(
         Ok(_) if guard.cancelled() => {
             CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
         }
-        Ok(bytes) => CommandResult::success(bytes),
+        Ok(bytes) => {
+            let bytes = if let Some(identity) = output_identity {
+                let mime = crate::cache::sniff_image_mime("", &bytes).unwrap_or_else(|| "image/png".into());
+                crate::inference::finish_derived(database, data_dir, "inference.remote.cache", &identity, &mime, bytes)
+            } else { bytes };
+            CommandResult::success(bytes)
+        }
         // 远端那一步的失败带着自己的码：超时是可重试的（本地可以退到本机那一版
         // 继续读），4xx 是我们发错了、不该原样重试。
         Err(error) => CommandResult::failure(error.code, error.message, error.retryable),
@@ -2660,6 +2850,47 @@ async fn remote_process_cached_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_prefetch_survives_memory_eviction_and_invalidates_with_source_or_plan() {
+        use std::io::{Read, Write};
+        let temp = tempfile::tempdir().unwrap();
+        let database = crate::db::Database::open_path(temp.path().join("test.sqlite3")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let png = b"\x89PNG\r\n\x1a\nprocessed";
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 8192];
+            stream.read(&mut request).unwrap();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nX-Yomika-Settings-Revision: plan-a\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", png.len()).unwrap();
+            stream.write_all(png).unwrap();
+        });
+        let mut input = RemoteProcessInput {
+            url, token: "private-token".into(), params: ProcessParams { op: "dlssnr".into(), chain: vec!["dlssnr".into()], model_id: None, scale: None, dlssnr: None },
+            scope_id: "scope".into(), archive_id: "archive".into(), page_index: 1, source: None,
+            expected_revision: Some("plan-a".into()), upscale_model: None, upscale_output_scale: None, task_id: None, priority: None,
+        };
+        let source = crate::cache::CacheImageIdentity::new("scope", "archive", "reader-page", 1);
+        let mut original = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(8, 8).write_to(&mut original, image::ImageFormat::Png).unwrap();
+        crate::cache::write_cached_image(&database, temp.path(), &source, "image/png", original.get_ref()).unwrap();
+        let first = match remote_process_cached_page(&database, temp.path(), &input).await {
+            CommandResult::Success { value, .. } => value,
+            other => panic!("first remote process failed: {other:?}"),
+        };
+        server.join().unwrap(); // No listening server remains: a second fetch must use disk.
+        let CommandResult::Success { value: second, .. } = remote_process_cached_page(&database, temp.path(), &input).await else { panic!("disk cache missed") };
+        assert_eq!(first, second);
+        input.expected_revision = Some("plan-b".into());
+        assert!(matches!(remote_process_cached_page(&database, temp.path(), &input).await, CommandResult::Failure { .. }));
+        input.expected_revision = Some("plan-a".into());
+        crate::cache::write_cached_image(&database, temp.path(), &source, "image/png", b"\x89PNGchanged").unwrap();
+        assert!(matches!(remote_process_cached_page(&database, temp.path(), &input).await, CommandResult::Failure { .. }));
+        assert!(!remote_output_identity(&input, b"source").unwrap().revision.unwrap().contains("private-token"));
+        input.expected_revision = None;
+        assert!(remote_output_identity(&input, b"source").is_none());
+    }
 
     #[cfg(windows)]
     #[test]
@@ -2712,7 +2943,7 @@ mod tests {
         worker.join().unwrap();
         let (url, worker) = remote_failure_stub(500, "application/json", &error_body("GPU_OUTPUT_INVALID", "broken engine"));
         let error = remote_process(&url, "token", &params, one_pixel_png()).unwrap_err();
-        assert_eq!(error.code, "REMOTE_UNAVAILABLE");
+        assert_eq!(error.code, "INFERENCE_UNAVAILABLE");
         assert!(error.message.contains("broken engine"));
         worker.join().unwrap();
     }
@@ -2925,6 +3156,7 @@ mod tests {
             data: dir.path().to_path_buf(),
             app: None,
             manager: None,
+            dlssnr_manager: None,
         };
         let center = ComputeCenter::new();
         center.set_token("token-123");
@@ -3170,11 +3402,32 @@ mod tests {
             data: dir.to_path_buf(),
             app: None,
             manager: None,
+            dlssnr_manager: None,
         };
         let center = ComputeCenter::new();
         center.set_token("token-123");
         let port = center.start(context, 0).expect("起服务");
         (center, port)
+    }
+
+    #[test]
+    fn local_service_control_requires_host_token_and_does_not_disclose_client_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let (center, port) = server_for(dir.path());
+        let (id, code) = center.pairing.begin("127.0.0.1", "Test tablet", None).unwrap();
+        let paired_token = center.pairing.confirm("127.0.0.1", &id, &code).unwrap();
+        let request = |token: &str| raw_request(port, format!("GET /v2/local-control HTTP/1.1\r\nHost: localhost\r\nx-yomika-token: {token}\r\n\r\n").as_bytes());
+        assert!(request(&paired_token).starts_with("HTTP/1.1 403"));
+        let response = request("token-123");
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("Test tablet"));
+        assert!(!response.contains(&paired_token));
+        let client_id = center.pairing.listed()[0].id.clone();
+        let body = serde_json::json!({"revoke": client_id}).to_string();
+        let response = raw_request(port, format!("POST /v2/local-control HTTP/1.1\r\nHost: localhost\r\nx-yomika-token: token-123\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes());
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(!center.pairing.authorized(&paired_token));
+        center.stop();
     }
 
     #[test]
@@ -3350,7 +3603,7 @@ mod tests {
         let base = format!("127.0.0.1:{port}");
         let refused = remote_process(&base, "token-123", &params, gif.clone())
             .expect_err("没有编排时对面该拒绝，而不是就地算出来");
-        assert_eq!(refused.code, "REMOTE_UNAVAILABLE", "{}", refused.message);
+        assert_eq!(refused.code, "INFERENCE_UNAVAILABLE", "{}", refused.message);
         assert!(refused.retryable, "编排没起来是暂态，对面回的是 5xx：{}", refused.message);
         assert!(
             refused.message.contains("dlssnr：计算编排"),

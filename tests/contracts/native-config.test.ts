@@ -1585,8 +1585,16 @@ describe('native shell configuration', () => {
     expect(pkg, '宿主的垫片导出名不许在').toContain(
       "$found = Find-Literals $hostBytes @('yomika_ngx_init')",
     );
-    expect(pkg, '宿主 ORT 那一半就看这三个名字').toContain(
-      "$found = Find-Literals $hostBytes @('d3d12.dll', 'DirectML.dll', 'onnxruntime')",
+    // 服务安装器会复制 `DirectML.dll`，所以「文件里有这个名字」是打包元数据，不再是
+    // 「宿主链了 DirectML」的证据。判据改看真正的 PE 导入表，字节里的字面量只留引擎符号。
+    expect(pkg, '宿主 ORT 那一半看导入表，另加 ORT 引擎符号；文件名不当证据').toContain(
+      "$found = @(Find-Literals $hostBytes @('d3d12.dll', 'onnxruntime', 'OrtGetApiBase'))",
+    );
+    expect(pkg, '导入表要按 PE 目录真解一遍，名字小写比对').toContain(
+      "$found += @(Get-PeImports $hostBytes | Where-Object { $_ -in @('d3d12.dll', 'directml.dll', 'onnxruntime.dll') })",
+    );
+    expect(pkg, 'PE 导入表解析不出就抛，别把解析失败读成「没有导入」').toContain(
+      "throw 'PE import RVA outside sections'",
     );
     // 这一句是判据被自己的误报教出来的：`ort-api` 是协议常量，宿主拿它当缓存身份，
     // 它本来就该在宿主的字节里。查它会红在一件设计上就该如此的事。

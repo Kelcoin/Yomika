@@ -58,6 +58,8 @@ mod settings;
 mod single_instance;
 mod tagcount;
 mod tray_menu;
+#[cfg(windows)]
+mod windows_compute_service;
 
 use cache::{
     cache_clear_images, cache_evict, cache_invalidate_archive, cache_purge_reader_renditions,
@@ -148,6 +150,8 @@ static MAIN_WINDOW_READY: std::sync::atomic::AtomicBool =
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(windows)]
+    if windows_compute_service::dispatch() { return; }
     #[cfg(target_os = "windows")]
     let background_launch = std::env::args().any(|arg| arg == "--background");
     // 单实例：双击两次图标、或者自启之外又手动打开一次，会得到两个进程同时写同一份
@@ -541,6 +545,7 @@ pub fn run() {
             compute_center_status,
             compute_center_configure,
             compute_center_revoke_pairing,
+            compute_center::compute_windows_service_configure,
             compute_discover,
             compute_pair_request,
             compute_pair_confirm,

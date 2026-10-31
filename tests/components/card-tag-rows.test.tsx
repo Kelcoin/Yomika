@@ -72,6 +72,20 @@ const TAGS = [
 ];
 
 describe('card tag rows', () => {
+  it('retains measured packing when a refresh returns equal tags in a new array', () => {
+    const fake = installMeasureFake();
+    try {
+      const { container, rerender } = render(<CardTagRows tags={TAGS} rowCount={2} fill className="tags" />);
+      const root = container.querySelector<HTMLElement>('.tags')!;
+      fake.track(root);
+      fake.state.laidOut = true;
+      act(() => fake.fire(root));
+      expect(rowLengths(container)).toEqual([1, 1]);
+      fake.state.laidOut = false;
+      rerender(<CardTagRows tags={[...TAGS]} rowCount={2} fill className="tags" />);
+      expect(rowLengths(container)).toEqual([1, 1]);
+    } finally { fake.restore(); }
+  });
   it('uses CSS wrapping without hidden measurement chips on dense responsive lists', () => {
     const fake = installMeasureFake();
     try {

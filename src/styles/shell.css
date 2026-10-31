@@ -6760,6 +6760,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 /* Landscape art gets the same uncropped treatment as wide thumbnail cards. */
 .archive-detail-overview:has(.archive-detail-route-cover.is-wide) { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .archive-detail-route-cover.is-wide .archive-detail-cover-trigger { width: 100%; }
+.archive-detail-route-cover.is-wide .archive-detail-cover-placeholder { width: 100%; aspect-ratio: var(--cover-ratio, 4 / 3); }
 .archive-detail-route-cover.is-wide img { width: 100%; height: auto; aspect-ratio: auto; object-fit: contain; }
 @container archive-detail (max-width: 520px) {
   .archive-detail-overview:has(.archive-detail-route-cover.is-wide) { grid-template-columns: minmax(0, 1fr); }

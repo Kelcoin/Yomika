@@ -394,7 +394,7 @@ detailBasePath?: string | undefined }) {
       </header>
 
       <div className="archive-detail-overview">
-        <ArchiveDetailCover title={title} cover={cover} loading={coverLoading} />
+        <ArchiveDetailCover title={title} cover={cover} loading={coverLoading} serverId={serverId} archiveId={archiveId} />
         <div className="archive-detail-overview-copy">
           <ArchiveDetailFacts facts={facts} loading={!metadata} />
         </div>

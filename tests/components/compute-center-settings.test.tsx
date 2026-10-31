@@ -121,6 +121,31 @@ describe('device identity', () => {
 });
 
 describe('compute center paired clients', () => {
+  it('registers and uninstalls the Windows service without toggling local serving', async () => {
+    const configure = vi.fn((args?: Record<string, unknown>) => ({ ok: true, value: computeStatus({ running: true, windowsServiceSupported: true, windowsServiceInstalled: args?.enabled }) }));
+    const adapter = adapterFor({
+      compute_center_status: () => ({ ok: true, value: computeStatus({ running: true, windowsServiceSupported: true }) }),
+      compute_windows_service_configure: configure,
+    });
+    setInvokeAdapterForTests(adapter);
+    renderComputeCenter();
+    const toggle = await screen.findByRole('switch', { name: '注册为 Windows 服务' });
+    expect(toggle).not.toBeChecked();
+    await user().click(toggle);
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(configure).toHaveBeenLastCalledWith({ enabled: true });
+    await user().click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(configure).toHaveBeenLastCalledWith({ enabled: false });
+    expect(adapter.mock.calls.some(([command]) => command === 'compute_center_configure')).toBe(false);
+  });
+
+  it('does not expose Windows service registration on unsupported platforms or while disabled', async () => {
+    setInvokeAdapterForTests(adapterFor({ compute_center_status: () => ({ ok: true, value: computeStatus({ windowsServiceSupported: true }) }) }));
+    renderComputeCenter();
+    await screen.findByRole('switch', { name: '开启本机远程后处理服务' });
+    expect(screen.queryByRole('switch', { name: '注册为 Windows 服务' })).not.toBeInTheDocument();
+  });
   it('renders cached service details immediately while reconciling in the background', () => {
     localStorage.setItem('yomika.compute-center-status', JSON.stringify(computeStatus({ running: true, pairedClients: CLIENTS, token: '' })));
     setInvokeAdapterForTests(adapterFor({ compute_center_status: () => new Promise(() => {}) }));

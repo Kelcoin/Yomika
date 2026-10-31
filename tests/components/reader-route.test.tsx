@@ -2007,6 +2007,7 @@ describe('reader route', () => {
     pageCount?: number;
     rawPage?: (pageIndex: number) => unknown;
     prefetchPages?: number;
+    startPage?: number;
   }): { calls: Array<[string, Record<string, unknown> | undefined]> } {
     const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     let probes = 0;
@@ -2058,7 +2059,7 @@ describe('reader route', () => {
       }
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', name: 'Home', baseUrl: 'https://example.com', scopeId: 's' }] };
       if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'remote-reader', title: 'Reader', pages: Array.from({ length: options.pageCount ?? 1 }, (_, index) => `${index}.jpg`) } };
-      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'load_reading_progress') return { ok: true, value: options.startPage === undefined ? null : { scopeId: 's', archiveId: 'remote-reader', pageIndex: options.startPage, pageCount: options.pageCount, layout: 'paged', direction: 'ltr', revision: 1, updatedAt: new Date().toISOString() } };
       if (command === 'load_reader_page') return options.rawPage ? options.rawPage(Number(args?.pageIndex)) : { ok: true, value: [1, 2, 3] };
       if (command === 'save_preferences') return { ok: true, value: (args?.input ?? {}) };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
@@ -2099,6 +2100,18 @@ describe('reader route', () => {
       const requests = calls.filter(([name]) => name === 'remote_compute_process').map(([, args]) => args?.input as { pageIndex: number; params: { chain: string[] } });
       expect(new Set(requests.map(request => request.pageIndex))).toEqual(new Set([0, 1, 2, 3, 4]));
       expect(requests.every(request => request.params.chain.join(',') === 'upscale,dlssnr')).toBe(true);
+    });
+  });
+
+  it('preprocesses the next DLSSNR page before older pages behind the viewport', async () => {
+    installHost();
+    const { calls } = remoteReader({ ready: { upscale: false, dlssnr: true }, pageCount: 7, startPage: 2, prefetchPages: 4 });
+    await screen.findByRole('img', { name: '第 3 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启 DLSSNR' }));
+    await waitFor(() => {
+      const pages = calls.filter(([name]) => name === 'remote_compute_process').map(([, args]) => (args?.input as { pageIndex: number }).pageIndex);
+      expect(pages.slice(0, 5)).toEqual([2, 3, 1, 4, 0]);
     });
   });
 

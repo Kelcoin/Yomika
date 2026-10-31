@@ -48,7 +48,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
   const root = useRef<HTMLSpanElement>(null);
   const pageActive = usePageActive();
   const translationRevision = useTagTranslations();
-  const [measured, setMeasured] = useState<{ tags: string[]; widths: number[]; containerWidth: number }>();
+  const [measured, setMeasured] = useState<{ labelKey: string; widths: number[]; containerWidth: number }>();
   // 翻译与序列化只在标签集合变化时重算：搜索框每敲一键，档案库会重渲染
   // 所有可见卡片，这里不挡一下就是每卡 × 每键的重复工作。
   const labels = useMemo(
@@ -83,10 +83,10 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
       // 落回上一次的读数（或下面的兜底瀑布），等下一次通知带真尺寸来。
       if (widths.length === 0 || !widths.some((width) => width > 0)) return;
       if (fill && containerWidth <= 0) return;
-      setMeasured((previous) => previous?.tags === tags
+      setMeasured((previous) => previous?.labelKey === labelKey
         && previous.widths.every((width, index) => width === widths[index])
         && previous.containerWidth === containerWidth
-        ? previous : { tags, widths, containerWidth });
+        ? previous : { labelKey, widths, containerWidth });
     };
     measureTags();
     const observer = fill && typeof ResizeObserver !== 'undefined'
@@ -102,7 +102,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     return () => { active = false; observer?.disconnect(); };
   // Retained pages reveal before ResizeObserver delivers: measure in the
   // activation layout effect so the fallback rows never reach the screen.
-  }, [tags, labelKey, fill, pageActive, layout]);
+  }, [labelKey, fill, pageActive, layout]);
   if (layout === 'wrap') return <span className={className + ' card-tag-waterfall is-wrapped'} style={{ '--tag-row-count': rowCount } as import('react').CSSProperties}>
     <span className="archive-row-tag-line">{labels.map((label, index) => {
       const tag = tags[index - leading.length];
@@ -111,8 +111,8 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     })}</span>
   </span>;
   // 测量层的顺序与 labels 一致（判定胶囊在前），所以宽度表也按 labels 兜底。
-  const widths = measured?.tags === tags ? measured.widths : labels.map(() => 1);
-  const containerWidth = measured?.tags === tags ? measured.containerWidth : 0;
+  const widths = measured?.labelKey === labelKey ? measured.widths : labels.map(() => 1);
+  const containerWidth = measured?.labelKey === labelKey ? measured.containerWidth : 0;
   const rows = fill
     ? distributeTagRows(widths, rowCount, { containerWidth })
     : distributeTagRows(widths, rowCount);

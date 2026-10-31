@@ -6,10 +6,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover } from '../../src/components/ArchiveDetailSections';
 import { getNativeImageCache } from '../../src/lib/nativeImageCache';
 import { RetainedPage } from '../../src/app/RetainedPage';
+import { rememberCoverRatio } from '../../src/lib/archiveCardPresentation';
 
 /** 档案详情页与本地档案详情面板共用的那几块：事实网格、封面（含大图预览）、标签墙。
  * 抽出来的边界就在这里，页面级测试不一定会走到。 */
 describe('archive detail sections', () => {
+  it('reserves the known wide cover geometry before the detail image loads', () => {
+    rememberCoverRatio('geometry-server', 'wide-archive', 1.6);
+    const view = render(<ArchiveDetailCover title="Wide" serverId="geometry-server" archiveId="wide-archive" loading />);
+    const cover = view.container.querySelector('.archive-detail-route-cover')!;
+    expect(cover).toHaveClass('is-wide');
+    expect(cover).toHaveStyle({ '--cover-ratio': '1.6' });
+    view.rerender(<ArchiveDetailCover title="Wide" serverId="geometry-server" archiveId="wide-archive" cover="blob:wide-new" />);
+    expect(cover).toHaveClass('is-wide');
+    expect(cover).toHaveStyle({ '--cover-ratio': '1.6' });
+  });
   it('returns a full preview into a cropped cover without distorting the artwork', () => {
     const animate = vi.fn(() => ({ cancel: vi.fn() }));
     const original = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'animate');

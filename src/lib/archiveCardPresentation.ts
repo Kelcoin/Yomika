@@ -51,6 +51,21 @@ export function wideCoverMarkKey(serverId: string, archiveId: string): string {
  * 「这张封面长什么样」的提示，猜错最多是排版先按窄卡、封面到手后自己纠正，不会显示
  * 错内容。上限沿用 `WIDE_COVER_MARK_LIMIT` 的 FIFO，所以它不会无限增长。 */
 let wideCoverMarks = new Set<string>();
+const coverRatios = new Map<string, number>();
+
+export function rememberCoverRatio(serverId: string, archiveId: string, ratio: number): void {
+  if (!serverId || !archiveId) return;
+  if (!Number.isFinite(ratio) || ratio <= 0) return;
+  const key = wideCoverMarkKey(serverId, archiveId);
+  coverRatios.delete(key);
+  coverRatios.set(key, ratio);
+  while (coverRatios.size > WIDE_COVER_MARK_LIMIT) coverRatios.delete(coverRatios.keys().next().value!);
+  rememberWideCoverMark(serverId, archiveId, isWideCoverRatio(ratio));
+}
+
+export function readCoverRatio(serverId: string, archiveId: string): number | undefined {
+  return coverRatios.get(wideCoverMarkKey(serverId, archiveId));
+}
 
 export function rememberWideCoverMark(serverId: string, archiveId: string, wide: boolean): Set<string> {
   wideCoverMarks = withWideCoverMark(wideCoverMarks, wideCoverMarkKey(serverId, archiveId), wide);
@@ -68,6 +83,7 @@ export function readWideCoverMarkKeys(): ReadonlySet<string> {
 
 export function resetWideCoverMarksForTests(): void {
   wideCoverMarks = new Set();
+  coverRatios.clear();
 }
 
 /** Namespaces that tell a reader what an archive is, most telling first. A card
