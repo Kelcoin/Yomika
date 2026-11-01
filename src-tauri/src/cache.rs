@@ -43,23 +43,47 @@ const CACHE_EVICTION_TARGET_PERCENT: u64 = 75;
 /// 前者重试有意义、后者没有。
 pub const LOCK_FAILED: &str = "数据库正被占用";
 
-/// 缓存代：**清空缓存**会把它加一。
+/// 缓存代：**这一条缓存根**被清空过几次。
 ///
 /// 它管住的是「清空」与「正在写的那些任务」之间的竞速。写缓存分成两步——先在锁外
 /// 把文件落盘（这一步可能很长），再在锁内写一行——如果这中间用户点了清空，那一步
 /// 落盘的产物就属于**上一代**：它不该再把自己的行塞回来，否则用户看到的「已清空」
 /// 会被一件早就开始的任务悄悄推翻。条目是内容寻址的，所以晚到的产物**不删**（同一
 /// 份内容可能还有别的行在引用它），只是不再挂新行；没有行引用的文件由孤儿清扫收走。
-static CACHE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 代是**按缓存根**记的，不是整个进程一个数：真机上只有一条缓存根，两者等价；而测试里
+/// 每个用例各开一条临时根，共用一个数会让「A 清空缓存」把 B 手里正要挂行的产物判成上一代
+/// （见 `clearing_one_cache_root_does_not_drop_a_write_in_flight_on_another`）。
+static CACHE_EPOCHS: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn with_epochs<T>(work: impl FnOnce(&mut Vec<(std::path::PathBuf, u64)>) -> T) -> T {
+    let mut epochs = CACHE_EPOCHS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    work(&mut epochs)
+}
 
 /// 当前缓存代。读它不需要锁：它只用来做「我动手前是这一代吗」的比较。
-pub fn cache_epoch() -> u64 {
-    CACHE_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+pub fn cache_epoch(app_data: &std::path::Path) -> u64 {
+    with_epochs(|epochs| {
+        epochs
+            .iter()
+            .find(|(root, _)| root == app_data)
+            .map(|(_, epoch)| *epoch)
+            .unwrap_or(0)
+    })
 }
 
 /// 作废这一代（清空缓存时调用），返回新的代。
-fn bump_cache_epoch() -> u64 {
-    CACHE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+fn bump_cache_epoch(app_data: &std::path::Path) -> u64 {
+    with_epochs(|epochs| {
+        if let Some((_, epoch)) = epochs.iter_mut().find(|(root, _)| root == app_data) {
+            *epoch += 1;
+            return *epoch;
+        }
+        epochs.push((app_data.to_path_buf(), 1));
+        1
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -231,12 +255,13 @@ const LOCK_PROBE_QUERY: &str = "SELECT 1";
 
 fn begin_read(
     database: &Database,
+    app_data: &std::path::Path,
     identity: &CacheImageIdentity,
 ) -> Result<Option<PendingRead>, String> {
     let key = image_cache_key(identity);
     let connection = database.connection.lock().map_err(|_| LOCK_FAILED.to_string())?;
     let row = read_entry_row(&connection, &key, identity)?;
-    let epoch = cache_epoch();
+    let epoch = cache_epoch(app_data);
     Ok(row.map(|row| PendingRead { key, row, epoch }))
 }
 
@@ -256,7 +281,7 @@ fn finish_read(
             mime: row.mime.unwrap_or_else(default_mime),
         }));
     }
-    if cache_epoch() != epoch {
+    if cache_epoch(app_data) != epoch {
         // 代变了：这一行是上一代的账。行是按**路径**删的，而路径是内容寻址的——
         // 清了缓存之后新一代完全可能把同一份内容贴回同一个文件上，照着旧账删行
         // 就会删掉新一代那一行；删文件同理。所以这里什么都不做：没有行引用的
@@ -284,7 +309,7 @@ pub fn read_cached_image(
     identity: &CacheImageIdentity,
 ) -> Result<Option<CachedImage>, String> {
     identity.validate()?;
-    let Some(pending) = begin_read(database, identity)? else {
+    let Some(pending) = begin_read(database, app_data, identity)? else {
         return Ok(None);
     };
     finish_read(database, app_data, pending)
@@ -634,7 +659,7 @@ fn prepare_blob(
         content_hash,
         mime,
         byte_length: bytes.len() as i64,
-        epoch: cache_epoch(),
+        epoch: cache_epoch(app_data),
         identity: identity.clone(),
     })
 }
@@ -661,7 +686,7 @@ fn commit_blob(
         .connection
         .lock()
         .map_err(|_| LOCK_FAILED.to_string())?;
-    if cache_epoch() != blob.epoch {
+    if cache_epoch(app_data) != blob.epoch {
         // 这一份写入开始之后用户清空过缓存：它属于上一代，不挂行。
         // 文件留着（内容寻址，可能还有别的行引用它），没行引用的由孤儿清扫收。
         return Ok(());
@@ -749,7 +774,7 @@ fn pending_from_published(
         content_hash: content_hash.to_string(),
         mime: mime.to_string(),
         byte_length,
-        epoch: cache_epoch(),
+        epoch: cache_epoch(app_data),
         identity: identity.clone(),
     })
 }
@@ -1184,7 +1209,7 @@ pub fn clear_image_cache(
         return Err("Invalid cache root".into());
     }
     // 作废这一代：这一下之后才收尾的那份写入不许再挂行（见 CACHE_EPOCH 的注释）。
-    bump_cache_epoch();
+    bump_cache_epoch(app_data);
     let candidates = {
         let mut statement = connection
             .prepare(&format!(
@@ -1262,7 +1287,7 @@ pub fn invalidate_archive_cache(
         return Err("Invalid archive cache identity".into());
     }
     // 同 clear_image_cache：作废这一代，晚到的写入不再挂行。
-    bump_cache_epoch();
+    bump_cache_epoch(app_data);
     let candidates = {
         let mut statement = connection
             .prepare(&format!(
@@ -1360,7 +1385,7 @@ pub fn purge_reader_renditions(
         return Err("Invalid cache root".into());
     }
     // 与另外两条一样：作废这一代，晚到的写入不再挂行。
-    bump_cache_epoch();
+    bump_cache_epoch(app_data);
     let kinds = READER_SESSION_RENDITIONS
         .iter()
         .map(|kind| format!("'{kind}'"))
@@ -1879,7 +1904,7 @@ mod tests {
         write_cached_image(&database, &app_data, &first, "image/png", &payload).expect("写缓存");
 
         // 读开了个头（拿到行 + 记下代），还没收尾。
-        let pending = begin_read(&database, &first).expect("开始读").expect("有行");
+        let pending = begin_read(&database, &app_data, &first).expect("开始读").expect("有行");
 
         // 中间清空了一代，然后新一代用**同一份内容**把它贴了回来。
         {
@@ -2592,7 +2617,35 @@ mod tests {
         std::fs::remove_dir_all(app_data).unwrap();
     }
 
-    /// 8-g①：产物已经在**内容寻址**的位置上了，这一版还必须能被按修订号查回来。
+    /// 缓存代属于**这一个缓存根**，不是整个进程。
+///
+/// 旧写法是进程级 `AtomicU64`：测试里每个用例各自开一个内存库与临时目录，却在共享同一
+/// 个代——A 用例清一次缓存，B 用例手里那份「已经落盘、正要挂行」的产物就被判成上一代而
+/// 悄悄不挂行（`a_published_artifact_is_registered_without_copying_its_bytes` 因此偶发
+/// 红在「挂完行之后按修订号查得到这一版」）。真机只有一个缓存根，所以这条隔离在线上
+/// 不可见，只有并行跑测试时才露出来。
+#[test]
+fn clearing_one_cache_root_does_not_drop_a_write_in_flight_on_another() {
+    let database = online_db();
+    let written_root = temp_app_data("cache-epoch-isolated-write");
+    let cleared_root = temp_app_data("cache-epoch-isolated-clear");
+    std::fs::create_dir_all(&cleared_root).unwrap();
+    let identity = CacheImageIdentity::new("scope-a", "archive-a", "enhanced", 9);
+    let payload = b"a page that is already on disk".to_vec();
+    // 落盘发生在这条缓存根上：真机上就是「清空缓存」按下之前的那一刻。
+    let blob = prepare_blob(&written_root, &identity, "image/png", &payload).expect("落盘");
+    // 另一条缓存根被清空：它不该把这一份写入判成上一代。
+    clear_image_cache(&database.connection.lock().unwrap(), &cleared_root).expect("清空另一条");
+    commit_blob(&database, &written_root, blob).expect("挂行");
+    let located = cached_blob_location(&database, &written_root, &identity)
+        .expect("查位置")
+        .expect("另一条缓存根被清空，不该影响这一份写入");
+    assert_eq!(located.byte_length, payload.len() as u64);
+    std::fs::remove_dir_all(&written_root).unwrap();
+    std::fs::remove_dir_all(&cleared_root).unwrap();
+}
+
+/// 8-g①：产物已经在**内容寻址**的位置上了，这一版还必须能被按修订号查回来。
     ///
     /// 这是 compute 那条路与缓存索引之间唯一的那道缝：`compute::artifacts::publish_blob` 落的
     /// 路径与 `relative_for_hash` 逐字同形，缺的只是**索引那一行**——没有行，按修订号取起点的
