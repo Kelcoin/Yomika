@@ -10,6 +10,8 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 
 import { App } from './app/App';
+import { initializeLayoutMode, setLayoutPlatform } from './lib/layoutMode';
+import { getPlatformCapabilities } from './bridge/platform';
 import './styles/tokens.css';
 import './styles/base.css';
 import './styles/shell.css';
@@ -44,6 +46,10 @@ function trackKeyboardInset() {
   sync();
 }
 
+initializeLayoutMode();
+void getPlatformCapabilities().then((result) => {
+  if (result.ok) setLayoutPlatform(result.value.platform);
+});
 trackKeyboardInset();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

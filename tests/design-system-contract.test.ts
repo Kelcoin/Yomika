@@ -35,6 +35,13 @@ function ruleBody(css: string, selector: string): string {
   throw new Error(`Unbalanced rule: ${selector}`);
 }
 
+/** The compact shell is a device state, not a viewport width: a phone keeps the
+ * bottom nav when it is rotated to landscape, and a narrow desktop window still
+ * compacts. CSS and React both read `data-layout`, written by lib/layoutMode.ts
+ * and by the inline bootstrap in index.html before the first paint. */
+const COMPACT_LAYOUT = ":where(:root[data-layout='compact'])";
+const DESKTOP_LAYOUT = ":where(:root[data-layout='desktop'])";
+
 /** A rule that lives inside a media block, where every line is indented. The
  * first match for the bare selector would be the base rule instead. */
 function nestedRuleBody(css: string, selector: string): string {
@@ -92,7 +99,7 @@ describe('design system contract', () => {
   });
 
   it('keeps compact page flow free of duplicated viewport and tail reservations', () => {
-    const compact = ruleBody(read('src/styles/shell.css'), '@media (max-width: 900px)');
+    const compact = ruleBody(read('src/styles/shell.css'), COMPACT_LAYOUT);
     // Check all compact blocks: some specialize sizing after the first block.
     const shell = read('src/styles/shell.css');
     expect(shell).toMatch(/\.library-shell\.has-detail > \[data-panel\]:has\(\.library-shell-detail\) \{\s*height: auto !important/);
@@ -190,7 +197,7 @@ describe('design system contract', () => {
 
   it('keeps compact content above navigation without a padded black band', () => {
     const shell = read('src/styles/shell.css');
-    const compactMain = shell.match(/@media \(max-width: 900px\)[\s\S]*?\.app-main\s*\{([\s\S]*?)\}/)?.[1] ?? '';
+    const compactMain = shell.match(/:where\(:root\[data-layout='compact'\]\)[\s\S]*?\.app-main\s*\{([\s\S]*?)\}/)?.[1] ?? '';
     const archiveList = ruleBody(shell, '.archive-list');
     // 底栏占位与底部安全区要减掉；顶部安全区不能减——box-sizing: border-box 下
     // padding-top 已经算在 height 里，减第二次就会在底栏上方留下一段 body 底色的
@@ -967,11 +974,11 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.library-shell\.is-home\.has-detail\)\s*\{[^}]*overflow:\s*hidden/);
     expect(shell).toMatch(/\.route-cache-panel\.is-flow:has\(\.library-shell\.is-home\.has-detail\)\s*\{[^}]*height:\s*100%/);
     expect(shell).toMatch(/\.library-shell\.is-home\.has-detail \.library-shell-list\s*\{[^}]*overflow-y:\s*auto/);
-    // 900px 及以下首页是「钻进去」的单栏、整页滚：`@media (max-width: 900px)` 那一段把
+    // 紧凑档（手机壳层，含横屏）首页是「钻进去」的单栏、整页滚：`data-layout='compact'` 那一段把
     // `.library-shell` 拆成 `display: block`、把 `.library-shell-detail` 的 overflow 还原成
     // `visible`。上面这三条要是漏进窄屏，详情栏就被钳在一个 `overflow: hidden` 的盒子里，
     // 内容比屏幕长，而没有任何东西能滚它。
-    expect(shell).toMatch(/@media \(min-width: 901px\) \{\s*\.workspace:has\(/);
+    expect(shell).toMatch(/:where\(:root\[data-layout='desktop'\]\) \{\s*\.workspace:has\(/);
   });
 
   it('preserves the home scroll tail when transferring scrolling into the split list', () => {
@@ -1414,7 +1421,7 @@ describe('design system contract', () => {
     expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*width:\s*100%/);
     expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*justify-content:\s*center/);
     // 900px 那一档只收组内间距，不再动对齐。
-    expect(ruleBody(reader, '@media (max-width: 900px)')).not.toMatch(/justify-content/);
+    expect(ruleBody(reader, COMPACT_LAYOUT)).not.toMatch(/justify-content/);
 
     // M3 的 top app bar 一明一暗两颗图标：前导（返回）是 on-surface，尾随动作是
     // on-surface-variant。底栏那一排动作全走 on-surface-variant，页码是 on-surface。
@@ -1982,7 +1989,7 @@ describe('design system contract', () => {
     expect(routes).toContain("flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}");
     expect(read('src/app/RetainedPage.tsx')).toContain("flow ? ' is-flow'");
     expect(shell).toMatch(/\.route-cache-panel\.is-flow \{[\s\S]{0,400}?height:\s*auto/);
-    expect(shell).toMatch(/@media \(max-width: 900px\)/);
+    expect(shell, '紧凑档由设备壳层驱动').toContain(COMPACT_LAYOUT);
 
     // 「美观尾留白」不能住在可滚范围里的任何地方：住在滚动容器上是内容之外那一格，
     // 住在面板上是面板高度多一格，两者都会让「内容只差一格就放满」的页面滚出空带
@@ -2039,8 +2046,8 @@ describe('design system contract', () => {
     // Hidden by default, horizontal sections only under the compact breakpoint,
     // where the right-hand rail folds away.
     expect(shell).toMatch(/\.archive-day-divider\s*\{\s*display:\s*none;\s*\}/);
-    expect(shell).toMatch(/@media \(max-width: 900px\)[\s\S]*\.archive-row-timeline\s*\{\s*display:\s*none;\s*\}/);
-    expect(shell).toMatch(/@media \(max-width: 900px\)[\s\S]*\.archive-day-divider\s*\{[\s\S]*display:\s*flex/);
+    expect(shell).toMatch(/:where\(:root\[data-layout='compact'\]\)[\s\S]*\.archive-row-timeline\s*\{\s*display:\s*none;\s*\}/);
+    expect(shell).toMatch(/:where\(:root\[data-layout='compact'\]\)[\s\S]*\.archive-day-divider\s*\{[\s\S]*display:\s*flex/);
   });
 
   it('keeps the history timeline in its own rail outside the clickable card', () => {
@@ -2096,7 +2103,7 @@ describe('design system contract', () => {
     expect(source).not.toContain('historyMonths');
     expect(source).not.toContain('history-quick-jump');
     expect(shell).not.toContain('.history-quick-jump');
-    expect(shell).toMatch(/@media \(max-width: 900px\)[\s\S]*\.archive-list\.is-wide\.has-timeline\s*\{\s*padding-right:\s*4px/);
+    expect(shell).toMatch(/:where\(:root\[data-layout='compact'\]\)[\s\S]*\.archive-list\.is-wide\.has-timeline\s*\{\s*padding-right:\s*4px/);
     // Thumbnail cards have no rail to hang the ticks on.
     expect(source).toMatch(/displayMode !== 'wide' \|\| railSegments\.length < 2/);
   });
@@ -2753,7 +2760,29 @@ describe('design system contract', () => {
     // 44px is the floor, and it is a token so the three sizes cannot drift.
     expect(cssVariables(ruleBody(read('src/styles/tokens.css'), ':root')).get('--tap-min')).toBe('44px');
     // The toast stack clears the bottom nav instead of hiding under it.
-    expect(shell).toMatch(/@media \(max-width: 900px\) \{[\s\S]*?\.toast-stack \{[\s\S]*?bottom:\s*calc\(var\(--safe-bottom\) \+ 64px/);
+    expect(shell).toMatch(/:where\(:root\[data-layout='compact'\]\) \{[\s\S]*?\.toast-stack \{[\s\S]*?bottom:\s*calc\(var\(--safe-bottom\) \+ 64px/);
+  });
+
+  it('drives the compact shell from the device layout, not the viewport width', () => {
+    const shell = read('src/styles/shell.css');
+    const reader = read('src/styles/reader.css');
+    const tokens = read('src/styles/tokens.css');
+    const html = read('index.html');
+    const mode = read('src/lib/layoutMode.ts');
+    // 宽度媒体查询把「手机横过来」判成桌面：915px 的横屏手机就此丢掉底栏导航与单栏流，
+    // 而窄桌面窗口又该跟着宽度收。紧凑档改由 data-layout 驱动，CSS 与 React 读同一个属性。
+    for (const [name, css] of [['shell.css', shell], ['reader.css', reader], ['tokens.css', tokens]]) {
+      expect(css, name + ' 不再按视口宽度切紧凑档').not.toMatch(/@media \(max-width: 900px\)/);
+      expect(css, name + ' 不再按视口宽度切桌面档').not.toMatch(/@media \(min-width: 901px\)/);
+    }
+    expect(shell).toContain(COMPACT_LAYOUT);
+    expect(shell).toContain(DESKTOP_LAYOUT);
+    expect(tokens).toContain(":root[data-layout='compact'] {");
+    // 原生壳层的平台判定优先于 UA：Android WebView 可以报桌面 UA。
+    expect(mode).toContain("export const DEVICE_LAYOUT_EVENT = 'yomika-device-layout-change'");
+    expect(mode).toMatch(/platform === 'android' \|\| platform === 'ios'/);
+    // 首帧之前就要定下来，否则桌面壳先画一帧再换成紧凑壳。
+    expect(html).toMatch(/document\.documentElement\.dataset\.layout = .*'compact' : 'desktop'/);
   });
 
   it('keeps typography on the scale instead of spelling out weights and leading', () => {

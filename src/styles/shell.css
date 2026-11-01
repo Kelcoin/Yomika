@@ -486,7 +486,7 @@ body::-webkit-scrollbar,
    窄屏（901px 以下）整段不生效：那时首页是「钻进去」的单栏、`.library-shell-detail` 的
    overflow 又还原成 `visible`，靠整页滚——真把这四条放进去，详情就会被钳在一个滚不动的
    `overflow: hidden` 盒子里。 */
-@media (min-width: 901px) {
+:where(:root[data-layout='desktop']) {
   .workspace:has(> .route-cache-panel:not([hidden]) .library-shell.is-home.has-detail) {
     padding: 0;
     overflow: hidden;
@@ -724,7 +724,7 @@ body::-webkit-scrollbar,
  * icon carries the state in `--success`/`--error`/`--primary`, and those keep
  * their contrast against the tonal container in both themes — against an inverted
  * one they would not. */
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .toast-stack {
     right: var(--space-4);
     bottom: calc(var(--safe-bottom) + 64px + var(--space-6));
@@ -759,7 +759,7 @@ body::-webkit-scrollbar,
 /* The phone build of the card, after the base rules it overrides: the pill, the
    smaller mark, and no dismiss control — Android's toast is not something you act
    on, and the app already sets its own lifetime (3.6s, 7s for an error). */
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .toast-card {
     display: flex;
     justify-content: center;
@@ -5026,7 +5026,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-workspace .dedup-section-actions > button { white-space: nowrap; flex: none; }
 .dedup-workspace .dedup-section-heading > div:first-child { min-width: 0; }
 
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   /* 标题与动作各占一行。动作区：主按钮（开始扫描）独占一行，次级按钮按内容宽度
      换行铺满——三个一排、有「恢复扫描」时两两一排，不再用固定三列把第四个挤成
      孤零零的第二行。 */
@@ -5101,7 +5101,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    sidebar plus two library panes, so between 768px and 900px the content used to
    be squeezed narrower than this layout makes it. Keep in step with
    COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and with reader.css. */
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .workspace.is-library-workspace {
     overflow-x: hidden;
     overflow-y: auto;
@@ -6729,13 +6729,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 .library-controls .search-preset-field { flex: 0 0 var(--control-height); width: var(--control-height); min-width: var(--control-height); }
 .library-controls .search-preset-save { width: var(--control-height); height: var(--control-height); }
-@media (max-width: 900px) { .library-toolbar > .select-field { min-width: 0; } }
+:where(:root[data-layout='compact']) { .library-toolbar > .select-field { min-width: 0; } }
 [hidden] { display: none !important; }
 .route-cache-panel[hidden] * { animation-play-state: paused !important; }
 
 /* Panel v4 puts the scroll wrapper inside data-panel. Compact pages scroll in
    the workspace instead of creating a second vertical scrollport. */
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .library-shell-panel-content, .library-list-panel-content { height: auto !important; overflow: visible !important; }
 }
 
@@ -7142,7 +7142,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 .local-delete-dialog { max-width: 440px; }
 
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   /* 手机上这一页跟着文档流滚。档案行照旧是档案库那套（封面 + 文案），只有下载行
      要多占一行：390px 里挤不下封面、文案和三个按钮。 */
   .local-archives { height: auto; min-height: 0; }
@@ -7328,7 +7328,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .spin { animation: none; }
 }
 
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .compact-nav.is-floating .nav-link { min-height: 56px; border-radius: 28px; }
 }
 
@@ -7347,7 +7347,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 .archive-list-pull { transition: transform var(--motion-bounce); }
 
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .app-shell.is-floating-nav .scroll-to-top {
     transition: transform var(--motion-dock), opacity var(--motion-dock), visibility 0s;
   }
@@ -7424,7 +7424,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .dedup-section-actions .action-label { display: none; }
   .dedup-workspace .dedup-section-actions > .has-action-label { flex: 0 0 36px; width: 36px; min-width: 36px; padding-inline: 0; justify-content: center; order: 0; }
 }
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .dedup-workspace .dedup-section-actions { width: 100%; flex-wrap: nowrap; }
   .dedup-workspace .dedup-section-actions > .has-action-label { flex: 1 1 0; width: 0; min-width: 0; order: 0; }
 }

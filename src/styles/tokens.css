@@ -624,10 +624,8 @@
 
   /* Compact: the bottom nav is subtracted from .app-main's height, so a scroll
      container does not reserve it a second time. */
-  @media (max-width: 900px) {
-    :root {
-      --chrome-bottom: 0px;
-    }
+  :root[data-layout='compact'] {
+    --chrome-bottom: 0px;
   }
 
   :root[data-theme='dark'] {

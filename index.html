@@ -56,6 +56,9 @@
     <script>
       // Native mobile already has an OS launch screen; show only its canvas here.
       if (window.__TAURI_INTERNALS__ && (/Android|iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1))) document.documentElement.dataset.nativeMobile = 'true';
+      // Keep CSS and React on the same shell from the first frame. Width may
+      // compact a desktop window, but rotating a mobile device never widens it.
+      document.documentElement.dataset.layout = (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1) || matchMedia('(max-width: 900px)').matches) ? 'compact' : 'desktop';
       // 自定义样式镜像在首帧前预置（与 preferences.tsx 的模块级应用同一份键、
       // 同一个 CSSStyleSheet 实例）：静态开屏帧因此跟着用户的主题预设与自定义
       // CSS 走。必须走 adoptedStyleSheets（CSSOM）——Tauri 给 CSP 注入 nonce 后

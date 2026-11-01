@@ -1040,7 +1040,7 @@
    `justify-content` 压成 `flex-start`，于是窗口一窄，页码就从栏中间滑到左边
    （user report: 「修复移动模式下底栏组件没有居中的问题」）。三段式的网格在
    900px 下仍然放得开，只有组内间距收一档。 */
-@media (max-width: 900px) {
+:where(:root[data-layout='compact']) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
   .reader-overview-cover-frame { width: 88px; }
   .reader-toolbar {

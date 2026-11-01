@@ -17,6 +17,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { getPlatformCapabilities } from '../bridge/platform';
+import { isMobileDevice } from '../lib/layoutMode';
 import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
 import { YomikaMark } from './YomikaMark';
@@ -24,9 +25,7 @@ import { usePreferences } from '../app/preferences';
 
 /** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
  * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
-function isMobileShell(): boolean {
-  return typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-}
+const isMobileShell = isMobileDevice;
 
 const navigation = [
   { to: '/', label: '首页', icon: Home },
