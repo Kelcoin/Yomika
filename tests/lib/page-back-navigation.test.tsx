@@ -16,6 +16,15 @@ describe('workspace-scoped Back', () => {
     expect(history.back()).toBe('/');
     expect(history.back()).toBeUndefined();
   });
+  it('drops the entries ahead when a page is visited again', () => {
+    // Going back and then opening something else must not leave the abandoned
+    // page reachable: Back would jump to a URL the user has already left.
+    const history = new PageBackHistory();
+    history.visit('/library'); history.visit('/library/b'); history.visit('/library');
+    expect(history.back()).toBeUndefined();
+    history.visit('/library/c');
+    expect(history.back()).toBe('/library');
+  });
   it('keeps readers and metadata editors with the page that opened them', () => {
     const history = new PageBackHistory();
     history.visit('/'); history.visit('/home/a');
