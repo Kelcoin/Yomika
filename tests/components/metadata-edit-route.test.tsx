@@ -23,7 +23,7 @@ describe('metadata editor navigation and plugins', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Server', baseUrl: 'https://example.com' }] };
       if (command === 'load_archive_metadata') return { ok: true, value: { archiveId: 'a', title: 'Title', filename: 'a.zip', tags: '', extension: 'zip', progress: 0, pageCount: 10, lastReadTime: 0, size: 100 } };
       if (command === 'list_metadata_plugins') return { ok: true, value: [{ id: 'other', name: 'Other' }, { id: 'eh', name: 'E-Hentai' }] };
-      if (command === 'use_metadata_plugin') return { ok: true, value: {} };
+      if (command === 'use_metadata_plugin') return { ok: true, value: { success: 1, data: { title: 'Plugin title', new_tags: 'artist:somebody, female:glasses' } } };
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     setInvokeAdapterForTests(adapter);
@@ -38,7 +38,9 @@ describe('metadata editor navigation and plugins', () => {
     expect(screen.getByRole('listbox', { name: '元数据插件' })).toBeInTheDocument();
     fireEvent.click(screen.getAllByRole('option', { name: 'E-Hentai' }).at(-1)!);
     fireEvent.click(screen.getByRole('button', { name: '执行插件' }));
-    await waitFor(() => expect(adapter).toHaveBeenCalledWith('use_metadata_plugin', { serverId: 's', archiveId: 'a', plugin: 'eh', arg: 'Title' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('use_metadata_plugin', { serverId: 's', archiveId: 'a', plugin: 'eh', arg: '' }));
+    await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('Plugin title'));
+    expect(screen.getAllByText('female:glasses').length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole('button', { name: '返回上一页' }));
     expect(screen.getByRole('link', { name: '首页编辑' })).toBeInTheDocument();
     expect(screen.queryByText('错误详情页')).not.toBeInTheDocument();

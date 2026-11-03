@@ -621,7 +621,7 @@ async fn reader_request(
     url: String,
     api_key: String,
 ) -> Result<reqwest::Response, ReaderRequestError> {
-    reader_request_with_timeout(method, url, api_key, 10).await
+    reader_request_with_timeout(method, url, api_key, 30).await
 }
 
 async fn reader_request_with_timeout(
@@ -630,16 +630,24 @@ async fn reader_request_with_timeout(
     api_key: String,
     timeout_seconds: u64,
 ) -> Result<reqwest::Response, ReaderRequestError> {
-    lanraragi_client().map_err(ReaderRequestError::configuration)?
-        .request(method, url)
-        .timeout(std::time::Duration::from_secs(timeout_seconds))
-        .header(
-            reqwest::header::AUTHORIZATION,
-            authorization_value(&api_key),
-        )
-        .send()
-        .await
-        .map_err(ReaderRequestError::transport)
+    let client = lanraragi_client().map_err(ReaderRequestError::configuration)?;
+    // Only replay safe reads. Plugin execution, uploads and mutations must never
+    // run twice merely because the first response was lost.
+    let safe = method == reqwest::Method::GET || method == reqwest::Method::HEAD;
+    for attempt in 0..2 {
+        let response = client.request(method.clone(), &url)
+            .timeout(std::time::Duration::from_secs(timeout_seconds))
+            .header(reqwest::header::AUTHORIZATION, authorization_value(&api_key))
+            .send().await;
+        let retry = safe && attempt == 0 && match &response {
+            Ok(value) => matches!(value.status().as_u16(), 502 | 503 | 504),
+            Err(error) => error.is_connect() || error.is_timeout() || error.is_request(),
+        };
+        if !retry { return response.map_err(ReaderRequestError::transport); }
+        drop(response);
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    }
+    unreachable!("bounded request loop always returns")
 }
 
 /// 共享的 LANraragi HTTP 客户端：进程内一份，连接池跨请求复用，
@@ -650,7 +658,10 @@ fn lanraragi_client() -> Result<Client, String> {
     CLIENT
         .get_or_init(|| {
             Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(3))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
+                .pool_max_idle_per_host(8)
+                .tcp_keepalive(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|error| error.to_string())
         })
@@ -1397,9 +1408,11 @@ pub async fn use_metadata_plugin(
     };
     url.query_pairs_mut()
         .append_pair("id", &archive_id)
-        .append_pair("plugin", &plugin)
-        .append_pair("arg", &arg);
-    let response = match reader_request(reqwest::Method::POST, url.to_string(), api_key).await {
+        .append_pair("plugin", &plugin);
+    if !arg.trim().is_empty() { url.query_pairs_mut().append_pair("arg", &arg); }
+    // Sync metadata plugins do not modify the archive. Some make several
+    // external lookups; the ordinary metadata read budget is too short here.
+    let response = match reader_request_with_timeout(reqwest::Method::POST, url.to_string(), api_key, 120).await {
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
@@ -2300,6 +2313,50 @@ fn record_local_archive(
 #[cfg(test)]
 mod archive_download_tests {
     use super::*;
+
+    // Exercise real reqwest headers and replay behavior against a local server,
+    // without credentials or a dependency on a live LANraragi instance.
+    async fn reader_http_sequence(method: reqwest::Method, statuses: &[u16]) -> (u16, Vec<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/info", listener.local_addr().unwrap());
+        let statuses = statuses.to_vec();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for status in statuses {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                    request.push(byte[0]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}").unwrap();
+            }
+            requests
+        });
+        let response = reader_request_with_timeout(method, url, "test-key".into(), 5).await.unwrap();
+        (response.status().as_u16(), server.join().unwrap())
+    }
+
+    #[tokio::test]
+    async fn reader_http_retries_a_transient_read_and_preserves_base64_auth() {
+        let (status, requests) = reader_http_sequence(reqwest::Method::GET, &[503, 200]).await;
+        assert_eq!(status, 200);
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert!(request.to_lowercase().contains("authorization: bearer dGVzdC1rZXk=".to_lowercase().as_str()));
+        }
+    }
+
+    #[tokio::test]
+    async fn reader_http_does_not_replay_plugins_or_auth_failures() {
+        assert_eq!(reader_http_sequence(reqwest::Method::POST, &[503]).await.0, 503);
+        assert_eq!(reader_http_sequence(reqwest::Method::GET, &[401]).await.0, 401);
+        assert_eq!(reader_http_sequence(reqwest::Method::GET, &[404]).await.0, 404);
+    }
 
     fn download_metadata(title: &str) -> serde_json::Value {
         serde_json::json!({ "title": title, "filename": "a.cbz" })
@@ -5483,7 +5540,7 @@ async fn fetch_search_page(
     let body = response
         .text()
         .await
-        .map_err(|error| ("INVALID_RESPONSE", error.to_string(), true))?;
+        .map_err(|error| (if error.is_timeout() { "REMOTE_TIMEOUT" } else { "NETWORK" }, error.to_string(), true))?;
     parse_search_page(&body).map_err(|error| ("INVALID_RESPONSE", error, false))
 }
 

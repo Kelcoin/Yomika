@@ -14,6 +14,7 @@ import { ComputeWorkerToasts } from '../components/ComputeWorkerToasts';
 import { PairingCodeNotice } from '../components/PairingCodeNotice';
 import { RenderGuard } from '../components/RenderGuard';
 import { ArchiveTitleTooltip } from '../components/ArchiveTitleTooltip';
+import { usePageBackNavigation } from '../lib/pageBackNavigation';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
  * the route it launched at — a later visit to the home page is the user's own
@@ -43,6 +44,7 @@ function StartupRoute() {
 const MAX_RETAINED_READERS = 2;
 
 export function App() {
+  usePageBackNavigation();
   const location = useLocation();
   const { pathname } = location;
   const foregroundPath = useRef(pathname);

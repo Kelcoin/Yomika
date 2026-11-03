@@ -16,6 +16,7 @@ import { MetadataEditorSkeleton } from './MetadataEditorSkeleton';
 import { StatusLine } from './StatusLine';
 import { SelectField } from './SelectField';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
+import { metadataPluginResult } from '../lib/metadataPluginResult';
 
 const repository = new NativeLibraryRepository();
 
@@ -166,17 +167,19 @@ export function MetadataEditRoute({ archiveId }: { archiveId: string }) {
     const version = owner.version;
     owner.busy = true;
     setBusy('plugin'); setError(undefined);
-    const result = await repository.useMetadataPlugin(serverId, archiveId, plugin, title);
+    // The optional one-shot argument is plugin-specific (often a gallery URL),
+    // not the archive title. With no override the plugin uses archive metadata.
+    const result = await repository.useMetadataPlugin(serverId, archiveId, plugin, '');
     if (editorOwner.current !== owner || owner.version !== version) return;
     if (result.ok) {
-      const data = result.value?.data && typeof result.value.data === 'object' ? result.value.data : result.value;
-      if (data && typeof data === 'object') {
-        const fields = data as { title?: unknown; tags?: unknown; summary?: unknown };
-        if (typeof fields.title === 'string') setTitle(fields.title);
-        if (typeof fields.tags === 'string') setTags(fields.tags);
-        if (typeof fields.summary === 'string') setSummary(fields.summary);
-      }
-      setMessage('插件结果已载入，保存后生效');
+      try {
+        const fields = metadataPluginResult(result.value, tags);
+        if (fields.title !== undefined) setTitle(fields.title);
+        if (fields.tags !== undefined) setTags(fields.tags);
+        if (fields.summary !== undefined) setSummary(fields.summary);
+        if (fields.changed) setMessage('插件结果已载入，保存后生效');
+        else setError('插件没有返回新的元数据，请检查插件配置和档案的来源链接');
+      } catch (error) { setError(error instanceof Error ? error.message : '插件执行失败'); }
     } else setError(result.error.message);
     setBusy('');
     owner.busy = false;

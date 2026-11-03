@@ -6,6 +6,15 @@ type Overlay = { close: () => void; restore: () => void; depth: number };
 const stack: Overlay[] = [];
 let bound = false;
 
+/** Native Back must close the frontmost overlay before considering a route.
+ * Keep its history guard until React cleanup consumes it normally. */
+export function closeTopOverlay(): boolean {
+  const top = stack.at(-1);
+  if (!top) return false;
+  top.close();
+  return true;
+}
+
 /**
  * 现在这一格历史是守卫区里的第几层。
  *

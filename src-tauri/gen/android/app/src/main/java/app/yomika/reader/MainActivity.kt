@@ -10,6 +10,7 @@ import android.view.ViewGroup
 import android.webkit.WebView
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.OnBackPressedCallback
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.Insets
@@ -19,12 +20,33 @@ import org.json.JSONObject
 import java.io.File
 
 class MainActivity : TauriActivity() {
+  private var workspaceBackCallback: OnBackPressedCallback? = null
+
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
     // WebView vibrates for native long presses even when the page suppresses
     // contextmenu (blank canvas and reader images have no long-press action).
     // Real app actions use MobileHost.vibrate, independently of View feedback.
     webView.isHapticFeedbackEnabled = false
+    // Register after native plugins/WebView initialization as well: their
+    // generic goBack callback must not override workspace-scoped navigation.
+    webView.post { installWorkspaceBackCallback() }
+  }
+
+  private fun installWorkspaceBackCallback() {
+    workspaceBackCallback?.remove()
+    val callback = object : OnBackPressedCallback(true) {
+      override fun handleOnBackPressed() {
+        val web = appWebView(findViewById(android.R.id.content)) ?: return
+        web.evaluateJavascript(
+          "window.dispatchEvent(new Event('yomika-mobile-back', {cancelable:true}))",
+        ) { unhandled ->
+          if (unhandled == "true") moveTaskToBack(true)
+        }
+      }
+    }
+    workspaceBackCallback = callback
+    onBackPressedDispatcher.addCallback(this, callback)
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
@@ -46,6 +68,10 @@ class MainActivity : TauriActivity() {
       applySystemBarAppearance(this, startup.getBoolean("dark", true), canvas)
     }
     super.onCreate(savedInstanceState)
+    // The app owns one Back stack per workspace. WebView.goBack() traverses
+    // unrelated tabs and stale searches instead. Login sheets register their
+    // own later callback and retain their separate web navigation behavior.
+    installWorkspaceBackCallback()
 
     // 边到边之后，那一圈高度得有人管：系统栏（状态栏、手势条、刘海）交给**页面**——WebView
     // 不会把它交给 `env(safe-area-inset-*)`，所以这里量好，写进页面的 `--safe-top` /
