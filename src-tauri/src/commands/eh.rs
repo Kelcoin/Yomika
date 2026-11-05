@@ -1296,13 +1296,23 @@ fn favorite_form_fields(body: &str) -> Option<(bool, Vec<(String, String)>)> {
 fn gallery_favorite_state(body: &str) -> Option<bool> {
     use std::sync::LazyLock;
     static CONTROL: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?is)<div\b[^>]*\bid\s*=\s*(?:"gdf"|'gdf'|gdf\b)[^>]*>(.*?)</div\s*>"#).unwrap()
+        regex::Regex::new(r#"(?is)<div\b[^>]*\bid\s*=\s*(?:"gdf"|'gdf'|gdf\b)[^>]*>"#).unwrap()
     });
+    static DIV: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?is)</?div\b[^>]*>").unwrap());
     static LINK: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?is)<a\b[^>]*\bonclick\s*=\s*(?:"[^"]*\bpop_fav\([^"<>]*"|'[^']*\bpop_fav\([^'<>]*')[^>]*>(.*?)</a\s*>"#).unwrap()
+        regex::Regex::new(r#"(?is)<a\b[^>]*(?:\bid\s*=\s*(?:"favoritelink"|'favoritelink'|favoritelink\b)|\bonclick\s*=\s*(?:"[^"]*\bpop_fav\([^"<>]*"|'[^']*\bpop_fav\([^'<>]*'))[^>]*>(.*?)</a\s*>"#).unwrap()
     });
-    let control = CONTROL.captures(body)?;
-    let link = LINK.captures(&control[1])?;
+    let opening = CONTROL.find(body)?;
+    let rest = &body[opening.end()..];
+    // EH nests the icon and link in separate divs, and places pop_fav() on
+    // #gdf itself. Stop at its matching close, not the icon's first </div>.
+    let mut depth = 1;
+    let mut end = None;
+    for tag in DIV.find_iter(rest) {
+        if tag.as_str().starts_with("</") { depth -= 1; } else { depth += 1; }
+        if depth == 0 { end = Some(tag.start()); break; }
+    }
+    let link = LINK.captures(&rest[..end?])?;
     let label = decode_html_text(&strip_tags(&link[1]));
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if label.is_empty() { None } else { Some(!label.eq_ignore_ascii_case("Add to Favorites")) }
@@ -3267,6 +3277,17 @@ mod tests {
     }
 
     // ── remove_eh_favorite tests ──────────────────────────────────────────
+
+    #[test]
+    fn gallery_favorite_reads_nested_real_markup() {
+        let removed = r##"<div id="gdf" onclick="return pop_fav()"><div id="fav"></div>
+            <div>&nbsp;<a id="favoritelink" href="#" onclick="return false"><img src="mr.gif">Add to Favorites</a></div><div class="c"></div></div>"##;
+        assert_eq!(gallery_favorite_state(removed), Some(false));
+        let present = r##"<div id="gdf" onclick="return pop_fav()"><div id="fav"><div class="i" title="收藏"></div></div>
+            <div><a id="favoritelink" href="#" onclick="return false">My collection</a></div></div>"##;
+        assert_eq!(gallery_favorite_state(present), Some(true));
+        assert_eq!(gallery_favorite_state("<div id='gdf'><div>Loading</div></div><a id='favoritelink'>Add to Favorites</a>"), None);
+    }
 
     #[test]
     fn gallery_membership_is_independent_of_popup_default_category() {

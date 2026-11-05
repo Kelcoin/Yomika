@@ -1464,6 +1464,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         setError('尚未配置服务器');
         return;
       }
+      const metadataRequest = repository.loadArchiveMetadata(server.id, archiveId);
+      const progressRequest = repository.loadProgress(server.scopeId, archiveId);
       const manifest = await repository.loadReaderManifest(server.id, archiveId);
       if (!stillCurrent()) return;
       if (!manifest.ok) {
@@ -1480,9 +1482,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       contextRef.current = context;
       setScopeId(server.scopeId);
       setTitle(manifest.value.title);
-      // Overview facts load in the background: the panel is optional chrome, so
-      // it must not delay the first page.
-      void repository.loadArchiveMetadata(server.id, archiveId).then((metadata) => {
+      // Start facts and progress alongside the manifest. Existing local progress
+      // can open immediately; missing progress also needs the server's position.
+      void metadataRequest.then((metadata) => {
         if (!stillCurrent() || !metadata.ok) return;
         setInfo((current) => ({
           ...current,
@@ -1500,7 +1502,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           setInfo((current) => ({ ...current, cover: handle.url }));
         })
         .catch(() => undefined);
-      const progress = await repository.loadProgress(server.scopeId, archiveId);
+      let progress = await progressRequest;
+      // Metadata imports the server position when no local record exists.
+      // Reuse the in-flight request; existing local progress never waits for it.
+      if (requestedPage === undefined && progress.ok && !progress.value) {
+        const metadata = await metadataRequest;
+        if (!stillCurrent()) return;
+        if (metadata.ok && metadata.value.progress > 0) progress = await repository.loadProgress(server.scopeId, archiveId);
+      }
       if (!stillCurrent()) return;
       const firstPage = requestedPage !== undefined
         ? Math.min(requestedPage, Math.max(0, manifest.value.pages.length - 1))

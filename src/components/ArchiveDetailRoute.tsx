@@ -23,6 +23,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { z } from 'zod';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { usePanelSwipe } from '../lib/usePanelSwipe';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { parseArchiveTagString } from '../lib/tags';
@@ -126,6 +127,8 @@ detailBasePath?: string | undefined }) {
   useOverlayBackGuard(incognitoAsk, () => setIncognitoAsk(false));
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [detailPanel, setDetailPanel] = useState<'media' | 'comments'>('media');
+  const detailPanelsRef = useRef<HTMLDivElement>(null);
+  usePanelSwipe(detailPanelsRef, direction => setDetailPanel(direction === 'left' ? 'comments' : 'media'), favoritePageActive && !(error && !metadata));
   const [ehAccountId, setEhAccountId] = useState<string>();
   const incognitoTimer = useRef<number>();
   const incognitoPrompted = useRef(false);
@@ -319,7 +322,7 @@ detailBasePath?: string | undefined }) {
 
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
-  const progress = useArchiveReadingProgress(scopeId, archiveId);
+  const progress = useArchiveReadingProgress(scopeId, archiveId, metadata);
   /** 有进度时阅读按钮写成「从 N 页继续」：这一页真正的下一步是接着读，而不是从第一页
    * 重来。窄容器里退成「继续」（`shell.css` 的 `detail-actions` 容器查询），再窄就只剩
    * 图标——和这一排其它动作同一套退化。 */
@@ -492,6 +495,7 @@ detailBasePath?: string | undefined }) {
         <button type="button" role="tab" aria-selected={detailPanel === 'comments'} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => setDetailPanel('comments')}><MessageCircle aria-hidden="true" />评论</button>
       </div>
 
+      <div ref={detailPanelsRef} className="archive-detail-panels">
       <div role="tabpanel" aria-label="详情" hidden={detailPanel !== 'media'}>
         {/* 分类、日期这些记账标签在事实网格里已经各占一格，标签墙上不再重复。 */}
         <ArchiveDetailTagSection
@@ -517,6 +521,7 @@ detailBasePath?: string | undefined }) {
       {ehGallery && ehAccountId
         ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} serverId={serverId} onOpenArchive={(archive) => navigate(`${detailBasePath}/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)} />
         : <EmptyState compact icon={MessageCircle} title="评论暂不可用" description="此档案没有可读取的 E-Hentai 评论。" />}
+      </div>
       </div>
       {menu}
     </main>

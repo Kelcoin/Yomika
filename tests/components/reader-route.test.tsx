@@ -1079,6 +1079,31 @@ describe('reader route', () => {
     expect(revokeObjectUrl).toHaveBeenCalled();
   });
 
+  it('waits for missing progress to hydrate from server metadata before opening or writing page one', async () => {
+    let finishMetadata!: (value: unknown) => void;
+    let hydrated = false;
+    const metadataRequest = new Promise(resolve => { finishMetadata = resolve; });
+    const loadedPaths: string[] = [];
+    const adapter = vi.fn(async (command: string, args) => {
+      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'single', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'server-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'server-progress', title: 'Reader', pages: ['0.jpg', '1.jpg', '2.jpg', '3.jpg', '4.jpg'] } };
+      if (command === 'load_archive_metadata') return metadataRequest;
+      if (command === 'load_reading_progress') return { ok: true, value: hydrated ? { scopeId: 'scope-a', archiveId: 'server-progress', pageIndex: 3, pageCount: 5, layout: 'paged', direction: 'ltr', updatedAt: '2026-11-05T00:00:00Z', revision: 1 } : null };
+      if (command === 'load_reader_page') { loadedPaths.push(String(args?.path)); return { ok: true, value: [1] }; }
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/reader/server-progress']}><App /></MemoryRouter>);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('load_reading_progress', { scopeId: 'scope-a', archiveId: 'server-progress' }));
+    expect(loadedPaths).toEqual([]);
+    expect(adapter.mock.calls.some(([command]) => command === 'save_reading_progress')).toBe(false);
+    hydrated = true;
+    finishMetadata({ ok: true, value: { archiveId: 'server-progress', title: 'Reader', filename: 'a.zip', tags: '', summary: null, extension: 'zip', progress: 4, pageCount: 5, lastReadTime: 0, size: 100 } });
+    expect(await screen.findByRole('img', { name: '第 4 页' })).toBeInTheDocument();
+    expect(loadedPaths[0]).toBe('3.jpg');
+  });
+
   it('loads the restored page, one slot either side, and then ahead of it', async () => {
     const loadedPaths: string[] = [];
     setInvokeAdapterForTests(async (command: string, args) => {

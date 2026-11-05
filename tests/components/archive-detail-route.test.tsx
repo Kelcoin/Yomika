@@ -41,6 +41,58 @@ function renderDetail(detailBasePath?: string) {
 }
 
 describe('archive detail route', () => {
+  it('refreshes the reading label after metadata hydrates missing server progress', async () => {
+    let finishMetadata!: (value: unknown) => void;
+    const request = new Promise(resolve => { finishMetadata = resolve; });
+    let hydrated = false;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return request;
+      if (command === 'load_reading_progress') return { ok: true, value: hydrated ? { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 4, pageCount: 12, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } : null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderDetail();
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('load_reading_progress', { scopeId: server.scopeId, archiveId: metadata.archiveId }));
+    hydrated = true;
+    finishMetadata({ ok: true, value: { ...metadata, progress: 5 } });
+    expect(await screen.findByRole('link', { name: '从 5 页继续' })).toBeInTheDocument();
+  });
+  it('swipes the content between details and comments without stealing vertical or rail gestures', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 0 } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await screen.findByRole('heading', { name: metadata.title });
+    const swipe = (target: HTMLElement, x: number, y: number) => {
+      fireEvent.touchStart(target, { touches: [{ clientX: 180, clientY: 100 }] });
+      fireEvent.touchMove(target, { touches: [{ clientX: x, clientY: y }] });
+      fireEvent.touchEnd(target, { touches: [], changedTouches: [{ clientX: x, clientY: y }] });
+    };
+    const details = screen.getByRole('tabpanel', { name: '详情' });
+    swipe(details, 90, 105);
+    expect(screen.getByRole('tab', { name: '评论' })).toHaveAttribute('aria-selected', 'true');
+    const comments = screen.getByRole('tabpanel', { name: '评论' });
+    swipe(comments, 265, 102);
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+    swipe(details, 95, 220);
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+    const rail = document.createElement('div');
+    rail.dataset.horizontalScroll = '';
+    details.append(rail);
+    swipe(rail, 90, 100);
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.touchStart(details, { touches: [{ clientX: 180, clientY: 100 }] });
+    fireEvent.touchMove(details, { touches: [{ clientX: 90, clientY: 100 }] });
+    fireEvent.touchCancel(details);
+    fireEvent.touchEnd(details, { touches: [], changedTouches: [{ clientX: 90, clientY: 100 }] });
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+  });
   it('labels the final saved page as completed', async () => {
     setInvokeAdapterForTests(async command => {
       if (command === 'list_servers') return { ok: true, value: [server] };

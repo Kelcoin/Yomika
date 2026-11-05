@@ -16,6 +16,34 @@ function renderShell() {
   return host;
 }
 
+it('keeps the dock visible on short pages despite elastic scroll positions', () => {
+  const host = renderShell();
+  Object.defineProperty(host, 'scrollHeight', { value: 530 });
+  const nav = screen.getByRole('navigation', { name: '移动导航' });
+  for (const top of [20, 30, 75, 30, -20, 0, 25]) {
+    host.scrollTop = top;
+    fireEvent.scroll(host);
+    expect(nav).not.toHaveClass('is-hidden');
+  }
+});
+
+it('does not toggle the dock during edge dragging or settling', () => {
+  const host = renderShell();
+  const nav = screen.getByRole('navigation', { name: '移动导航' });
+  host.scrollTop = 100; fireEvent.scroll(host);
+  expect(nav).toHaveClass('is-hidden');
+  for (const phase of ['dragging', 'settling']) {
+    host.dataset.edgeBounce = phase;
+    host.scrollTop = 0; fireEvent.scroll(host);
+    expect(nav).toHaveClass('is-hidden');
+  }
+  delete host.dataset.edgeBounce;
+  host.scrollTop = 50; fireEvent.scroll(host);
+  expect(nav).toHaveClass('is-hidden');
+  host.scrollTop = 30; fireEvent.scroll(host);
+  expect(nav).not.toHaveClass('is-hidden');
+});
+
 it('enters edge feedback in the same native gesture even after touchmove becomes noncancelable', () => {
   const host = renderShell();
   const content = screen.getByTestId('content');

@@ -2375,6 +2375,14 @@ body::-webkit-scrollbar,
 .archive-detail-panel-tabs button.is-active { background: var(--brand-vermilion); color: var(--ink-on-brand); }
 .archive-detail-panel-tabs svg { width: 16px; height: 16px; }
 .archive-detail-panel-tabs button:only-child { grid-column: 1 / -1; }
+.archive-detail-panels { min-height: 160px; }
+.archive-detail-panels > [role='tabpanel']:not([hidden]) {
+  animation: detail-panel-enter var(--motion-page);
+}
+@keyframes detail-panel-enter { from { opacity: .6; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .archive-detail-panels > [role='tabpanel']:not([hidden]) { animation: none; }
+}
 .detail-panel-glyph { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.75; }
 
 .archive-detail-summary { white-space: pre-wrap; line-height: var(--leading-relaxed); }

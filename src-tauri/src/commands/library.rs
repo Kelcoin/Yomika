@@ -5024,7 +5024,23 @@ fn persist_archive_metadata(
         archive_id: wire.arcid.clone(), title: wire.title.clone(), summary,
         tags: wire.tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()).map(str::to_owned).collect(),
         page_count: wire.pagecount, size: wire.size,
-    }])
+    }])?;
+    // Mirror an existing server reading position only when this device has no
+    // record. This is a read-side import, not a visit: no history, journal or
+    // remote write, and a user's explicit reset tombstone remains authoritative.
+    if wire.progress > 0 && wire.pagecount > 0 {
+        connection.execute(
+            "INSERT OR IGNORE INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, updated_at)
+             SELECT scope_id, ?2, ?3, ?4, 'paged', 'ltr', COALESCE(datetime(?5, 'unixepoch'), CURRENT_TIMESTAMP)
+             FROM servers WHERE id=?1 AND NOT EXISTS (
+               SELECT 1 FROM sync_journal WHERE scope_id=servers.scope_id
+               AND object_type='reading_progress' AND object_id=servers.scope_id || '/' || ?2
+               AND (operation='delete' OR json_extract(payload_json, '$.clearProgress')=1)
+             )",
+            params![server_id, wire.arcid, (wire.progress - 1).min(wire.pagecount - 1), wire.pagecount, wire.lastreadtime],
+        ).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn replace_server_archives(
@@ -9068,6 +9084,36 @@ mod tests {
             ))
             .expect("local archive metadata migration");
         connection
+    }
+
+    #[test]
+    fn remote_progress_fills_only_missing_local_state_without_history_or_sync_writes() {
+        let mut connection = migrated_connection();
+        connection.execute("INSERT INTO servers (id,name,base_url,scope_id) VALUES ('server-a','Home','https://example.com','scope-a')", []).unwrap();
+        let mut wire = ArchiveMetadataWire {
+            arcid: "remote-progress".into(), title: "Remote progress".into(), filename: "archive.cbz".into(),
+            tags: "".into(), summary: None, extension: "cbz".into(), progress: 5,
+            pagecount: 12, lastreadtime: 1700000000, size: 1024,
+        };
+        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
+        let read = |connection: &Connection| connection.query_row(
+            "SELECT page_index FROM reading_progress WHERE scope_id='scope-a' AND archive_id='remote-progress'", [], |row| row.get::<_, i64>(0)).optional().unwrap();
+        assert_eq!(read(&connection), Some(4));
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sync_journal", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        wire.progress = 12;
+        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
+        assert_eq!(read(&connection), Some(4), "local progress wins once it exists");
+        clear_reading_progress_in(&mut connection, "scope-a", "remote-progress").unwrap();
+        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
+        assert_eq!(read(&connection), None, "stale server data must not undo an explicit reset");
+        wire.arcid = "past-end".into();
+        wire.progress = 999;
+        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
+        assert_eq!(connection.query_row("SELECT page_index FROM reading_progress WHERE archive_id='past-end'", [], |row| row.get::<_, i64>(0)).unwrap(), 11);
+        wire.arcid = "unread".into(); wire.progress = 0;
+        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM reading_progress WHERE archive_id='unread'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

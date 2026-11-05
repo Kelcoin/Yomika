@@ -4,7 +4,7 @@ import { useToast } from './Toast';
 
 const repository = new NativeLibraryRepository();
 
-export function useArchiveReadingProgress(scopeId: string | undefined, archiveId: string | undefined) {
+export function useArchiveReadingProgress(scopeId: string | undefined, archiveId: string | undefined, metadata?: unknown) {
   const { showToast } = useToast();
   const identity = `${scopeId ?? ''}\0${archiveId ?? ''}`;
   const owner = useRef({ identity, busy: false });
@@ -32,7 +32,8 @@ export function useArchiveReadingProgress(scopeId: string | undefined, archiveId
     refresh();
     window.addEventListener('yomika:route-cache-invalidated', invalidate);
     return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
-  }, [scopeId, archiveId, identity]);
+  // Loading metadata may hydrate a missing local record from LANraragi.
+  }, [scopeId, archiveId, identity, metadata]);
   const clear = async () => {
     if (!scopeId || !archiveId || current.busy) return;
     current.busy = true;

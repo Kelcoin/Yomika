@@ -189,8 +189,15 @@ export function AppShell({ children }: AppShellProps) {
       const region = target instanceof HTMLElement ? target : undefined;
       if (!region) return;
       if (region !== workspaceRef.current && !region.matches('[data-scroll-region]')) return;
-      const current = region.scrollTop;
+      const maxScroll = Math.max(0, region.scrollHeight - region.clientHeight);
+      const current = Math.min(maxScroll, Math.max(0, region.scrollTop));
       const before = previous.get(region) ?? 0;
+      const bouncing = Boolean(region.closest('[data-edge-bounce]')
+        || region.matches('.archive-list') && region.querySelector(':scope > [data-overscroll]'));
+      if (bouncing) {
+        previous.set(region, current);
+        return;
+      }
       // Ignore tiny reversals from touch noise / elastic settling. Accumulate
       // against the last accepted sample so slow intentional scrolling works.
       if (current > 8 && Math.abs(current - before) < 6) return;
@@ -212,6 +219,9 @@ export function AppShell({ children }: AppShellProps) {
       // scrolling; the docked bar has its own row and stays put.
       if (floatingNav) {
         setCompactNavHidden((hidden) => {
+          // A short page cannot lose a whole bar's clearance without clamping
+          // its scroll position. Keep it docked instead of a hide/clamp/show loop.
+          if (maxScroll + (hidden ? 80 : 0) <= 80) return false;
           // Removing the hidden bar's spacer can clamp scrollTop at the end.
           // That layout correction is not an upward gesture to show it again.
           if (hidden && current < before && region.clientHeight > 0 && current >= region.scrollHeight - region.clientHeight - 1) return true;
