@@ -17,10 +17,10 @@ describe('status bar refresh', () => {
     setInvokeAdapterForTests(adapter);
     render(<StatusBar />);
     await act(async () => { fireEvent.focus(window); await vi.advanceTimersByTimeAsync(45_000); });
-    expect(adapter.mock.calls.length).toBe(5);
+    expect(adapter.mock.calls.length).toBe(4);
     await act(async () => { finish(failure); });
     await act(async () => { fireEvent.focus(window); });
-    expect(adapter.mock.calls.length).toBe(10);
+    expect(adapter.mock.calls.length).toBe(8);
   });
 
   it('clears the archive count when the configured server is removed', async () => {

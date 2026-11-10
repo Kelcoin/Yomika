@@ -1,14 +1,7 @@
 import { DATA_EXPORT_KIND } from '../domain/dataExport';
 import { CREDENTIAL_EXPORT_KIND } from '../domain/credentialWire';
 
-/** Data migration payloads.
- *
- * 现在导出的是「按导入导出范围里记录那一半折出来的同步文档」（见 domain/syncWire 的
- * ScopedExportReportSchema，由原生侧的 export_scoped_data 生成；凭据那一半走口令加密
- * 的凭据文件），这里保留的是**导入**侧认识的所有形状：本机的同步文档、口令加密的凭据
- * 文件、Readoshi worker v3、更早的 Yomika 统一信封，以及旧的偏好设置 blob。旧的导出
- * 仍要能导进来——换过版本的人手里还留着那些文件。
- */
+/** Explicit data-file migration, including supported legacy payload shapes. */
 export const MIGRATION_SCHEMA_VERSION = 1;
 
 /** 原生侧导出的信封标记（`kind`）。 */
@@ -40,8 +33,8 @@ export interface MigrationListEntry { archiveId: string; addedAt: string }
 export interface HistorySource { archiveId: string; pageIndex: number; visitedAt: string }
 export interface WatchlistSource { archiveId: string; addedAt: string; deleted: boolean }
 
-/** 更早那一版的导出信封（历史 + 待看 + 墓碑 id 列表）。现在不再由本应用生成——
- * 导出走的是同步文档——但旧文件仍在导入路径上，测试也用它造样本。 */
+/** 旧文件信封（历史 + 待看 + 墓碑 id 列表），保留供文件兼容和测试使用。
+ * 当前导出使用显式数据备份格式；此处不连接旧云同步或自动上传到插件。 */
 export function buildMigrationExport(input: {
   scopeId: string;
   history: readonly HistorySource[];

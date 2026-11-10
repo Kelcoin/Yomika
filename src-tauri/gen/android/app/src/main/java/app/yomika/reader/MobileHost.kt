@@ -71,6 +71,15 @@ class StatusBarVisibilityArgs {
 }
 
 @InvokeArg
+class SecurityConfigureArgs {
+  var expectedLockGeneration: Long = -1
+  var passwordEnabled: Boolean = false
+  var lockOnBackground: Boolean = false
+  var hidePreview: Boolean = false
+  var locked: Boolean = false
+}
+
+@InvokeArg
 class VibrateArgs {
   /** `light` / `medium` / `heavy` / `selection`，映射到系统预置的那几种效果。 */
   var kind: String = "medium"
@@ -99,10 +108,11 @@ private var insetScript: String? = null
  * 页面启动时还会通过 `system_insets` 命令再问一次（见 `lib/safeArea`），所以即使这里的值
  * 落后一格也会被纠正回来。
  */
-fun pushInsetsToPage(web: WebView?, top: Int, bottom: Int) {
+fun pushInsetsToPage(web: WebView?, top: Int, bottom: Int, overlayTop: Int = top) {
   val target = web ?: return
   val values = "document.documentElement.style.setProperty('--safe-top','${top}px');" +
-    "document.documentElement.style.setProperty('--safe-bottom','${bottom}px');"
+    "document.documentElement.style.setProperty('--safe-bottom','${bottom}px');" +
+    "document.documentElement.style.setProperty('--safe-overlay-top','${overlayTop}px');"
   target.evaluateJavascript(values, null)
   if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
   val script = "window.addEventListener('DOMContentLoaded',function(){$values});"
@@ -145,6 +155,18 @@ fun applySystemBarAppearance(activity: Activity, dark: Boolean, background: Stri
  */
 @TauriPlugin
 class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
+  @Command
+  fun securityStatus(invoke: Invoke) { invoke.resolve(NativeAppSecurity.status(hostActivity)) }
+  @Command
+  fun securityConfigure(invoke: Invoke) {
+    try { NativeAppSecurity.configure(hostActivity, invoke.parseArgs(SecurityConfigureArgs::class.java)); invoke.resolve() }
+    catch (_: Throwable) { invoke.reject("无法应用安全设置") }
+  }
+  @Command
+  fun securityAuthenticate(invoke: Invoke) { NativeAppSecurity.authenticate(hostActivity, invoke) }
+  @Command
+  fun securityReady(invoke: Invoke) { NativeAppSecurity.ready(); invoke.resolve() }
+
   @Command
   fun setStatusBarVisible(invoke: Invoke) {
     try {

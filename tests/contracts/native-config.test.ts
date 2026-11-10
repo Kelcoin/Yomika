@@ -1929,7 +1929,8 @@ describe('native shell configuration', () => {
     );
     expect(cold, '摆进去的那一份得真是第 10 档').toContain('--make $seedPath --up-to 10');
     expect(cold, '备份里该还是升级前那一档').toContain('$backupReading.version -eq 10');
-    expect(cold, '主库升到本版档位，行都还在').toContain('$upgraded.version -eq 32');
+    expect(cold, '主库升到本版档位，行都还在').toContain('$upgraded.version -eq $expectedVersion');
+    expect(cold, '档位从 migrations 目录里取最大编号，不写死一个数').toContain('$expectedVersion = (Get-ChildItem');
     expect(cold, '升级那一半也是冷启动的一条').toContain('[switch] $SeedLegacy,');
     expect(cold, '用户自己的文件一字没动').toContain(
       'Note "run${index}-seed-marker" ($markerNow -eq $seedMarkerText)',

@@ -1,3 +1,4 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { useState } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -5,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useArchiveSelection } from '../../src/components/useArchiveSelection';
 import { ToastProvider } from '../../src/components/Toast';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 afterEach(resetInvokeAdapterForTests);
 

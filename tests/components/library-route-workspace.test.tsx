@@ -1,10 +1,11 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { invalidateRouteCache, simulateRouteCacheRestartForTests, writeRouteCache } from '../../src/lib/routeCache';
 import { getNativeImageCache } from '../../src/lib/nativeImageCache';
 import { peekCachedImageUrl } from '../../src/lib/unifiedImageCache';
@@ -194,7 +195,7 @@ describe('library route workspace', () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       if (command === 'list_servers') return new Promise((resolve) => { resolveServers = resolve; });
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       return { ok: true, value: [] };
     });
 
@@ -260,7 +261,7 @@ describe('library route workspace', () => {
     // 不再各画一版。
     expect(await screen.findByRole('heading', { name: '添加你的 LANraragi' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: '添加服务器' })).toHaveAttribute('href', '/settings');
-    expect(screen.getByRole('link', { name: /从云端同步/ })).toHaveAttribute('href', '/settings?section=sync');
+    expect(screen.getByRole('link', { name: /导入数据/ })).toHaveAttribute('href', '/settings?section=data');
   });
 
   it('switches to a page that already knows there is no server without showing its skeletons first', async () => {
@@ -303,7 +304,7 @@ describe('library route workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: '历史档案标题', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -320,7 +321,7 @@ describe('library route workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a1', title: 'Timeline archive', pageCount: 12, updatedAt: '2026-08-28T00:00:00Z' }] };
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648, cardStyle: 'thumbnail' } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -343,7 +344,7 @@ describe('library route workspace', () => {
         { serverId: 'scope-a', archiveId: 'older', title: 'Older visit', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
         { serverId: 'scope-a', archiveId: 'newer', title: 'Newer visit', pageCount: 3, updatedAt: '2026-08-28T00:00:00Z' },
       ] };
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -363,7 +364,7 @@ describe('library route workspace', () => {
         { serverId: 'scope-a', archiveId: 'a', title: 'Alpha archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' },
         { serverId: 'scope-a', archiveId: 'b', title: 'Beta archive', pageCount: 3, updatedAt: '2026-08-27T00:00:00Z' },
       ] };
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -392,7 +393,7 @@ describe('library route workspace', () => {
       if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: !removed } };
       if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 'scope-a', archiveId: 'a', title: 'Remove archive', pageCount: 2, updatedAt: '2026-08-28T00:00:00Z' }] };
       if (command === 'remove_archive_from_category') { removed = true; return { ok: true, value: { operation: 'remove_from_category', success: 1 } }; }
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -480,21 +481,6 @@ describe('library route workspace', () => {
     await vi.waitFor(() => expect(categoryRequests).toBeGreaterThan(requestsBefore));
     expect(screen.queryByText('正在读取分类')).toBeNull();
     expect(screen.getByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
-  });
-
-  it('shows an actionable empty state when WebDAV is not configured', async () => {
-    const user = userEvent.setup();
-    setInvokeAdapterForTests(async (command) => {
-      if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
-      if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
-      throw new Error(`Unexpected command: ${command}`);
-    });
-    render(<MemoryRouter initialEntries={['/sync']}><App /></MemoryRouter>);
-
-    // 同步区是一行设置；未配置的空状态在「WebDAV 账户」行的悬浮菜单里。
-    await user.click(await screen.findByRole('button', { name: '同步账户' }));
-    const accountsMenu = await screen.findByRole('dialog', { name: '同步账户' });
-    expect(within(accountsMenu).getByText('还没有账户：填下面的表单即可开始。')).toBeInTheDocument();
   });
 
   it('loads archives from the first configured server scope', async () => {
@@ -1223,4 +1209,27 @@ describe('library route workspace', () => {
     await user.click(within(menu).getByRole('menuitem', { name: '加入待看' }));
     expect(await screen.findByText('已加入待看')).toBeInTheDocument();
   });
+});
+
+
+it('refreshes presets on narrow invalidation without refetching archive pages', async () => {
+  let presetName = 'Before update';
+  const adapter = vi.fn(async (command: string) => {
+    if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', scopeId: 'scope-a', name: 'Server', baseUrl: 'https://lrr.test' }] };
+    if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a', title: 'Stable archive', pageCount: 3, updatedAt: 'now' }]);
+    if (command === 'list_search_presets') return { ok: true, value: [{ scopeId: 'scope-a', presetId: 'p', name: presetName, query: '', sortBy: 'added', sortOrder: 'desc', categoryId: null, createdAt: 'now', updatedAt: 'now', deviceId: 'd', revision: 1, deleted: false }] };
+    if (command.startsWith('list_')) return { ok: true, value: [] };
+    return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'unused', retryable: false } };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderLibrary();
+  await screen.findByRole('button', { name: /^Stable archive/ });
+  await userEvent.setup().click(screen.getByRole('button', { name: '检索预设' }));
+  await screen.findByRole('menuitem', { name: /^Before update$/ });
+  const pages = adapter.mock.calls.filter(([command]) => command === 'search_archives_page').length;
+  presetName = 'After update';
+  act(() => invalidateRouteCache('presets:'));
+  await screen.findByRole('menuitem', { name: /^After update$/ });
+  expect(screen.queryByRole('menuitem', { name: /^Before update$/ })).toBeNull();
+  expect(adapter.mock.calls.filter(([command]) => command === 'search_archives_page')).toHaveLength(pages);
 });

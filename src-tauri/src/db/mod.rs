@@ -26,7 +26,6 @@ impl Database {
             .map_err(|error| error.to_string())?;
         run_migrations(&mut connection, path)?;
         crate::commands::library::recover_interrupted_tasks(&connection)?;
-        crate::commands::sync::recover_stuck_sync_journal(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -120,6 +119,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../../migrations/0031_cache_quota_covering_index.sql"),
     ),
     (32, include_str!("../../migrations/0032_dedup_manual_save.sql")),
+    (33, include_str!("../../migrations/0033_retire_cloud_sync.sql")),
 ];
 
 fn run_migrations(connection: &mut Connection, path: &Path) -> Result<(), String> {
@@ -219,11 +219,11 @@ mod tests {
                 .expect("servers table");
             let sync_table: String = connection
                 .query_row(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sync_accounts'",
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reading_resets'",
                     [],
                     |row| row.get(0),
                 )
-                .expect("webdav accounts table");
+                .expect("local reading reset table");
             let archive_categories_table: String = connection
                 .query_row(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'archive_categories'",
@@ -296,10 +296,10 @@ mod tests {
                     local_archive_metadata_columns
                 ),
                 (
-                    32,
+                    33,
                     1,
                     "servers",
-                    "sync_accounts",
+                    "reading_resets",
                     "archive_categories",
                     "archive_categories_lookup_idx",
                     2,
@@ -325,7 +325,7 @@ mod tests {
                 row.get(0)
             })
             .expect("migration count");
-        assert_eq!(migration_count, 29);
+        assert_eq!(migration_count, 30);
         let recovered_status: String = reopened
             .connection
             .lock()
@@ -358,7 +358,7 @@ mod tests {
                 .pragma_update(None, "user_version", version)
                 .expect("legacy version");
         }
-        let left_over = "{\"left_over\":\"这台机器上原来就有\"}".to_string();
+        let left_over = r#"{"left_over":"这台机器上原来就有"}"#.to_string();
         connection
             .execute(
                 "INSERT INTO settings (key, value_json) VALUES ('legacy-marker', ?1)",
@@ -408,7 +408,7 @@ mod tests {
         {
             let connection = database.connection.lock().expect("database lock");
             let (version, marker) = version_and_marker(&connection);
-            assert_eq!(version, 32, "升完该是这一版的档位");
+            assert_eq!(version, 33, "升完该是这一版的档位");
             assert_eq!(marker, left_over, "那台机器上的数据要跟着一起升上来");
         }
         drop(database);
@@ -441,7 +441,7 @@ mod tests {
             connection
                 .execute(
                     "INSERT INTO settings (key, value_json) VALUES ('legacy-marker', ?1)",
-                    ["{\"from\":\"a newer build\"}"],
+                    [r#"{"from":"a newer build"}"#],
                 )
                 .expect("newer row");
             connection
@@ -455,7 +455,7 @@ mod tests {
             let connection = reopened.connection.lock().expect("database lock");
             let (version, marker) = version_and_marker(&connection);
             assert_eq!(version, 99, "别人写下的档位不许被改小");
-            assert_eq!(marker, "{\"from\":\"a newer build\"}");
+            assert_eq!(marker, r#"{"from":"a newer build"}"#);
         }
         drop(reopened);
         assert!(
@@ -464,4 +464,17 @@ mod tests {
         );
         std::fs::remove_file(path).expect("remove test database");
     }
+    #[test]
+    fn retiring_cloud_sync_preserves_records_and_local_reset_intent() {
+        let connection = Connection::open_in_memory().unwrap();
+        for (_, sql) in MIGRATIONS.iter().filter(|(version,_)| *version <= 32) {
+            connection.execute_batch(sql).unwrap();
+        }
+        connection.execute_batch(r#"INSERT INTO reading_history(scope_id,archive_id,page_index,device_id) VALUES('scope','kept',4,'device'); INSERT INTO sync_journal(scope_id,object_id,object_type,operation,device_id,logical_clock,payload_hash,payload_json) VALUES('scope','scope/reset','reading_progress','delete','device',3,'hash','{"archiveId":"reset","deleted":true}');"#).unwrap();
+        connection.execute_batch(include_str!("../../migrations/0033_retire_cloud_sync.sql")).unwrap();
+        assert_eq!(connection.query_row("SELECT page_index FROM reading_history WHERE archive_id='kept'", [], |r|r.get::<_,i64>(0)).unwrap(),4);
+        assert_eq!(connection.query_row("SELECT archive_id FROM reading_resets WHERE scope_id='scope'", [], |r|r.get::<_,String>(0)).unwrap(),"reset");
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('sync_journal','sync_accounts','sync_applied_segments','webdav_accounts')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
 }

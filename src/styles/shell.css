@@ -1852,8 +1852,7 @@ body::-webkit-scrollbar,
   max-width: 680px;
 }
 
-.eh-account-form,
-.sync-form {
+.eh-account-form {
   width: 100%;
 }
 
@@ -2376,13 +2375,23 @@ body::-webkit-scrollbar,
 .archive-detail-panel-tabs svg { width: 16px; height: 16px; }
 .archive-detail-panel-tabs button:only-child { grid-column: 1 / -1; }
 .archive-detail-panels { min-height: 160px; }
-.archive-detail-panels > [role='tabpanel']:not([hidden]) {
-  animation: detail-panel-enter var(--motion-page);
+/* 两块面板一块舞台。换边期间它们叠进同一个网格格子：容器只保留一个高度
+   （否则矮的那块会被高的那块撑出一段空白），每块按手势写进去的位移平移，
+   于是「离开的那块」和「进来的那块」同时可见。静止时这条规则不生效，
+   面板照旧各占一行、高度跟着当前那块走。位移由 src/lib/usePanelPager.ts 写。 */
+.archive-detail-panels.is-sliding {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  overflow: hidden;
 }
-@keyframes detail-panel-enter { from { opacity: .6; transform: translateY(4px); } to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) {
-  .archive-detail-panels > [role='tabpanel']:not([hidden]) { animation: none; }
+.archive-detail-panels.is-sliding > [role='tabpanel'] {
+  grid-area: 1 / 1;
+  min-width: 0;
+  backface-visibility: hidden;
 }
+/* 只在手指按着的时候提升：两块整幅面板常驻提升，等于白占两层合成。 */
+.archive-detail-panels.is-dragging > [role='tabpanel'] { will-change: transform; }
 .detail-panel-glyph { fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.75; }
 
 .archive-detail-summary { white-space: pre-wrap; line-height: var(--leading-relaxed); }
@@ -3105,9 +3114,10 @@ body::-webkit-scrollbar,
 }
 
 .archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-media { height: 220px; }
-/* 34 title + 48 tags + 18 meta + 2x4 gap = 108 inside a 130px body. */
+/* Two 18px title lines + 48 tags + 18 meta + 2x4 gap = 110;
+   the 130px body still has 114px inside its padding. */
 .archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-body {
-  grid-template-rows: 34px 48px 18px;
+  grid-template-rows: 36px 48px 18px;
   gap: 4px;
   height: 130px;
   padding: var(--space-2);
@@ -4326,131 +4336,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   flex: 1 1 auto;
 }
 
-/* Sync lives in the settings menu only: the account row is a settings row whose
-   actions sit where the value would, and the WebDAV form is the menu's content.
-   The menu panel is the frame for both, so neither brings group chrome.
-   两层折叠互斥（编辑时收动作，否则收表单），各自的间隔挂在折叠层外面并随状态
-   开关：网格的行间距不认「零高」，收起的那一层照样占一道缝，按钮下面就多出一块
-   空白；而放进 0fr 那一层里当内边距也压不掉——内边距不能压缩，最小高度压不到零。 */
-.settings-menu-account > .sync-collapsible {
-  grid-column: 1 / -1;
-}
-
-.settings-menu-account > .sync-collapsible.is-open { margin-block-start: var(--space-2); }
-.settings-menu-accounts > .sync-collapsible.is-open { margin-block-start: var(--space-3); }
-
-/* 账户块里若还有「先去添服务器」的提示，它与账户行的间隔同样只属于这一块。 */
-.settings-menu-accounts > .settings-menu-account + .settings-menu-desc {
-  margin-block-start: var(--space-3);
-}
-
-/* 动作在一行里排开：编辑 / 立即同步 / 重置远端 **三等分整行**，谁也不折行。
-   为什么不是 `flex: 1 1 0`：2026-10-15 在真浏览器里量过，三项算出来的 flex 都是
-   `1 1 0px`、`min-width` 都是 0，可这一行量出来是 130 / 130 / 96——第三项
-   （`.settings-menu-reset` 那枚常驻按钮）就是不肯长到另两项的宽度；把三项都改成内联
-   `flex: 1 1 0`、把它的 basis 改成 `0%`、`width: 0`、`min-width: 0`、去掉内层按钮的
-   flex，读数一动不动。同一行换成 `grid-template-columns: repeat(3, minmax(0, 1fr))`
-   立刻是 119 / 119 / 119。所以用 grid：三等分由排法本身给出，不依赖浏览器怎么算那份
-   基准尺寸。 */
-.settings-menu-account-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
-}
-
-/* 三等分之后，窄面板（390px 宽的手机）每颗只剩 96px（列宽 98 减两侧边框）：4 个汉字
-   + 17px 图标 + 4px 间距 + 两侧 16px 内边距量出来是 103，会被 overflow:hidden 裁掉。
-   这一行的内边距收一档（16→8）、图标间距收一档（8→4），需要 90 ≤ 96 才写得下——
-   只收这一行，其它按钮仍是 16。 */
-.settings-menu-account-actions > .primary-action,
-.settings-menu-account-actions > .secondary-action,
-.settings-menu-reset > .secondary-action {
-  min-width: 0;
-  padding-inline: var(--space-2);
-  gap: var(--space-1);
-}
-
-/* 360px 宽的手机上三颗只剩 86px（列宽 88 减边框），上面那 90 还差 4px：这一档只把
-   图标与间距再各收一点（17→15、4→2），字号与内边距不动。 */
-@media (max-width: 380px) {
-  .settings-menu-account-actions > .primary-action svg,
-  .settings-menu-account-actions > .secondary-action svg,
-  .settings-menu-reset > .secondary-action svg { width: 15px; height: 15px; }
-
-  .settings-menu-account-actions > .primary-action,
-  .settings-menu-account-actions > .secondary-action,
-  .settings-menu-reset > .secondary-action { gap: 2px; }
-}
-
-/* 破坏性动作的「原地变形」：一颗常驻按钮 + 一条件件长出来的对手方。
-   未变形时它只装着那一颗按钮——**一列**，那颗按钮占满第三列（119 而不是 55：
-   2026-10-15 第一版给这里写死了两列，常驻那颗只拿到半格，宽度又跟旁边两颗不一样）。
-   变形时这一组跨满三列，两枚胶囊各分一半——它们要写得下「确认重置」四个字。 */
-.settings-menu-reset {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  min-width: 0;
-  gap: var(--space-2);
-}
-
-.settings-menu-reset.is-armed {
-  grid-column: 1 / -1;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-/* 变形的那一帧：那颗按钮轻轻张开（同一个节点换了图标与标签），对手方从左边淡入。
-   两段是同一个动作的两半，所以共用 `--motion-fast`；`backwards` 让首帧立刻生效，
-   不会先闪一下终态。 */
-@keyframes settings-reset-morph {
-  from { opacity: 0.45; transform: scale(0.94); }
-}
-
-@keyframes settings-reset-partner-in {
-  from { opacity: 0; transform: translateX(-6px); }
-}
-
-.settings-menu-reset.is-armed > .settings-menu-reset-toggle {
-  animation: settings-reset-morph var(--motion-fast) backwards;
-}
-
-.settings-menu-reset.is-armed > .settings-menu-reset-cancel {
-  animation: settings-reset-partner-in var(--motion-fast) backwards;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .settings-menu-reset.is-armed > .settings-menu-reset-toggle,
-  .settings-menu-reset.is-armed > .settings-menu-reset-cancel { animation: none; }
-}
-
-/* 收起/展开：0fr → 1fr 的网格行过渡，让「高度自动」的表单也能动画——按钮的显隐
-   与面板尺寸变化是同一个动作，不会突然跳一截。 */
-.sync-collapsible {
-  display: grid;
-  grid-template-rows: 0fr;
-  opacity: 0;
-  /* 外边距也在过渡里：收起时它一起收掉，展开时一起长出来。 */
-  transition: grid-template-rows var(--motion-standard), opacity var(--motion-fast), margin-block-start var(--motion-standard);
-}
-
-.sync-collapsible.is-open {
-  grid-template-rows: 1fr;
-  opacity: 1;
-}
-
-.sync-collapsible > * {
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* 保存、测试与取消各占一份，一起铺满整行。 */
-.sync-form-actions {
-  display: flex;
-  gap: var(--space-3);
-}
-
 /* A row of actions divides the width evenly. Declared once for every such row
    instead of per screen, so two buttons never come out as two different sizes. */
-.sync-form-actions > button,
 .settings-menu-actions > .primary-action,
 .settings-menu-actions > .secondary-action,
 .archive-detail-actions > .primary-action,
@@ -4466,65 +4353,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dialog-actions > .is-icon {
   flex: 0 0 auto;
   margin-inline-start: auto;
-}
-
-/* 同步范围：复用设置菜单的多选行（底栏项目那套），只是外面套一层表单里的字段标题。
-   不再画自己的边框盒子——菜单本身就是框，表单里多一个框反而像第二种控件。 */
-.sync-scope {
-  display: grid;
-  gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.sync-scope legend {
-  padding: 0;
-  color: var(--ink-secondary);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-}
-
-.sync-scope .settings-menu-checks {
-  margin: 0 calc(-1 * var(--space-3));
-}
-
-.sync-scope-hint {
-  margin: 0;
-  color: var(--on-surface-variant);
-  font-size: var(--text-xs);
-  line-height: var(--leading-normal);
-}
-
-/* 账户类型：与「自定义」菜单里 基础/高级 同一套分段按钮，不另造控件。 */
-.sync-kind {
-  display: grid;
-  gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.sync-kind legend {
-  padding: 0;
-  color: var(--ink-secondary);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-}
-
-/* The WebDAV form is one column: it only ever renders inside the 420px menu. */
-.sync-form {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: var(--space-3);
-}
-
-.sync-form label {
-  display: grid;
-  gap: var(--space-2);
-  color: var(--ink-secondary);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
 }
 
 /* 对话框的动作行与二级菜单同一种排法：按钮平分整行，一起铺满。
@@ -4637,8 +4465,9 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-rail-item > .archive-thumb-card {
   --archive-rail-cover-height: 210px;
   scroll-snap-align: none;
-  transform: scale(1);
-  will-change: transform;
+  /* Let settled text return to normal rasterization. A permanent transform
+     layer caches the 13px glyphs and stretches that bitmap on hover. */
+  transform: none;
   isolation: isolate;
   /* Cover and progress share this one transform, including its origin and
      animation. Do not promote/transform the track independently. */
@@ -4733,7 +4562,11 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 .settings-rule-list { box-sizing: border-box; width: 100%; min-height: 128px; resize: none; font: inherit; }
 .archive-thumb-card-title { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
-.archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-bold); line-height: var(--leading-tight); text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+/* Keep glyph outlines stable across the card's fractional hover scale. Hinting
+   small CJK glyphs independently at each scale can move the second baseline's
+   visible strokes by a device pixel even though both line boxes stay put.
+   Apply in both states: changing rendering only on hover causes its own jump. */
+.archive-thumb-card-title strong { overflow: hidden; font-size: var(--text-sm); font-weight: var(--weight-semibold); line-height: 18px; text-rendering: geometricPrecision; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .archive-thumb-card-title svg { flex: 0 0 auto; width: 15px; height: 15px; color: var(--brand-vermilion); }
 .archive-thumb-card-meta { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); min-width: 0; max-width: 100%; color: var(--ink-secondary); font-size: var(--archive-thumb-meta-fitted-size, var(--archive-thumb-meta-font-size)); font-weight: var(--weight-semibold); line-height: var(--leading-tight); font-variant-numeric: tabular-nums; }
 .archive-thumb-card-meta > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -4778,8 +4611,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-workspace .dedup-progress-fill.is-indeterminate { width: 40%; animation: progress-sweep var(--duration-pulse) var(--ease-pulse) infinite; }
 @media (prefers-reduced-motion: reduce) {
   .dedup-workspace .dedup-progress-fill.is-indeterminate { width: 100%; animation: none; opacity: 0.6; }
-  /* 减弱动效时收起/展开直接切换，不做过渡。 */
-.sync-collapsible { transition: none; }
 }
 /* 九格排一行：auto-fit+minmax 在窄一点时会把最后一格挤到第二行，改成等分的
    单行网格，格子自己收缩。 */
@@ -5626,7 +5457,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 
-/* A settings menu can hold a whole workspace (E-Hentai accounts, the WebDAV
+/* A settings menu can hold a whole workspace (E-Hentai accounts, the account
    form), so it is allowed more height than a preset list — and only its body
    scrolls, keeping the title and description pinned while the content moves.
    The column is flex, not grid: a grid row sized to its content is not shrunk
@@ -5966,7 +5797,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    （用户报的「同步界面上下的 LOGO 是重复的」），去掉之后网格只剩一列：`auto` 那一列
    本来是给图标的，留着会让名称挤在图标宽里、长端点把面板顶宽。
    行间距为零：动作那一层的间隔由它自己的 margin 出（见
-   .settings-menu-account > .sync-collapsible），收起时才不会白占一道缝。 */
+   折叠层），收起时才不会白占一道缝。 */
 .settings-menu-account {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

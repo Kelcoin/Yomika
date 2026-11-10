@@ -206,6 +206,12 @@ jobs:
       # runner image does not preinstall it.
       - name: Install XcodeGen
         run: brew install xcodegen
+      - name: Validate iOS Face ID permission
+        run: |
+          set -euo pipefail
+          plutil -lint src-tauri/Info.ios.plist
+          face_id_reason=$(plutil -extract NSFaceIDUsageDescription raw src-tauri/Info.ios.plist)
+          test -n "$face_id_reason"
       - run: npx tauri ios init --ci
       - name: Build pinned iOS ONNX Runtime with CoreML
         run: |
@@ -262,12 +268,17 @@ jobs:
         run: python3 .github/scripts/verify-mobile-runtime.py src-tauri/gen/apple/Externals/arm64/release/libapp.a --ios
       - name: Build unsigned iOS app
         run: |
+          set -euo pipefail
           project=$(find src-tauri/gen/apple -name '*.xcodeproj' -maxdepth 1 -print -quit)
           scheme=$(xcodebuild -list -project "$project" | awk '/Schemes:/{getline; gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit}')
           test -n "$scheme"
-          xcodebuild -project "$project" -scheme "$scheme" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' FRAMEWORK_SEARCH_PATHS="\$(inherited) $ORT_IOS_XCFWK_PATH/ios-arm64" OTHER_LDFLAGS="\$(inherited) -framework onnxruntime -framework CoreML -framework Metal -framework Accelerate -lc++" build
+          xcodebuild -project "$project" -scheme "$scheme" -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/yomika-ios" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' FRAMEWORK_SEARCH_PATHS="\$(inherited) $ORT_IOS_XCFWK_PATH/ios-arm64" OTHER_LDFLAGS="\$(inherited) -framework onnxruntime -framework CoreML -framework Metal -framework Accelerate -framework LocalAuthentication -framework UIKit -framework Foundation -lc++" build
           app=$(find "$RUNNER_TEMP/yomika-ios/Build/Products" -type d -name '*.app' -path '*iphoneos*' -print -quit)
           test -d "$app"
+          # Validate the final bundle, so an init/config merge regression cannot
+          # ship an app which terminates as soon as Face ID is requested.
+          face_id_reason=$(plutil -extract NSFaceIDUsageDescription raw "$app/Info.plist")
+          test -n "$face_id_reason"
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app
           (cd artifacts && zip -qry Yomika-unsigned.ipa Payload)

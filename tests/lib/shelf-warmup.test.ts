@@ -1,7 +1,8 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { afterEach, expect, it, vi } from 'vitest';
 import { warmShelfSnapshot, shelfRead } from '../../src/app/shelfWarmup';
 import { readRouteCache, invalidateRouteCache } from '../../src/lib/routeCache';
-import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 afterEach(() => { resetInvokeAdapterForTests(); invalidateRouteCache(); });
 const member = (archiveId: string) => ({ scopeId: 'scope', archiveId, addedAt: '2026-01-01', updatedAt: '2026-01-01', deviceId: 'device', revision: 1, deleted: false });

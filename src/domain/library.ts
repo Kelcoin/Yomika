@@ -136,26 +136,3 @@ export const LocalArchiveRecordSchema = z.object({
 });
 
 export type LocalArchiveRecord = z.infer<typeof LocalArchiveRecordSchema>;
-
-export const SyncJournalOperationSchema = z.enum(['upsert', 'delete']);
-export const SyncJournalStatusSchema = z.enum(['pending', 'retryable', 'processing', 'completed', 'failed']);
-export const SyncJournalRecordSchema = z.object({
-  sequence: z.number().int().positive(),
-  scopeId: z.string().min(1),
-  objectId: z.string().min(1),
-  objectType: z.string().min(1),
-  operation: SyncJournalOperationSchema,
-  deviceId: z.string().min(1),
-  logicalClock: z.number().int().nonnegative(),
-  wallClock: z.string().min(1),
-  baseHash: z.string().nullable().optional(),
-  payloadHash: z.string().min(1),
-  payloadJson: z.string().min(1),
-  status: SyncJournalStatusSchema,
-  attemptCount: z.number().int().nonnegative(),
-  lastError: z.string().nullable().optional(),
-});
-export type SyncJournalRecord = z.infer<typeof SyncJournalRecordSchema>;
-export type SyncJournalInput = Omit<SyncJournalRecord, 'sequence' | 'wallClock' | 'status' | 'attemptCount' | 'lastError'> & {
-  baseHash?: string;
-};

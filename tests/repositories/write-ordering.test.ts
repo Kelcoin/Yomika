@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { NativeLrrBridgeRepository, invalidateLrrBridgeConfig } from '../../src/repositories/nativeLrrBridgeRepository';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
@@ -12,6 +13,13 @@ const watchlistRecord = (added: boolean) => ({
   deletedAt: null,
   revision: 1,
   deleted: !added,
+});
+
+beforeEach(async () => {
+  invalidateLrrBridgeConfig();
+  setInvokeAdapterForTests(async () => ({ ok: true, value: { enabled: false, pending: 0, conflicts: 0 } }));
+  for (const scopeId of ['s', 'scope-a']) await new NativeLrrBridgeRepository().configure(scopeId, false);
+  resetInvokeAdapterForTests();
 });
 
 afterEach(() => {
@@ -38,7 +46,7 @@ describe('repository write ordering', () => {
     const repository = new NativeLibraryRepository();
     const write = repository.setReadingList('s', 'a', true);
     const read = repository.listReadingList('s');
-    await Promise.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(calls).toEqual(['set_reading_list']);
     release();
     await write;
@@ -102,7 +110,7 @@ describe('repository write ordering', () => {
     const second = repository.setWatchlist('s', 'a', false);
 
     // 第一条还在路上：第二条**一个字节都不该发出去**。
-    await Promise.resolve();
+    await new Promise(resolve => setTimeout(resolve, 0));
     expect(dispatched).toEqual(['set_reading_list:true']);
 
     releaseFirst();

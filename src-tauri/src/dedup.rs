@@ -68,7 +68,6 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY);")
             .expect("migration ledger");
-        // 非重复标记会顺手写一条同步日志：夹具需要 settings（设备 id）与 sync_journal。
         connection
             .execute_batch(
                 "CREATE TABLE settings (
@@ -78,9 +77,6 @@ mod tests {
                 );",
             )
             .expect("settings schema");
-        connection
-            .execute_batch(include_str!("../migrations/0003_sync_journal.sql"))
-            .expect("sync journal schema");
         connection
             .execute_batch(include_str!("../migrations/0008_dedup_features.sql"))
             .expect("dedup feature schema");
@@ -921,61 +917,6 @@ mod tests {
                 .unwrap()
                 .1
         );
-    }
-
-    #[test]
-    fn non_duplicate_marks_write_a_sync_journal_entry() {
-        // 标记与取消都要能跨设备：写一条 dedup_non_duplicate 日志，时钟取表里那一行，
-        // 取消时 tombstoned=true。以前这两处一笔都不记，结论只留在本机。
-        let mut connection = connection();
-        save_non_duplicate(
-            &mut connection,
-            DedupNonDuplicateInput {
-                scope_id: "server-a".into(),
-                left_archive_id: "a".into(),
-                right_archive_id: "b".into(),
-            },
-        )
-        .unwrap();
-        let (object_type, tombstoned, clock): (String, i64, i64) = connection
-            .query_row(
-                "SELECT sj.object_type,
-                        CASE WHEN dnd.tombstoned = 1 THEN 1 ELSE 0 END,
-                        sj.logical_clock
-                 FROM sync_journal sj
-                 JOIN dedup_non_duplicates dnd
-                   ON dnd.scope_id = sj.scope_id AND sj.object_id = dnd.scope_id || '/' || dnd.pair_key
-                 ORDER BY sj.sequence DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("journal row");
-        assert_eq!(object_type, "dedup_non_duplicate");
-        assert_eq!(tombstoned, 0);
-        assert_eq!(clock, 1);
-
-        remove_non_duplicate(
-            &mut connection,
-            DedupNonDuplicateInput {
-                scope_id: "server-a".into(),
-                left_archive_id: "a".into(),
-                right_archive_id: "b".into(),
-            },
-        )
-        .unwrap();
-        let (tombstoned, clock): (i64, i64) = connection
-            .query_row(
-                "SELECT CASE WHEN dnd.tombstoned = 1 THEN 1 ELSE 0 END, sj.logical_clock
-                 FROM sync_journal sj
-                 JOIN dedup_non_duplicates dnd
-                   ON dnd.scope_id = sj.scope_id AND sj.object_id = dnd.scope_id || '/' || dnd.pair_key
-                 ORDER BY sj.sequence DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("removal journal row");
-        assert_eq!(tombstoned, 1);
-        assert_eq!(clock, 2, "改动一次时钟 +1，远端抢占比较才有依据");
     }
 
     #[test]
@@ -3514,49 +3455,22 @@ pub fn resume_scan(
     session(connection, &session_id)
 }
 
-/// 非重复结论也跨设备：本地写完顺手记一条同步日志，类型与落地端一致。
-/// 逻辑时钟取表里那一行的值，远端的抢占比较才与本地同源。
-fn journal_non_duplicate(
-    transaction: &rusqlite::Transaction<'_>,
-    scope_id: &str,
-    pair_key: &str,
-    left: &str,
-    right: &str,
-    tombstoned: bool,
-) -> Result<(), String> {
-    let clock: i64 = transaction
-        .query_row(
-            "SELECT logical_clock FROM dedup_non_duplicates WHERE scope_id = ?1 AND pair_key = ?2",
-            params![scope_id, pair_key],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-    crate::commands::sync::journal_object(
-        transaction,
-        scope_id,
-        "dedup_non_duplicate",
-        &format!("{scope_id}/{pair_key}"),
-        clock,
-        serde_json::json!({
-            "pairKey": pair_key,
-            "leftArchiveId": left,
-            "rightArchiveId": right,
-            "tombstoned": tombstoned,
-        }),
-    )
-}
-
+/// 非重复标记按当前数据模式写入本机或插件持久队列。
 pub fn save_non_duplicate(
     connection: &mut Connection,
     input: DedupNonDuplicateInput,
 ) -> Result<(), String> {
     required_text(&input.scope_id)?;
+    if crate::commands::lrr_bridge::enabled(connection,&input.scope_id) {
+        let tx=connection.transaction().map_err(|e|e.to_string())?;
+        crate::commands::lrr_bridge::queue_nonduplicate(&tx,&input.scope_id,&input.left_archive_id,&input.right_archive_id,true)?;
+        return tx.commit().map_err(|e|e.to_string());
+    }
     let (key, left, right) = pair_key(&input.left_archive_id, &input.right_archive_id)?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
     transaction.execute("INSERT INTO dedup_non_duplicates (scope_id,pair_key,left_archive_id,right_archive_id,tombstoned,logical_clock) VALUES (?1,?2,?3,?4,0,1) ON CONFLICT(scope_id,pair_key) DO UPDATE SET tombstoned=0,logical_clock=dedup_non_duplicates.logical_clock+1,updated_at=CURRENT_TIMESTAMP", params![input.scope_id, key, left, right]).map_err(|error| error.to_string())?;
-    journal_non_duplicate(&transaction, &input.scope_id, &key, &left, &right, false)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -3566,12 +3480,16 @@ pub fn remove_non_duplicate(
     input: DedupNonDuplicateInput,
 ) -> Result<(), String> {
     required_text(&input.scope_id)?;
+    if crate::commands::lrr_bridge::enabled(connection,&input.scope_id) {
+        let tx=connection.transaction().map_err(|e|e.to_string())?;
+        crate::commands::lrr_bridge::queue_nonduplicate(&tx,&input.scope_id,&input.left_archive_id,&input.right_archive_id,false)?;
+        return tx.commit().map_err(|e|e.to_string());
+    }
     let (key, left, right) = pair_key(&input.left_archive_id, &input.right_archive_id)?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
     transaction.execute("INSERT INTO dedup_non_duplicates (scope_id,pair_key,left_archive_id,right_archive_id,tombstoned,logical_clock) VALUES (?1,?2,?3,?4,1,1) ON CONFLICT(scope_id,pair_key) DO UPDATE SET tombstoned=1,logical_clock=dedup_non_duplicates.logical_clock+1,updated_at=CURRENT_TIMESTAMP", params![input.scope_id, key, left, right]).map_err(|error| error.to_string())?;
-    journal_non_duplicate(&transaction, &input.scope_id, &key, &left, &right, true)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -3582,12 +3500,15 @@ pub fn import_readoshi(connection: &mut Connection, input: DedupImportInput) -> 
         .transaction()
         .map_err(|error| error.to_string())?;
     for pair in input.pairs {
+        if crate::commands::lrr_bridge::enabled(&transaction,&input.scope_id) {
+            crate::commands::lrr_bridge::queue_nonduplicate(&transaction,&input.scope_id,&pair.left_archive_id,&pair.right_archive_id,true)?;
+            continue;
+        }
         let (key, left, right) = pair_key(&pair.left_archive_id, &pair.right_archive_id)?;
         transaction.execute(
             "INSERT INTO dedup_non_duplicates (scope_id,pair_key,left_archive_id,right_archive_id,tombstoned,logical_clock) VALUES (?1,?2,?3,?4,0,1) ON CONFLICT(scope_id,pair_key) DO UPDATE SET tombstoned=0,logical_clock=dedup_non_duplicates.logical_clock+1,updated_at=CURRENT_TIMESTAMP",
             params![input.scope_id, key, left, right],
         ).map_err(|error| error.to_string())?;
-        journal_non_duplicate(&transaction, &input.scope_id, &key, &left, &right, false)?;
     }
     transaction.commit().map_err(|error| error.to_string())
 }
@@ -3851,19 +3772,7 @@ pub fn dedup_save_non_duplicate(
             .lock()
             .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
-                let scope_id = input.scope_id.clone();
-                let (pair_key, left, right) =
-                    pair_key(&input.left_archive_id, &input.right_archive_id)?;
-                save_non_duplicate(&mut connection, input)?;
-                crate::commands::sync::append_dedup_journal(
-                    &mut connection,
-                    &scope_id,
-                    &pair_key,
-                    "upsert",
-                    &left,
-                    &right,
-                    false,
-                )
+                save_non_duplicate(&mut connection, input)
             }),
     )
 }
@@ -3890,23 +3799,7 @@ pub fn dedup_save_non_duplicates(
             .and_then(|mut connection| {
                 let mut outcomes = Vec::with_capacity(input.entries.len());
                 for entry in input.entries {
-                    let scope_id = entry.scope_id.clone();
-                    let outcome = match pair_key(&entry.left_archive_id, &entry.right_archive_id) {
-                        Ok((pair_key, left, right)) => {
-                            save_non_duplicate(&mut connection, entry).is_ok()
-                                && crate::commands::sync::append_dedup_journal(
-                                    &mut connection,
-                                    &scope_id,
-                                    &pair_key,
-                                    "upsert",
-                                    &left,
-                                    &right,
-                                    false,
-                                )
-                                .is_ok()
-                        }
-                        Err(_) => false,
-                    };
+                    let outcome = save_non_duplicate(&mut connection, entry).is_ok();
                     outcomes.push(outcome);
                 }
                 Ok(outcomes)
@@ -3924,19 +3817,7 @@ pub fn dedup_remove_non_duplicate(
             .lock()
             .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
-                let scope_id = input.scope_id.clone();
-                let (pair_key, left, right) =
-                    pair_key(&input.left_archive_id, &input.right_archive_id)?;
-                remove_non_duplicate(&mut connection, input)?;
-                crate::commands::sync::append_dedup_journal(
-                    &mut connection,
-                    &scope_id,
-                    &pair_key,
-                    "delete",
-                    &left,
-                    &right,
-                    true,
-                )
+                remove_non_duplicate(&mut connection, input)
             }),
     )
 }
@@ -4134,23 +4015,7 @@ pub fn dedup_import_readoshi(
             .lock()
             .map_err(|_| crate::cache::LOCK_FAILED.into())
             .and_then(|mut connection| {
-                let scope_id = input.scope_id.clone();
-                let pairs = input.pairs.clone();
-                import_readoshi(&mut connection, input)?;
-                for pair in pairs {
-                    let (pair_key, left, right) =
-                        pair_key(&pair.left_archive_id, &pair.right_archive_id)?;
-                    crate::commands::sync::append_dedup_journal(
-                        &mut connection,
-                        &scope_id,
-                        &pair_key,
-                        "upsert",
-                        &left,
-                        &right,
-                        false,
-                    )?;
-                }
-                Ok(())
+                import_readoshi(&mut connection, input)
             }),
     )
 }

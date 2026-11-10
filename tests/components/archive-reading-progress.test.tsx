@@ -1,6 +1,7 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { useArchiveReadingProgress } from '../../src/components/useArchiveReadingProgress';
 import { invalidateRouteCache } from '../../src/lib/routeCache';
 

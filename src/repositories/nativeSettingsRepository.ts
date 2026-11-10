@@ -1,3 +1,4 @@
+import { ScopedImportReportSchema, type ScopedImportReport } from '../domain/dataExport';
 import { z } from 'zod';
 
 import { invokeCommand } from '../bridge/invoke';
@@ -75,7 +76,6 @@ export const PreferenceSnapshotSchema = z.object({
     .default(['home', 'library', 'history', 'watchlist', 'settings']),
   /** 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次。
    * 关掉就只剩设置里的「立即同步」。 */
-  autoSync: z.boolean().default(true),
   startWithWindows: z.boolean().default(false),
   closeToTray: z.boolean().default(false),
   tagTranslationEnabled: z.boolean().default(true),
@@ -144,7 +144,6 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
-  autoSync: true,
   startWithWindows: false,
   closeToTray: false,
   tagTranslationEnabled: true,
@@ -160,6 +159,10 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
 };
 
 export class NativeSettingsRepository {
+  importScopedData(payload: string, categories: string): Promise<CommandResult<ScopedImportReport>> {
+    return invokeCommand('import_scoped_data', { payload, categories }, ScopedImportReportSchema);
+  }
+
   load(): Promise<CommandResult<PreferenceSnapshot>> {
     return invokeCommand('load_preferences', {}, PreferenceSnapshotResponse);
   }

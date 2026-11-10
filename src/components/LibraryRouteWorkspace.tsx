@@ -512,6 +512,22 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     return () => { libraryRequest.current++; };
   }, [loadLibrary]);
 
+  // A hosted preset update does not require refreshing the archive list.
+  useEffect(() => {
+    if (!scopeId) return;
+    let active = true;
+    let generation = 0;
+    const refresh = (event: Event) => {
+      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix !== 'presets:') return;
+      const request = ++generation;
+      void repository.listSearchPresets(scopeId).then(result => {
+        if (active && request === generation && result.ok) setPresets(result.value);
+      });
+    };
+    window.addEventListener('yomika:route-cache-invalidated', refresh);
+    return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', refresh); };
+  }, [scopeId]);
+
   // 启用服务器切换以全量失效广播（prefix 为空）：档案库就地整页重读（解析到
   // 新启用的服务器、重读书架作用域与首页），列表留在屏幕上直到新数据到位。
   // 'library:' 是同一条路径的窄化版本——在详情页删掉一条档案、或元数据编辑器改了

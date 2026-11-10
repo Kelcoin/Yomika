@@ -36,7 +36,6 @@ const preferences = {
   customCss: '',
   floatingNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads' | 'settings'>,
-  autoSync: true,
   startWithWindows: false,
   closeToTray: false,
   tagTranslationEnabled: true,

@@ -166,13 +166,21 @@
   position: relative;
 }
 
+/* Only large pages get a prepared, bounded gesture texture. The original stays
+   mounted for layout, source leases and touch ownership, and supplies full detail
+   again once the gesture's settling window ends. */
+.reader-gesture-texture { position: absolute; inset: 0; margin: auto; visibility: hidden; pointer-events: none; }
+.reader-screen[data-image-interaction='true'] .reader-single .reader-gesture-texture[data-ready='true'],
+.reader-screen[data-image-interaction='true'] .reader-spread .reader-gesture-texture[data-ready='true'] { visibility: visible; }
+.reader-screen[data-image-interaction='true'] :is(.reader-single, .reader-spread) .reader-page.has-gesture-texture { opacity: 0; }
+
 /* 「超分 / DLSSNR 处理中」：这一页的图先照常画着，等本机把那一版算出来再换上去。
    算一页要好几秒（两个模型一起近二十秒），从前这段时间屏幕上没有任何动静——
    按下去像没反应，功能看起来就是坏的。胶囊只说在算，不拦任何操作：它
    pointer-events: none，翻页、缩放照旧。 */
 .reader-deriving {
   position: absolute;
-  top: var(--space-3);
+  top: calc(max(var(--safe-top), var(--safe-overlay-top)) + var(--space-3));
   left: 50%;
   transform: translateX(-50%);
   /* 这一层里的序位（不是相对画面）：压住画面靠的是祖先 `.reader-chrome`（它是带
@@ -708,7 +716,7 @@
    这一条曾经是 `minmax(0, 1fr) auto minmax(0, 1fr)` 加两侧各自的
    `justify-self: start/end`：宽窗口下两组被推到栏的两端，离中间那枚页码最远
    （user report:「底栏左右两侧按钮离中心太远」）。最窄的那一档（见 610px 那条查询）
-   本来就是居中的：那里换成可换行的 flex，页码整行居中，剩下两组跟在它下面。
+   同样保持三列单行，只收紧组间距和按钮宽度。
    容器和顶栏同一档 `surface-container`：一条在上、一条在下，中间隔着画面，不再靠
    色调差互相区分。朝向内容那一侧同样留一条 1px 分隔线。 */
 .reader-toolbar {
@@ -1048,37 +1056,28 @@
   }
 }
 
-/* 手机档：三列并排放不下，改成两行——第一行整行给页码（`width: 100%` 让它自己
-   占一行，行内居中），第二行放剩下的控件，整行居中。`order` 把页码提到最前，
-   DOM 顺序（布局/页码/处理）不变，读屏顺序也就没变。 */
+/* Keep the same three groups on one row, including narrow phones. Wrapping the
+   page counter created an oversized second bar and separated it from its controls. */
 @media (max-width: 610px) {
-  /* 高度这一档要落在**两条栏和页码胶囊共同的祖先**上，不能写在 `.reader-toolbar`
-     里：自定义属性是继承的，写在栏上就只有栏的后代看得见，而胶囊是
-     `.reader-screen` 的直接子节点——它读到的是 :root 的 80px。手机档上栏有
-     160px 高，胶囊的「让位」位置却只退到 88px，于是它落进栏**里面**，盖在栏自己
-     的页码上；栏一退场，胶囊从栏里滑到屏幕底，那一路横穿整条栏的表面 ⇒
-     user report「阅读模式底栏消失时看起来会有两层底栏」。 */
-  .reader-screen { --reader-toolbar-height: 112px; }
+  .reader-screen { --reader-toolbar-height: 64px; }
   .reader-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    align-content: center;
+    display: grid;
+    grid-template-columns: auto auto auto;
+    grid-template-rows: minmax(0, 1fr);
     justify-content: center;
     gap: var(--space-1);
-    overflow: hidden;
   }
-  .reader-toolbar-group { min-height: 44px; }
-  .reader-toolbar-pages { order: 0; justify-content: center; width: 100%; }
-  .reader-toolbar-layout { order: 1; }
-  .reader-toolbar-processing { order: 2; }
+  .reader-toolbar-group { min-height: 44px; gap: 0; padding-inline: 0; }
+  .reader-toolbar-pages { justify-content: center; }
+  .reader-toolbar button { width: 36px; min-width: 36px; flex-basis: 36px; }
+  .reader-toolbar span:not(.reader-toolbar-turn) { min-width: 58px; }
 }
 
-@media (max-width: 420px) {
-  .reader-screen { --reader-toolbar-height: 160px; }
-  .reader-toolbar {
-    gap: 0 var(--space-1);
-  }
-  .reader-toolbar-group { min-height: 42px; }
+@media (max-width: 380px) {
+  .reader-toolbar { gap: 2px; }
+  .reader-toolbar button { width: 30px; min-width: 30px; flex-basis: 30px; }
+  .reader-toolbar span:not(.reader-toolbar-turn) { min-width: 52px; font-size: var(--text-xs); }
+  .reader-toolbar svg { width: 22px; height: 22px; }
 }
 
 /* The reader's own scrollers, for the same reason as the shell's: a webtoon that

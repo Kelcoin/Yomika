@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { NativeDedupRepository } from '../../src/repositories/nativeDedupRepository';
 
 afterEach(resetInvokeAdapterForTests);

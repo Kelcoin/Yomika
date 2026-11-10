@@ -1,10 +1,11 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter } from 'react-router-dom';
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { ToastProvider } from '../../src/components/Toast';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
 import { invalidateRouteCache, readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 import { rememberServerPresence } from '../../src/lib/serverPresence';
@@ -190,13 +191,12 @@ describe('shelf snapshots', () => {
 
   it('drops the home and shelf snapshots when history records are removed', async () => {
     // 用户报的那一条：历史里清掉（多选「全选已读完」→「清理所选记录」）或自动清理掉记录
-    // 之后，首页「继续阅读」那一排还在显示它们。清理从前只排了一次同步（`notifyLocalWrite`），
+    // 之后，首页「继续阅读」那一排还在显示它们。清理后需要作废书架快照，
     // 界面上的快照没人作废——首页那一份就一直停在旧数据上。
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
       if (command === 'delete_history_records') return { ok: true, value: 2 };
       if (command === 'prune_history') return { ok: true, value: 3 };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       return { ok: false, error: { code: 'UNKNOWN', message: `unused ${command}`, retryable: false } };
     });
     setInvokeAdapterForTests(adapter);

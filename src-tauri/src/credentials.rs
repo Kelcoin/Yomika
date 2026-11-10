@@ -1,14 +1,5 @@
-//! 数据迁移的凭据一半（docs/30 重构后）：把「账户与服务器」整份搬过去。
-//!
-//! 同步刻意不带凭据（同步密钥由账户口令派生，上传它等于把远端文档的钥匙一起交出去；
-//! API Key 与 Cookie 是这台设备的授权，搬到第三方存储上等于放大泄漏面），但「换台机器
-//! 就得重新配一遍」总得有个出口。
-//!
-//! 2026-09 重构：口令加密整条链路移除。凭据由使用者**显式勾选**后以明文进文件，
-//! 勾选时界面提醒「包含敏感信息，切勿分享」——防泄漏的防线从「一把口令」挪到
-//! 「导出前的知情确认」。文件里装的是三类东西：LANraragi 服务器条目与 API Key、
-//! E-H 账户与 Cookie、同步账户与其口令；记录与设置那一半是同步文档信封，原样嵌入。
-//! 导入与导出都走系统凭据库（`keyring`），SQLite 里依旧只留 `credential_ref`。
+//! Explicit file export/import of selected records and local LANraragi/E-H credentials.
+//! Secrets remain in the system credential store and enter files only when selected.
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -21,10 +12,8 @@ use crate::{
             save_server_record, set_server_enabled_record, CredentialStore, ServerInput,
             SystemCredentialStore,
         },
-        sync::{
-            import_scoped_document, save_sync_account_record, SaveSyncAccountInput,
-            SystemWebdavCredentialStore, WebdavCredentialStore,
-        },
+        data_transfer::import_scoped_document,
+
     },
     data_transfer::{normalize_items, record_categories, DATA_RECORDS_ITEM},
     db::Database,
@@ -53,18 +42,16 @@ struct DataExportEnvelope {
     #[serde(default)]
     eh_accounts: Vec<EhAccountCredential>,
     #[serde(default)]
-    sync_accounts: Vec<SyncAccountCredential>,
-    #[serde(default)]
     skipped: usize,
 }
 
 /// 只为了从**文本**里再取一次 `records`：`serde_json::Value` 会把同一键的重复项合成
-/// 最后一条，而记录类要在文本上折叠（见 `sync::parse_scoped_document`）。解析不出来
+/// 最后一条，而记录类要在文本上折叠（见 `data_transfer::parse_scoped_document`）。解析不出来
 /// 就退回信封里那份 Value，老文件照旧能导入。
 #[derive(Deserialize)]
 struct DataExportRecords {
     #[serde(default)]
-    records: Option<crate::commands::sync::ScopedDataExport>,
+    records: Option<crate::commands::data_transfer::ScopedDataExport>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,22 +76,6 @@ struct EhAccountCredential {
     cookie: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SyncAccountCredential {
-    id: String,
-    #[serde(default)]
-    kind: String,
-    label: String,
-    base_url: String,
-    #[serde(default)]
-    bucket: String,
-    username: String,
-    #[serde(default)]
-    sync_scope: Option<String>,
-    credential: String,
-}
-
 /// 导出结果：那份文本、实际装进的条目，以及各类条目的条数（界面据此报数）。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,7 +85,6 @@ pub struct DataExportReport {
     pub records: usize,
     pub servers: usize,
     pub eh_accounts: usize,
-    pub sync_accounts: usize,
     /// 凭据库里读不到的那几条（例如条目还在、密钥已被系统清理）。它们不会进文件，
     /// 所以报出来，而不是让使用者以为"全都带上了"。
     pub skipped: usize,
@@ -128,7 +98,6 @@ pub struct DataImportReport {
     pub records: usize,
     pub servers: usize,
     pub eh_accounts: usize,
-    pub sync_accounts: usize,
     pub skipped: usize,
 }
 
@@ -148,7 +117,6 @@ fn collect_bundle(
         records: None,
         servers: Vec::new(),
         eh_accounts: Vec::new(),
-        sync_accounts: Vec::new(),
         skipped: 0,
     };
     let mut skipped = 0;
@@ -163,17 +131,11 @@ fn collect_bundle(
         envelope.eh_accounts = accounts;
         skipped += missed;
     }
-    if wanted("sync_accounts") {
-        let (accounts, missed) = collect_sync_accounts(connection)?;
-        envelope.sync_accounts = accounts;
-        skipped += missed;
-    }
 
     envelope.items = export_items(
         items,
         envelope.servers.len(),
         envelope.eh_accounts.len(),
-        envelope.sync_accounts.len(),
     );
     envelope.skipped = skipped;
     Ok((envelope, skipped))
@@ -189,7 +151,6 @@ fn export_items(
     items: &[String],
     servers: usize,
     eh_accounts: usize,
-    sync_accounts: usize,
 ) -> Vec<String> {
     let mut listed = Vec::new();
     if items.iter().any(|item| item == DATA_RECORDS_ITEM) {
@@ -202,9 +163,6 @@ fn export_items(
     }
     if eh_accounts > 0 {
         listed.push("eh_account".to_string());
-    }
-    if sync_accounts > 0 {
-        listed.push("sync_accounts".to_string());
     }
     listed
 }
@@ -291,57 +249,7 @@ fn collect_eh_accounts(
     Ok((entries, skipped))
 }
 
-/// 同步账户条目 + 凭据库里的口令。
-fn collect_sync_accounts(
-    connection: &Connection,
-) -> Result<(Vec<SyncAccountCredential>, usize), String> {
-    let credentials = SystemWebdavCredentialStore;
-    let rows = {
-        let mut statement = connection
-            .prepare(
-                "SELECT id, kind, label, base_url, bucket, username, credential_ref, sync_scope
-                 FROM sync_accounts ORDER BY id",
-            )
-            .map_err(|error| error.to_string())?;
-        let mapped = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                ))
-            })
-            .map_err(|error| error.to_string())?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?
-    };
-    let mut entries = Vec::new();
-    let mut skipped = 0;
-    for (id, kind, label, base_url, bucket, username, credential_ref, sync_scope) in rows {
-        match credentials.get_credential(&credential_ref) {
-            Ok(credential) if !credential.trim().is_empty() => {
-                entries.push(SyncAccountCredential {
-                    id,
-                    kind,
-                    label,
-                    base_url,
-                    bucket,
-                    username,
-                    sync_scope: sync_scope.filter(|value| !value.trim().is_empty()),
-                    credential,
-                })
-            }
-            _ => skipped += 1,
-        }
-    }
-    Ok((entries, skipped))
-}
+/// Parse the explicit data export envelope.
 
 fn parse_export_envelope(payload: &str) -> Result<DataExportEnvelope, String> {
     let value: serde_json::Value =
@@ -385,7 +293,7 @@ pub fn export_data(
     let categories = record_categories(&items);
     let mut records_count = 0;
     if !categories.is_empty() {
-        match crate::commands::sync::export_scoped_document(&connection, &categories) {
+        match crate::commands::data_transfer::export_scoped_document(&connection, &categories) {
             Ok((value, objects)) => {
                 records_count = objects;
                 envelope.records = Some(value);
@@ -405,7 +313,6 @@ pub fn export_data(
             records: records_count,
             servers: envelope.servers.len(),
             eh_accounts: envelope.eh_accounts.len(),
-            sync_accounts: envelope.sync_accounts.len(),
             skipped,
         }),
         Err(error) => CommandResult::failure("UNKNOWN", error.to_string(), true),
@@ -442,7 +349,6 @@ pub fn import_data(
         records: 0,
         servers: 0,
         eh_accounts: 0,
-        sync_accounts: 0,
         skipped: 0,
     };
 
@@ -494,45 +400,13 @@ pub fn import_data(
         }
     }
 
-    for account in envelope.sync_accounts {
-        if !wanted("sync_accounts") || account.credential.trim().is_empty() {
-            report.skipped += 1;
-            continue;
-        }
-        let label = account.label.clone();
-        let result = save_sync_account_record(
-            &mut connection,
-            &SystemWebdavCredentialStore,
-            SaveSyncAccountInput::new(
-                &account.id,
-                &account.kind,
-                &account.label,
-                &account.base_url,
-                &account.bucket,
-                &account.username,
-                &account.credential,
-                account.sync_scope,
-            ),
-        );
-        match result {
-            crate::domain::result::CommandResult::Success { .. } => report.sync_accounts += 1,
-            crate::domain::result::CommandResult::Failure { error, .. } => {
-                return CommandResult::failure(
-                    "INVALID_INPUT",
-                    format!("导入同步账户「{label}」失败：{}", error.message),
-                    false,
-                )
-            }
-        }
-    }
-
     // 记录与设置：文件里装着就按同步那套合并规则落地（同一份文件重复导入是幂等的）。
     // 目录没勾的条目一样是「文件里有、这次不要」，由导入核心数进 skipped，所以一条
     // 都没勾也照样走一趟——报出来的数才是诚实的。
     //
     // 认得出 records 的文本就再解析一遍：`parse_export_envelope` 走的是
     // `serde_json::Value`，那一步已经把 records 里同名的键合成最后一条了，文件内部
-    // 有重复项时就比不出哪一条更新；文本这条路交给 sync 侧的折叠反序列化。
+    // 有重复项时就比不出哪一条更新；文本这条路交给 记录文件的折叠反序列化。
     if let Some(value) = envelope.records.clone() {
         let categories = record_categories(&items);
         let parsed = serde_json::from_str::<DataExportRecords>(&payload)
@@ -540,7 +414,7 @@ pub fn import_data(
             .and_then(|parsed| parsed.records)
             .map(|records| records.document);
         let outcome = match parsed {
-            Some(document) => crate::commands::sync::import_scoped_documents(
+            Some(document) => crate::commands::data_transfer::import_scoped_documents(
                 &mut connection,
                 document,
                 &categories,
@@ -650,8 +524,7 @@ mod tests {
             records: None,
             servers: Vec::new(),
             eh_accounts: Vec::new(),
-            sync_accounts: Vec::new(),
-            skipped: 0,
+                skipped: 0,
         };
         let text = serde_json::to_string(&envelope).expect("serialize");
         assert!(parse_export_envelope(&text).is_ok());
@@ -666,53 +539,6 @@ mod tests {
         assert!(parse_export_envelope(&empty).is_err());
     }
 
-    #[test]
-    fn the_bundle_reads_only_the_classes_in_scope() {
-        // 三类条目各放一条，凭据库里都没有对应条目（测试进程没有真实的凭据库），
-        // 所以断言的是「没勾的类根本不去查」与「读不到的如实报出来」。
-        let database = test_database();
-        let connection = database.connection.lock().expect("database lock");
-        connection
-            .execute_batch(
-                "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://lrr.test', 'scope-a');
-                 INSERT INTO eh_accounts (id, label, host, username_hint, cookie_ref) VALUES ('eh-a', '主账号', 'e-hentai.org', 'reader', 'cred-eh');
-                 INSERT INTO sync_accounts (id, label, base_url, username, credential_ref) VALUES ('dav-a', 'NAS', 'https://dav.test/yomika', 'me', 'cred-sync');",
-            )
-            .expect("rows");
-
-        let all = ["lrr_servers", "eh_account", "sync_accounts"].map(String::from).to_vec();
-        let (bundle, skipped) = collect_bundle(&connection, &all).expect("bundle");
-        assert!(
-            bundle.servers.is_empty() && bundle.eh_accounts.is_empty() && bundle.sync_accounts.is_empty()
-        );
-        assert_eq!(skipped, 3, "三条都没有可读的凭据，要如实报出来");
-        // 读不出来的凭据类不上清单：导入弹层不该给出一格连不上服务器的勾选框。
-        assert!(bundle.items.is_empty(), "没有内容的类不上清单：{:?}", bundle.items);
-
-        // 只勾服务器：另外两类连查都不查，所以跳过的只有那一条服务器。
-        let servers_only = vec!["lrr_servers".to_string()];
-        let (bundle, skipped) = collect_bundle(&connection, &servers_only).expect("bundle");
-        assert_eq!(skipped, 1);
-        assert!(bundle.eh_accounts.is_empty());
-        assert!(bundle.sync_accounts.is_empty());
-
-        // 记录类相反：勾了哪个目录就列哪个目录（哪怕这一趟没有内容），清单才回得来。
-        let categories_only =
-            vec!["history".to_string(), "progress".to_string(), "retired".to_string()];
-        let (bundle, skipped) = collect_bundle(&connection, &categories_only).expect("bundle");
-        assert_eq!(
-            bundle.items,
-            vec!["progress".to_string(), "history".to_string()],
-            "按词表顺序列出勾到的目录，未知条目不留"
-        );
-        assert_eq!(skipped, 0, "记录类的目录由同步那边数，这里一条都不读凭据库");
-
-        // 一类都不勾：什么都不读，也不报跳过。
-        let (_, skipped) = collect_bundle(&connection, &[]).expect("bundle");
-        assert_eq!(skipped, 0);
-    }
-
-    /// 一台装着「一条进度 + 一条历史」的库，两条都在同步日志里（导出就是从日志折的）。
     fn database_with_two_categories_of_records() -> crate::db::Database {
         let database = test_database();
         let mut connection = database.connection.lock().expect("database lock");
@@ -725,31 +551,6 @@ mod tests {
                    VALUES ('scope-a', 'archive-a', 1, '2026-09-01 08:00:00', 'device-a', 1);",
             )
             .expect("source rows");
-        let transaction = connection.transaction().expect("transaction");
-        crate::commands::sync::journal_object(
-            &transaction,
-            "scope-a",
-            "reading_progress",
-            "scope-a/archive-a",
-            1,
-            serde_json::json!({
-                "archiveId": "archive-a", "pageIndex": 4, "pageCount": 20,
-                "layout": "paged", "direction": "ltr", "coverAlone": null,
-            }),
-        )
-        .expect("journal progress");
-        crate::commands::sync::journal_object(
-            &transaction,
-            "scope-a",
-            "history",
-            "scope-a/archive-a",
-            1,
-            serde_json::json!({
-                "archiveId": "archive-a", "pageIndex": 1, "visitedAt": "2026-09-01 08:00:00",
-            }),
-        )
-        .expect("journal history");
-        transaction.commit().expect("commit journal");
         drop(connection);
         database
     }
@@ -764,7 +565,7 @@ mod tests {
             let connection = source.connection.lock().expect("database lock");
             let (bundle, _) = collect_bundle(&connection, &items).expect("bundle");
             let (document, objects) =
-                crate::commands::sync::export_scoped_document(&connection, &record_categories(&items))
+                crate::commands::data_transfer::export_scoped_document(&connection, &record_categories(&items))
                     .expect("export");
             assert_eq!(objects, 1, "只勾了进度，历史不该进文档");
             assert_eq!(bundle.items, vec!["progress".to_string()]);
@@ -773,7 +574,7 @@ mod tests {
 
         let target = test_database();
         let mut connection = target.connection.lock().expect("database lock");
-        let report = crate::commands::sync::import_scoped_document(
+        let report = crate::commands::data_transfer::import_scoped_document(
             &mut connection,
             document,
             &record_categories(&listed),
@@ -792,20 +593,20 @@ mod tests {
             let connection = source.connection.lock().expect("database lock");
             let all = record_categories(&[DATA_RECORDS_ITEM.to_string()]);
             let (document, objects) =
-                crate::commands::sync::export_scoped_document(&connection, &all).expect("export");
-            assert_eq!(objects, 2, "整包 id 展开成全部六个目录，两类记录都要在");
+                crate::commands::data_transfer::export_scoped_document(&connection, &all).expect("export");
+            assert_eq!(objects, 3, "整包 id 展开成全部六个目录，两类记录都要在");
             document
         };
 
         let target = test_database();
         let mut connection = target.connection.lock().expect("database lock");
-        let report = crate::commands::sync::import_scoped_document(
+        let report = crate::commands::data_transfer::import_scoped_document(
             &mut connection,
             document,
             &["progress".to_string()],
         )
         .expect("import");
-        assert_eq!((report.applied, report.skipped), (1, 1));
+        assert_eq!((report.applied, report.skipped), (1, 2));
         assert_eq!(record_counts(&connection), (1, 0));
     }
 

@@ -7,6 +7,7 @@ import { App } from '../../src/app/App';
 import { RetainedPage } from '../../src/app/RetainedPage';
 import { LocalArchivesWorkspace } from '../../src/components/LocalArchivesWorkspace';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { withAppSecurity } from '../nativeHostSecurity';
 import { UNTAGGED_FILTER_ID, categoryTagLabel } from '../../src/lib/tags';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
@@ -527,7 +528,7 @@ describe('local archives workspace', () => {
       if (command === 'reveal_in_file_manager') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
-    setInvokeAdapterForTests(adapter);
+    setInvokeAdapterForTests(withAppSecurity(adapter));
     // 平台桥在浏览器里短路成 browser；摆一个运行时标记让 capabilities 真的走适配器。
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
 

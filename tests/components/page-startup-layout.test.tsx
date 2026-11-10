@@ -1,10 +1,11 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, render, screen } from '@testing-library/react';
 import { afterEach, expect, it } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { ToastProvider } from '../../src/components/Toast';
-import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { invalidateRouteCache } from '../../src/lib/routeCache';
 import { resetServerPresenceForTests } from '../../src/lib/serverPresence';
 import { warmShelfSnapshot } from '../../src/app/shelfWarmup';

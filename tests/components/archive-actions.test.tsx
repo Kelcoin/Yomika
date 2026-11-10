@@ -1,3 +1,4 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +7,7 @@ import { useArchiveContextMenu } from '../../src/components/useArchiveContextMen
 import { ArchiveDeleteDialog } from '../../src/components/ArchiveDeleteDialog';
 import { ToastProvider } from '../../src/components/Toast';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { RetainedPage } from '../../src/app/RetainedPage';
 import { invalidateRouteCache } from '../../src/lib/routeCache';
 

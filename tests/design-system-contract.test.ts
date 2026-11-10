@@ -89,6 +89,17 @@ describe('design system contract', () => {
     expect(entry).not.toMatch(/transform:/);
     expect(ruleBody(read('src/styles/shell.css'), '.dialog-content')).toMatch(/transform: translate\(-50%, -50%\)/);
   });
+  it('slides the detail panels across one clipped stage instead of fading them in', () => {
+    const shell = read('src/styles/shell.css');
+    // 换边时两块面板要同时可见：只有叠进同一个网格格子、再由外层裁掉滑出去的那半，
+    // 舞台上才只留一个高度（矮的那块不会被高的那块撑出一段空白）。
+    const stage = ruleBody(shell, '.archive-detail-panels.is-sliding');
+    expect(stage).toMatch(/display:\s*grid/);
+    expect(stage).toMatch(/overflow:\s*hidden/);
+    expect(ruleBody(shell, ".archive-detail-panels.is-sliding > [role='tabpanel']")).toMatch(/grid-area:\s*1 \/ 1/);
+    // 原来的纵向淡入必须让位：滑完再播一次上浮，看着像弹了两下。
+    expect(shell).not.toContain('detail-panel-enter');
+  });
 
   it('does not apply archive tag tracks to an unfinished download', () => {
     const shell = read('src/styles/shell.css');
@@ -236,7 +247,7 @@ describe('design system contract', () => {
     expect(mainActivity, '状态栏高度要换算成 CSS 像素再交给页面').toMatch(/val top = Math\.round\(bars\.top \/ density\)/);
     expect(mainActivity, '手势条高度要换算成 CSS 像素再交给页面').toMatch(/val bottom = Math\.round\(bars\.bottom \/ density\)/);
     // 换算后的那两个值才是给页面与 `insets` 命令的那一份，`bars` 原文不再外流。
-    expect(mainActivity).toMatch(/pushInsetsToPage\(appWebView\(view\), top, bottom\)/);
+    expect(mainActivity).toMatch(/pushInsetsToPage\(appWebView\(view\), top, bottom, overlayTop\)/);
     expect(mainActivity).toMatch(/SystemBars\.top = top/);
     expect(mainActivity).toMatch(/SystemBars\.bottom = bottom/);
   });
@@ -339,7 +350,7 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
 
     expect(prompt).toContain('className="first-run"');
-    expect(prompt).toContain('/settings?section=sync');
+    expect(prompt).toContain('/settings?section=data');
     expect(routes).toContain('<ServerRequiredPrompt />');
     expect(library).toContain('<ServerRequiredPrompt />');
     // 书架那版「尚未连接 LANraragi」的 EmptyState 已退役；首页剩下的另一处
@@ -364,8 +375,7 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.first-run')).toMatch(/border-radius:\s*var\(--radius-card\)/);
     expect(ruleBody(shell, '.first-run')).not.toMatch(/border-(top|bottom):/);
     expect(ruleBody(shell, '.first-run-actions')).toMatch(/border-top:\s*1px solid var\(--hairline\)/);
-    // 云端同步不只 WebDAV：S3 兼容存储同样能恢复配置。
-    expect(prompt).toContain('WebDAV 或 S3 兼容存储');
+    expect(prompt).toContain('导入其他设备导出的数据文件');
     expect(prompt).not.toContain('从 WebDAV 同步');
   });
 
@@ -812,75 +822,6 @@ describe('design system contract', () => {
     expect(shell).not.toMatch(/settings-menu-body\s*\{\s*padding-bottom/);
   });
 
-  it('reuses the shared multi-select rows for the sync scope', () => {
-    const module = read('src/components/SyncSettings.tsx');
-    // 范围勾选就是设置菜单里「底栏项目」那一套行，不再自造复选框；而且它独立成行
-    // （自己的 SettingsPanel），不挂在账户表单里。
-    expect(module).toMatch(/function SyncScopeChecks[\s\S]*?<CheckRowGroup label="同步范围">/);
-    expect(module).toMatch(/<CheckRow[\s\S]*?label=\{category\.label\}/);
-    expect(module).not.toMatch(/input\s+type="checkbox"/);
-    expect(read('src/styles/shell.css')).not.toMatch(/\.sync-scope-option\b/);
-    expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/label="同步范围"/);
-    const form = module.slice(module.indexOf('export function SyncAccountForm'));
-    expect(form).not.toMatch(/toggleScope|CheckRowGroup/);
-  });
-
-  it('keeps app settings out of sync while the export list still carries them', () => {
-    // 两张词表刻意分家：同步管「自动在设备之间流动什么」（应用设置不在其中——主题与
-    // 后处理开关同步只会让两台设备互相覆盖，用户看到的是主题来回跳、DLSSNR 自己关
-    // 掉），「导入导出范围」管「我主动带走什么」（必须含应用设置，否则换机器带不走
-    // 设置）。判据落在两侧的词表与派生关系上，任何一侧被顺手改回去都会红。
-    const syncScope = read('src/domain/syncScope.ts');
-    const syncTable = syncScope.slice(
-      syncScope.indexOf('export const SYNC_SCOPE_CATEGORIES'),
-      syncScope.indexOf('] as const;'),
-    );
-    expect(syncTable).not.toMatch(/app_settings/);
-
-    // 导出清单自己逐项列，不许再从同步词表派生：派生的话摘掉同步那一步就顺手把它
-    // 一起摘掉了（「勾了应用设置却什么都没带」）。
-    const dataExport = read('src/domain/dataExport.ts');
-    expect(dataExport).not.toMatch(/SYNC_SCOPE_CATEGORIES/);
-    const recordItems = dataExport.slice(
-      dataExport.indexOf('export const DATA_EXPORT_RECORD_ITEMS'),
-      dataExport.indexOf('export const DATA_EXPORT_CREDENTIAL_ITEMS'),
-    );
-    expect(recordItems).toMatch(/\{ id: 'app_settings', label: '应用设置' \}/);
-    expect(recordItems.match(/id: '/g)).toHaveLength(6);
-
-    // 原生侧同一件事：同步词表五项（无应用设置），文件词表六项（有）。
-    const sync = read('src-tauri/src/commands/sync.rs');
-    const rustSyncTable = sync.slice(
-      sync.indexOf('pub(crate) const SYNC_SCOPE_CATEGORIES'),
-      sync.indexOf('/// 默认勾选'),
-    );
-    expect(rustSyncTable).not.toMatch(/"app_settings"/);
-    const transfer = read('src-tauri/src/data_transfer.rs');
-    const rustRecordTable = transfer.slice(
-      transfer.indexOf('pub(crate) const RECORD_CATEGORIES'),
-      transfer.indexOf('pub(crate) const DATA_RECORDS_ITEM'),
-    );
-    expect(rustRecordTable).toMatch(/"app_settings"/);
-    // 文件导入导出走的是文件词表，不许再借同步那份解析（借了应用设置就搬不动）。
-    for (const call of [
-      sync.slice(sync.indexOf('pub fn export_scoped_data')),
-      sync.slice(sync.indexOf('pub fn import_scoped_data')),
-    ]) {
-      expect(call).toMatch(/parse_record_categories/);
-    }
-
-    // 同步范围菜单底部那行小字删掉了：说明凭据去哪儿是「导入导出范围」的事，
-    // 写在这里既是重复，也让人以为上面那几行能勾到凭据。
-    const syncSettings = read('src/components/SyncSettings.tsx');
-    const scopeChecks = syncSettings.slice(
-      syncSettings.indexOf('function SyncScopeChecks'),
-      syncSettings.indexOf('export function SyncAccountForm'),
-    );
-    expect(scopeChecks).not.toMatch(/sync-scope-hint/);
-    // 账户表单自己也用这个 class 放一句提示，CSS 因此留着——这条是「不要连 CSS 一起删」。
-    expect(read('src/styles/shell.css')).toMatch(/\.sync-scope-hint\s*\{/);
-  });
-
   it('draws each multi-value control exactly once', () => {
     // 复选框行、开关与「勾选行组」各只有一份实现：三处复制过的行、两处复制过的
     // 开关，都改成从这里取。任何一处再自己画一个，这条就红。
@@ -892,7 +833,7 @@ describe('design system contract', () => {
 
     // DeduplicationWorkspace is deliberately absent: a selectable result card is
     // not a check row, and its disc marker is shared a different way.
-    const components = ['SettingsWorkspace.tsx', 'SyncSettings.tsx', 'ArchiveDeleteDialog.tsx', 'EhAccountPanel.tsx'];
+    const components = ['SettingsWorkspace.tsx', 'ArchiveDeleteDialog.tsx', 'EhAccountPanel.tsx'];
     for (const file of components) {
       const source = read(`src/components/${file}`);
       // 自带 role="checkbox" 的行、自带 role="switch" 的按钮、直接写出的
@@ -902,7 +843,7 @@ describe('design system contract', () => {
       expect(source, file).not.toMatch(/className="switch-control"/);
     }
     // 勾选行的类名只在共享实现里出现一次。
-    const checkRowClass = ['SettingsWorkspace.tsx', 'SyncSettings.tsx'].map((file) => read(`src/components/${file}`));
+    const checkRowClass = ['SettingsWorkspace.tsx'].map((file) => read(`src/components/${file}`));
     for (const source of checkRowClass) expect(source).not.toMatch(/settings-menu-check/);
   });
 
@@ -922,7 +863,7 @@ describe('design system contract', () => {
     expect(danger).toMatch(/color:\s*var\(--on-error-container\)/);
     expect(danger).not.toMatch(/border/);
     // 动作行平分宽度：声明的容器与实际使用的一致。
-    for (const row of ['.sync-form-actions > button', '.settings-menu-actions > .secondary-action', '.archive-detail-actions > .primary-action']) {
+    for (const row of ['.settings-menu-actions > .secondary-action', '.archive-detail-actions > .primary-action']) {
       expect(shell.replace(/\/\*[\s\S]*?\*\//g, '')).toContain(row);
     }
   });
@@ -1276,7 +1217,7 @@ describe('design system contract', () => {
     const gridCard = ruleBody(shell, '.archive-list.is-thumbnail .archive-thumb-card');
     expect(gridCard).toMatch(/grid-template-rows:\s*220px 1fr/);
     expect(gridCard).toMatch(/height:\s*350px/);
-    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-thumb-card \.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*34px 48px 18px/);
+    expect(shell).toMatch(/\.archive-list\.is-thumbnail \.archive-thumb-card \.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*36px 48px 18px/);
     expect(shell).not.toMatch(/\.archive-list\.is-thumbnail \.archive-row-copy/);
     // List rows share the footer layout and drop the trailing chevron column.
     expect(shell).toMatch(/\.archive-row-footer\s*\{[\s\S]*justify-content:\s*space-between/);
@@ -1413,12 +1354,11 @@ describe('design system contract', () => {
     expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/grid-column:\s*3/);
     expect(ruleBody(reader, '.reader-toolbar-processing')).not.toMatch(/justify-self/);
 
-    // 手机档（≤610px）换成可以换行的 flex：页码整行占满、行内居中，剩下两组跟在后面，
-    // 整行同样居中。这是「移动模式下底栏组件没有居中」那条 user report 的钉子。
+    // Phones preserve the same single row; shrink controls instead of wrapping.
     const phone = ruleBody(reader, '@media (max-width: 610px)');
-    expect(phone).toMatch(/flex-wrap:\s*wrap/);
-    expect(phone).toMatch(/justify-content:\s*center/);
-    expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*width:\s*100%/);
+    expect(phone).toMatch(/display:\s*grid/);
+    expect(phone).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\)/);
+    expect(phone).not.toMatch(/flex-wrap:\s*wrap|width:\s*100%/);
     expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*justify-content:\s*center/);
     // 900px 那一档只收组内间距，不再动对齐。
     expect(ruleBody(reader, COMPACT_LAYOUT)).not.toMatch(/justify-content/);
@@ -1478,7 +1418,7 @@ describe('design system contract', () => {
     // 栏顶滑到屏幕底，一路横穿整条栏（user report:「底栏消失时看起来会有两层底栏」）。
     // 真机读数：修前 `--reader-toolbar-height` 栏读到 160px、胶囊读到 80px，`shown` 那
     // 一帧胶囊与栏重叠 25px；修后两边都读 160px，每一帧重叠都是 0。
-    expect(phone).toMatch(/\.reader-screen\s*\{[^}]*--reader-toolbar-height:\s*112px/);
+    expect(phone).toMatch(/\.reader-screen\s*\{[^}]*--reader-toolbar-height:\s*64px/);
     expect(phone).not.toMatch(/\.reader-toolbar\s*\{[^}]*--reader-toolbar-height/);
 
     // 栏退场的那 260ms 里它还在树上淡出：胶囊这时跟着一起淡出（`is-leaving` 就是这一档）。
@@ -2948,13 +2888,9 @@ describe('design system contract', () => {
     expect(helper).toMatch(/JOIN archives a ON a\.server_id = \?2 AND a\.archive_id = r\.archive_id/);
     expect(helper).toMatch(/a\.is_deleted = 1/);
     expect(helper).not.toMatch(/LEFT JOIN/);
-    expect(helper).toMatch(/for \(table, object_type\) in DANGLING_RECORD_TABLES/);
-    // 三张表里只有两张进同步：收藏夹镜像的是服务器上的收藏分类，本机这份只是镜像的
-    // 落点，删掉它不留墓碑。待看与收藏夹曾经共用一个对象类型，于是清掉一条收藏夹
-    // 记录会让别的设备删掉待看里同 id 的那条——所以这条断言盯的是「各归各的名字，
-    // 或者干脆没有名字」。
-    expect(rust).toMatch(/\("reading_history", Some\("history"\)\),\s*\("reading_list", Some\("watchlist"\)\),\s*\("watchlist", None\),/);
-    expect(read('src-tauri/src/commands/sync.rs')).toMatch(/"watchlist" => Some\("watchlist"\),\s*"search_preset" => Some\("search_presets"\),/);
+    expect(helper).toMatch(/for table in DANGLING_RECORD_TABLES/);
+    // All three local membership mirrors are pruned without the retired cloud journal.
+    expect(rust).toMatch(/const DANGLING_RECORD_TABLES:[^=]+=[^;]+"reading_history"[^;]+"reading_list"[^;]+"watchlist"/);
     // Wired into both: the per-id verification, and the complete library walk.
     const verify = rust.slice(rust.indexOf('pub async fn verify_archives_exist'), rust.indexOf('pub fn save_reading_progress'));
     expect(verify).toMatch(/prune_dangling_records_for_server\(&mut connection, &server_id\)/);
@@ -3385,66 +3321,6 @@ describe('the paired-device link holds still', () => {
   });
 });
 
-/** 「重置远端」那一下是**原地变形**：点下去以后，用户刚按的那一颗自己变成确认按钮，
- *  它旁边长出一枚「取消」。行为那一半（同一个节点还在、举着没人管会退回去、窗口被切走
- *  也退回去）钉在 `tests/components/settings-workspace.test.tsx` 里；jsdom 看不见的是
- *  「变形」本身——两颗胶囊之间的那一段过渡落在样式表上，所以在这里钉。 */
-describe('the destructive confirmation morphs in place', () => {
-  const shell = read('src/styles/shell.css');
-  const plain = shell.replace(/\/\*[\s\S]*?\*\//g, '');
-
-  it('splits the account row into three equal columns, and the pair into two when armed', () => {
-    // 2026-10-15 用户报「部分按钮的宽度不一致了」：真浏览器里量到的是 130 / 130 / 96——
-    // 三项的 flex 都是 `1 1 0px`、`min-width` 都是 0，第三项就是不长到另两项的宽度
-    // （把三项都改成内联 `flex: 1 1 0`、把它的 basis 改成 `0%`、`width: 0`、去掉内层
-    // 按钮的 flex，读数一动不动）。同一行换成 grid 三等分后立刻是 119 / 119 / 119，
-    // 所以判据钉在「排法是三等分」上，而不是钉在那份算不准的 flex 上。
-    expect(ruleBody(shell, '.settings-menu-account-actions'), '三等分整行').toMatch(/display:\s*grid/);
-    expect(ruleBody(shell, '.settings-menu-account-actions')).toMatch(/grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
-    expect(ruleBody(shell, '.settings-menu-reset'), '未变形时只有常驻那一颗，占满第三列').toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
-    expect(ruleBody(shell, '.settings-menu-reset'), '未变形时不能是两列，否则常驻那颗只拿到半格').not.toMatch(/repeat\(2/);
-    expect(ruleBody(shell, '.settings-menu-reset.is-armed'), '变形后跨满三列，两枚各分一半').toMatch(/grid-column:\s*1\s*\/\s*-1/);
-    expect(ruleBody(shell, '.settings-menu-reset.is-armed')).toMatch(/grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
-    // 三等分把每颗压到 96px（390px 宽的手机）：4 个汉字 + 17px 图标 + 两侧 16px 内边距
-    // 量出来 103，会被 overflow:hidden 裁掉——所以这一行的内边距与图标间距各收一档，
-    // 360px 上再收一档图标与间距（真浏览器实测：390 与 360 下 scrollWidth == clientWidth）。
-    expect(shell, '这一行的内边距与图标间距各收一档').toMatch(/\.settings-menu-account-actions > \.primary-action,[\s\S]{0,260}?padding-inline:\s*var\(--space-2\)/);
-    expect(shell, '360px 上再收图标与间距').toMatch(/@media \(max-width: 380px\)[\s\S]{0,420}?\.settings-menu-reset > \.secondary-action svg \{ width: 15px/);
-  });
-
-  it('draws the account glyph once, on the menu title, and not again in the row', () => {
-    // 用户报「同步界面上下的 LOGO 是重复的」：标题的图标槽里已经有一枚 `<Waypoints>`，
-    // 账户行里又画了一枚同样的图形。一屏里同一枚图形只画一次——行里那枚去掉了，
-    // 连它那条样式也一起删（留着就是死规则）。
-    expect(read('src/components/SettingsWorkspace.tsx'), '行里不再画第二枚').not.toMatch(/settings-menu-account-glyph/);
-    expect(read('src/styles/shell.css'), '样式也不留死规则').not.toMatch(/settings-menu-account-glyph/);
-    // 行首那一列本来是给图标的：去掉之后网格只剩一列，名称才不会被挤进图标宽里。
-    expect(ruleBody(read('src/styles/shell.css'), '.settings-menu-account')).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
-  });
-
-  it('animates the morph instead of snapping between two button sets', () => {
-    expect(shell, '常驻那一颗轻轻张开').toContain('@keyframes settings-reset-morph');
-    expect(shell, '对手方从左边淡入').toContain('@keyframes settings-reset-partner-in');
-    expect(
-      ruleBody(shell, '.settings-menu-reset.is-armed > .settings-menu-reset-toggle'),
-      '变形动画挂在常驻那颗按钮上，而且用同一档时长',
-    ).toMatch(/animation:\s*settings-reset-morph\s+var\(--motion-fast\)\s+backwards/);
-    expect(
-      ruleBody(shell, '.settings-menu-reset.is-armed > .settings-menu-reset-cancel'),
-      '对手方那一半同拍进场',
-    ).toMatch(/animation:\s*settings-reset-partner-in\s+var\(--motion-fast\)\s+backwards/);
-  });
-
-  it('lets a reader who asked for less motion have the morph turned off', () => {
-    const optOut = [...plain.matchAll(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/g)]
-      .map(([, body]) => body ?? '')
-      .filter((body) => body.includes('.settings-menu-reset.is-armed'));
-    expect(optOut, '这两条动画必须有自己那一档「少动效」的出口，而且只该有一条').toHaveLength(1);
-    expect(optOut[0]).toMatch(/\.settings-menu-reset\.is-armed > \.settings-menu-reset-cancel \{\s*animation:\s*none/);
-  });
-});
-
-
 it('grants tray reopening only event listening permissions to the tray window', () => {
   const capabilities = readdirSync(resolve(root, 'src-tauri/capabilities')).filter((name) => name.endsWith('.json')).map((name) => JSON.parse(read(`src-tauri/capabilities/${name}`)) as { windows?: string[]; permissions: string[] });
   const tray = capabilities.filter((capability) => capability.windows?.includes('tray-menu'));
@@ -3586,15 +3462,6 @@ describe('the 2026-10-17 UI batch', () => {
     expect(retained, '滚动区那一处也要走它').toContain(
       'writeInstantScroll(region, () => { region.scrollTop = top; })',
     );
-  });
-
-  it('keeps automatic sync on, with no switch to turn it off', () => {
-    const preferences = read('src/app/preferences.tsx');
-    expect(preferences, '自动同步就该一直开着：进门强制打开，不再跟着偏好走').toMatch(
-      /useEffect\(\(\) => \{\s*setAutoSyncEnabled\(true\);\s*\}, \[\]\);/,
-    );
-    const settings = read('src/components/SettingsWorkspace.tsx');
-    expect(settings, '设置里不该再有自动同步开关').not.toMatch(/label="自动同步"/);
   });
 
   it('draws the vote glyph as the Material thumb, buttons first and the score to their right', () => {

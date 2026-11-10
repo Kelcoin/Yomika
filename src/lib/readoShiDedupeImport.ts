@@ -1,5 +1,4 @@
 import type { DedupPairInput } from '../repositories/nativeDedupRepository';
-import type { SyncJournalRecord } from '../domain/library';
 
 export interface ReadoshiImportReport {
   pairs: DedupPairInput[];
@@ -71,23 +70,6 @@ function collectPairs(value: unknown, output: DedupPairInput[]): number {
     }
   }
   return skipped;
-}
-
-export function compareDedupSyncVersion(left: Pick<SyncJournalRecord, 'logicalClock' | 'wallClock' | 'deviceId'>, right: Pick<SyncJournalRecord, 'logicalClock' | 'wallClock' | 'deviceId'>): number {
-  if (left.logicalClock !== right.logicalClock) return left.logicalClock - right.logicalClock;
-  const wall = left.wallClock.localeCompare(right.wallClock);
-  return wall || left.deviceId.localeCompare(right.deviceId);
-}
-
-/** Merge remote/local relation events. Newer tombstones remain authoritative. */
-export function mergeDedupSyncRecords(records: readonly SyncJournalRecord[]): SyncJournalRecord[] {
-  const latest = new Map<string, SyncJournalRecord>();
-  for (const record of records) {
-    if (record.objectType !== 'dedup_non_duplicate') continue;
-    const current = latest.get(`${record.scopeId}/${record.objectId}`);
-    if (!current || compareDedupSyncVersion(record, current) > 0) latest.set(`${record.scopeId}/${record.objectId}`, record);
-  }
-  return [...latest.values()].sort((left, right) => left.scopeId.localeCompare(right.scopeId) || left.objectId.localeCompare(right.objectId));
 }
 
 export function parseReadoshiNonDuplicateExport(input: unknown, targetScopeId?: string): ReadoshiImportReport {

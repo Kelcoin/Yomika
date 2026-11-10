@@ -12,6 +12,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { ConfirmDialog } from './ConfirmDialog';
 import { SettingsRowBody } from './SettingsRow';
 import { useToast } from './Toast';
+import { LrrBridgeSettings } from './LrrBridgeSettings';
 
 const repository = new NativeLibraryRepository();
 
@@ -179,6 +180,7 @@ function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action'
             <label>名称（可选）<input disabled={pending} ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input disabled={pending} name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
             <label>API Key<input disabled={pending} name="apiKey" value={apiKey} onChange={(event) => { apiKeyEdited.current = true; setApiKey(event.target.value); }} type="password" autoComplete="off" spellCheck={false} required /></label>
+            {open && server && <LrrBridgeSettings key={server.scopeId} scopeId={server.scopeId} disabled={pending || name !== server.name || baseUrl !== server.baseUrl || apiKeyEdited.current} />}
             {/* 动作行等宽平分：删除配置（仅编辑态）与保存服务器各占一列。
                 没有「取消」——对话框本来就能点空白处或按 Esc 关掉，多一颗按钮
                 只会让「保存服务器」那一格变小、也让退出与保存看起来一样重。 */}

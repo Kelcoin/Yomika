@@ -1,9 +1,17 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { NativeLrrBridgeRepository, invalidateLrrBridgeConfig } from '../../src/repositories/nativeLrrBridgeRepository';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { flushErrorLog, setErrorLogSinkForTests, type ErrorLogRecord } from '../../src/lib/errorLog';
 import { readRouteCache, resetRouteCacheForTests, writeRouteCache } from '../../src/lib/routeCache';
 import { NativeLibraryRepository } from '../../src/repositories/nativeLibraryRepository';
+
+beforeEach(async () => {
+  invalidateLrrBridgeConfig();
+  setInvokeAdapterForTests(async () => ({ ok: true, value: { enabled: false, pending: 0, conflicts: 0 } }));
+  for (const scopeId of ['s', 'scope-a']) await new NativeLrrBridgeRepository().configure(scopeId, false);
+  resetInvokeAdapterForTests();
+});
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -491,36 +499,6 @@ describe('native library repository bridge', () => {
     completed.shift()?.();
     await Promise.all([first, second, history, resume]);
     expect(calls.slice(2)).toEqual(['list_reading_history', 'load_reading_progress']);
-  });
-
-  it('appends, lists, and retries scoped sync journal entries', async () => {
-    const value = {
-      sequence: 7, scopeId: 'scope-a', objectId: 'scope-a/a1', objectType: 'reading_progress',
-      operation: 'upsert', deviceId: 'device-a', logicalClock: 2,
-      wallClock: '2026-08-26T00:00:00Z', payloadHash: 'hash-a',
-      payloadJson: '{"page":4}', status: 'pending', attemptCount: 0,
-    };
-    const adapter = vi.fn(async (command: string) => ({
-      ok: true,
-      value: command === 'list_sync_journal' ? [value] : value,
-    }));
-    setInvokeAdapterForTests(adapter);
-    const repository = new NativeLibraryRepository();
-    const entry = {
-      scopeId: 'scope-a', objectId: 'scope-a/a1', objectType: 'reading_progress',
-      operation: 'upsert' as const, deviceId: 'device-a', logicalClock: 2,
-      payloadHash: 'hash-a', payloadJson: '{"page":4}',
-    };
-
-    expect(await repository.appendSyncJournal(entry)).toEqual({ ok: true, value });
-    expect(await repository.listSyncJournal('scope-a', 'pending')).toEqual({ ok: true, value: [value] });
-    expect(await repository.setSyncJournalState('scope-a', 7, 'retryable', 'offline')).toEqual({ ok: true, value });
-
-    expect(adapter).toHaveBeenNthCalledWith(1, 'append_sync_journal', { entry });
-    expect(adapter).toHaveBeenNthCalledWith(2, 'list_sync_journal', { scopeId: 'scope-a', status: 'pending' });
-    expect(adapter).toHaveBeenNthCalledWith(3, 'set_sync_journal_state', {
-      input: { scopeId: 'scope-a', sequence: 7, status: 'retryable', error: 'offline' },
-    });
   });
 
   it('adds, removes, and lists scoped watchlist records', async () => {

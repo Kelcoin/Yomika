@@ -20,6 +20,27 @@ import org.json.JSONObject
 import java.io.File
 
 class MainActivity : TauriActivity() {
+  override fun onDestroy() {
+    NativeAppSecurity.destroy(this)
+    super.onDestroy()
+  }
+
+  override fun onPause() {
+    NativeAppSecurity.pause(this)
+    super.onPause()
+  }
+
+  override fun onStop() {
+    NativeAppSecurity.stop(this)
+    super.onStop()
+  }
+
+  override fun onResume() {
+    super.onResume()
+    val root = findViewById<View>(android.R.id.content)
+    NativeAppSecurity.resume(this, root?.let { appWebView(it) })
+  }
+
   private var workspaceBackCallback: OnBackPressedCallback? = null
 
   override fun onWebViewCreate(webView: WebView) {
@@ -68,6 +89,7 @@ class MainActivity : TauriActivity() {
       applySystemBarAppearance(this, startup.getBoolean("dark", true), canvas)
     }
     super.onCreate(savedInstanceState)
+    NativeAppSecurity.initialize(this)
     // The app owns one Back stack per workspace. WebView.goBack() traverses
     // unrelated tabs and stale searches instead. Login sheets register their
     // own later callback and retain their separate web navigation behavior.
@@ -115,7 +137,11 @@ class MainActivity : TauriActivity() {
     view.setPadding(0, 0, 0, ime.bottom)
     SystemBars.top = top
     SystemBars.bottom = bottom
-    pushInsetsToPage(appWebView(view), top, bottom)
+    val overlayBars = windowInsets.getInsetsIgnoringVisibility(
+      WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout()
+    )
+    val overlayTop = Math.round(overlayBars.top / density)
+    pushInsetsToPage(appWebView(view), top, bottom, overlayTop)
     // 键盘那一份已经被内边距吃掉了，别再让 WebView 按它缩一次——两次叠加的结果是页面比
     // 可见区域还短一截。
     return WindowInsetsCompat.Builder(windowInsets)

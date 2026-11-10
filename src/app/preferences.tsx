@@ -4,8 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { CommandResult } from '../domain/result';
 import { setSystemBarStyle } from '../bridge/platform';
 import { nativeCanvasColor } from '../lib/nativeCanvasColor';
-import { SYNC_COMPLETED_EVENT, setAutoSyncEnabled, startAutoSync } from '../lib/autoSync';
-import { startHistoryMaintenance } from '../lib/historyMaintenance';
+import { startLrrBridgeLifecycle } from '../lib/lrrBridgeLifecycle';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { setEhMyTagsPriorityEnabled } from '../lib/ehMyTags';
 import { initializeTagTranslations, setTagTranslationServiceEnabled } from '../lib/tagTranslationService';
@@ -22,6 +21,7 @@ import {
 interface PreferencesContextValue {
   preferences: PreferenceSnapshot;
   loading: boolean;
+  reload: () => Promise<boolean>;
   error: string | undefined;
   save: (input: PreferenceSnapshot) => Promise<CommandResult<PreferenceSnapshot>>;
   importLegacy: (encoded: string) => Promise<CommandResult<LegacyPreferenceImport>>;
@@ -146,7 +146,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   // later intent.
   const saveQueueRef = useRef(Promise.resolve());
 
-  /** 读一次原生偏好并落到界面上：启动时一次，同步拉回别处的改动后再来一次。 */
+  /** 读一次原生偏好并落到界面上：启动时一次，显式导入设置后再来一次。 */
   const reload = useCallback(async () => {
     const result = await repository.load();
     if (result.ok) {
@@ -166,25 +166,10 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   // 系统栏高度只有原生侧有（见 lib/safeArea）：启动时问一次，之后原生自己写变量。
   useEffect(() => { void syncSystemInsets(); }, []);
 
-  // 自动同步与历史清理的触发点（启动、回前台、写入、联网、定时）在这里装上；
-  // 拉回到别的设备的改动时，偏好得重读一次，否则界面上还是本机这份。
   useEffect(() => {
-    const stopSync = startAutoSync();
-    const stopMaintenance = startHistoryMaintenance();
-    const onApplied = () => { void reload(); };
-    window.addEventListener(SYNC_COMPLETED_EVENT, onApplied);
-    return () => {
-      window.removeEventListener(SYNC_COMPLETED_EVENT, onApplied);
-      stopSync();
-      stopMaintenance();
-    };
-  }, [reload]);
-
-  // 自动同步没有开关了：它是这一档的既定行为，用户要求「去掉同步的自动同步开关，就应该
-  // 是自动同步的」。偏好里那个 `autoSync` 字段仍然照旧存着（存储 schema 不动，旧库读得
-  // 出来），但界面与这里都不再拿它当闸门——从前它一关，`startAutoSync` 装的触发点全成
-  // 空转，而设置页上那条开关又和「立即同步」摆在一起，看起来像同一件事的两种强度。
-  useEffect(() => { setAutoSyncEnabled(true); }, []);
+    const stopBridge = startLrrBridgeLifecycle();
+    return stopBridge;
+  }, []);
 
   function save(input: PreferenceSnapshot): Promise<CommandResult<PreferenceSnapshot>> {
     const operation = saveQueueRef.current.then(async () => {
@@ -214,7 +199,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   }
 
   const value = useMemo(
-    () => ({ preferences, loading, error, save, importLegacy }),
+    () => ({ preferences, loading, error, save, importLegacy, reload }),
     [preferences, loading, error],
   );
   return <PreferencesContext.Provider value={value}>{children}</PreferencesContext.Provider>;

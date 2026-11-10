@@ -586,7 +586,7 @@ fn reconcile_missing_archive_status(
 }
 
 #[derive(Debug)]
-struct ReaderRequestError {
+pub(crate) struct ReaderRequestError {
     code: &'static str,
     message: String,
 }
@@ -624,7 +624,7 @@ async fn reader_request(
     reader_request_with_timeout(method, url, api_key, 30).await
 }
 
-async fn reader_request_with_timeout(
+pub(crate) async fn reader_request_with_timeout(
     method: reqwest::Method,
     url: String,
     api_key: String,
@@ -5028,14 +5028,12 @@ fn persist_archive_metadata(
     // Mirror an existing server reading position only when this device has no
     // record. This is a read-side import, not a visit: no history, journal or
     // remote write, and a user's explicit reset tombstone remains authoritative.
-    if wire.progress > 0 && wire.pagecount > 0 {
+    if wire.progress > 0 && wire.pagecount > 0 && !super::lrr_bridge::enabled(connection, &connection.query_row("SELECT scope_id FROM servers WHERE id=?1", [server_id], |r|r.get::<_,String>(0)).unwrap_or_default()) {
         connection.execute(
             "INSERT OR IGNORE INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, updated_at)
              SELECT scope_id, ?2, ?3, ?4, 'paged', 'ltr', COALESCE(datetime(?5, 'unixepoch'), CURRENT_TIMESTAMP)
              FROM servers WHERE id=?1 AND NOT EXISTS (
-               SELECT 1 FROM sync_journal WHERE scope_id=servers.scope_id
-               AND object_type='reading_progress' AND object_id=servers.scope_id || '/' || ?2
-               AND (operation='delete' OR json_extract(payload_json, '$.clearProgress')=1)
+               SELECT 1 FROM reading_resets WHERE scope_id=servers.scope_id AND archive_id=?2
              )",
             params![server_id, wire.arcid, (wire.progress - 1).min(wire.pagecount - 1), wire.pagecount, wire.lastreadtime],
         ).map_err(|error| error.to_string())?;
@@ -6300,9 +6298,7 @@ pub fn save_server_record(
         Ok(record) => record,
         Err(error) => return CommandResult::failure("UNKNOWN", error.to_string(), true),
     };
-    // 服务器条目**不进同步日志**：地址与启用状态属于「本机怎么连上它」，而 API Key
-    // 在系统凭据库里按设备各存各的——条目本身在别的设备上不成立（没有 Key 就是一
-    // 行连不上的服务器），所以它和凭据归同一类，不上远端。
+    // Server configuration and API keys remain local to this device.
     if let Err(error) = transaction.commit() {
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
@@ -6998,7 +6994,7 @@ pub fn save_reading_progress(
         Ok(record) => record,
         Err(error) => return CommandResult::failure("UNKNOWN", error, true),
     };
-    // 本地这一笔已经落盘、也已经进同步日志了。下面只是顺手把它打到服务器上——
+    // 本地这一笔已经落盘。下面只是顺手把它打到服务器上——
     // 成不成功都不改变上面那个结果，失败也只进错误日志（见 `spawn_progress_push`）。
     let base_url = progress_push_base_url(&connection, &record.scope_id);
     drop(connection);
@@ -7064,10 +7060,6 @@ fn persist_reading_progress(
     ) {
         return Err(error.to_string());
     }
-    transaction.execute(
-        "UPDATE reading_progress SET revision = MAX(revision, COALESCE((SELECT MAX(logical_clock) + 1 FROM sync_journal WHERE scope_id=?1 AND object_id=?1 || '/' || ?2 AND object_type='reading_progress'), 1)) WHERE scope_id=?1 AND archive_id=?2",
-        params![progress.scope_id, progress.archive_id],
-    ).map_err(|error| error.to_string())?;
     let record = transaction.query_row(
         "SELECT scope_id, archive_id, page_index, page_count, layout, direction, cover_alone, updated_at, revision
          FROM reading_progress WHERE scope_id = ?1 AND archive_id = ?2",
@@ -7083,34 +7075,6 @@ fn persist_reading_progress(
         Ok(None) => return Err("Progress write was not visible".to_string()),
         Err(error) => return Err(error.to_string()),
     };
-    let payload_json = serde_json::json!({
-        "archiveId": record.archive_id,
-        "pageIndex": record.page_index,
-        "pageCount": record.page_count,
-        "layout": record.layout,
-        "direction": record.direction,
-        "coverAlone": record.cover_alone,
-    })
-    .to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(payload_json.as_bytes());
-    let payload_hash = format!("{:x}", hasher.finalize());
-    if let Err(error) = transaction.execute(
-        "INSERT INTO sync_journal (
-            scope_id, object_id, object_type, operation, device_id,
-            logical_clock, payload_hash, payload_json
-         ) VALUES (?1, ?2, 'reading_progress', 'upsert', ?3, ?4, ?5, ?6)",
-        params![
-            record.scope_id,
-            format!("{}/{}", record.scope_id, record.archive_id),
-            device_id,
-            record.revision,
-            payload_hash,
-            payload_json,
-        ],
-    ) {
-        return Err(error.to_string());
-    }
     transaction
         .execute(
             "INSERT INTO reading_history (scope_id, archive_id, page_index, device_id, revision)
@@ -7128,45 +7092,9 @@ fn persist_reading_progress(
             ],
         )
         .map_err(|error| error.to_string())?;
-    transaction.execute(
-        "UPDATE reading_history SET revision = MAX(revision, COALESCE((SELECT MAX(logical_clock) + 1 FROM sync_journal WHERE scope_id=?1 AND object_id=?1 || '/' || ?2 AND object_type='history'), 1)) WHERE scope_id=?1 AND archive_id=?2",
-        params![record.scope_id, record.archive_id],
-    ).map_err(|error| error.to_string())?;
-    let history: (i64, String, i64) = transaction
-        .query_row(
-            "SELECT page_index, visited_at, revision FROM reading_history
-         WHERE scope_id = ?1 AND archive_id = ?2",
-            params![record.scope_id, record.archive_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .map_err(|error| error.to_string())?;
-    let history_payload = serde_json::json!({
-        "archiveId": record.archive_id,
-        "pageIndex": history.0,
-        "visitedAt": history.1,
-    })
-    .to_string();
-    let mut history_hasher = Sha256::new();
-    history_hasher.update(history_payload.as_bytes());
-    transaction
-        .execute(
-            "INSERT INTO sync_journal (
-            scope_id, object_id, object_type, operation, device_id,
-            logical_clock, payload_hash, payload_json
-         ) VALUES (?1, ?2, 'history', 'upsert', ?3, ?4, ?5, ?6)",
-            params![
-                record.scope_id,
-                format!("{}/{}", record.scope_id, record.archive_id),
-                device_id,
-                history.2,
-                format!("{:x}", history_hasher.finalize()),
-                history_payload,
-            ],
-        )
-        .map_err(|error| error.to_string())?;
     // Page indexes are zero-based. Strictly above 90%, never at exactly 90%.
     // Tombstone only existing active entries, and journal once in this transaction.
-    // 同一套判据也供同步/导入在批末对账用（sync::reconcile_progress_completion）：
+    // 文件导入也使用同一套进度完成判据：
     // 「本地读到这一页」和「远端同步进来这一页」对「看完没看完」只能有一个口径。
     if progress_finishes_archive(record.page_index, record.page_count) {
         let listed: bool = transaction.query_row(
@@ -7224,7 +7152,7 @@ fn set_watchlist_entry(
             },
         )
         .map_err(|error| error.to_string())?;
-    // 收藏夹不写同步日志：它镜像的是 LRR 服务器上的收藏分类，服务器才是它的真相
+    // 收藏夹镜像 LRR 服务器上的收藏分类，服务器才是它的真相
     // 来源，本机这行只是那份镜像的落点。把它推给别的设备等于在两边各造一份本地记录，
     // 而服务器上的分类才是该看的那份（见 sync.rs 的 object_type_category）。
     transaction.commit().map_err(|error| error.to_string())?;
@@ -7294,72 +7222,14 @@ pub(crate) fn write_reading_list_entry(
             },
         )
         .map_err(|error| error.to_string())?;
-    let payload_json = serde_json::json!({
-        "archiveId": record.archive_id,
-        "deleted": record.deleted,
-    })
-    .to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(payload_json.as_bytes());
-    transaction.execute(
-        "INSERT INTO sync_journal (
-            scope_id, object_id, object_type, operation, device_id,
-            logical_clock, payload_hash, payload_json
-         ) VALUES (?1, ?2, 'watchlist', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
-        params![
-            record.scope_id,
-            format!("{}/{}", record.scope_id, record.archive_id),
-            added,
-            record.device_id,
-            record.revision,
-            format!("{:x}", hasher.finalize()),
-            payload_json,
-        ],
-    ).map_err(|error| error.to_string())?;
     Ok(record)
-}
-
-fn journal_search_preset(
-    connection: &rusqlite::Connection,
-    record: &SearchPresetRecord,
-    upsert: bool,
-) -> Result<(), String> {
-    let payload_json = serde_json::json!({
-        "presetId": record.preset_id,
-        "name": record.name,
-        "query": record.query,
-        "sortBy": record.sort_by,
-        "sortOrder": record.sort_order,
-        "categoryId": record.category_id,
-        "deleted": record.deleted,
-    })
-    .to_string();
-    let mut hasher = Sha256::new();
-    hasher.update(payload_json.as_bytes());
-    connection
-        .execute(
-            "INSERT INTO sync_journal (
-                scope_id, object_id, object_type, operation, device_id,
-                logical_clock, payload_hash, payload_json
-             ) VALUES (?1, ?2, 'search_preset', CASE WHEN ?3 THEN 'upsert' ELSE 'delete' END, ?4, ?5, ?6, ?7)",
-            params![
-                record.scope_id,
-                format!("{}/{}", record.scope_id, record.preset_id),
-                upsert,
-                record.device_id,
-                record.revision,
-                format!("{:x}", hasher.finalize()),
-                payload_json,
-            ],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
 }
 
 fn write_search_preset(
     connection: &mut rusqlite::Connection,
     input: &SearchPresetInput,
 ) -> Result<SearchPresetRecord, String> {
+    if super::lrr_bridge::enabled(connection,&input.scope_id) {return Err("搜索预设由插件托管，请通过托管接口保存".into());}
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -7380,7 +7250,6 @@ fn write_search_preset(
         )
         .map_err(|error| error.to_string())?;
     let record = read_search_preset(&transaction, &input.scope_id, &input.preset_id)?;
-    journal_search_preset(&transaction, &record, true)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(record)
 }
@@ -7417,9 +7286,7 @@ fn read_search_preset(
         .map_err(|error| error.to_string())
 }
 
-/// Saved searches: the library toolbar state under a name. Stored per scope and
-/// journalled like the watchlist, so a preset made on one device arrives on the
-/// next sync instead of living only in local settings.
+/// Local saved searches. Hosted callers use the versioned bridge collection.
 #[tauri::command(async)]
 pub fn save_search_preset(
     input: SearchPresetInput,
@@ -7453,6 +7320,7 @@ pub fn delete_search_preset(
         Ok(connection) => connection,
         Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
+    if super::lrr_bridge::enabled(&connection,&scope_id) {return CommandResult::failure("INVALID_INPUT","搜索预设由插件托管，请通过托管接口删除",false);}
     let result = (|| -> Result<SearchPresetRecord, String> {
         let transaction = connection
             .transaction()
@@ -7466,7 +7334,6 @@ pub fn delete_search_preset(
             )
             .map_err(|error| error.to_string())?;
         let record = read_search_preset(&transaction, &scope_id, &preset_id)?;
-        journal_search_preset(&transaction, &record, false)?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(record)
     })();
@@ -7676,95 +7543,13 @@ pub fn list_watchlist(
 
 /// 历史自动清理：读完的留 3 个月，没读完的留 1 年。
 ///
-/// 历史表是「每部档案一条」，不清理就会一直长：翻过的每一部都留着。读完的判断与
-/// 界面一致（`isArchiveFinished`：已读页数超过总页数的 95%），页数取自进度行；
-/// 没有进度行的历史（例如导入的）按没读完算，留得更久。
-pub(crate) const HISTORY_RETENTION_FINISHED_DAYS: i64 = 90;
-pub(crate) const HISTORY_RETENTION_UNFINISHED_DAYS: i64 = 365;
-const DAY_MILLIS: i64 = 24 * 60 * 60 * 1000;
-
-fn history_is_finished(page_index: i64, page_count: Option<i64>) -> bool {
-    match page_count {
-        // 与前端同一条式子，整数比较免去浮点误差。
-        Some(count) if count > 0 => (i128::from(page_index) + 1) * 100 > i128::from(count) * 95,
-        _ => false,
-    }
-}
-
-/// 删掉过期历史，并为每条写一个同步墓碑：别的设备下一次同步就跟着删，不会被它们
-/// 那份文档再带回来。时间解析不了的行一律保留——清理宁可少删。
+/// History has no age-based expiration, in local or plugin-hosted mode.
+/// Kept for the old IPC entry point; archive deletion cleanup is separate.
 pub(crate) fn prune_reading_history(
-    connection: &mut Connection,
-    now_millis: i64,
+    _connection: &mut Connection,
+    _now_millis: i64,
 ) -> Result<usize, String> {
-    let candidates: Vec<(String, String, String, i64, Option<i64>)> = {
-        let mut statement = connection
-            .prepare(
-                "SELECT h.scope_id, h.archive_id, h.visited_at, h.page_index, p.page_count
-                 FROM reading_history h
-                 LEFT JOIN reading_progress p
-                   ON p.scope_id = h.scope_id AND p.archive_id = h.archive_id",
-            )
-            .map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                ))
-            })
-            .map_err(|error| error.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?
-    };
-    let doomed = candidates
-        .into_iter()
-        .filter_map(|(scope_id, archive_id, visited_at, page_index, page_count)| {
-            let visited = super::sync::instant_millis(&visited_at)?;
-            let days = if history_is_finished(page_index, page_count) {
-                HISTORY_RETENTION_FINISHED_DAYS
-            } else {
-                HISTORY_RETENTION_UNFINISHED_DAYS
-            };
-            (visited <= now_millis - days * DAY_MILLIS).then_some((scope_id, archive_id))
-        })
-        .collect::<Vec<_>>();
-    if doomed.is_empty() {
-        return Ok(0);
-    }
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    for (scope_id, archive_id) in &doomed {
-        transaction
-            .execute(
-                "DELETE FROM reading_history WHERE scope_id = ?1 AND archive_id = ?2",
-                params![scope_id, archive_id],
-            )
-            .map_err(|error| error.to_string())?;
-        let object_id = format!("{scope_id}/{archive_id}");
-        let clock: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
-                 WHERE scope_id = ?1 AND object_id = ?2",
-                params![scope_id, object_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        super::sync::journal_object(
-            &transaction,
-            scope_id,
-            "history",
-            &object_id,
-            clock,
-            serde_json::json!({ "archiveId": archive_id, "deleted": true }),
-        )?;
-    }
-    transaction.commit().map_err(|error| error.to_string())?;
-    Ok(doomed.len())
+    Ok(0)
 }
 
 fn now_millis() -> i64 {
@@ -7774,11 +7559,7 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// 删掉选中的历史记录，每条写一个同步墓碑：别的设备下一次同步就跟着删。
-///
-/// 与保留期清理（`prune_reading_history`）走同一条路：历史记录属于本机与其它设备的
-/// 共同事实，删掉一条就必须留墓碑，否则对面的文档会把它带回来。清理的是**记录**，
-/// 不是档案——档案本体与进度都不动。
+/// 删除选中的本机历史条目，保留档案本体与阅读进度。
 pub(crate) fn delete_history_records_in(
     connection: &mut Connection,
     scope_id: &str,
@@ -7802,23 +7583,6 @@ pub(crate) fn delete_history_records_in(
             continue;
         }
         removed += deleted;
-        let object_id = format!("{scope_id}/{archive_id}");
-        let clock: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
-                 WHERE scope_id = ?1 AND object_id = ?2",
-                params![scope_id, object_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string())?;
-        super::sync::journal_object(
-            &transaction,
-            scope_id,
-            "history",
-            &object_id,
-            clock,
-            serde_json::json!({ "archiveId": archive_id, "deleted": true }),
-        )?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(removed)
@@ -7841,40 +7605,13 @@ pub fn delete_history_records(
 }
 
 /// Explicit reading reset; history-only deletion intentionally keeps progress.
-pub(crate) fn clear_reading_progress_in(
-    connection: &mut Connection,
-    scope_id: &str,
-    archive_id: &str,
-) -> Result<(), String> {
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    let object_id = format!("{scope_id}/{archive_id}");
-    // Both tombstones belong to this one transaction, including progress-only records.
-    for (table, kind) in [
-        ("reading_progress", "reading_progress"),
-        ("reading_history", "history"),
-    ] {
-        let clock: i64 = transaction.query_row(
-            &format!("SELECT MAX(COALESCE((SELECT MAX(logical_clock) FROM sync_journal WHERE scope_id=?1 AND object_id=?2), 0), COALESCE((SELECT revision FROM {table} WHERE scope_id=?1 AND archive_id=?3), 0)) + 1"),
-            params![scope_id, object_id, archive_id], |row| row.get(0),
-        ).map_err(|error| error.to_string())?;
-        transaction
-            .execute(
-                &format!("DELETE FROM {table} WHERE scope_id=?1 AND archive_id=?2"),
-                params![scope_id, archive_id],
-            )
-            .map_err(|error| error.to_string())?;
-        super::sync::journal_object(
-            &transaction,
-            scope_id,
-            kind,
-            &object_id,
-            clock,
-            serde_json::json!({ "archiveId": archive_id, "deleted": true, "clearProgress": true }),
-        )?;
+pub(crate) fn clear_reading_progress_in(connection: &mut Connection, scope_id: &str, archive_id: &str) -> Result<(), String> {
+    let transaction = connection.transaction().map_err(|e|e.to_string())?;
+    for table in ["reading_progress", "reading_history"] {
+        transaction.execute(&format!("DELETE FROM {table} WHERE scope_id=?1 AND archive_id=?2"), params![scope_id, archive_id]).map_err(|e|e.to_string())?;
     }
-    transaction.commit().map_err(|error| error.to_string())
+    transaction.execute("INSERT OR IGNORE INTO reading_resets(scope_id,archive_id) VALUES(?1,?2)",params![scope_id,archive_id]).map_err(|e|e.to_string())?;
+    transaction.commit().map_err(|e|e.to_string())
 }
 
 #[tauri::command(async)]
@@ -7914,16 +7651,8 @@ pub struct PrunedRecords {
     pub watchlist: usize,
 }
 
-/// 一张记录表，以及它在同步日志里的对象类型。`None` 是「这张表不进同步」——收藏夹
-/// 镜像的是服务器上的收藏分类，本机这份只是镜像的落点，所以清掉它时不留墓碑：留一条
-/// 就意味着别的设备要跟着删，而它本来就没有别的设备那一份。这里写错类型的代价是实打
-/// 实的：曾经 `("watchlist", "watchlist")` 写的是**待看**的对象类型，于是清掉一条
-/// 收藏夹记录，别的设备上被删掉的是待看里同 id 的那条。
-const DANGLING_RECORD_TABLES: [(&str, Option<&str>); 3] = [
-    ("reading_history", Some("history")),
-    ("reading_list", Some("watchlist")),
-    ("watchlist", None),
-];
+/// These local membership mirrors can contain archives deleted on the server.
+const DANGLING_RECORD_TABLES: [&str; 3] = ["reading_history", "reading_list", "watchlist"];
 
 /// 删掉指向「已确认不在 LANraragi」的档案的历史、待看与收藏夹记录。
 ///
@@ -7951,8 +7680,7 @@ fn prune_dangling_records_for_server(
         .map_err(|error| error.to_string())?;
     let mut pruned = PrunedRecords::default();
     let prune_table = |connection: &mut Connection,
-                       table: &str,
-                       object_type: Option<&str>|
+                       table: &str|
      -> Result<usize, String> {
         let doomed: Vec<String> = {
             let mut statement = connection
@@ -7981,32 +7709,13 @@ fn prune_dangling_records_for_server(
                     params![scope_id, archive_id],
                 )
                 .map_err(|error| error.to_string())?;
-            // 不进同步的表删掉就走：留一条墓碑等于告诉别的设备「这条没了」，而它们
-            // 本来就没有这一份（收藏夹的真相在服务器上）。
-            let Some(object_type) = object_type else { continue };
-            let object_id = format!("{scope_id}/{archive_id}");
-            let clock: i64 = transaction
-                .query_row(
-                    "SELECT COALESCE(MAX(logical_clock), 0) + 1 FROM sync_journal
-                     WHERE scope_id = ?1 AND object_id = ?2",
-                    params![scope_id, object_id],
-                    |row| row.get(0),
-                )
-                .map_err(|error| error.to_string())?;
-            super::sync::journal_object(
-                &transaction,
-                &scope_id,
-                object_type,
-                &object_id,
-                clock,
-                serde_json::json!({ "archiveId": archive_id, "deleted": true }),
-            )?;
+
         }
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(doomed.len())
     };
-    for (table, object_type) in DANGLING_RECORD_TABLES {
-        let removed = prune_table(connection, table, object_type)?;
+    for table in DANGLING_RECORD_TABLES {
+        let removed = prune_table(connection, table)?;
         match table {
             "reading_history" => pruned.history = removed,
             "reading_list" => pruned.reading_list = removed,
@@ -8638,6 +8347,14 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn history_never_expires_by_age() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("CREATE TABLE reading_history (visited_at TEXT); INSERT INTO reading_history VALUES ('2000-01-01 00:00:00');").unwrap();
+        assert_eq!(prune_reading_history(&mut connection, i64::MAX).unwrap(), 0);
+        assert_eq!(connection.query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
     /// 用户报的第 ① 条：`pause_download`/`cancel_download` 是拿前端给的任务 id 直接
     /// `set_download_signal` 的，对一个早就不在传输的 id 也会登记一条永不清理的条目。
     /// 登记序因此必须有上限，且是「插入序即淘汰序」。
@@ -8944,84 +8661,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicit_reading_reset_is_scoped_atomic_and_reading_can_restart() {
-        let mut connection = migrated_connection();
-        for scope in ["scope-a", "scope-b"] {
-            persist_reading_progress(
-                &mut connection,
-                ReadingProgressInput {
-                    scope_id: scope.into(),
-                    archive_id: "archive-a".into(),
-                    page_index: 8,
-                    page_count: 10,
-                    layout: "paged".into(),
-                    direction: "ltr".into(),
-                    cover_alone: None,
-                    allow_progress_regression: true,
-                },
-            )
-            .unwrap();
-        }
-        // The existing history delete keeps progress, including a first-page record.
-        delete_history_records_in(&mut connection, "scope-a", &["archive-a".into()]).unwrap();
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM reading_progress WHERE scope_id='scope-a'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
-        clear_reading_progress_in(&mut connection, "scope-a", "archive-a").unwrap();
-        for table in ["reading_progress", "reading_history"] {
-            let count: i64 = connection
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE scope_id='scope-a'"),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(count, 0);
-            let other: i64 = connection
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE scope_id='scope-b'"),
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(other, 1);
-        }
-        let reset_clock: i64 = connection.query_row("SELECT MAX(logical_clock) FROM sync_journal WHERE scope_id='scope-a' AND object_type='reading_progress'", [], |row| row.get(0)).unwrap();
-        let restarted = persist_reading_progress(
-            &mut connection,
-            ReadingProgressInput {
-                scope_id: "scope-a".into(),
-                archive_id: "archive-a".into(),
-                page_index: 0,
-                page_count: 10,
-                layout: "paged".into(),
-                direction: "ltr".into(),
-                cover_alone: None,
-                allow_progress_regression: false,
-            },
-        )
-        .unwrap();
-        assert_eq!(restarted.page_index, 0);
-        assert!(restarted.revision > reset_clock);
-        // A failing journal write rolls back both deletions.
-        connection.execute_batch("CREATE TRIGGER fail_reset BEFORE INSERT ON sync_journal BEGIN SELECT RAISE(ABORT, 'test rollback'); END;").unwrap();
-        assert!(clear_reading_progress_in(&mut connection, "scope-a", "archive-a").is_err());
-        let count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM reading_progress WHERE scope_id='scope-a'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 1);
-    }
-
     fn migrated_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("in-memory database");
         connection
@@ -9031,7 +8670,7 @@ mod tests {
             .execute_batch(include_str!("../../migrations/0002_local_library.sql"))
             .expect("library migration");
         connection
-            .execute_batch(include_str!("../../migrations/0003_sync_journal.sql"))
+            .execute_batch("CREATE TABLE reading_resets(scope_id TEXT NOT NULL, archive_id TEXT NOT NULL, PRIMARY KEY(scope_id,archive_id));")
             .expect("sync journal migration");
         connection
             .execute_batch(include_str!("../../migrations/0004_watchlist.sql"))
@@ -9087,36 +8726,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_progress_fills_only_missing_local_state_without_history_or_sync_writes() {
-        let mut connection = migrated_connection();
-        connection.execute("INSERT INTO servers (id,name,base_url,scope_id) VALUES ('server-a','Home','https://example.com','scope-a')", []).unwrap();
-        let mut wire = ArchiveMetadataWire {
-            arcid: "remote-progress".into(), title: "Remote progress".into(), filename: "archive.cbz".into(),
-            tags: "".into(), summary: None, extension: "cbz".into(), progress: 5,
-            pagecount: 12, lastreadtime: 1700000000, size: 1024,
-        };
-        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
-        let read = |connection: &Connection| connection.query_row(
-            "SELECT page_index FROM reading_progress WHERE scope_id='scope-a' AND archive_id='remote-progress'", [], |row| row.get::<_, i64>(0)).optional().unwrap();
-        assert_eq!(read(&connection), Some(4));
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM reading_history", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM sync_journal", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-        wire.progress = 12;
-        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
-        assert_eq!(read(&connection), Some(4), "local progress wins once it exists");
-        clear_reading_progress_in(&mut connection, "scope-a", "remote-progress").unwrap();
-        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
-        assert_eq!(read(&connection), None, "stale server data must not undo an explicit reset");
-        wire.arcid = "past-end".into();
-        wire.progress = 999;
-        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
-        assert_eq!(connection.query_row("SELECT page_index FROM reading_progress WHERE archive_id='past-end'", [], |row| row.get::<_, i64>(0)).unwrap(), 11);
-        wire.arcid = "unread".into(); wire.progress = 0;
-        persist_archive_metadata(&mut connection, "server-a", &wire).unwrap();
-        assert_eq!(connection.query_row("SELECT COUNT(*) FROM reading_progress WHERE archive_id='unread'", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    }
-
-    #[test]
     fn resolved_favorite_metadata_persists_and_preserves_optional_facts() {
         let mut connection = migrated_connection();
         connection.execute("INSERT INTO servers (id,name,base_url,scope_id) VALUES ('scope-a','Home','https://example.com','scope-a')", []).unwrap();
@@ -9138,135 +8747,6 @@ mod tests {
         assert_eq!(preserved, (Some("Known summary".into()), Some(123)));
         let again = query_archive_records(&connection, "scope-a").unwrap();
         assert_eq!(again.len(), 1);
-    }
-
-    #[test]
-    fn reading_past_ninety_percent_removes_only_active_to_read_once() {
-        let mut connection = migrated_connection();
-        set_reading_list_entry(&mut connection, "scope-a", "archive-a", true).unwrap();
-        set_reading_list_entry(&mut connection, "scope-b", "archive-a", true).unwrap();
-        set_watchlist_entry(&mut connection, "scope-a", "archive-a", true).unwrap();
-        for (index, expected_deleted) in [(89, false), (90, true), (99, true)] {
-            persist_reading_progress(
-                &mut connection,
-                ReadingProgressInput {
-                    scope_id: "scope-a".into(),
-                    archive_id: "archive-a".into(),
-                    page_index: index,
-                    page_count: 100,
-                    layout: "paged".into(),
-                    direction: "ltr".into(),
-                    allow_progress_regression: true,
-                    cover_alone: None,
-                },
-            )
-            .unwrap();
-            let deleted: bool = connection
-                .query_row(
-                    "SELECT deleted_at IS NOT NULL FROM reading_list WHERE scope_id='scope-a'",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(deleted, expected_deleted);
-        }
-        let deletes: i64 = connection.query_row("SELECT COUNT(*) FROM sync_journal WHERE object_type='watchlist' AND operation='delete'", [], |row| row.get(0)).unwrap();
-        assert_eq!(deletes, 1);
-        for sql in [
-            "SELECT deleted_at IS NULL FROM reading_list WHERE scope_id='scope-b'",
-            "SELECT deleted_at IS NULL FROM watchlist WHERE scope_id='scope-a'",
-        ] {
-            assert!(connection
-                .query_row(sql, [], |row| row.get::<_, bool>(0))
-                .unwrap());
-        }
-    }
-
-    #[test]
-    fn history_prune_keeps_recent_rows_and_tombstones_the_rest() {
-        let mut connection = migrated_connection();
-        // 四行历史：读完/没读完 × 超过/没超过各自的保留窗口。时间直接写成偏移，
-        // 清理只按 visited_at 与进度判断，不依赖写入顺序。
-        let now = now_millis();
-        let days_ago = |days: i64| {
-            let millis = now - days * DAY_MILLIS;
-            let seconds = millis / 1000;
-            // SQLite 的 CURRENT_TIMESTAMP 形状：UTC 的 YYYY-MM-DD HH:MM:SS。
-            let (year, month, day, hour, minute, second) = epoch_to_parts(seconds);
-            format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
-        };
-        for (archive_id, page_index, page_count, visited_days) in [
-            ("finished-old", 99, 100, 100),
-            ("finished-recent", 99, 100, 10),
-            ("unfinished-old", 3, 100, 200),
-            ("unfinished-ancient", 3, 100, 400),
-            // 没有进度行的历史（导入的）按没读完算。
-            ("orphan-ancient", 1, 0, 400),
-        ] {
-            connection
-                .execute(
-                    "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
-                     VALUES ('scope-a', ?1, ?2, ?3, 'device-a', 1)",
-                    params![archive_id, page_index, days_ago(visited_days)],
-                )
-                .unwrap();
-            if page_count > 0 {
-                connection
-                    .execute(
-                        "INSERT INTO reading_progress (scope_id, archive_id, page_index, page_count, layout, direction, device_id, revision)
-                         VALUES ('scope-a', ?1, ?2, ?3, 'paged', 'ltr', 'device-a', 1)",
-                        params![archive_id, page_index, page_count],
-                    )
-                    .unwrap();
-            }
-        }
-
-        let removed = prune_reading_history(&mut connection, now).expect("prune");
-        assert_eq!(removed, 3);
-
-        let remaining: Vec<String> = {
-            let mut statement = connection
-                .prepare("SELECT archive_id FROM reading_history ORDER BY archive_id")
-                .unwrap();
-            let rows = statement.query_map([], |row| row.get(0)).unwrap();
-            rows.collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        assert_eq!(remaining, vec!["finished-recent", "unfinished-old"]);
-
-        // 每条被清掉的都留下一个墓碑，别的设备下一次同步跟着删。
-        let tombstones: Vec<(String, String)> = {
-            let mut statement = connection
-                .prepare(
-                    "SELECT object_id, payload_json FROM sync_journal
-                     WHERE object_type = 'history' ORDER BY object_id",
-                )
-                .unwrap();
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap();
-            rows.collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        assert_eq!(tombstones.len(), 3);
-        assert!(tombstones
-            .iter()
-            .all(|(_, payload)| payload.contains("\"deleted\":true")));
-        assert!(tombstones
-            .iter()
-            .any(|(object_id, _)| object_id == "scope-a/unfinished-ancient"));
-        // 时钟取该对象的下一格：墓碑一定压过被删掉的那一版。
-        let clocks: Vec<i64> = tombstones
-            .iter()
-            .map(|(object_id, _)| {
-                connection
-                    .query_row(
-                        "SELECT logical_clock FROM sync_journal WHERE object_id = ?1",
-                        params![object_id],
-                        |row| row.get(0),
-                    )
-                    .unwrap()
-            })
-            .collect();
-        assert!(clocks.iter().all(|clock| *clock == 1));
     }
 
     fn epoch_to_parts(seconds: i64) -> (i64, i64, i64, i64, i64, i64) {
@@ -9312,76 +8792,6 @@ mod tests {
     }
 
     #[test]
-    fn reading_progress_write_creates_same_scope_sync_journal_entry() {
-        let mut connection = migrated_connection();
-        let record = persist_reading_progress(
-            &mut connection,
-            ReadingProgressInput {
-                scope_id: "scope-a".to_string(),
-                archive_id: "archive-a".to_string(),
-                page_index: 4,
-                page_count: 10,
-                layout: "paged".to_string(),
-                direction: "ltr".to_string(),
-                allow_progress_regression: true,
-                cover_alone: None,
-            },
-        )
-        .expect("progress write");
-
-        assert_eq!(record.revision, 1);
-        let journal: (String, String, String, String, String) = connection
-            .query_row(
-                "SELECT scope_id, object_id, object_type, operation, device_id FROM sync_journal",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                },
-            )
-            .expect("journal entry");
-        assert_eq!(
-            (
-                journal.0.as_str(),
-                journal.1.as_str(),
-                journal.2.as_str(),
-                journal.3.as_str()
-            ),
-            ("scope-a", "scope-a/archive-a", "reading_progress", "upsert")
-        );
-        assert!(journal.4.starts_with("device-"));
-        let progress_device: String = connection
-            .query_row(
-                "SELECT device_id FROM reading_progress WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("progress device");
-        assert_eq!(progress_device, journal.4);
-        let history: (i64, i64) = connection
-            .query_row(
-                "SELECT page_index, revision FROM reading_history WHERE scope_id = 'scope-a' AND archive_id = 'archive-a'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("history row");
-        assert_eq!(history, (4, 1));
-        let history_journal_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sync_journal WHERE scope_id = 'scope-a' AND object_type = 'history'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("history journal");
-        assert_eq!(history_journal_count, 1);
-    }
-
-    #[test]
     fn reading_history_follows_the_page_last_saved_for_resume() {
         let mut connection = migrated_connection();
         for page_index in [8, 2] {
@@ -9417,29 +8827,6 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?)),
         ).expect("matching progress");
         assert_eq!((resume, history), (8, 8));
-    }
-
-    #[test]
-    fn favlist_toggle_writes_tombstone_without_journal() {
-        // 收藏夹镜像的是 LRR 服务器上的收藏分类，不是本机记录：本地墓碑与 revision 照旧
-        // （列表要显示得出来、点掉要消失），但同步日志一笔都不写——它不上路，也不该在
-        // 别的设备上凭空多出一份。
-        let mut connection = migrated_connection();
-        let added = set_watchlist_entry(&mut connection, "scope-a", "archive-a", true)
-            .expect("favlist add");
-        assert!(!added.deleted);
-        let removed = set_watchlist_entry(&mut connection, "scope-a", "archive-a", false)
-            .expect("favlist remove");
-        assert!(removed.deleted);
-        assert_eq!(removed.revision, 2);
-        let journal_count: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sync_journal WHERE scope_id = 'scope-a' AND object_id = 'scope-a/archive-a'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("journal count");
-        assert_eq!(journal_count, 0, "收藏夹不进同步日志");
     }
 
     #[test]
@@ -10481,82 +9868,6 @@ mod tests {
     }
 
     #[test]
-    fn dangling_records_are_pruned_only_when_the_archive_is_known_gone() {
-        let mut connection = migrated_connection();
-        connection
-            .execute_batch(
-                "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a');
-                 INSERT INTO archives (server_id, archive_id, title, title_sort, tags_json, page_count, added_at, is_deleted) VALUES
-                   ('scope-a', 'alive', 'Alive', 'alive', '[]', 1, 100, 0),
-                   ('scope-a', 'gone', 'Gone', 'gone', '[]', 1, 100, 1);
-                 INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id) VALUES
-                   ('scope-a', 'alive', 1, '2026-09-17 12:00:00', 'dev-1'),
-                   ('scope-a', 'gone', 1, '2026-09-17 12:00:00', 'dev-1'),
-                   ('scope-a', 'never-indexed', 1, '2026-09-17 12:00:00', 'dev-1');
-                 INSERT INTO reading_list (scope_id, archive_id, device_id) VALUES
-                   ('scope-a', 'alive', 'dev-1'), ('scope-a', 'gone', 'dev-1');
-                 INSERT INTO watchlist (scope_id, archive_id, device_id) VALUES
-                   ('scope-a', 'gone', 'dev-1');",
-            )
-            .unwrap();
-
-        let pruned =
-            prune_dangling_records_for_server(&mut connection, "scope-a").expect("prune dangling");
-        assert_eq!(
-            (pruned.history, pruned.reading_list, pruned.watchlist),
-            (1, 1, 1)
-        );
-
-        // 索引里根本没有的那条留着：「还没被索引到」不是「被删了」的证据——导入进来的
-        // 记录正是这样，按缺失来判会把它们一次清空。
-        let history: Vec<String> = {
-            let mut statement = connection
-                .prepare("SELECT archive_id FROM reading_history ORDER BY archive_id")
-                .unwrap();
-            let rows = statement.query_map([], |row| row.get(0)).unwrap();
-            rows.collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        assert_eq!(history, vec!["alive", "never-indexed"]);
-        let lists: i64 = connection
-            .query_row("SELECT COUNT(*) FROM reading_list", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(lists, 1, "the live one stays");
-
-        // 每条被清掉的**同步中**记录都留下墓碑，别的设备下一次同步跟着删。
-        let tombstones: Vec<(String, String)> = {
-            let mut statement = connection
-                .prepare("SELECT object_type, payload_json FROM sync_journal ORDER BY object_id, object_type")
-                .unwrap();
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap();
-            rows.collect::<Result<Vec<_>, _>>().unwrap()
-        };
-        assert_eq!(tombstones.len(), 2, "历史与待看各一条；收藏夹不上路，没有墓碑");
-        assert!(tombstones
-            .iter()
-            .all(|(_, payload)| payload.contains("\"deleted\":true")
-                && payload.contains("\"gone\"")));
-        // 两条墓碑的类型必须各归各的：待看与收藏夹曾经共用一个类型，于是清掉一条
-        // 收藏夹记录，别的设备上被删掉的是待看里同 id 的那条。
-        let mut types: Vec<&str> = tombstones.iter().map(|(object_type, _)| object_type.as_str()).collect();
-        types.sort_unstable();
-        assert_eq!(types, vec!["history", "watchlist"]);
-        let favorite_rows: i64 = connection
-            .query_row("SELECT COUNT(*) FROM watchlist", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(favorite_rows, 0, "收藏夹那条本地删掉，但不留墓碑");
-
-        // 幂等：再跑一次没有可删的。
-        let again =
-            prune_dangling_records_for_server(&mut connection, "scope-a").expect("prune again");
-        assert_eq!(
-            (again.history, again.reading_list, again.watchlist),
-            (0, 0, 0)
-        );
-    }
-
-    #[test]
     fn random_upsert_keeps_the_rest_of_the_index_alive() {
         let mut connection = migrated_connection();
         connection.execute_batch(
@@ -10672,44 +9983,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alive"]
         );
-    }
-
-    #[test]
-    fn search_presets_round_trip_tombstone_and_journal() {
-        // Presets sync like every other user record, so saving one has to leave a
-        // journal row; deleting is a tombstone, not a hard delete, or a delete
-        // would never reach the other device.
-        let mut connection = migrated_connection();
-        connection.execute(
-            "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Test', 'https://lrr.test', 'scope-a')",
-            [],
-        ).unwrap();
-
-        let input = SearchPresetInput {
-            scope_id: "scope-a".to_string(),
-            preset_id: "preset-1".to_string(),
-            name: "  中文汉化  ".to_string(),
-            query: "language:chinese$".to_string(),
-            sort_by: "added".to_string(),
-            sort_order: "desc".to_string(),
-            category_id: None,
-        };
-        let saved = write_search_preset(&mut connection, &input).expect("save preset");
-        assert_eq!(saved.name, "中文汉化");
-        assert_eq!(saved.revision, 1);
-        assert!(!saved.deleted);
-
-        let again = write_search_preset(&mut connection, &input).expect("update preset");
-        assert_eq!(again.revision, 2);
-
-        let journalled: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sync_journal WHERE object_type='search_preset'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(journalled, 2);
     }
 
     #[test]
@@ -11007,67 +10280,6 @@ mod tests {
                 .expect("read shared")
                 .is_none()
         );
-    }
-
-    #[test]
-    fn deleting_history_records_leaves_tombstones_and_spares_other_rows() {
-        let mut connection = migrated_connection();
-        for archive_id in ["a1", "a2", "a3"] {
-            connection
-                .execute(
-                    "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
-                     VALUES ('scope-h', ?1, 3, '2026-09-01T00:00:00Z', 'device-1', 1)",
-                    [archive_id],
-                )
-                .expect("insert history");
-        }
-        connection
-            .execute(
-                "INSERT INTO reading_history (scope_id, archive_id, page_index, visited_at, device_id, revision)
-                 VALUES ('scope-other', 'a1', 3, '2026-09-01T00:00:00Z', 'device-1', 1)",
-                [],
-            )
-            .expect("insert other scope");
-
-        let removed = delete_history_records_in(
-            &mut connection,
-            "scope-h",
-            &["a1".to_string(), "a2".to_string(), "missing".to_string()],
-        )
-        .expect("delete");
-        assert_eq!(removed, 2, "每条真的删掉的记录各算一条");
-
-        let left: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM reading_history WHERE scope_id = 'scope-h'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count");
-        assert_eq!(left, 1, "没选中的那条记录还在");
-        let other: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM reading_history WHERE scope_id = 'scope-other'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("count other");
-        assert_eq!(other, 1, "别的设备那一份不能被本机的清理带走");
-
-        let tombstones: Vec<(String, String)> = {
-            let mut statement = connection
-                .prepare("SELECT object_id, payload_json FROM sync_journal WHERE object_type = 'history'")
-                .expect("prepare journal");
-            let rows = statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .expect("journal rows");
-            rows.collect::<Result<Vec<_>, _>>().expect("collect")
-        };
-        assert_eq!(tombstones.len(), 2, "每条删掉的记录各留一个墓碑");
-        for (object_id, payload) in tombstones {
-            assert!(object_id.starts_with("scope-h/"), "{object_id}");
-            assert!(payload.contains("\"deleted\":true"), "{payload}");
-        }
     }
 
     #[test]

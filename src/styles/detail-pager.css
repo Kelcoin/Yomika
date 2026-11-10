@@ -1,0 +1,14 @@
+/* The enclosing detail pane scrolls on desktop; the workspace scrolls on
+   compact layouts. Sticky follows either scrollport without a second scroller. */
+.archive-detail-route-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-raised);
+  min-height: var(--icon-button-size);
+  background: var(--surface);
+  box-shadow: 0 1px 0 var(--hairline);
+}
+
+.archive-detail-panels {
+  touch-action: pan-y pinch-zoom;
+}

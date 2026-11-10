@@ -1,3 +1,4 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
@@ -5,7 +6,7 @@ import { afterEach, vi } from 'vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { getNativeImageCache, RenditionError } from '../../src/lib/nativeImageCache';
 import { serializeRemoteOps } from '../../src/repositories/nativeComputeCenterRepository';
 import type { ImageHandle } from '../../src/lib/unifiedImageCache';

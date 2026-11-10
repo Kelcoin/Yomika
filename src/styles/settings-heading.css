@@ -1,0 +1,8 @@
+/* Keep the landing title and drilled title on exactly the same 44px row. */
+.settings-compact-heading {
+  min-height: var(--icon-button-size);
+}
+
+:root[data-layout='compact'] .settings-sidebar {
+  padding-top: 0;
+}

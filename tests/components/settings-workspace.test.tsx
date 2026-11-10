@@ -108,7 +108,6 @@ const DATA_EXPORT_TEXT = JSON.stringify({
   records: JSON.parse(SCOPED_EXPORT_TEXT),
   servers: [{ scopeId: 'scope-a', name: 'Home', baseUrl: 'https://lrr.test', enabled: true, apiKey: 'key-1' }],
   ehAccounts: [],
-  syncAccounts: [],
   skipped: 0,
 });
 
@@ -135,6 +134,8 @@ describe('settings workspace', () => {
     const user = userEvent.setup();
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => false } });
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'app_security_status') return { ok: true, value: { locked: false, passwordEnabled: false, biometricEnabled: false, lockOnBackground: false, hidePreview: false, biometricAvailable: false, previewProtectionAvailable: true } };
+      if (command === 'app_security_ready') return { ok: true, value: null };
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'save_preferences') return { ok: true, value: args?.input };
       if (command === 'platform_capabilities') return { ok: true, value: { platform: 'windows', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } };
@@ -281,7 +282,7 @@ describe('settings workspace', () => {
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
+    renderSettings('data');
     // 纯开关不再有二级菜单：绘制的开关就在行的右侧，翻转即保存。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     expect(toggle).toHaveClass('switch-control');
@@ -301,7 +302,7 @@ describe('settings workspace', () => {
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
+    renderSettings('data');
     // 没登录：开关按不动，行里说明原因。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     await waitFor(() => expect(toggle).toBeDisabled());
@@ -336,130 +337,6 @@ describe('settings workspace', () => {
     expect(myTags).toBeDisabled();
     expect(myTags).not.toBeChecked();
   });
-  it('carries the auto-sync switch and reports the last sync on the account row', async () => {
-    const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'save_preferences') return { ok: true, value: args?.input };
-      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a', enabled: true }] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [{
-        id: 'personal', label: 'Personal WebDAV', baseUrl: 'https://dav.example.com/Yomika', username: 'reader',
-        credentialRef: 'personal-secret', syncScope: '[]', status: 'ok', lastProbeAt: null,
-        lastSyncAt: new Date(Date.now() - 30 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' '),
-        lastErrorCode: null, createdAt: '2026-08-28 00:00:00', updatedAt: '2026-08-28 00:00:00',
-      }] };
-      return { ok: true, value: [] };
-    });
-    setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
-
-    // 自动同步没有开关：它就该一直开着（用户 2026-10-17 的要求），设置里只留账户行。
-    expect(screen.queryByRole('switch', { name: '自动同步' })).toBeNull();
-
-    // 账户行报出上次同步的时刻（原生给的是 SQLite 的 UTC 串）。
-    await user.click(await screen.findByRole('button', { name: '同步账户' }));
-    const menu = await screen.findByRole('dialog', { name: '同步账户' });
-    // 行上只留「类型 · 上次同步」：范围有自己的行，用户名/Access Key 不再重复。
-    expect(within(menu).getByText('WebDAV · 30 分钟前同步')).toBeInTheDocument();
-  });
-
-  /** 登录过的 WebDAV 账户：`重置远端` 只有在一行真的账户上才画得出来。 */
-  const RESET_ACCOUNT = {
-    id: 'personal', label: 'Personal WebDAV', baseUrl: 'https://dav.example.com/Yomika', username: 'reader',
-    credentialRef: 'personal-secret', syncScope: '[]', status: 'ok', lastProbeAt: null, lastSyncAt: null,
-    lastErrorCode: null, createdAt: '2026-08-28 00:00:00', updatedAt: '2026-08-28 00:00:00',
-  };
-
-  async function openAccountRow(user: ReturnType<typeof userEvent.setup>) {
-    const adapter = vi.fn(async (command: string) => {
-      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
-      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a', enabled: true }] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [RESET_ACCOUNT] };
-      if (command === 'reset_remote_state') return { ok: true, value: undefined };
-      return { ok: true, value: [] };
-    });
-    setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
-    await user.click(await screen.findByRole('button', { name: '同步账户' }));
-    return { menu: await screen.findByRole('dialog', { name: '同步账户' }), adapter };
-  }
-
-  it('morphs the reset button in place rather than adding a second pair of buttons', async () => {
-    const user = userEvent.setup();
-    const { menu } = await openAccountRow(user);
-
-    // 初始形态：只有一枚「重置远端」。
-    const toggle = within(menu).getByRole('button', { name: '重置远端' });
-    const group = toggle.parentElement as HTMLElement;
-    expect(group.className).toContain('settings-menu-reset');
-    expect(group.className).not.toContain('is-armed');
-    expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(within(group).queryAllByRole('button')).toHaveLength(1);
-
-    // 点一下。这里换掉真定时器：下面要验「举着没人管会自己退回去」。
-    vi.useFakeTimers();
-    try {
-      fireEvent.click(toggle);
-
-      // **同一个节点**还在，是它自己变成了确认按钮——这就是「原地变形」。
-      // 旧形态（一颗按钮被两枚新按钮整组替换）在这里 `isConnected` 是 false。
-      expect(toggle.isConnected).toBe(true);
-      expect(toggle.textContent).toContain('确认重置');
-      expect(toggle.textContent).not.toContain('重置远端');
-      expect(toggle).toHaveAttribute('aria-expanded', 'true');
-      expect(group.className).toContain('is-armed');
-      // 对手方是那一枚「取消」，长在同一个组里（参考图上的第二颗胶囊）。
-      const cancel = within(group).getByRole('button', { name: '取消' });
-      expect(cancel.className).toContain('settings-menu-reset-cancel');
-      // 整个组里就两枚：多出来的按钮就是「新增按钮」的样子。
-      expect(within(group).queryAllByRole('button')).toHaveLength(2);
-      // 而这三枚动作之外没有别的地方冒出「确认重置」。
-      expect(within(menu).queryAllByRole('button', { name: '确认重置' })).toHaveLength(1);
-
-      // 举着没人管：自己退回初始形态。
-      act(() => { vi.advanceTimersByTime(10_000); });
-      expect(toggle.isConnected).toBe(true);
-      expect(toggle.textContent).toContain('重置远端');
-      expect(toggle).toHaveAttribute('aria-expanded', 'false');
-      expect(group.className).not.toContain('is-armed');
-      expect(within(group).queryAllByRole('button')).toHaveLength(1);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('drops the reset confirmation once the window is not the one being used', async () => {
-    const user = userEvent.setup();
-    const { menu } = await openAccountRow(user);
-    const toggle = within(menu).getByRole('button', { name: '重置远端' });
-    const group = toggle.parentElement as HTMLElement;
-
-    fireEvent.click(toggle);
-    expect(toggle.textContent).toContain('确认重置');
-
-    // 窗口失焦：用户已经去别的窗口了，这一下不该还举着。
-    act(() => { window.dispatchEvent(new Event('blur')); });
-    expect(toggle.textContent).toContain('重置远端');
-    expect(toggle).toHaveAttribute('aria-expanded', 'false');
-
-    // 窗口被最小化/切走：`visibilitychange` 这一路同样回落。
-    fireEvent.click(toggle);
-    expect(toggle.textContent).toContain('确认重置');
-    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
-    try {
-      act(() => { document.dispatchEvent(new Event('visibilitychange')); });
-      expect(toggle.textContent).toContain('重置远端');
-    } finally {
-      delete (document as { visibilityState?: unknown }).visibilityState;
-    }
-
-    // 取消也要能按：按完回到初始形态，而且不会去动远端。
-    fireEvent.click(toggle);
-    fireEvent.click(within(group).getByRole('button', { name: '取消' }));
-    expect(toggle.textContent).toContain('重置远端');
-    expect(within(group).queryByRole('button', { name: '取消' })).toBeNull();
-  });
-
   it('no longer offers a manual history prune in settings — that lives on the history shelf', async () => {
     // 清理的入口在历史页：多选之后清掉选中的记录。设置里那条「立即清理」按年龄清，
     // 要清哪几条只有看着列表的人知道，所以整行都撤了。
@@ -784,7 +661,7 @@ describe('settings workspace', () => {
 
     expect(await screen.findByRole('region', { name: '服务器' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: '数据迁移' })).not.toBeInTheDocument();
-    await user.click(screen.getByRole('link', { name: /同步/ }));
+    await user.click(screen.getByRole('link', { name: /^数据$/ }));
     // 导入与导出各自是一行；旧的一体化「数据迁移」不再出现。
     expect(screen.getByRole('button', { name: '导出数据' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '导入数据' })).toBeInTheDocument();
@@ -1308,9 +1185,9 @@ describe('settings workspace', () => {
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
+    renderSettings('data');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /同步/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     await user.type(within(importMenu).getByLabelText('导出 JSON'), 'encoded-config');
@@ -1328,14 +1205,13 @@ describe('settings workspace', () => {
     expect(adapter).toHaveBeenCalledWith('import_legacy_preferences', { encoded: 'encoded-config' });
   });
 
-  it('exports the checked sync scope as the sync document', async () => {
+  it('exports the selected data categories', async () => {
     const user = userEvent.setup();
     // 导出走原生侧那一份：本地日志折成同步文档，所以这里不再逐个表去取。取不到
     // 就会抛——「不再逐表取」这条正是这个 mock 守着的。
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'export_data') {
         return {
           ok: true,
@@ -1345,7 +1221,6 @@ describe('settings workspace', () => {
             records: 3,
             servers: 0,
             ehAccounts: 0,
-            syncAccounts: 0,
             skipped: 0,
             categories: ['history'],
           },
@@ -1356,9 +1231,9 @@ describe('settings workspace', () => {
     });
     setInvokeAdapterForTests(adapter);
     setSavePickerForTests(async () => 'C:/tmp/yomika-export.json');
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
     // 六类记录与设置默认全勾；凭据默认不勾。这一颗按钮自己就折文本、选路径、写盘——
@@ -1377,18 +1252,17 @@ describe('settings workspace', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'export_data') {
-        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, items: ['records'], records: 2, servers: 0, ehAccounts: 0, syncAccounts: 0, skipped: 0 } };
+        return { ok: true, value: { text: SCOPED_EXPORT_TEXT, items: ['records'], records: 2, servers: 0, ehAccounts: 0, skipped: 0 } };
       }
       if (command === 'save_text_file') return { ok: true, value: 'C:/tmp/yomika-export.json' };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     setSavePickerForTests(async () => 'C:/tmp/yomika-export.json');
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const menu = screen.getByRole('dialog', { name: '导出数据' });
 
@@ -1401,21 +1275,20 @@ describe('settings workspace', () => {
     }));
   });
 
-  it('imports a scoped export through the checked scope', async () => {
+  it('imports a legacy scoped export', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'import_scoped_data') {
         return { ok: true, value: { applied: 4, skipped: 2, categories: ['history'] } };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     // 粘贴一份本机的导出：userEvent.type 会把 `{{` 当成转义，所以直接改值。
@@ -1436,16 +1309,15 @@ describe('settings workspace', () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'read_text_file') return { ok: true, value: '{"kind":"yomika-scope-export","schemaVersion":1,"document":{"version":1,"epoch":0,"objects":{}}}' };
       if (command === 'import_scoped_data') return { ok: true, value: { applied: 2, skipped: 0, categories: [] } };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     setTextFilePickerForTests(async () => 'C:/tmp/yomika-export.json');
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const menu = screen.getByRole('dialog', { name: '导入数据' });
     await user.click(within(menu).getByRole('button', { name: '从文件导入' }));
@@ -1463,18 +1335,17 @@ describe('settings workspace', () => {
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'export_data') {
-        return { ok: true, value: { text: DATA_EXPORT_TEXT, items: args?.items as string[], records: 2, servers: 0, ehAccounts: 1, syncAccounts: 0, skipped: 0 } };
+        return { ok: true, value: { text: DATA_EXPORT_TEXT, items: args?.items as string[], records: 2, servers: 0, ehAccounts: 1, skipped: 0 } };
       }
       if (command === 'save_text_file') return { ok: true, value: 'C:/tmp/yomika-export.json' };
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     setSavePickerForTests(async () => 'C:/tmp/yomika-export.json');
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导出数据' }));
     const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
 
@@ -1504,17 +1375,16 @@ describe('settings workspace', () => {
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       if (command === 'import_data') {
         // 服务器在弹层里被取消勾选了：即使文件里有，也不会落地（报数为 0）。
-        return { ok: true, value: { records: 2, servers: 0, ehAccounts: 0, syncAccounts: 0, skipped: 0 } };
+        return { ok: true, value: { records: 2, servers: 0, ehAccounts: 0, skipped: 0 } };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: DATA_EXPORT_TEXT } });
@@ -1539,12 +1409,11 @@ describe('settings workspace', () => {
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
-      if (command === 'list_sync_accounts') return { ok: true, value: [] };
       throw new Error(`Unexpected command: ${command}`);
     });
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     const envelope = '{"kind":"yomika-credentials","schemaVersion":1,"salt":"c2FsdA==","nonce":"bm9uY2U=","payload":"Y2lwaGVy"}';
@@ -1566,9 +1435,9 @@ describe('settings workspace', () => {
       throw new Error();
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     const envelope = JSON.stringify({
@@ -1609,9 +1478,9 @@ describe('settings workspace', () => {
       if (command === 'list_servers') return { ok: true, value: [] };
       throw new Error();
     });
-    renderSettings('sync');
+    renderSettings('data');
 
-    await user.click(await screen.findByRole('link', { name: /同步/ }));
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     const envelope = JSON.stringify({ version: 3, scope: 'token-and-server-md5', serverScope: 'f4fe9bbfa7d17b5bcd601ca76192b539', exportedAt: '2026-09-13T12:21:55.353Z', sections: {} });
@@ -1629,9 +1498,9 @@ describe('settings workspace', () => {
       if (command === 'import_legacy_preferences') return { ok: false, error: { code: 'INVALID_RESPONSE', message: '旧配置无有效普通偏好', retryable: false } };
       throw new Error(`Unexpected command: ${command}`);
     });
-    renderSettings('sync');
+    renderSettings('data');
 
-    await userEvent.setup().click(await screen.findByRole('link', { name: /同步/ }));
+    await userEvent.setup().click(await screen.findByRole('link', { name: /^数据$/ }));
     await user.click(await screen.findByRole('button', { name: '导入数据' }));
     const importMenu = screen.getByRole('dialog', { name: '导入数据' });
     await user.type(within(importMenu).getByLabelText('导出 JSON'), 'secret-only');
@@ -1771,10 +1640,14 @@ describe('settings workspace', () => {
 
       // The list first: no section content, and every section reachable.
       expect(await screen.findByRole('button', { name: /关于/ })).toBeInTheDocument();
+      const landingHeading = screen.getByRole('heading', { name: '设置', level: 2 });
+      expect(landingHeading.parentElement).toHaveClass('settings-compact-heading');
+      expect(within(landingHeading.parentElement!).queryByRole('button')).toBeNull();
       expect(screen.queryByRole('region', { name: '服务器' })).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /通用/ }));
       expect(await screen.findByRole('heading', { name: '通用' })).toBeInTheDocument();
+      expect(screen.getByRole('heading', { name: '通用' }).parentElement).toHaveClass('settings-compact-heading');
       expect(screen.getByRole('region', { name: '服务器' })).toBeInTheDocument();
       // One section at a time: the list is gone rather than sitting above it.
       expect(screen.queryByRole('button', { name: /关于/ })).not.toBeInTheDocument();

@@ -18,10 +18,6 @@ import {
   type DownloadResult,
   LocalArchiveRecordSchema,
   type LocalArchiveRecord,
-  SyncJournalRecordSchema,
-  type SyncJournalInput,
-  type SyncJournalRecord,
-  type SyncJournalStatusSchema,
   WatchlistRecordSchema,
   type WatchlistRecord,
   ReadingHistoryRecordSchema,
@@ -29,15 +25,19 @@ import {
 } from '../domain/library';
 import type { CommandResult } from '../domain/result';
 import { invalidateRouteCache } from '../lib/routeCache';
-import { notifyLocalWrite } from '../lib/localWrite';
 import { rememberServerPresence } from '../lib/serverPresence';
+import { NativeLrrBridgeRepository, bridgeProgress, bridgeWatchlist, bridgeHistory, invalidateLrrBridgeConfig, type BridgeCollectionRecord } from './nativeLrrBridgeRepository';
+import { ok, err } from '../domain/result';
+const lrrBridge = new NativeLrrBridgeRepository();
+function invalidateHosted<T>(result: CommandResult<T>): CommandResult<T> {
+  if (result.ok) { invalidateRouteCache('home:'); invalidateRouteCache('state:'); }
+  return result;
+}
 
 function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
   if (result.ok) {
     invalidateRouteCache('home:');
     invalidateRouteCache('state:');
-    // 同步范围里的进度/历史/待看都从这些写入产生：自动同步据此合并成一次推送。
-    notifyLocalWrite();
   }
   return result;
 }
@@ -146,6 +146,14 @@ export interface SearchPresetInput {
   categoryId: string | null;
 }
 
+function mapPreset(scopeId: string, record: BridgeCollectionRecord): SearchPreset {
+  const value = record.value as Partial<SearchPreset> | null;
+  return { scopeId, presetId: record.key, name: value?.name ?? '已删除预设', query: value?.query ?? '',
+    sortBy: value?.sortBy ?? 'added', sortOrder: value?.sortOrder ?? 'desc', categoryId: value?.categoryId ?? null,
+    createdAt: record.createdAt ?? new Date().toISOString(), updatedAt: record.updatedAt ?? new Date().toISOString(),
+    deviceId: 'lrr-bridge', revision: Math.max(1, record.version), deleted: record.value === null };
+}
+
 /** `query_archive_page` 切词的那一套：逗号分隔、去掉首尾空白、末尾的 `$` 只对服务端
  * 的精确搜索有意义、比较时按小写。空词丢掉。 */
 function archiveSearchTokens(query: string): string[] {
@@ -168,7 +176,7 @@ function archiveMatchesSearch(archive: ArchiveRecord, tokens: readonly string[])
 }
 
 export class NativeLibraryRepository {
-  /** Public watchlist means local 待看. Keep the existing reading_list storage and sync migration. */
+  /** Public watchlist means local 待看. Uses the existing reading_list local mirror. */
   setWatchlist(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
     return this.setReadingList(scopeId, archiveId, added);
   }
@@ -177,7 +185,13 @@ export class NativeLibraryRepository {
   }
   /** Compatibility name for the established local pending-reading store. */
   setReadingList(scopeId: string, archiveId: string, added: boolean): Promise<CommandResult<WatchlistRecord>> {
-    return queuedWrite(`reading-list\0${scopeId}\0${archiveId}`, () => invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves));
+    return queuedWrite(`reading-list\0${scopeId}\0${archiveId}`, async () => {
+      const config = await lrrBridge.config(scopeId);
+      if (!config.ok) return config;
+      if (!config.value.enabled) return invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves);
+      const result = await lrrBridge.apply(scopeId, archiveId, added ? 'watchlist_add' : 'watchlist_remove');
+      return invalidateHosted(result.ok ? ok(bridgeWatchlist(scopeId, result.value)) : result);
+    });
   }
   async listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
     // Progress may remove a finished archive; pending additions/removals must
@@ -185,58 +199,91 @@ export class NativeLibraryRepository {
     await Promise.all([...pendingWrites].filter(([key]) =>
       key.startsWith(`reading-list\0${scopeId}\0`) || key.startsWith(`progress\0${scopeId}\0`))
       .map(([, write]) => write));
-    return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
+    const config = await lrrBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (!config.value.enabled) return invokeCommand('list_reading_list', { scopeId }, z.array(WatchlistRecordSchema));
+    const result = await lrrBridge.list(scopeId, 'watchlist');
+    return result.ok ? ok(result.value.filter(state => state.watchlistAt !== null).map(state => bridgeWatchlist(scopeId, state))) : result;
   }
   /** 右键菜单要的两个布尔：两个 PK 点查就够，犯不着拉全量列表。 */
-  archiveMembership(scopeId: string, archiveId: string): Promise<CommandResult<{ reading: boolean; favorites: boolean }>> {
+  async archiveMembership(scopeId: string, archiveId: string): Promise<CommandResult<{ reading: boolean; favorites: boolean }>> {
+    await Promise.all([...pendingWrites].filter(([key]) => key.endsWith(`\0${scopeId}\0${archiveId}`)).map(([, write]) => write));
+    const config = await lrrBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (config.value.enabled) {
+      const states = await lrrBridge.states(scopeId, [archiveId]);
+      if (!states.ok) return states;
+      const local = await invokeCommand('get_archive_membership', { scopeId, archiveId }, z.object({ reading: z.boolean(), favorites: z.boolean() }));
+      return local.ok ? ok({ ...local.value, reading: states.value[0]?.watchlistAt != null }) : local;
+    }
     return invokeCommand('get_archive_membership', { scopeId, archiveId }, z.object({ reading: z.boolean(), favorites: z.boolean() }));
   }
-  /** Saved searches sync with everything else, so they live in the database
-   * rather than local settings. */
-  listSearchPresets(scopeId: string): Promise<CommandResult<SearchPreset[]>> {
-    return invokeCommand('list_search_presets', { scopeId }, z.array(SearchPresetSchema));
+  /** Saved searches follow the same per-server ownership as reading records. */
+  async listSearchPresets(scopeId: string): Promise<CommandResult<SearchPreset[]>> {
+    await Promise.all([...pendingWrites].filter(([key]) => key.startsWith(`preset\0${scopeId}\0`)).map(([, write]) => write));
+    const config = await lrrBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (!config.value.enabled) return invokeCommand('list_search_presets', { scopeId }, z.array(SearchPresetSchema));
+    const result = await lrrBridge.collectionList(scopeId, 'search_presets');
+    if (!result.ok) return result;
+    const records = result.value.filter(record => record.value !== null).map(record => mapPreset(scopeId, record));
+    const parsed = z.array(SearchPresetSchema).safeParse(records);
+    return parsed.success ? ok(parsed.data.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }))) : err('INVALID_RESPONSE', '服务器搜索预设数据无效', false);
   }
   saveSearchPreset(input: SearchPresetInput): Promise<CommandResult<SearchPreset>> {
-    return invokeCommand('save_search_preset', { input }, SearchPresetSchema);
+    return queuedWrite(`preset\0${input.scopeId}\0${input.presetId}`, async () => {
+      const config = await lrrBridge.config(input.scopeId);
+      if (!config.ok) return config;
+      if (!config.value.enabled) return invokeCommand('save_search_preset', { input }, SearchPresetSchema);
+      const { scopeId, presetId, ...value } = input;
+      const result = await lrrBridge.collectionApply(scopeId, 'search_presets', presetId, value);
+      return result.ok ? ok(mapPreset(scopeId, result.value)) : result;
+    });
   }
   deleteSearchPreset(scopeId: string, presetId: string): Promise<CommandResult<SearchPreset>> {
-    return invokeCommand('delete_search_preset', { scopeId, presetId }, SearchPresetSchema);
+    return queuedWrite(`preset\0${scopeId}\0${presetId}`, async () => {
+      const config = await lrrBridge.config(scopeId);
+      if (!config.ok) return config;
+      if (!config.value.enabled) return invokeCommand('delete_search_preset', { scopeId, presetId }, SearchPresetSchema);
+      const current = await invokeCommand('list_search_presets', { scopeId }, z.array(SearchPresetSchema));
+      if (!current.ok) return current;
+      const old = current.value.find(preset => preset.presetId === presetId);
+      const result = await lrrBridge.collectionApply(scopeId, 'search_presets', presetId, null);
+      return result.ok ? ok({ ...mapPreset(scopeId, result.value), ...(old ? { name: old.name, query: old.query, sortBy: old.sortBy, sortOrder: old.sortOrder, categoryId: old.categoryId } : {}) }) : result;
+    });
   }
   async listHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
     await waitForProgress(scopeId);
-    return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));
-  }
-  appendSyncJournal(entry: SyncJournalInput): Promise<CommandResult<SyncJournalRecord>> {
-    return invokeCommand('append_sync_journal', { entry }, SyncJournalRecordSchema);
-  }
-  listSyncJournal(scopeId: string, status?: z.infer<typeof SyncJournalStatusSchema>): Promise<CommandResult<SyncJournalRecord[]>> {
-    return invokeCommand('list_sync_journal', { scopeId, ...(status ? { status } : {}) }, z.array(SyncJournalRecordSchema));
-  }
-  setSyncJournalState(
-    scopeId: string,
-    sequence: number,
-    status: z.infer<typeof SyncJournalStatusSchema>,
-    error?: string,
-  ): Promise<CommandResult<SyncJournalRecord>> {
-    return invokeCommand('set_sync_journal_state', {
-      input: { scopeId, sequence, status, ...(error ? { error } : {}) },
-    }, SyncJournalRecordSchema);
+    const config = await lrrBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (!config.value.enabled) return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));
+    const result = await lrrBridge.list(scopeId, 'history');
+    return result.ok ? ok(result.value.filter(state => state.historyAt !== null).map(state => bridgeHistory(scopeId, state))) : result;
   }
   /** 历史自动清理：读完的留 90 天，没读完的留 365 天；返回清掉的条数。
    *
    * 真清掉了才算一次「书架上的历史变了」：首页那一排与历史/书架的快照都要作废，否则
    * 清掉的记录还留在首页上——用户报的「历史里已经不显示已读完的档案，首页还在显示」
-   * 就是这条：从前的 `notifyLocalWrite` 只排了一次同步，界面上的快照没人作废。 */
+   * 就是这条：写入后也需要让界面上的快照失效。 */
   pruneHistory(): Promise<CommandResult<number>> {
     return invokeCommand('prune_history', {}, z.number().int().nonnegative()).then((result) => {
       if (result.ok && result.value > 0) invalidateShelves(result);
       return result;
     });
   }
-  /** 清理选中的历史记录（不是档案）：每条都写同步墓碑，别的设备跟着删。
-   * 清掉了就按一次书架变更处理，理由同上（`invalidateShelves` 里的 `notifyLocalWrite`
-   * 就是原来那一声同步）。 */
-  deleteHistoryRecords(scopeId: string, archiveIds: string[]): Promise<CommandResult<number>> {
+  /** 清理选中的历史记录（不是档案），并让书架快照失效。 */
+  async deleteHistoryRecords(scopeId: string, archiveIds: string[]): Promise<CommandResult<number>> {
+    const config = await lrrBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (config.value.enabled) {
+      let count = 0;
+      for (const archiveId of [...new Set(archiveIds)]) {
+        const result = await queuedWrite(progressKey(scopeId, archiveId), () => lrrBridge.apply(scopeId, archiveId, 'history_delete'));
+        if (!result.ok) return result;
+        count++;
+      }
+      return invalidateHosted(ok(count));
+    }
     return invokeCommand('delete_history_records', { scopeId, archiveIds }, z.number().int().nonnegative()).then((result) => {
       if (result.ok && result.value > 0) invalidateShelves(result);
       return result;
@@ -244,8 +291,13 @@ export class NativeLibraryRepository {
   }
   /** Explicitly reset reading; deleting history alone deliberately keeps progress. */
   clearReadingProgress(scopeId: string, archiveId: string): Promise<CommandResult<void>> {
-    return queuedWrite(progressKey(scopeId, archiveId), () =>
-      invokeCommand('clear_reading_progress', { scopeId, archiveId }, VoidResponseSchema).then(invalidateShelves));
+    return queuedWrite(progressKey(scopeId, archiveId), async () => {
+      const config = await lrrBridge.config(scopeId);
+      if (!config.ok) return config;
+      if (!config.value.enabled) return invokeCommand('clear_reading_progress', { scopeId, archiveId }, VoidResponseSchema).then(invalidateShelves);
+      const result = await lrrBridge.apply(scopeId, archiveId, 'progress_clear');
+      return invalidateHosted(result.ok ? ok(undefined) : result);
+    });
   }
   /** LANraragi 的 🔖 Favorites 这一条分类（`null` = 服务器上没有这条）。
    *
@@ -417,7 +469,7 @@ export class NativeLibraryRepository {
       apiKey: input.apiKey,
     }, ServerRecordSchema).then((result) => {
       // 存下一台（新的或改的）之后「没有服务器」这个答案就过期了。
-      if (result.ok) rememberServerPresence(true);
+      if (result.ok) { invalidateLrrBridgeConfig(input.identity.scopeId); rememberServerPresence(true); }
       return result;
     });
   }
@@ -442,6 +494,7 @@ export class NativeLibraryRepository {
   deleteServer(serverId: string): Promise<CommandResult<ServerRecord[]>> {
     return invokeCommand('delete_server', { serverId }, z.array(ServerRecordSchema)).then((result) => {
       if (result.ok) {
+        invalidateLrrBridgeConfig();
         invalidateRouteCache();
         // 回的是删完剩下的那份列表，随手把答案改对：删掉最后一台时下一个页面
         // 的第一帧就该是引导，而不是先给一次骨架。
@@ -551,12 +604,28 @@ export class NativeLibraryRepository {
   saveProgress(progress: NewProgress): Promise<CommandResult<ReadingProgress>> {
     return queuedWrite(
       progressKey(progress.scopeId, progress.archiveId),
-      () => invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves),
+      async () => {
+        const config = await lrrBridge.config(progress.scopeId);
+        if (!config.ok) return config;
+        if (!config.value.enabled) return invokeCommand('save_reading_progress', { progress }, ReadingProgressSchema).then(invalidateShelves);
+        const result = await lrrBridge.apply(progress.scopeId, progress.archiveId, 'progress', {
+          pageIndex: progress.pageIndex, pageCount: progress.pageCount, layout: progress.layout, direction: progress.direction,
+          ...(progress.coverAlone !== undefined ? { coverAlone: progress.coverAlone } : {}),
+          allowProgressRegression: progress.allowProgressRegression ?? true, updatedAt: new Date().toISOString(),
+        });
+        if (!result.ok) return result;
+        const value = bridgeProgress(progress.scopeId, result.value);
+        return invalidateHosted(value ? ok(value) : err('INVALID_RESPONSE', '托管进度响应无效', false));
+      },
     );
   }
 
   async loadProgress(scopeId: string, archiveId: string): Promise<CommandResult<ReadingProgress | null>> {
     await waitForProgress(scopeId, archiveId);
-    return invokeCommand('load_reading_progress', { scopeId, archiveId }, ReadingProgressSchema.nullable());
+    const config = await lrrBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (!config.value.enabled) return invokeCommand('load_reading_progress', { scopeId, archiveId }, ReadingProgressSchema.nullable());
+    const result = await lrrBridge.states(scopeId, [archiveId]);
+    return result.ok ? ok(result.value[0] ? bridgeProgress(scopeId, result.value[0]) : null) : result;
   }
 }

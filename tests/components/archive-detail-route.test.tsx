@@ -1,8 +1,9 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { ArchiveDetailRoute } from '../../src/components/ArchiveDetailRoute';
 import { installTagTranslations } from '../../src/lib/tags';
 import { ToastProvider } from '../../src/components/Toast';
@@ -92,6 +93,105 @@ describe('archive detail route', () => {
     fireEvent.touchCancel(details);
     fireEvent.touchEnd(details, { touches: [], changedTouches: [{ clientX: 90, clientY: 100 }] });
     expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+    fireEvent.keyDown(screen.getByRole('tab', { name: '详情' }), { key: 'ArrowRight' });
+    expect(screen.getByRole('tab', { name: '评论' })).toHaveFocus();
+    expect(screen.getByRole('tab', { name: '评论' })).toHaveAttribute('aria-selected', 'true');
+    expect(details).toHaveAttribute('inert');
+    fireEvent.keyDown(screen.getByRole('tab', { name: '评论' }), { key: 'Home' });
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveFocus();
+    expect(details).not.toHaveAttribute('inert');
+  });
+  it('slides both panels across one stage while the swipe is still under the finger', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 0 } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await screen.findByRole('heading', { name: metadata.title });
+    const details = screen.getByRole('tabpanel', { name: '详情' });
+    const stage = details.parentElement!;
+    // 藏起来的那块没有可访问名（display: none 下算不出），按 DOM 直接取。
+    const comments = stage.querySelector<HTMLElement>('[role="tabpanel"][aria-label="评论"]')!;
+    expect(stage.className).toBe('archive-detail-panels');
+    expect(comments).toHaveAttribute('hidden');
+
+    fireEvent.touchStart(details, { touches: [{ clientX: 240, clientY: 100 }] });
+    fireEvent.touchMove(details, { touches: [{ clientX: 180, clientY: 104 }] });
+
+    // 手指还没松：两块面板并排铺在同一个舞台上，位移跟着手指走 —— 滑出去的那半
+    // 和滑进来的那半同时看得见，这就是「翻页」而不是「切换」。
+    expect(stage.className).toContain('is-sliding');
+    expect(stage.className).toContain('is-dragging');
+    expect(comments).not.toHaveAttribute('hidden');
+    expect(details.getAttribute('style')).toContain('translate3d(-60px, 0, 0)');
+    expect(comments.getAttribute('style')).toContain('translate3d(calc(100% - 60px), 0, 0)');
+    // 标签页要等松手那一刻才算换过。
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+
+    fireEvent.touchEnd(details, { touches: [], changedTouches: [{ clientX: 180, clientY: 104 }] });
+    expect(screen.getByRole('tab', { name: '评论' })).toHaveAttribute('aria-selected', 'true');
+    // 收势结束，舞台收起来：位移清零，另一块重新藏起来，容器回到单块占位。
+    expect(stage.className).toBe('archive-detail-panels');
+    expect(details).toHaveAttribute('hidden');
+    expect(details.getAttribute('style') ?? '').toBe('');
+    expect(comments.getAttribute('style') ?? '').toBe('');
+  });
+  it('snaps back to the same panel when the drag is too short to turn', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 0 } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await screen.findByRole('heading', { name: metadata.title });
+    const details = screen.getByRole('tabpanel', { name: '详情' });
+    const stage = details.parentElement!;
+    const comments = stage.querySelector<HTMLElement>('[role="tabpanel"][aria-label="评论"]')!;
+
+    fireEvent.touchStart(details, { touches: [{ clientX: 240, clientY: 100 }] });
+    fireEvent.touchMove(details, { touches: [{ clientX: 220, clientY: 102 }] });
+    // 20px 已经越过起手阈值，所以舞台上两块都在，位移也跟手。
+    expect(stage.className).toContain('is-sliding');
+    expect(details.getAttribute('style')).toContain('translate3d(-20px, 0, 0)');
+
+    fireEvent.touchEnd(details, { touches: [], changedTouches: [{ clientX: 220, clientY: 102 }] });
+    // 拖得不够长也不够快：回弹到原来那块，标签页不换。
+    expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
+    expect(comments).toHaveAttribute('hidden');
+    expect(stage.className).toBe('archive-detail-panels');
+    expect(details.getAttribute('style') ?? '').toBe('');
+  });
+  it('stretches a little and holds when there is no panel on that side', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 0 } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    renderDetail();
+    await screen.findByRole('heading', { name: metadata.title });
+    fireEvent.click(screen.getByRole('tab', { name: '评论' }));
+    expect(screen.getByRole('tab', { name: '评论' })).toHaveAttribute('aria-selected', 'true');
+    const comments = screen.getByRole('tabpanel', { name: '评论' });
+    const stage = comments.parentElement!;
+
+    fireEvent.touchStart(comments, { touches: [{ clientX: 240, clientY: 100 }] });
+    fireEvent.touchMove(comments, { touches: [{ clientX: 120, clientY: 100 }] });
+    const offset = Number(/translate3d\((-?[\d.]+)px/.exec(comments.getAttribute('style') ?? '')?.[1]);
+    // 手指拖了 120px，但右边没有面板了：只按阻力挪出一小段，绝不跟着走出整幅空白。
+    expect(offset).toBeLessThan(-10);
+    expect(offset).toBeGreaterThan(-64);
+
+    fireEvent.touchEnd(comments, { touches: [], changedTouches: [{ clientX: 120, clientY: 100 }] });
+    expect(screen.getByRole('tab', { name: '评论' })).toHaveAttribute('aria-selected', 'true');
+    expect(stage.className).toBe('archive-detail-panels');
+    expect(comments.getAttribute('style') ?? '').toBe('');
   });
   it('labels the final saved page as completed', async () => {
     setInvokeAdapterForTests(async command => {
@@ -645,7 +745,7 @@ describe('archive detail route', () => {
       if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       throw new Error(`Unexpected command: ${command}`);
     });
 
@@ -692,7 +792,7 @@ describe('archive detail route', () => {
       if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
-      if (command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+      if (command === 'list_tasks') return { ok: true, value: [] };
       throw new Error(`Unexpected command: ${command}`);
     });
 

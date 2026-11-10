@@ -106,7 +106,7 @@ describe('mobile packaging', () => {
     // 发布版的原生库不该带调试信息或静态符号表。APK 里它们是不压缩存放的
     // （extractNativeLibs=false，为的是能从 APK 直接 mmap），所以符号表有多大一目了然
     // 地落在下载里：改之前 .so 64.30MB（其中 17MB 是 .symtab/.strtab）。
-    expect(cargo).toMatch(/\[profile\.release\]\nstrip = "symbols"/);
+    expect(cargo).toMatch(/\[profile\.release\]\r?\nstrip = "symbols"/);
     // AGP 的 stripUniversalReleaseDebugSymbols 对**预编译** jniLibs 是空操作（实测它
     // 的输出与输入逐字节相同），所以 release 变体的中间产物要自己再 strip 一遍；
     // debug 变体不碰，jni 调试要留符号。

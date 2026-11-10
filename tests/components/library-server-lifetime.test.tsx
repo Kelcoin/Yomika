@@ -1,8 +1,9 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Link, MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LibraryRouteWorkspace } from '../../src/components/LibraryRouteWorkspace';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetRouteCacheForTests } from '../../src/lib/routeCache';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { App } from '../../src/app/App';

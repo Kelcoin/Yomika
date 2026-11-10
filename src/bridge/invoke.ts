@@ -35,13 +35,16 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
   request: TRequest,
   schema: z.ZodType<TResponse, z.ZodTypeDef, unknown>,
 ): Promise<CommandResult<TResponse>> {
+  // Reading and workspace payloads are private; diagnostics need only the action.
+  const securityCommand = name.startsWith('app_security_');
+  const loggedRequest = securityCommand ? {} : name.startsWith('lrr_bridge_') ? { scopeId: request.scopeId, action: request.action } : request;
   try {
     const adapter = testAdapter ?? await loadNativeAdapter();
     const payload = await adapter(name, request);
     const parsed = ResultEnvelopeSchema.safeParse(payload);
 
     if (!parsed.success) {
-      logError(`bridge/${name}`, 'Native command returned an invalid response', { request });
+      logError(`bridge/${name}`, 'Native command returned an invalid response', { request: loggedRequest });
       return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
     }
 
@@ -50,7 +53,7 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
       // 「现在就是这样」的码（档案已经不在服务器上、这一页的推理被取消）——它们照样
       // 按失败返回，但不进日志，免得把真正的现场埋掉。
       if (!QUIET_ERROR_CODES.has(parsed.data.error.code)) {
-        logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, error: parsed.data.error });
+        logError(`bridge/${name}`, securityCommand ? `${parsed.data.error.code}: Security command failed` : `${parsed.data.error.code}: ${parsed.data.error.message}`, securityCommand ? {} : { request: loggedRequest, error: parsed.data.error });
       }
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);
     }
@@ -60,12 +63,12 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
     // 哪个字段没对上才是能查的东西。只写「不匹配」等于把现场丢掉：一个
     // `null` 撞上非 nullable 的 schema，排查要从猜字段开始。
     logError(`bridge/${name}`, 'Native command answer did not match its schema', {
-      request,
-      issues: value.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
+      request: loggedRequest,
+      issues: securityCommand ? [] : value.error.issues.slice(0, 5).map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`),
     });
     return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
   } catch (error) {
-    logError(`bridge/${name}`, 'Native command failed', { request, error, errorMessage: error instanceof Error ? error.message : String(error) });
+    logError(`bridge/${name}`, 'Native command failed', securityCommand ? {} : { request: loggedRequest, error, errorMessage: error instanceof Error ? error.message : String(error) });
     return err('UNKNOWN', 'Native command failed', true);
   }
 }

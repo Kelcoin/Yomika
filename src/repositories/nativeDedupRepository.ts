@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
-import type { CommandResult } from '../domain/result';
+import { ok, type CommandResult } from '../domain/result';
+import { NativeLrrBridgeRepository } from './nativeLrrBridgeRepository';
+const hostedBridge = new NativeLrrBridgeRepository();
 import { parseReadoshiNonDuplicateExport, type ReadoshiImportReport } from '../lib/readoShiDedupeImport';
 
 const DedupCheckResultSchema = z.object({ hash: z.string(), size: z.number() });
@@ -103,13 +105,21 @@ export class NativeDedupRepository {
   findExact(scopeId: string, exactHash: string): Promise<CommandResult<z.infer<typeof DedupFeatureRecordSchema>[]>> {
     return invokeCommand('dedup_find_exact', { scopeId, exactHash }, z.array(DedupFeatureRecordSchema));
   }
-  startScan(input: DedupStartScanInput) { return invokeCommand('dedup_start_scan', { input }, DedupScanSessionSchema); }
+  async startScan(input: DedupStartScanInput) {
+    const refreshed = await this.refreshHostedMarks(input.scopeId);
+    if (!refreshed.ok) return refreshed;
+    return invokeCommand('dedup_start_scan', { input }, DedupScanSessionSchema);
+  }
   scanChunk(input: DedupScanChunkInput) { return invokeCommand('dedup_scan_chunk', { input }, DedupScanSessionSchema); }
   /** 待删选择：走独立命令，已完成的会话也能改（scan_chunk 只收运行中的会话）。 */
   saveSelection(sessionId: string, selectedArchiveIds: string[]) {
     return invokeCommand('dedup_save_selection', { sessionId, selectedArchiveIds }, VoidResponseSchema);
   }
-  scan(input: DedupScanInput): Promise<CommandResult<DedupScanProgress>> { return invokeCommand('dedup_scan', { input }, DedupScanProgressSchema); }
+  async scan(input: DedupScanInput): Promise<CommandResult<DedupScanProgress>> {
+    const refreshed = await this.refreshHostedMarks(input.scopeId);
+    if (!refreshed.ok) return refreshed;
+    return invokeCommand('dedup_scan', { input }, DedupScanProgressSchema);
+  }
   /** 扫描期间画进度条用；会话没在跑时后端回 null。 */
   scanProgress(sessionId: string): Promise<CommandResult<DedupScanProgress | null>> {
     return invokeCommand('dedup_scan_progress', { sessionId }, DedupScanProgressSchema.nullable());
@@ -126,14 +136,44 @@ export class NativeDedupRepository {
   cancelScan(sessionId: string) { return invokeCommand('dedup_cancel_scan', { sessionId }, DedupScanSessionSchema); }
   resumeScan(sessionId: string) { return invokeCommand('dedup_resume_scan', { sessionId }, DedupScanSessionSchema); }
   loadResult(sessionId: string, refreshIndex = false) { return invokeCommand('dedup_load_result', { sessionId, ...(refreshIndex ? { refreshIndex: true } : {}) }, DedupLoadResultSchema); }
-  saveNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_save_non_duplicate', { input }, VoidResponseSchema); }
-  /** 整组执行用：一把锁内逐条落库，按输入顺序回每条成败。 */
-  saveNonDuplicates(entries: DedupNonDuplicateInput[]): Promise<CommandResult<boolean[]>> {
-    return invokeCommand('dedup_save_non_duplicates', { input: { entries } }, z.array(z.boolean()));
+  private async refreshHostedMarks(scopeId: string): Promise<CommandResult<void>> {
+    const config = await hostedBridge.config(scopeId);
+    if (!config.ok) return config;
+    if (!config.value.enabled) return ok(undefined);
+    const result = await hostedBridge.collectionList(scopeId, 'non_duplicates');
+    return result.ok ? ok(undefined) : result;
   }
-  removeNonDuplicate(input: DedupNonDuplicateInput) { return invokeCommand('dedup_remove_non_duplicate', { input }, VoidResponseSchema); }
-  importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) { return invokeCommand('dedup_import_readoshi', { input }, VoidResponseSchema); }
-  listNonDuplicates(scopeId: string): Promise<CommandResult<DedupNonDuplicateRecord[]>> {
+  async saveNonDuplicate(input: DedupNonDuplicateInput) {
+    const result = await invokeCommand('dedup_save_non_duplicate', { input }, VoidResponseSchema);
+    if (result.ok) await this.notifyHostedWrite(input.scopeId);
+    return result;
+  }
+  /** Native writes queue per-record hosted operations atomically with the local mirror. */
+  async saveNonDuplicates(entries: DedupNonDuplicateInput[]): Promise<CommandResult<boolean[]>> {
+    const result = await invokeCommand('dedup_save_non_duplicates', { input: { entries } }, z.array(z.boolean()));
+    if (result.ok) for (const scopeId of new Set(entries.filter((_, i) => result.value[i]).map(entry => entry.scopeId))) await this.notifyHostedWrite(scopeId);
+    return result;
+  }
+  async removeNonDuplicate(input: DedupNonDuplicateInput) {
+    const result = await invokeCommand('dedup_remove_non_duplicate', { input }, VoidResponseSchema);
+    if (result.ok) await this.notifyHostedWrite(input.scopeId);
+    return result;
+  }
+  async importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) {
+    const result = await invokeCommand('dedup_import_readoshi', { input }, VoidResponseSchema);
+    if (result.ok) await this.notifyHostedWrite(input.scopeId);
+    return result;
+  }
+  private async notifyHostedWrite(scopeId: string) {
+    const config = await hostedBridge.config(scopeId);
+    if (config.ok && config.value.enabled) window.dispatchEvent(new CustomEvent('yomika:lrr-bridge-write', { detail: { scopeId, kind: 'non_duplicates' } }));
+  }
+  listCachedNonDuplicates(scopeId: string): Promise<CommandResult<DedupNonDuplicateRecord[]>> {
+    return invokeCommand('dedup_list_non_duplicates', { scopeId }, z.array(DedupNonDuplicateRecordSchema));
+  }
+  async listNonDuplicates(scopeId: string): Promise<CommandResult<DedupNonDuplicateRecord[]>> {
+    const refreshed = await this.refreshHostedMarks(scopeId);
+    if (!refreshed.ok) return refreshed;
     return invokeCommand('dedup_list_non_duplicates', { scopeId }, z.array(DedupNonDuplicateRecordSchema));
   }
   importReadoshiExport(scopeId: string, input: unknown): Promise<CommandResult<ReadoshiImportReport>> {

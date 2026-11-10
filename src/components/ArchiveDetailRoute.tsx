@@ -19,11 +19,11 @@ import {
   RotateCcw,
   Trash2,
 } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
-import { usePanelSwipe } from '../lib/usePanelSwipe';
+import { usePanelPager } from '../lib/usePanelPager';
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { parseArchiveTagString } from '../lib/tags';
@@ -53,12 +53,17 @@ import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailTagTime, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
 import { useDetailActions, useDetailDateKind } from '../app/preferences';
+import '../styles/detail-pager.css';
 
 const repository = new NativeLibraryRepository();
 const ehRepository = new NativeEhRepository();
 /** Long enough not to fire on a normal tap, short enough to discover by holding.
  * Matches the platform convention rather than the drag thresholds. */
 const LONG_PRESS_MS = 500;
+
+/** 详情页的两块内容面板，顺序就是滑动方向：往左是评论，往右回详情。 */
+const DETAIL_PANELS = ['media', 'comments'] as const;
+type DetailPanel = (typeof DETAIL_PANELS)[number];
 
 /** How long a detail page may paint from the previous visit before it insists on
  * fresh metadata. It revalidates either way; this only decides whether the page
@@ -126,9 +131,15 @@ detailBasePath?: string | undefined }) {
   // 返回手势先关这个确认框，而不是把页面带走（见 overlayBackGuard）。
   useOverlayBackGuard(incognitoAsk, () => setIncognitoAsk(false));
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [detailPanel, setDetailPanel] = useState<'media' | 'comments'>('media');
-  const detailPanelsRef = useRef<HTMLDivElement>(null);
-  usePanelSwipe(detailPanelsRef, direction => setDetailPanel(direction === 'left' ? 'comments' : 'media'), favoritePageActive && !(error && !metadata));
+  const [detailPanel, setDetailPanel] = useState<DetailPanel>('media');
+  const panelId = useId();
+  /** Both subtrees stay mounted; only their layout visibility changes. */
+  const pager = usePanelPager({
+    order: DETAIL_PANELS,
+    panel: detailPanel,
+    enabled: favoritePageActive && !(error && !metadata),
+    onChange: setDetailPanel,
+  });
   const [ehAccountId, setEhAccountId] = useState<string>();
   const incognitoTimer = useRef<number>();
   const incognitoPrompted = useRef(false);
@@ -490,13 +501,19 @@ detailBasePath?: string | undefined }) {
         
       </Dialog.Root>
 
-      <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容">
-        <button type="button" role="tab" aria-selected={detailPanel === 'media'} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => setDetailPanel('media')}><DetailGlyph /><span>详情</span></button>
-        <button type="button" role="tab" aria-selected={detailPanel === 'comments'} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => setDetailPanel('comments')}><MessageCircle aria-hidden="true" />评论</button>
+      <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容" onKeyDown={(event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 'media' : event.key === 'End' ? 'comments' : detailPanel === 'media' ? 'comments' : 'media';
+        pager.goTo(next);
+        event.currentTarget.querySelector<HTMLButtonElement>(`[data-panel="${next}"]`)?.focus();
+      }}>
+        <button type="button" role="tab" data-panel="media" aria-controls={`${panelId}-media`} aria-selected={detailPanel === 'media'} tabIndex={detailPanel === 'media' ? 0 : -1} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => pager.goTo('media')}><DetailGlyph /><span>详情</span></button>
+        <button type="button" role="tab" data-panel="comments" aria-controls={`${panelId}-comments`} aria-selected={detailPanel === 'comments'} tabIndex={detailPanel === 'comments' ? 0 : -1} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => pager.goTo('comments')}><MessageCircle aria-hidden="true" />评论</button>
       </div>
 
-      <div ref={detailPanelsRef} className="archive-detail-panels">
-      <div role="tabpanel" aria-label="详情" hidden={detailPanel !== 'media'}>
+      <div ref={pager.containerRef} className={pager.containerClass}>
+      <div id={`${panelId}-media`} role="tabpanel" aria-label="详情" tabIndex={0} {...pager.panelProps('media')}>
         {/* 分类、日期这些记账标签在事实网格里已经各占一格，标签墙上不再重复。 */}
         <ArchiveDetailTagSection
           groups={tagGroups.filter((group) => !['category', 'reclass', 'date_added', 'timestamp', 'rating'].includes(group.namespace))}
@@ -517,7 +534,7 @@ detailBasePath?: string | undefined }) {
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
       </div>
-      <div role="tabpanel" aria-label="评论" hidden={detailPanel !== 'comments'}>
+      <div id={`${panelId}-comments`} role="tabpanel" aria-label="评论" tabIndex={0} {...pager.panelProps('comments')}>
       {ehGallery && ehAccountId
         ? <EhComments accountId={ehAccountId} galleryId={ehGallery.galleryId} token={ehGallery.token} serverId={serverId} onOpenArchive={(archive) => navigate(`${detailBasePath}/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)} />
         : <EmptyState compact icon={MessageCircle} title="评论暂不可用" description="此档案没有可读取的 E-Hentai 评论。" />}

@@ -49,7 +49,8 @@ mod memory;
 mod model_release;
 #[cfg(target_os = "android")]
 mod mobile_host;
-mod network;
+#[cfg(target_os = "ios")]
+mod app_security_ios;
 // 凭据落盘的唯一入口：桌面走系统凭据库，移动端走数据目录里的 secrets.json
 // （keyring 3.6.3 在安卓上没有后端，会退化成一个写不进去的 mock）。
 mod secret_store;
@@ -95,12 +96,7 @@ use commands::platform::{
 };
 #[cfg(target_os = "windows")]
 use commands::platform::set_big_window_icon;
-use commands::sync::{
-    append_sync_journal, claim_sync_journal, export_scoped_data, import_scoped_data,
-    list_sync_accounts, list_sync_journal,
-    reset_remote_state, save_sync_account, save_sync_scope, set_sync_journal_state,
-    sync_account_credential, sync_remote_scope, test_sync_account,
-};
+use commands::data_transfer::{export_scoped_data, import_scoped_data};
 use credentials::{export_data, import_data};
 use db::Database;
 use dedup::{
@@ -179,6 +175,7 @@ pub fn run() {
     builder
         .setup(move |app| {
             data_paths::prepare(app.handle()).map_err(std::io::Error::other)?;
+            commands::app_security::setup(app.handle()).map_err(std::io::Error::other)?;
             // 错误日志留两轮：先把「本轮」翻成「上一轮」（上一轮的现场是这次闪退唯一的
             // 线索），再挂上 panic 钩子。
             error_log::rotate(app.handle());
@@ -357,6 +354,14 @@ pub fn run() {
             let builder =
                 builder.data_directory(data_paths::data_dir(app.handle())?.join("webview"));
             let main_window = builder.build()?;
+            #[cfg(target_os = "ios")]
+            app_security_ios::install(app.handle()).map_err(std::io::Error::other)?;
+            let security_app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = commands::app_security::restore_platform(&security_app).await {
+                    error_log::record_step(&security_app, "core/app-security", &error);
+                }
+            });
             // Windows 的任务栏按钮与 Alt+Tab 读的是 **ICON_BIG**，而 tao 只设了
             // ICON_SMALL（`WM_SETICON` 带 ICON_SMALL，见 tao 的 set_window_icon），
             // 窗口类的图标又是空的：于是那两处只能靠系统的兜底，落到的就是那个
@@ -400,6 +405,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(desktop)]
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Focused(false)) {
+                commands::app_security::background(window.app_handle());
+            }
             // 菜单窗口靠「失焦」收起：点到别处（包括主窗）就是取消。它自己从不关闭，
             // 所以这里只藏不销毁，下一次右键要能立刻再弹出来。
             #[cfg(target_os = "windows")]
@@ -439,6 +448,13 @@ pub fn run() {
             let _ = (window, event);
         })
         .invoke_handler(tauri::generate_handler![
+            commands::app_security::app_security_status,
+            commands::app_security::app_security_configure,
+            commands::app_security::app_security_unlock_password,
+            commands::app_security::app_security_unlock_biometric,
+            commands::app_security::app_security_lock,
+            commands::app_security::app_security_background,
+            commands::app_security::app_security_ready,
             frontend_ready,
             platform_capabilities,
             reveal_in_file_manager,
@@ -501,6 +517,10 @@ pub fn run() {
             update_archive_metadata,
             list_metadata_plugins,
             use_metadata_plugin,
+            commands::lrr_bridge::lrr_bridge_config,
+            commands::lrr_bridge::lrr_bridge_configure,
+            commands::lrr_bridge::lrr_bridge_request,
+            commands::lrr_bridge::lrr_bridge_flush,
             save_reading_progress,
             load_reading_progress,
             set_watchlist,
@@ -516,17 +536,6 @@ pub fn run() {
             save_search_preset,
             list_search_presets,
             delete_search_preset,
-            append_sync_journal,
-            claim_sync_journal,
-            list_sync_journal,
-            set_sync_journal_state,
-            save_sync_account,
-            save_sync_scope,
-            list_sync_accounts,
-            sync_remote_scope,
-            test_sync_account,
-            reset_remote_state,
-            sync_account_credential,
             export_scoped_data,
             import_scoped_data,
             export_data,

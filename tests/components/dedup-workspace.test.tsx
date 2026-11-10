@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DeduplicationWorkspace } from '../../src/components/DeduplicationWorkspace';
 import { ToastProvider } from '../../src/components/Toast';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
-import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { translateRawTag } from '../../src/lib/tags';
 import { RetainedPage } from '../../src/app/RetainedPage';
 import { NativeDedupRepository } from '../../src/repositories/nativeDedupRepository';
@@ -1218,4 +1219,25 @@ describe('dedup scan progress and saved results', () => {
   });
 
 
+});
+
+
+it('refreshes an open relations dialog from its mirror on narrow invalidation', async () => {
+  let records = [{ pairKey: 'a|b', leftArchiveId: 'a', rightArchiveId: 'b', tombstoned: false }];
+  const adapter = vi.fn(async (command: string) => {
+    if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'Server', baseUrl: 'https://lrr.test' }] };
+    if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+    if (command === 'dedup_list_non_duplicates') return { ok: true, value: records };
+    if (command === 'list_archive_identities') return { ok: true, value: [] };
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  render(<MemoryRouter><ToastProvider><DeduplicationWorkspace /></ToastProvider></MemoryRouter>);
+  await userEvent.setup().click(await screen.findByRole('button', { name: '不重复关系' }));
+  const dialog = await screen.findByRole('dialog', { name: '不重复关系' });
+  expect(within(dialog).getByPlaceholderText('在 1 条不重复关系中搜索')).toBeInTheDocument();
+  records = [...records, { pairKey: 'c|d', leftArchiveId: 'c', rightArchiveId: 'd', tombstoned: false }];
+  act(() => window.dispatchEvent(new CustomEvent('yomika:route-cache-invalidated', { detail: { prefix: 'non-duplicates:' } })));
+  await waitFor(() => expect(within(dialog).getByPlaceholderText('在 2 条不重复关系中搜索')).toBeInTheDocument());
+  expect(adapter.mock.calls.some(([command]) => command === 'lrr_bridge_request')).toBe(false);
 });

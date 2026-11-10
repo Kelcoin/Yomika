@@ -1,9 +1,10 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { App } from '../../src/app/App';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetRouteCacheForTests } from '../../src/lib/routeCache';
 
 afterEach(() => { resetInvokeAdapterForTests(); resetRouteCacheForTests(); });

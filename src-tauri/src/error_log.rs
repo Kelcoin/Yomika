@@ -423,7 +423,7 @@ fn error_log_write(app: &tauri::AppHandle, entry: &ErrorLogEntry) -> CommandResu
 fn expected_outcome(message: &str) -> bool {
     let code = message.trim_start().split(|ch: char| ch == ':' || ch == '：' || ch.is_whitespace()).next().unwrap_or("");
     matches!(code,
-        "LRR_NOT_FOUND" | "EH_LOGIN_WINDOW_CLOSED" |
+        "LRR_NOT_FOUND" | "EH_LOGIN_WINDOW_CLOSED" | "APP_SECURITY_AUTH" |
         "INFERENCE_CANCELLED" | "COMPUTE_CANCELLED" |
         "COMPUTE_QUEUE_FULL" | "COMPUTE_UNAVAILABLE" | "COMPUTE_WORKER_BUSY" |
         "APP_RELEASE_CHECK_FAILED" | "APP_RELEASE_UNREACHABLE" |

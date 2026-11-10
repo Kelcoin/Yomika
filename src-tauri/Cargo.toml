@@ -84,6 +84,13 @@ custom-protocol = ["tauri/custom-protocol"]
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 yomika-compute-worker = { path = "worker" }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSNotification", "NSOperation", "NSString", "NSError", "block2"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext", "LABiometryType", "block2"] }
+block2 = "0.6"
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIView", "UIColor", "UIResponder", "objc2-core-foundation"] }
+
 # 测试二进制仍然链 ONNX Runtime。
 #
 # 出厂的那份宿主二进制不链（`cargo tree -e normal` 与 PE 导入表看得见），但
@@ -106,7 +113,8 @@ arboard = "3"
 # 自带这个 feature，不用多拉一个依赖。
 # Win32_System_Console 只为了 `GetConsoleWindow`：判据要问「这一路拉起的子进程有没有
 # 控制台窗口」（`tests/console_window_contract.rs`），宿主自己不建控制台，量不到别的。
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_System_Environment", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_System_Environment", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging", "Security_Credentials_UI", "Win32_System_WinRT"] }
+windows-future = "0.3"
 windows-service = "0.8"
 # DLSSNR 引擎（8-g④）：`docs/71` Task 8 的出口要求宿主不再持有 NGX 资源，而 NGX 只能
 # 在计算进程里初始化、worker 又不许依赖 Tauri（§5.2），所以引擎住在核心那一层，这边

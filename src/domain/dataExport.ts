@@ -11,14 +11,7 @@ export const DATA_EXPORT_VERSION = 1;
 
 export type DataExportItem = string;
 
-/** 「记录与设置」那半边在文件里逐类列出：进度、历史、待看、搜索预设、非重复标记、
- * 应用设置。**这份清单比同步范围多一项应用设置**——同步那边已经把应用设置摘掉了
- * （两台设备各有各的屏幕与显卡，同步主题与后处理开关只会互相覆盖），而换机器带走
- * 设置恰恰要靠这份显式文件，所以这里必须留着它。两处清单各写各的、不再互为镜像：
- * 同步范围管「自动在设备之间流动什么」，这里管「我主动带走什么」。
- *
- * 从前这里只有一条 `records`：勾了就把六项一起打包，想只带进度走都做不到。现在
- * 逐类勾选、逐类写进文件——「记录和设置混在一起没法细选」指的就是这件事。 */
+/** 按类别显式迁移阅读记录与应用设置。 */
 export const DATA_EXPORT_RECORD_ITEMS: readonly { id: DataExportItem; label: string }[] = [
   { id: 'progress', label: '阅读进度' },
   { id: 'history', label: '历史' },
@@ -32,7 +25,6 @@ export const DATA_EXPORT_RECORD_ITEMS: readonly { id: DataExportItem; label: str
 export const DATA_EXPORT_CREDENTIAL_ITEMS: readonly { id: DataExportItem; label: string; credential: true }[] = [
   { id: 'lrr_servers', label: 'LANraragi 服务器', credential: true },
   { id: 'eh_account', label: 'E-Hentai 账户', credential: true },
-  { id: 'sync_accounts', label: '同步账户', credential: true },
 ];
 
 export const DATA_EXPORT_ITEMS = [...DATA_EXPORT_RECORD_ITEMS, ...DATA_EXPORT_CREDENTIAL_ITEMS];
@@ -60,7 +52,6 @@ export const DataExportReportSchema = z.object({
   records: z.number().int().nonnegative(),
   servers: z.number().int().nonnegative(),
   ehAccounts: z.number().int().nonnegative(),
-  syncAccounts: z.number().int().nonnegative(),
   skipped: z.number().int().nonnegative(),
 });
 export type DataExportReport = z.infer<typeof DataExportReportSchema>;
@@ -71,7 +62,14 @@ export const DataImportReportSchema = z.object({
   records: z.number().int().nonnegative(),
   servers: z.number().int().nonnegative(),
   ehAccounts: z.number().int().nonnegative(),
-  syncAccounts: z.number().int().nonnegative(),
   skipped: z.number().int().nonnegative(),
 });
 export type DataImportReport = z.infer<typeof DataImportReportSchema>;
+
+/** 旧版按范围导出文件的导入结果。 */
+export const ScopedImportReportSchema = z.object({
+  applied: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+  categories: z.array(z.string()),
+});
+export type ScopedImportReport = z.infer<typeof ScopedImportReportSchema>;

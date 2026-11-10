@@ -283,6 +283,24 @@ export function DeduplicationWorkspace() {
     return () => { active = false; };
   }, [server, result]);
 
+  useEffect(() => {
+    if (!server) return;
+    let active = true;
+    let request = 0;
+    const update = (event: Event) => {
+      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix !== 'non-duplicates:') return;
+      const generation = ++request;
+      // Polling has already refreshed the native mirror. Read it without a second network round trip.
+      void dedup.listCachedNonDuplicates(server.scopeId).then(response => {
+        if (!active || request !== generation || !response.ok) return;
+        setRelationCount(response.value.filter(record => !record.tombstoned).length);
+        if (relationsOpen) setRelations(response.value);
+      });
+    };
+    window.addEventListener('yomika:route-cache-invalidated', update);
+    return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', update); };
+  }, [server, relationsOpen]);
+
   const archiveById = useMemo(() => {
     const byId = new Map<string, ArchiveIdentity>();
     archives.forEach((archive) => byId.set(archive.archiveId, archive));
@@ -723,7 +741,7 @@ export function DeduplicationWorkspace() {
     }
   }
 
-  /** 不重复关系：读取持久化对；标记/撤销都走既有命令并同步 journal。 */
+  /** 不重复关系：读取持久化对；标记/撤销通过当前数据源保存。 */
   async function loadRelations() {
     if (!server) return;
     const response = await dedup.listNonDuplicates(server.scopeId);

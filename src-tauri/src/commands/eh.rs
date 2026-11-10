@@ -226,9 +226,7 @@ pub fn save_eh_account_record(
             return CommandResult::failure("UNKNOWN", error, true);
         }
     };
-    // 账户条目**不进同步日志**：名字、站点与用户名提示与 Cookie 归同一类（都是这台
-    // 机器上的登录状态），凭据库按设备各存各的，别的设备拉到条目也没法用——需要重新
-    // 登录一次，所以它就不该上路。
+    // Account configuration and cookies belong to the local device.
     if let Err(error) = transaction.commit() {
         let _ = store.delete_cookie(&cookie_ref);
         return CommandResult::failure("UNKNOWN", error.to_string(), true);

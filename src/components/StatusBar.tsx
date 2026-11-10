@@ -1,15 +1,12 @@
-import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { usePageActive } from '../app/RetainedPage';
 import { CircleDot, Database, ListTodo, LibraryBig } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
-import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
 import { NativeCacheRepository } from '../repositories/nativeCacheRepository';
 import { pickServer } from '../domain/server';
 
 const repository = new NativeLibraryRepository();
-const syncRepository = new NativeSyncRepository();
 const cacheRepository = new NativeCacheRepository();
 
 /** 缓存字节数跟着 `yomika:cache-changed` 重量的最小间隔。
@@ -38,7 +35,6 @@ export function StatusBar() {
   const [serverName, setServerName] = useState<string>();
   const [serverConnection, setServerConnection] = useState<'none' | 'online' | 'offline'>('none');
   const [taskCount, setTaskCount] = useState(0);
-  const [syncConfigured, setSyncConfigured] = useState(false);
   const [cacheBytes, setCacheBytes] = useState<number>();
   const countedServer = useRef<string>();
 
@@ -49,12 +45,11 @@ export function StatusBar() {
     const refresh = () => {
       if (!active || pending || document.visibilityState === 'hidden') return;
       pending = true;
-      void Promise.allSettled([repository.listServers(), repository.checkServerStatus(), repository.listTasks(), syncRepository.listAccounts()]).then(async ([serversState, statusState, tasksState, syncState]) => {
+      void Promise.allSettled([repository.listServers(), repository.checkServerStatus(), repository.listTasks()]).then(async ([serversState, statusState, tasksState]) => {
         if (!active) return;
         const servers = serversState.status === 'fulfilled' ? serversState.value : undefined;
         const statuses = statusState.status === 'fulfilled' ? statusState.value : undefined;
         const tasks = tasksState.status === 'fulfilled' ? tasksState.value : undefined;
-        const syncAccounts = syncState.status === 'fulfilled' ? syncState.value : undefined;
         const configuredServer = servers?.ok ? pickServer(servers.value, undefined) : undefined;
         const serverStatus = statuses?.ok ? statuses.value.find((status) => status.serverId === configuredServer?.id) : undefined;
         if (serverStatus?.online) {
@@ -70,7 +65,6 @@ export function StatusBar() {
         // 只数没跑完的：任务行从不删除（完成的上传、下载都会留在表里），数到
         // 底就成了「这个应用一共做过多少件事」，而不是现在有几件在跑。
         if (tasks?.ok) setTaskCount(tasks.value.filter((task) => task.status === 'running' || task.status === 'queued' || task.status === 'paused').length);
-        if (syncAccounts?.ok) setSyncConfigured(syncAccounts.value.length > 0);
         // The archive total comes from the local mirror's own index — one SQL
         // count, no LANraragi page request. It used to be published by whichever
         // LibraryWorkspace rendered last: the watchlist shelf (five rows)
@@ -143,7 +137,6 @@ export function StatusBar() {
 
   const statuses = [
     { label: '连接状态', icon: CircleDot, name: '连接', value: serverConnection === 'online' ? (serverName ?? '在线') : serverConnection === 'offline' ? '离线' : '未连接', tone: serverConnection === 'online' ? 'success' : 'warning' },
-    { label: '同步状态', icon: RefreshCw, name: '同步', value: syncConfigured ? '已配置' : '未配置', tone: syncConfigured ? 'success' : 'muted' },
     { label: '任务状态', icon: ListTodo, name: '任务', value: String(taskCount), tone: taskCount > 0 ? 'active' : 'muted' },
     { label: '缓存状态', icon: Database, name: '缓存', value: formatBytes(cacheBytes ?? 0), tone: cacheBytes ? 'active' : 'muted' },
   ] as const;

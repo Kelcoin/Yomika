@@ -1,3 +1,4 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,7 +7,7 @@ import { getNativeImageCache } from '../../src/lib/nativeImageCache';
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { ToastProvider } from '../../src/components/Toast';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 /** 收藏与待看的顶栏要和档案库同一套：分类筛选、排序方式、多选、显示模式，
  * 而且顺序就是档案库那个顺序（多选紧跟在排序方式右边）。 */

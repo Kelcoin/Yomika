@@ -1,4 +1,6 @@
 import { ContentSkeleton } from './ContentSkeleton';
+import { SecuritySettings } from './SecuritySettings';
+import '../styles/settings-heading.css';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
@@ -23,8 +25,6 @@ import { AboutDetails } from './AboutDetails';
 import { EhMark } from './EhMark';
 import { listen } from '@tauri-apps/api/event';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
-import { SYNC_COMPLETED_EVENT, autoSyncStatus, subscribeAutoSync } from '../lib/autoSync';
-import { formatSyncAge } from '../lib/syncTime';
 import { availableModelUpdates } from '../lib/modelUpdates';
 import { CUGAN_VARIANTS, chooseUpscaleFamily, groupUpscaleOptions, upscaleFamily, upscaleModelLabel } from '../lib/upscaleParameters';
 import { useTimedConfirmation } from '../lib/useTimedConfirmation';
@@ -36,11 +36,9 @@ import { SettingsRow, SettingsRowBody } from './SettingsRow';
 import { SettingsChoice, SettingsMenu, SettingsNumber, SettingsOption, SettingsPanel } from './SettingsValueControls';
 import { StatusLine } from './StatusLine';
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
-import { SyncAccountForm, SyncScopeChecks, accountKindLabel, useSyncSettings } from './SyncSettings';
 import { UpscaleIcon } from './UpscaleIcon';
 import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
 import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
-import { scopeLabel } from '../domain/syncScope';
 import {
   DATA_EXPORT_CREDENTIAL_ITEMS,
   DEFAULT_DATA_EXPORT_ITEMS,
@@ -57,7 +55,6 @@ import type { ServerIdentity } from '../domain/server';
 import type { CommandResult } from '../domain/result';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
-import { NativeSyncRepository } from '../repositories/nativeSyncRepository';
 import { NativeSettingsRepository } from '../repositories/nativeSettingsRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
 import { TextInputDialog } from './TextInputDialog';
@@ -111,7 +108,6 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
-const syncRepository = new NativeSyncRepository();
 const settingsRepository = new NativeSettingsRepository();
 const dedupRepository = new NativeDedupRepository();
 const cacheRepository = new NativeCacheRepository();
@@ -190,20 +186,21 @@ const BOTTOM_NAV_OPTIONS = [
 type BottomNavItemKey = (typeof BOTTOM_NAV_OPTIONS)[number]['key'];
 
 /** Settings are split by workflow so everyday controls stay separate from
- * visual preferences, synchronization, and model tooling. */
+ * visual preferences, data migration, and model tooling. */
 const settingsSections = [
   { id: 'settings-general', label: '通用', hint: '启动页面、下载目录与缓存', icon: <SlidersHorizontal /> },
   { id: 'settings-reading', label: '阅读', hint: '布局、方向与翻页方式', icon: <BookOpen /> },
+  { id: 'settings-security', label: '安全', hint: '密码、生物认证与后台隐私', icon: <ShieldCheck /> },
   { id: 'settings-appearance', label: '样式', hint: '主题、配色与自定义 CSS', icon: <Palette /> },
   { id: 'settings-eh', label: 'E-Hentai', hint: '账户登录与 Cookie 管理', icon: <EhMark plate={false} /> },
-  { id: 'settings-sync', label: '同步', hint: 'WebDAV 同步与数据迁移', icon: <RefreshCw /> },
+  { id: 'settings-data', label: '数据', hint: '数据迁移与关联收藏删除', icon: <Database /> },
   { id: 'settings-advanced', label: '高级', hint: '超分与模型管理', icon: <Sparkles /> },
   { id: 'settings-tools', label: '工具', hint: '上传、导入与查重工作台', icon: <Blocks /> },
   { id: 'settings-about', label: '关于', hint: '版本信息与项目来源', icon: <Info /> },
 ] as const;
 
 /** Sections whose content lives inside the single preferences form. */
-const PREFERENCE_SECTIONS = ['settings-general', 'settings-reading', 'settings-appearance', 'settings-advanced', 'settings-sync'] as const;
+const PREFERENCE_SECTIONS = ['settings-general', 'settings-reading', 'settings-appearance', 'settings-advanced', 'settings-data'] as const;
 
 /** The sections no longer print their own title, so the accessible name for a
  * panel comes from the same list the sidebar is built from. */
@@ -280,9 +277,6 @@ export function SettingsWorkspace() {
     if (!enabled || known) return;
     void (kind === 'translation' ? refreshTagTranslations() : refreshTagCounts()).catch(() => undefined);
   };
-  /** 自动同步的进行状态：账户行据此显示「同步中」与上次同步时刻。 */
-  const [autoSync, setAutoSync] = useState(autoSyncStatus());
-  useEffect(() => subscribeAutoSync(setAutoSync), []);
   const openAboutLink = async (url: string) => {
     const result = await openExternalUrl(url);
     if (!result.ok) showToast(result.error.message, 'error');
@@ -295,16 +289,14 @@ export function SettingsWorkspace() {
   const [pendingModel, setPendingModel] = useState<{ id: string; label: string }>();
   const [modelDownload, setModelDownload] = useState<{ completed: number; total?: number | undefined }>();
   const pageRef = useRef<HTMLDivElement>(null);
-  /** WebDAV state for the 同步 rows, loaded only while that section is shown. */
-  const sync = useSyncSettings(selectedSettingsSection === 'settings-sync');
   /** The E-Hentai row's current value: the active account, reported by the
    * workspace that owns the list. The workspace lives inside the row's menu, so
    * it only mounts when the menu opens — without a section-level fetch the
    * closed row would say 未登录 about an account that is signed in. */
   const [ehAccountName, setEhAccountName] = useState<string>();
   useEffect(() => {
-    // 同步一节也要它：收藏同步删除没有登录账户就开不了。
-    if (!['settings-eh', 'settings-sync'].includes(selectedSettingsSection)) return;
+    // 数据一节也要它：收藏同步删除没有登录账户就开不了。
+    if (!['settings-eh', 'settings-data'].includes(selectedSettingsSection)) return;
     let active = true;
     void new NativeEhRepository().listAccounts().then((result) => {
       if (!active || !result.ok) return;
@@ -655,7 +647,7 @@ export function SettingsWorkspace() {
     }
     if (parsed.kind === 'scoped') {
       // 旧版独立导出的同步文档：按记录类全集落地（旧文件里没有凭据）。
-      const result = await syncRepository.importScopedData(
+      const result = await settingsRepository.importScopedData(
         text.trim(),
         JSON.stringify(['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings']),
       );
@@ -770,7 +762,6 @@ export function SettingsWorkspace() {
       report.records > 0 ? `记录与设置 ${report.records} 项` : '',
       report.servers > 0 ? `服务器 ${report.servers}` : '',
       report.ehAccounts > 0 ? `E-H 账户 ${report.ehAccounts}` : '',
-      report.syncAccounts > 0 ? `同步账户 ${report.syncAccounts}` : '',
     ].filter(Boolean).join(' · ');
   }
 
@@ -794,17 +785,16 @@ export function SettingsWorkspace() {
       result.value.records > 0 ? `记录与设置 ${result.value.records} 项` : '',
       result.value.servers > 0 ? `服务器 ${result.value.servers}` : '',
       result.value.ehAccounts > 0 ? `E-H 账户 ${result.value.ehAccounts}` : '',
-      result.value.syncAccounts > 0 ? `同步账户 ${result.value.syncAccounts}` : '',
       result.value.skipped > 0 ? `跳过 ${result.value.skipped} 类（文件里没有内容，或本机读不出凭据）` : '',
     ].filter(Boolean);
     showToast(parts.length ? `已导入：${parts.join(' · ')}` : '勾选的类别在文件里都是空的，没有导入任何数据', parts.length ? 'success' : 'info');
     setMigrationText('');
     setImportAvailable([]);
     setImportItems([]);
-    // 服务器的行与同步账户的行都可能刚被写进来：前者重取一次列表，后者靠
-    // 「同步完成」事件让 hook 重读。
+    // 导入可能新增服务器，重新读取列表。
     setServerLoadAttempt((attempt) => attempt + 1);
-    window.dispatchEvent(new CustomEvent(SYNC_COMPLETED_EVENT));
+    await preferenceState.reload();
+    setPreferenceDraft(undefined);
     invalidateRouteCache();
   }
 
@@ -942,6 +932,7 @@ export function SettingsWorkspace() {
            switch between a tall and a short section. */
         <div className="settings-sidebar-slot">
         <aside className="settings-sidebar" aria-label="设置分类">
+          {compact && <header className="settings-compact-heading"><h2>设置</h2></header>}
           {compact ? (
             /* 移动端直接复用内部面板的渲染路径：preferences-form > settings-group
                > SettingsRow——同一套父链与类，不写任何样式覆盖。 */
@@ -988,7 +979,7 @@ export function SettingsWorkspace() {
         </header>
       )}
       {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
-      <section className="preferences-panel" id={selectedSettingsSection === 'settings-sync' ? 'settings-sync-preferences' : selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
+      <section className="preferences-panel" id={selectedSettingsSection === 'settings-data' ? 'settings-data-preferences' : selectedSettingsSection} aria-label={sectionLabel(selectedSettingsSection)}>
         {/* No section title here: the sidebar already names the section, and one
             visible section at a time meant the heading only reserved a column of
             empty space beside every control. No autosave notice either — every
@@ -1354,109 +1345,12 @@ export function SettingsWorkspace() {
                 )}
               </SettingsPanel>
             )}
-            {selectedSettingsSection === 'settings-sync' && (
-              <SettingsPanel
-                icon={<Waypoints />}
-                label="同步账户"
-                hint="WebDAV 或 S3 兼容存储"
-                ariaLabel="同步账户"
-                value={sync.loading ? '读取中…' : sync.activeAccount ? sync.activeAccount.label : '未配置'}
-                /* 关掉菜单就是离开这次编辑：再打开时应该是账号行加三个动作，而不是
-                   上次没收起的表单（含已回填的口令）。 */
-                onClose={sync.closeForm}
-              >
-                {/* 账户行与它的表单是同一块：折叠层自带间距，收起时连间距一起收掉。
-                    网格的行间距不认「零高」——收起的那一层照样占一道缝，按钮下面就
-                    多出一块空白。 */}
-                <div className="settings-menu-accounts">
-                  {sync.loading ? <ContentSkeleton label="正在读取同步账户" rows={3} /> : !sync.activeAccount ? (
-                    <p className="settings-menu-desc">还没有账户：填下面的表单即可开始。</p>
-                  ) : (
-                    /* 单账户：只维护一个 WebDAV 账户。 */
-                    [sync.activeAccount].map((account) => (
-                      <div className="settings-menu-account" key={account.id}>
-                        {/* 这里原本还画着一枚 `<Waypoints>`：菜单标题的图标槽里已经有一枚
-                            同样的图标，两枚隔着一行对上（用户 2026-10-15 报的「同步界面上下的
-                            LOGO 是重复的」）。一屏里同一枚图形只画一次——标题那枚是「这一屏
-                            是什么」的路标，行里这枚只是装饰，去掉装饰那枚。 */}
-                        <div className="settings-menu-account-copy">
-                          <strong>{account.label}</strong>
-                          {/* 端点/域名很长：一行放不下就省略号截断，完整的悬停可读。 */}
-                          <span title={account.kind === 's3' ? `${account.baseUrl.replace(/^https?:\/\//, '')}/${account.bucket}` : account.baseUrl}>
-                            {account.kind === 's3' ? `${account.baseUrl.replace(/^https?:\/\//, '')}/${account.bucket}` : account.baseUrl}
-                          </span>
-                          <small>{accountKindLabel(account.kind)} · {autoSync.running ? '同步中…' : formatSyncAge(account.lastSyncAt)}</small>
-                        </div>
-                        {/* 编辑时动作与表单互为开关，收起/展开都有高度过渡。 */}
-                        <div className={`sync-collapsible${sync.formTarget !== undefined ? '' : ' is-open'}`}>
-                          <div className="settings-menu-account-actions">
-                            <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined} onClick={() => sync.startEdit(account)}><Pencil aria-hidden="true" />编辑</button>
-                            <button className="secondary-action" type="button" disabled={sync.syncingId !== undefined || autoSync.running || sync.servers.length === 0} aria-busy={sync.syncingId === account.id || autoSync.running} onClick={() => void sync.runSync(account)}>
-                              <RefreshCw aria-hidden="true" />{sync.syncingId === account.id || autoSync.running ? '同步中…' : '立即同步'}
-                            </button>
-                            {/* 破坏性动作点两下：**同一颗按钮**在原地变成确认按钮。所以这里是
-                                一颗常驻的 `button`（同一个节点换图标与标签，不是删掉再插一颗），
-                                它旁边那枚「取消」才是新长出来的对手方——参考的两枚胶囊。
-                                变形过程走 CSS 动画（`settings-reset-*`）；举着没人管、窗口被
-                                切走或失焦都会退回初始形态（见 `useSyncSettings` 里那条 effect）。 */}
-                            <span className={`settings-menu-reset${sync.resetAccount?.id === account.id ? ' is-armed' : ''}`}>
-                              <button
-                                className="secondary-action settings-menu-reset-toggle"
-                                type="button"
-                                disabled={sync.resetAccount?.id === account.id ? sync.resetting : sync.syncingId !== undefined}
-                                aria-expanded={sync.resetAccount?.id === account.id}
-                                title={sync.resetAccount?.id === account.id ? undefined : '删掉远端那份同步文档，下次同步按本地重新写一份'}
-                                onClick={() => {
-                                  if (sync.resetAccount?.id === account.id) void sync.resetRemote(account);
-                                  else sync.beginReset(account);
-                                }}
-                              >
-                                {sync.resetAccount?.id === account.id ? <Check aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
-                                {sync.resetting ? '正在重置…' : sync.resetAccount?.id === account.id ? '确认重置' : '重置远端'}
-                              </button>
-                              {sync.resetAccount?.id === account.id && (
-                                <button className="secondary-action settings-menu-reset-cancel" type="button" disabled={sync.resetting} onClick={sync.cancelReset}>
-                                  <X aria-hidden="true" />取消
-                                </button>
-                              )}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                  {!sync.loading && sync.accounts.length > 0 && sync.servers.length === 0 && (
-                    <p className="settings-menu-desc">先在「通用」里添加一台服务器。</p>
-                  )}
-                  {/* 账户管理与添加都在这个菜单里完成；范围勾选在同一个表单里。 */}
-                  <div className={`sync-collapsible${sync.formTarget !== undefined || !sync.activeAccount ? ' is-open' : ''}`}>
-                    <SyncAccountForm sync={sync} />
-                  </div>
-                </div>
-              </SettingsPanel>
-            )}
-            {selectedSettingsSection === 'settings-sync' && (
-              /* 范围不再挂在账户表单里：它管的是「推拉哪几类」，与账户凭据无关，
-                 单独一行才看得清现在到底同步了什么。导入导出读的也是这一份勾选。 */
-              <SettingsPanel
-                icon={<ListChecks />}
-                label="同步范围"
-                hint={sync.activeAccount ? '没勾的类别既不上传也不落地' : '还没配置账户：这份勾选暂时没作用'}
-                ariaLabel="同步范围"
-                value={scopeLabel(sync.scopeDraft)}
-              >
-                {!sync.activeAccount && (
-                  <p className="settings-menu-desc">添加账户后，这份勾选会随账户保存。</p>
-                )}
-                <SyncScopeChecks sync={sync} />
-              </SettingsPanel>
-            )}
               </div>
             )}
             {/* 收藏删除这两个开关自己一组：它们管的是「删档案时要不要把 E-Hentai 上的
-                收藏一起删」，既不是 WebDAV 同步，也不是数据迁移。放在同步开关那一组里
+                收藏一起删」，与数据迁移分组显示。放在迁移开关那一组里
                 会让人以为它们管的是同步本身，放在最前面又把真正的同步控件挤到了下面。 */}
-            {selectedSettingsSection === 'settings-sync' && (
+            {selectedSettingsSection === 'settings-data' && (
               <div className="settings-group">
                 <SettingsSwitch
                   icon={<HeartOff />}
@@ -1479,7 +1373,7 @@ export function SettingsWorkspace() {
             )}
             {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
                 必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
-            {selectedSettingsSection === 'settings-sync' && (
+            {selectedSettingsSection === 'settings-data' && (
               <div className="settings-group">
                 <SettingsPanel
                   icon={<FileDown />}
@@ -1820,6 +1714,7 @@ export function SettingsWorkspace() {
         </div>
       </section>
       )}
+      {selectedSettingsSection === 'settings-security' && <SecuritySettings />}
       {selectedSettingsSection === 'settings-about' && (
       /* What an About page is for: what this is, who made it, where it lives and
          under what terms. It used to list the data directory, where server

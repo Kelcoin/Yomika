@@ -9,7 +9,7 @@
 //! `CredentialPersistence::EntryOnly`，原文「There is no persistence other than in the
 //! entry itself」）——每次 `Entry::new` 都 `build` 出一个**全新的空**对象。于是写进去的
 //! API Key 当场丢在一个马上被丢弃的临时对象里，之后每次读都是 `NoEntry`，档案库、E-H
-//! Cookie、WebDAV 同步在手机上全部「凭据不可用」。这里改成数据目录（`init` 记下的那个）
+//! Cookie 等凭据在手机上全部「凭据不可用」。这里改成数据目录（`init` 记下的那个）
 //! 下的一份 `secrets.json`。
 //!
 //! 明文落盘是移动端不得不做的取舍：Android/iOS 上没有一个 keyring 能用的系统凭据库，
@@ -279,13 +279,13 @@ mod file_store {
         #[test]
         fn the_file_round_trips_as_an_array_of_service_account_value() {
             let dir = TempDir::new("shape");
-            set(dir.path(), "app.yomika.webdav", "ref-1", "unicode-密钥-🔑").expect("set");
+            set(dir.path(), "app.yomika.test", "ref-1", "unicode-密钥-🔑").expect("set");
 
             let parsed: serde_json::Value = serde_json::from_str(&dir.raw()).expect("valid json");
             assert_eq!(
                 parsed,
                 serde_json::json!([
-                    { "service": "app.yomika.webdav", "account": "ref-1", "value": "unicode-密钥-🔑" }
+                    { "service": "app.yomika.test", "account": "ref-1", "value": "unicode-密钥-🔑" }
                 ])
             );
             assert!(parsed.is_array(), "格式是数组（见模块内的取舍说明）");

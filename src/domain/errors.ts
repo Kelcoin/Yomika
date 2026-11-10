@@ -4,6 +4,7 @@ export const DomainErrorCodeSchema = z.enum([
   'UNKNOWN',
   'INVALID_RESPONSE',
   'INVALID_INPUT',
+  'APP_SECURITY_AUTH',
   'INVALID_MANIFEST',
   'INVALID_MODEL_IMPORT',
   'MODEL_MANIFEST_FETCH_FAILED',
@@ -17,7 +18,6 @@ export const DomainErrorCodeSchema = z.enum([
   'REMOTE_CONFLICT',
   'REMOTE_RATE_LIMIT',
   'REMOTE_UNAVAILABLE',
-  'SYNC_MANIFEST_CONFLICT',
   'INFERENCE_UNAVAILABLE',
   /** 这一页的推理被取消了（切页、关开关、离开阅读器）。不是失败：取消的结果既
    * 不该进错误日志，也不该写进任何缓存。 */
@@ -45,7 +45,7 @@ export const DomainErrorCodeSchema = z.enum([
   'EH_UNEXPECTED_PAGE',
   'EH_UNAVAILABLE',
   /** 原生侧已经在用的几个码，之前没进这张表：任何一处发出它们，整条错误都会被桥
-   * 当成「无效响应」，真正的信息（比如 WebDAV 连不上）反而看不到。 */
+   * 当成「无效响应」，真正的信息（比如服务器连不上）反而看不到。 */
   'NETWORK',
   'NOT_FOUND',
   'LOCAL_DATABASE',
@@ -118,6 +118,7 @@ export type DomainErrorCode = z.infer<typeof DomainErrorCodeSchema>;
  * 表示传输失败时由 errorLog.ts 过滤，不能把 schema、解码逻辑或计算模型错误一起吞掉。
  */
 export const QUIET_ERROR_CODES: ReadonlySet<string> = new Set([
+  'APP_SECURITY_AUTH', // Incorrect credentials, cancelled biometrics and lockout are expected authentication outcomes.
   'REMOTE_PLAN_CHANGED', // Expected when the connected server changes its settings.
   'QUEUE_FULL', 'CANCELLED', 'CANCELED', 'ABORTED', 'ABORT_ERR',
   'ERR_CANCELED',

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { invokeCommand, resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { z } from 'zod';
+import { flushErrorLog, setErrorLogSinkForTests, type ErrorLogRecord } from '../../src/lib/errorLog';
 import { NativeErrorLogRepository } from '../../src/repositories/nativeErrorLogRepository';
 import { NativeAppInfoRepository } from '../../src/repositories/nativeAppInfoRepository';
 
@@ -20,6 +22,20 @@ const buildInfo = {
 };
 
 describe('native error log bridge', () => {
+  it('omits private bridge state and workspace payloads from diagnostics', async () => {
+    const written: ErrorLogRecord[] = [];
+    setErrorLogSinkForTests(async records => { written.push(...records); return true; });
+    try {
+      setInvokeAdapterForTests(async () => ({ ok: false, error: { code: 'INVALID_INPUT', message: 'Invalid bridge payload', retryable: false } }));
+      await invokeCommand('lrr_bridge_request', { scopeId: 'private-scope', action: 'workspace_put', input: { ids: ['private-archive'], value: 'private-reading-state' } }, z.unknown());
+      await flushErrorLog();
+      const serialized = JSON.stringify(written);
+      expect(serialized).toContain('workspace_put');
+      expect(serialized).not.toContain('private-archive');
+      expect(serialized).not.toContain('private-reading-state');
+      expect(serialized).not.toContain('private-scope');
+    } finally { setErrorLogSinkForTests(); }
+  });
   it('anonymizes legacy records and export contents at the repository boundary', async () => {
     const adapter = vi.fn(async (command: string) => command === 'error_log_read'
       ? { ok: true, value: [{ at: 'epoch:1', level: 'error', source: 'reader', message: 'failed https://private.example/api', detail: '{"serverId":"private-server"}' }] }

@@ -89,6 +89,11 @@ async fn call<T: serde::de::DeserializeOwned>(
         .map_err(|error| error.to_string())
 }
 
+/// Security bridge stays native; it never exposes password material to Kotlin.
+pub async fn security_call<T: serde::de::DeserializeOwned>(
+    app: &AppHandle, command: &str, payload: serde_json::Value,
+) -> Result<T, String> { call(app, command, payload).await }
+
 pub async fn login_open(app: &AppHandle, url: &str, user_agent: &str) -> Result<(), String> {
     call::<serde_json::Value>(app, "ehLoginOpen", json!({ "url": url, "userAgent": user_agent }))
         .await

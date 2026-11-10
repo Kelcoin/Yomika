@@ -17,7 +17,7 @@ afterEach(() => {
  * `.workspace` 那个 1320px 居中盒子加 48px 内边距。 */
 function renderHome() {
   setInvokeAdapterForTests(vi.fn(async (command: string) => {
-    if (command === 'list_servers' || command === 'list_tasks' || command === 'list_sync_accounts') return { ok: true, value: [] };
+    if (command === 'list_servers' || command === 'list_tasks') return { ok: true, value: [] };
     if (command === 'cache_stats') return { ok: true, value: { bytes: 0, entries: 0 } };
     if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
     return { ok: true, value: [] };

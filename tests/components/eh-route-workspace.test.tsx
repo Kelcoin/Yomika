@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { withAppSecurity } from '../nativeHostSecurity';
 
 afterEach(() => {
   resetInvokeAdapterForTests();
@@ -191,7 +192,7 @@ describe('EH route workspace', () => {
       if (command === 'fetch_eh_forum_username') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
-    setInvokeAdapterForTests(adapter);
+    setInvokeAdapterForTests(withAppSecurity(adapter));
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
     const user = userEvent.setup();
     try {
@@ -244,7 +245,7 @@ describe('EH route workspace', () => {
       if (command === 'fetch_eh_forum_username') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
-    setInvokeAdapterForTests(adapter);
+    setInvokeAdapterForTests(withAppSecurity(adapter));
     Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: async () => null } });
     const user = userEvent.setup();
     try {

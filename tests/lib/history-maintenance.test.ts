@@ -8,7 +8,6 @@ import {
   runHistoryMaintenance,
   startHistoryMaintenance,
 } from '../../src/lib/historyMaintenance';
-import { onLocalWrite, resetLocalWriteForTests } from '../../src/lib/localWrite';
 
 let prunes = 0;
 let pruned = 0;
@@ -19,7 +18,6 @@ beforeEach(() => {
   pruned = 0;
   setInvokeAdapterForTests(async (command) => {
     if (command === 'prune_history') { prunes += 1; return { ok: true, value: pruned }; }
-    if (command === 'list_sync_accounts') return { ok: true, value: [] };
     if (command === 'list_servers') return { ok: true, value: [] };
     return { ok: false, error: { code: 'UNKNOWN', message: `unexpected ${command}`, retryable: false } };
   });
@@ -28,7 +26,6 @@ beforeEach(() => {
 
 afterEach(() => {
   resetHistoryMaintenanceForTests();
-  resetLocalWriteForTests();
   resetInvokeAdapterForTests();
   vi.useRealTimers();
 });
@@ -48,18 +45,6 @@ describe('history maintenance', () => {
     const second = runHistoryMaintenance();
     await Promise.all([first, second]);
     expect(prunes).toBe(1);
-  });
-
-  it('asks for a sync once something was actually pruned', async () => {
-    let writes = 0;
-    const stop = onLocalWrite(() => { writes += 1; });
-    pruned = 3;
-    await runHistoryMaintenance();
-    expect(writes).toBe(1);
-    pruned = 0;
-    await runHistoryMaintenance();
-    expect(writes).toBe(1);
-    stop();
   });
 
   it('skips the sweep while the app is hidden', async () => {

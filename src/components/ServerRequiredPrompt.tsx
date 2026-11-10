@@ -39,7 +39,7 @@ export function ServerRequiredPrompt() {
           <Server aria-hidden="true" />
           <p className="eyebrow">未连接</p>
           <h2 id="first-run-title">添加你的 LANraragi</h2>
-          <p>服务器配置保存在本机；如果别的设备上已经配好，也可以从 WebDAV 或 S3 兼容存储同步恢复。</p>
+          <p>服务器配置保存在本机；也可以导入其他设备导出的数据文件。</p>
         </div>
         {/* 两个入口并排一行，图标都在文字左边：竖排满宽像两条横幅，而图标一左一右
             时读起来像两种不同的东西。 */}
@@ -48,9 +48,9 @@ export function ServerRequiredPrompt() {
             <AddServerGlyph />
             添加服务器
           </Link>
-          <Link className="secondary-action" to="/settings?section=sync">
+          <Link className="secondary-action" to="/settings?section=data">
             <RefreshCw aria-hidden="true" />
-            从云端同步
+            导入数据
           </Link>
         </div>
       </section>

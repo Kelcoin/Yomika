@@ -904,8 +904,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
           {...selection.props}
           selectionActions={<>
             {selection.actions}
-            {/* 历史的清理入口在这里：多选之后清掉的是**记录**（会同步到别的
-                设备），档案本体不动。设置里那条「立即清理」按年龄清，已经去掉——
+            {/* 历史的清理入口在这里：多选之后清掉的是**记录**（启用服务器托管时影响共享数据），档案本体不动。设置里那条「立即清理」按年龄清，已经去掉——
                 要清哪几条，只有看着列表的人知道。 */}
             {name === 'history' && (
               <button className="secondary-action is-icon" type="button" aria-label="清理所选记录" title="清理所选记录" disabled={selection.props.selectedArchiveIds.size === 0} onClick={() => setClearingHistory(true)}>
@@ -921,7 +920,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       {clearingHistory && (
         <ConfirmDialog
           title="清理历史记录"
-          description={`将从历史里移除选中的 ${selection.props.selectedArchiveIds.size} 条记录（档案本身不受影响），其它设备同步后也会移除。`}
+          description={`将从历史里移除选中的 ${selection.props.selectedArchiveIds.size} 条记录（档案本身不受影响），启用服务器托管时，其它设备读取的共享历史也会移除。`}
           confirmLabel="清理"
           danger
           onClose={() => setClearingHistory(false)}
@@ -1019,7 +1018,6 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, activ
           <Route path="/tools/upload" element={<UploadRoute />} />
           <Route path="/tools/dedup" element={<DeduplicationWorkspace />} />
           <Route path="/dedup" element={<ActiveRedirect to="/tools/dedup" />} />
-          <Route path="/sync" element={<ActiveRedirect to="/settings?section=sync" />} />
           <Route path="/settings" element={<SettingsWorkspace />} />
           <Route path="*" element={<HomeWorkspace />} />
         </Routes>

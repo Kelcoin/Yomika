@@ -21,6 +21,7 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { useReaderImageHandover } from '../lib/useReaderImageHandover';
+import { useReaderGestureTexture } from '../lib/useReaderGestureTexture';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
  * over a spread without a refetch, and costs a handful of blob URLs. */
@@ -289,7 +290,7 @@ interface ReaderScreenProps {
  * 包在 `memo` 里：翻一页只该动那一页的图。三个帧（上一页 / 这一页 / 下一页）都在同一个
  * 树里，不拦一下就是每次翻页把三张图的元素与内联样式重新算一遍。
  */
-const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote }: {
+const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote, gestureTextureEnabled }: {
   index: number;
   source: string;
   size: { width: number; height: number } | undefined;
@@ -298,10 +299,12 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
   onFailed: (index: number, url: string) => void;
   handoverPaused: boolean;
   canPromote: () => boolean;
+  gestureTextureEnabled: boolean;
 }) {
   const [shown, setShown] = useState(source);
   const candidateRef = useRef<HTMLImageElement>(null);
   const displayedRef = useRef<HTMLImageElement>(null);
+  const gestureTexture = useReaderGestureTexture(displayedRef, shown, gestureTextureEnabled);
   const loadedUrl = useRef<string>();
   const displayedFailed = useRef(false);
   const handover = useRef<{ url: string; image: HTMLImageElement }>();
@@ -355,7 +358,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
       key={url}
       ref={candidate ? candidateRef : displayedRef}
       draggable={false}
-      className={`reader-page${candidate ? ' is-candidate' : ''}`}
+      className={`reader-page${candidate ? ' is-candidate' : gestureTexture.ready ? ' has-gesture-texture' : ''}`}
       aria-hidden={candidate || undefined}
       alt={candidate ? '' : `第 ${index + 1} 页`}
       src={url}
@@ -375,7 +378,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
         onFailed(index, url);
       }}
     />;
-  })}</>;
+  })}<canvas ref={gestureTexture.canvas} className="reader-page reader-gesture-texture" data-ready={gestureTexture.ready} aria-hidden="true" style={size ? { '--reader-page-fit-width': `${size.width}px`, '--reader-page-fit-height': `${size.height}px` } as CSSProperties : undefined} /></>;
 
 });
 
@@ -1712,7 +1715,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     return (
       <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
         {source && !exhaustedPages.has(index)
-          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} />
+          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} gestureTextureEnabled={effectiveLayout !== 'webtoon'} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -1726,6 +1729,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     <main
       aria-label="漫画阅读器"
       className="reader-screen"
+      data-image-interaction={handoverPaused}
       style={{ touchAction: effectiveLayout === 'webtoon' ? 'pan-y' : 'none' }}
       ref={rootRef}
       onTouchStartCapture={() => { chromeTouchAt.current = -Infinity; }}

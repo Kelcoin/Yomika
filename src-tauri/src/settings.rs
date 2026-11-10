@@ -43,7 +43,6 @@ const SFW_MODE_KEY: &str = "preferences.sfw_mode";
 const DETAIL_DATE_KIND_KEY: &str = "preferences.detail_date_kind";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
-const AUTO_SYNC_KEY: &str = "preferences.auto_sync";
 const START_WITH_WINDOWS_KEY: &str = "preferences.start_with_windows";
 const CLOSE_TO_TRAY_KEY: &str = "preferences.close_to_tray";
 
@@ -199,10 +198,6 @@ pub struct PreferenceSnapshot {
     /// hand-edited row cannot leave the bar without them.
     #[serde(default = "default_bottom_nav_items")]
     pub bottom_nav_items: Vec<String>,
-    /// 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次；
-    /// 关掉就只剩「立即同步」按钮。
-    #[serde(default = "default_true")]
-    pub auto_sync: bool,
     #[serde(default)]
     pub start_with_windows: bool,
     #[serde(default)]
@@ -340,7 +335,6 @@ impl Default for PreferenceSnapshot {
             custom_css: String::new(),
             floating_nav: false,
             bottom_nav_items: default_bottom_nav_items(),
-            auto_sync: true,
             start_with_windows: false,
             close_to_tray: false,
             tag_translation_enabled: true,
@@ -533,7 +527,6 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         custom_css: map_value(&stored, CUSTOM_CSS_KEY, defaults.custom_css)?,
         floating_nav: map_value(&stored, FLOATING_NAV_KEY, defaults.floating_nav)?,
         bottom_nav_items: map_value(&stored, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
-        auto_sync: map_value(&stored, AUTO_SYNC_KEY, defaults.auto_sync)?,
         start_with_windows: map_value(&stored, START_WITH_WINDOWS_KEY, defaults.start_with_windows)?,
         close_to_tray: map_value(&stored, CLOSE_TO_TRAY_KEY, defaults.close_to_tray)?,
         tag_translation_enabled: map_value(&stored, TAG_TRANSLATION_ENABLED_KEY, defaults.tag_translation_enabled)?,
@@ -656,7 +649,6 @@ pub(crate) fn write_preference_keys(
             BOTTOM_NAV_ITEMS_KEY,
             serde_json::to_string(&value.bottom_nav_items),
         ),
-        (AUTO_SYNC_KEY, serde_json::to_string(&value.auto_sync)),
         (START_WITH_WINDOWS_KEY, serde_json::to_string(&value.start_with_windows)),
         (CLOSE_TO_TRAY_KEY, serde_json::to_string(&value.close_to_tray)),
         (TAG_TRANSLATION_ENABLED_KEY, serde_json::to_string(&value.tag_translation_enabled)),
@@ -707,20 +699,6 @@ pub fn save_preferences_to(
         .transaction()
         .map_err(|error| error.to_string())?;
     write_preference_keys(&transaction, &value)?;
-    // 偏好进同步日志（全局范围、单对象），**但只供「导入导出」那条路用**：自动同步
-    // 的类别表里已经没有 `app_settings`（主题与后处理开关同步只会让两台设备互相覆盖，
-    // 见 `commands::sync::SYNC_SCOPE_CATEGORIES`），所以这条日志行只会在用户显式导出
-    // 文件时被折进文档。属于本机的两项（下载目录、缓存上限）连文件里也不带：导到别的
-    // 设备上只会让它把设置改成一台机器上的路径。
-    if let Ok(serde_json::Value::Object(mut payload)) = serde_json::to_value(&value) {
-        payload.retain(|key, _| !DEVICE_LOCAL_PREFERENCE_KEYS.contains(&key.as_str()));
-        let _ = crate::commands::sync::journal_global_object(
-            &transaction,
-            "app_setting",
-            "preferences",
-            serde_json::Value::Object(payload),
-        );
-    }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(value)
 }
@@ -1026,7 +1004,6 @@ mod tests {
                 "settings".into(),
             ],
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
-            auto_sync: false,
             start_with_windows: false,
             close_to_tray: false,
             tag_translation_enabled: false,

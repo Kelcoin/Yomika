@@ -1,9 +1,10 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { App } from '../../src/app/App';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetArchiveExistenceForTests } from '../../src/lib/archiveExistence';
 import { invalidateRouteCache } from '../../src/lib/routeCache';
 

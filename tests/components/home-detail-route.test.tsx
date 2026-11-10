@@ -1,3 +1,4 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter } from 'react-router-dom';
@@ -16,7 +17,7 @@ import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
 import { AppShell, navEntryActive } from '../../src/components/AppShell';
 import { ToastProvider } from '../../src/components/Toast';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 /** 首页那一排卡片开的详情：用户报的是「在首页打开一个档案，当前页实际跳去了档案库」。 */
 const archive = (index: number) => ({

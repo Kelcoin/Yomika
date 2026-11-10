@@ -15,19 +15,21 @@ export const ARCHIVE_GRID_COVER_HEIGHT = 220;
 /** The copy block is three fixed slots, not a flexible column: a two-line title,
  * two rows of tag chips, and one footer row. Sizing it by content let the tag
  * rows spill past `overflow: hidden`, which cut the second row in half. */
-export const ARCHIVE_GRID_TITLE_HEIGHT = 34;
+export const ARCHIVE_GRID_TITLE_HEIGHT = 36;
 /** Two chip rows, exactly. A chip is 20px tall including its 1px border, so at
  * 42px the second row was clipped by a pixel and read as cut off — the slot has
  * to hold 20 + 4 + 20 with a little slack, not 18 + 3 + 18. */
 export const ARCHIVE_GRID_TAGS_HEIGHT = 48;
-export const ARCHIVE_GRID_FOOTER_HEIGHT = 16;
+export const ARCHIVE_GRID_FOOTER_HEIGHT = 18;
 export const ARCHIVE_GRID_COPY_GAP = 4;
 export const ARCHIVE_GRID_COPY_HEIGHT =
   ARCHIVE_GRID_TITLE_HEIGHT + ARCHIVE_GRID_TAGS_HEIGHT + ARCHIVE_GRID_FOOTER_HEIGHT + ARCHIVE_GRID_COPY_GAP * 2;
 export const ARCHIVE_GRID_CARD_PADDING = 8;
-export const ARCHIVE_GRID_CARD_GAP = 8;
+/** The fixed body includes its padding and remaining bottom clearance.
+ * Enlarging an inner slot must not enlarge the virtualizer's row stride. */
+export const ARCHIVE_GRID_BODY_HEIGHT = 130;
 export const ARCHIVE_GRID_ROW_HEIGHT =
-  ARCHIVE_GRID_COVER_HEIGHT + ARCHIVE_GRID_CARD_GAP + ARCHIVE_GRID_COPY_HEIGHT + ARCHIVE_GRID_CARD_PADDING * 2;
+  ARCHIVE_GRID_COVER_HEIGHT + ARCHIVE_GRID_BODY_HEIGHT;
 
 /** Wide/list rows use one geometry for every shelf: a 158px card inside a 166px
  * stride, so neighbouring cards keep a visible 8px gap instead of sharing an

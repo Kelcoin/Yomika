@@ -1,9 +1,10 @@
+import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, vi } from 'vitest';
 import { BrowserRouter } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
-import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 /** 详情页的「返回上一页」必须真的回到它自己那一页的列表，**而且不能被应用自己的
  *  历史改写骗到**：档案库的保留页面在「从别处回到档案库」时会用一条 `replace`

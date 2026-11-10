@@ -1,5 +1,6 @@
 import { RetainedPage } from './RetainedPage';
 import { AppShell } from '../components/AppShell';
+import { AppSecurityGate } from '../components/AppSecurityGate';
 import { useEffect, useRef } from 'react';
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { preloadLazyPages, ReaderRoutes, WorkspaceRoutes } from './routes';
@@ -97,6 +98,7 @@ export function App() {
   // 渲染错误会把整棵树卸载成「窗口还在、里面什么都没有」，看起来就是窗口消失了。
   return (
     <RenderGuard>
+      <AppSecurityGate>
       <PreferencesProvider>
       <SplashFrame />
       <StartupRoute />
@@ -118,6 +120,7 @@ export function App() {
         <ArchiveTitleTooltip />
       </ToastProvider>
       </PreferencesProvider>
+      </AppSecurityGate>
     </RenderGuard>
   );
 }

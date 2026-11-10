@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ARCHIVE_GRID_CARD_WIDTH,
+  ARCHIVE_GRID_CARD_PADDING,
+  ARCHIVE_GRID_BODY_HEIGHT,
   ARCHIVE_GRID_COPY_HEIGHT,
   ARCHIVE_GRID_COVER_HEIGHT,
   ARCHIVE_GRID_GAP,
   ARCHIVE_GRID_ROW_HEIGHT,
   ARCHIVE_GRID_TAGS_HEIGHT,
+  ARCHIVE_GRID_TITLE_HEIGHT,
   getArchiveGridColumns,
   getWideArchiveCardWidth,
   packArchiveGridRows,
@@ -18,8 +21,10 @@ describe('archive grid layout', () => {
   it('derives the row height from the fixed card geometry', () => {
     // Cards must be exactly as tall as the row they are placed in, otherwise
     // the absolutely positioned rows overlap.
-    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(ARCHIVE_GRID_COVER_HEIGHT + 8 + ARCHIVE_GRID_COPY_HEIGHT + 16);
+    expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(ARCHIVE_GRID_COVER_HEIGHT + ARCHIVE_GRID_BODY_HEIGHT);
     expect(ARCHIVE_GRID_ROW_HEIGHT).toBe(350);
+    expect(ARCHIVE_GRID_TITLE_HEIGHT).toBeGreaterThanOrEqual(18 * 2);
+    expect(ARCHIVE_GRID_COPY_HEIGHT + ARCHIVE_GRID_CARD_PADDING * 2).toBeLessThanOrEqual(ARCHIVE_GRID_BODY_HEIGHT);
   });
 
   it('gives the tag slot room for two whole chip rows', () => {
