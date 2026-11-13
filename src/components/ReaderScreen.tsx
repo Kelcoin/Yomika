@@ -21,7 +21,6 @@ import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { useReaderImageHandover } from '../lib/useReaderImageHandover';
-import { useReaderGestureTexture } from '../lib/useReaderGestureTexture';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
  * over a spread without a refetch, and costs a handful of blob URLs. */
@@ -290,7 +289,7 @@ interface ReaderScreenProps {
  * 包在 `memo` 里：翻一页只该动那一页的图。三个帧（上一页 / 这一页 / 下一页）都在同一个
  * 树里，不拦一下就是每次翻页把三张图的元素与内联样式重新算一遍。
  */
-const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote, gestureTextureEnabled }: {
+const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote }: {
   index: number;
   source: string;
   size: { width: number; height: number } | undefined;
@@ -299,12 +298,12 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
   onFailed: (index: number, url: string) => void;
   handoverPaused: boolean;
   canPromote: () => boolean;
-  gestureTextureEnabled: boolean;
 }) {
   const [shown, setShown] = useState(source);
   const candidateRef = useRef<HTMLImageElement>(null);
+  // Keep this same full-resolution image through gestures. Switching to a
+  // reduced canvas changes halftone sampling even before the zoom moves.
   const displayedRef = useRef<HTMLImageElement>(null);
-  const gestureTexture = useReaderGestureTexture(displayedRef, shown, gestureTextureEnabled);
   const loadedUrl = useRef<string>();
   const displayedFailed = useRef(false);
   const handover = useRef<{ url: string; image: HTMLImageElement }>();
@@ -358,7 +357,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
       key={url}
       ref={candidate ? candidateRef : displayedRef}
       draggable={false}
-      className={`reader-page${candidate ? ' is-candidate' : gestureTexture.ready ? ' has-gesture-texture' : ''}`}
+      className={`reader-page${candidate ? ' is-candidate' : ''}`}
       aria-hidden={candidate || undefined}
       alt={candidate ? '' : `第 ${index + 1} 页`}
       src={url}
@@ -378,7 +377,7 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
         onFailed(index, url);
       }}
     />;
-  })}<canvas ref={gestureTexture.canvas} className="reader-page reader-gesture-texture" data-ready={gestureTexture.ready} aria-hidden="true" style={size ? { '--reader-page-fit-width': `${size.width}px`, '--reader-page-fit-height': `${size.height}px` } as CSSProperties : undefined} /></>;
+  })}</>;
 
 });
 
@@ -439,6 +438,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const zoomRef = useRef(zoom);
   const zoomScaleRef = useRef(1);
   const zoomElementRef = useRef<HTMLDivElement>(null);
+  const canZoomCurrentImage = useCallback(() => {
+    const frame = zoomElementRef.current;
+    const images = frame?.querySelectorAll<HTMLImageElement>('img.reader-page:not(.is-candidate)');
+    return !!images?.length && images.length === frame?.querySelectorAll('.reader-slot').length
+      && Array.from(images).every((image) => image.complete && image.naturalWidth > 0);
+  }, []);
   const zoomFrameRef = useRef<number>();
   const zoomAnimationRef = useRef<Animation>();
   const setZoom = useCallback((update: ZoomState | ((current: ZoomState) => ZoomState)) => {
@@ -831,6 +836,15 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       }
     }
 
+    // Retire stale demand before submitting the new current page. Cancellation
+    // is not a failure and must not leave a backoff/exhausted entry behind.
+    for (const [index, controller] of loadingPagesRef.current) {
+      if (fetchSet.has(index)) continue;
+      loadingPagesRef.current.delete(index);
+      controller.abort();
+      releasePage?.(index);
+    }
+
     if (releasePage) {
       // 一次扫描收两件事：释放窗口外的页，以及「有东西真的被放掉」时那份新数组。
       // 先前无论有没有要放掉的页都会 `current.slice()`（上千页的档案每翻一页复制
@@ -877,6 +891,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       });
       void Promise.race([Promise.resolve().then(() => loadPage(index, controller.signal)).catch(() => undefined), aborted]).then((page) => {
         if (generation !== pageRequestGeneration.current || loadingPagesRef.current.get(index) !== controller) return;
+        // Retire ownership BEFORE notifying React. Otherwise a retry render can
+        // see the settled request as still loading, skip its backoff timer and
+        // leave the spinner there until navigating away changes dependencies.
+        loadingPagesRef.current.delete(index);
         if (page) {
           failedPagesRef.current.delete(index);
           setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
@@ -1003,7 +1021,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (layoutRef.current === 'webtoon' || inControl) return;
       if (event.deltaY === 0) return;
       if (event.cancelable) event.preventDefault();
-      if (sliding.current || panStart.current || pinchStart.current) return;
+      if (sliding.current || panStart.current || pinchStart.current || !canZoomCurrentImage()) return;
       pauseHandover();
       resumeHandover(380);
       const point = viewportPoint(event.clientX, event.clientY);
@@ -1021,7 +1039,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       window.clearTimeout(settleTimer);
       element.removeEventListener('wheel', onWheel);
     };
-  }, [settleZoomNow, followZoom, pauseHandover, resumeHandover]);
+  }, [settleZoomNow, followZoom, pauseHandover, resumeHandover, canZoomCurrentImage]);
 
   // Arrow keys are bound to the canvas, so it has to own focus from the start;
   // otherwise the user must click first, and that click toggles the chrome.
@@ -1050,7 +1068,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * `webtoon` 上提前返回，滚动由容器自己管），而在末页继续往下滚属于滚动，不是翻页
    * ——所以 `effectiveLayout` 那一关是手势分流，不是退出条件。 */
   function move(intent: 'next' | 'previous', allowExit = true) {
-    if (sliding.current) return;
+    if (sliding.current) finishSlideRef.current?.();
     const current = readerStateRef.current;
     const advanced = advanceReader(current, intent);
     if (allowExit && intent === (current.direction === 'rtl' ? 'previous' : 'next') && advanced.pageIndex === current.pageIndex && effectiveLayout !== 'webtoon') {
@@ -1109,6 +1127,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const horizontalDrag = useRef(false);
   const dragFrame = useRef<number>();
   const slideAnimation = useRef<Animation>();
+  const finishSlideRef = useRef<(() => void)>();
   const sliding = useRef(false);
   const reducedMotionRef = useRef(reduceMotion);
   reducedMotionRef.current = reduceMotion;
@@ -1128,6 +1147,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     if (dragFrame.current !== undefined) cancelAnimationFrame(dragFrame.current);
     slideAnimation.current?.cancel();
     slideAnimation.current = undefined;
+    finishSlideRef.current = undefined;
     sliding.current = false;
     dragOffset.current = 0;
   }, [archiveId]);
@@ -1155,7 +1175,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // Only uncommitted boundary drags spring back. A committed final-page
     // gesture exits on pointer-up instead of waiting for the spring to finish.
     const target = commit && !boundary ? (dx < 0 ? -width : width) : 0;
+    let finished = false;
     const finish = () => {
+      if (finished || finishSlideRef.current !== finish) return;
+      finished = true;
+      finishSlideRef.current = undefined;
       slideAnimation.current?.cancel();
       slideAnimation.current = undefined;
       sliding.current = false;
@@ -1175,12 +1199,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
     // Keep both neighbouring frames mounted until the outgoing page has left.
     setDrag({ dx: 0, commits: false });
+    finishSlideRef.current = finish;
     if (!track?.animate || reducedMotionRef.current) { finish(); return; }
     sliding.current = true;
+    // A fast flick or an almost-completed drag should not wait a fixed 240ms.
+    const remaining = Math.abs(target - dragOffset.current);
+    const measuredSpeed = velocity ?? (elapsed > 0 ? dx / elapsed : 0);
+    const releaseSpeed = Number.isFinite(measuredSpeed) ? Math.max(0.7, Math.abs(measuredSpeed)) : 0.7;
+    const turnDuration = Math.max(90, Math.min(220, remaining / releaseSpeed));
     slideAnimation.current = track.animate([
       { transform: `translate3d(${dragOffset.current}px,0,0)` },
       { transform: `translate3d(${target}px,0,0)` },
-    ], { duration: boundary ? EDGE_SETTLE_MS : commit ? 240 : 200,
+    ], { duration: boundary ? EDGE_SETTLE_MS : commit ? turnDuration : 200,
       easing: boundary ? EDGE_SETTLE_EASING : 'cubic-bezier(.22,.72,.2,1)', fill: 'forwards' });
     slideAnimation.current.onfinish = finish;
   }
@@ -1231,8 +1261,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const handleTouchStart = useCallback((event: TouchEvent) => {
     // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
     if (thumbnailPanelOpen) return;
-    if (sliding.current && event.touches.length < 2) return;
     if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+    // Commit the previous landing before accepting the next gesture. Dropping
+    // touches throughout the animation made rapid consecutive swipes feel late.
+    if (sliding.current && event.touches.length < 2) finishSlideRef.current?.();
     dragSample.current = undefined;
     horizontalDrag.current = false;
     const touch = event.touches[0];
@@ -1249,11 +1281,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       dragFrame.current = undefined;
       slideAnimation.current?.cancel();
       slideAnimation.current = undefined;
+      finishSlideRef.current = undefined;
       sliding.current = false;
       dragOffset.current = 0;
       if (trackRef.current) trackRef.current.style.transform = 'translate3d(0,0,0)';
       setDrag(null);
-      if (layoutRef.current !== 'webtoon') {
+      if (layoutRef.current !== 'webtoon' && canZoomCurrentImage()) {
         const second = event.touches[1]!;
         pinchStart.current = { distance: Math.max(1, Math.hypot(second.clientX - touch.clientX, second.clientY - touch.clientY)), x: (touch.clientX + second.clientX) / 2, y: (touch.clientY + second.clientY) / 2, zoom: zoomRef.current };
         panStart.current = undefined;
@@ -1267,7 +1300,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       setPanning(true);
     }
     touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
-  }, [hideExitHint, thumbnailPanelOpen, pauseHandover]);
+  }, [hideExitHint, thumbnailPanelOpen, pauseHandover, canZoomCurrentImage]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
     const pinch = pinchStart.current;
@@ -1321,6 +1354,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           settleZoomNow();
           return;
         }
+        if (!canZoomCurrentImage()) return;
         const now = Date.now();
         if (lastTapRef.current > 0 && now - lastTapRef.current < 300) {
           const point = viewportPoint(end.clientX, end.clientY);
@@ -1363,7 +1397,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       lastTapRef.current = 0;
       // 缩放的锚点就是这一下点在哪里：和滚轮同一套数学（`zoomAtPoint`）。以前这里只
       // 翻倍率、把 pan 归零，于是点画面左上角会把那一块甩到屏幕正中。
-      if (layoutRef.current !== 'webtoon') {
+      if (layoutRef.current !== 'webtoon' && canZoomCurrentImage()) {
         const point = viewportPoint(touch.clientX, touch.clientY);
         setZoom((current) => doubleTapZoomAt(current, point.x, point.y));
         touchZoomAt.current = now;
@@ -1379,7 +1413,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // Same distance and recent-velocity rule as the mouse.
     gestureMovedRef.current = true;
     finishDrag(dx, elapsed);
-  }, [handleChromeTouchTap, settleZoomNow, resumeHandover]);
+  }, [handleChromeTouchTap, settleZoomNow, resumeHandover, canZoomCurrentImage]);
 
   /** Windows fires mouse events for a trackpad or mouse drag, so paging needs a
    * press-drag-release gesture here; touch keeps its own swipe handler. */
@@ -1387,10 +1421,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
   const handleMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
     if (Date.now() - touchEndAt.current < 600) return;
-    if (sliding.current) return;
     // 面板那一层（蒙版 + 面板体）是自己的，不是画布：落在它上面的按下不开始画布手势。
     // `.reader-overview` 只匹配面板体，蒙版得自己列出来。
     if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+    if (sliding.current) finishSlideRef.current?.();
     dragSample.current = undefined;
     horizontalDrag.current = false;
     if (event.button !== 0) return;
@@ -1715,7 +1749,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     return (
       <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
         {source && !exhaustedPages.has(index)
-          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} gestureTextureEnabled={effectiveLayout !== 'webtoon'} />
+          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -1770,7 +1804,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         if (Date.now() - touchZoomAt.current < 600) return;
         const target = event.target;
         if (target instanceof Element && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
-        if (effectiveLayout === 'webtoon') return;
+        if (effectiveLayout === 'webtoon' || !canZoomCurrentImage()) return;
         // 锚点是鼠标点的那个位置，和滚轮同一套数学（`zoomAtPoint`）：点在左上角的
         // 人物上，放大后那一块还在指针下，而不是被甩到屏幕正中。
         const point = viewportPoint(event.clientX, event.clientY);

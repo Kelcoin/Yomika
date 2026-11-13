@@ -207,13 +207,14 @@ export function useSingleLineTitle(title: string, sizes: readonly string[] = DEF
     };
     fit();
     let width = element.clientWidth;
+    let frame = 0;
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
       if (width === element.clientWidth) return;
       width = element.clientWidth;
-      fit();
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; fit(); });
     });
     observer?.observe(element);
-    return () => observer?.disconnect();
+    return () => { observer?.disconnect(); cancelAnimationFrame(frame); };
   }, [title, sizes]);
   return ref;
 }

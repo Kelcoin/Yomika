@@ -3,6 +3,7 @@ import { vi } from 'vitest';
 import {
   COARSE_POINTER_QUERY,
   getHorizontalWheelDelta,
+  getNearestRailSnap,
   getMouseScrollStyle,
   getTouchScrollStyle,
   useHorizontalScroller,
@@ -69,6 +70,11 @@ function setOverflow(element: HTMLElement, scrollWidth: number, clientWidth: num
 }
 
 describe('horizontal scroller', () => {
+  it('chooses the nearest card boundary without overshooting the rail', () => {
+    expect(getNearestRailSnap(128, [6, 170, 334, 498], 356, 6)).toBe(164);
+    expect(getNearestRailSnap(40, [6, 170, 334, 498], 356, 6)).toBe(0);
+    expect(getNearestRailSnap(999, [6, 170, 334, 498], 356, 6)).toBe(356);
+  });
   it('keeps native touch inertia unsnapped until scrolling has actually stopped', () => {
     vi.useFakeTimers();
     try {
@@ -89,6 +95,43 @@ describe('horizontal scroller', () => {
       fireEvent.touchCancel(rail);
       expect(rail.style.scrollSnapType).toBe('x proximity');
     } finally { vi.useRealTimers(); }
+  });
+  it('settles a native touch release gently onto the nearest card after inertia ends', () => {
+    let at = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    let nextId = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => at);
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.set(++nextId, callback); return nextId; });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation((id) => { frames.delete(id); });
+    const view = render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
+    const rail = screen.getByTestId('rail');
+    setOverflow(rail, 800, 300);
+    rail.style.scrollSnapType = 'x proximity';
+    rail.style.scrollPaddingInlineStart = '6px';
+    const card = document.createElement('div');
+    card.className = 'archive-rail-item';
+    vi.spyOn(card, 'getBoundingClientRect').mockReturnValue({ left: 60, right: 210, top: 0, bottom: 0, width: 150, height: 0, x: 60, y: 0, toJSON: () => ({}) });
+    vi.spyOn(rail, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 300, top: 0, bottom: 0, width: 300, height: 0, x: 0, y: 0, toJSON: () => ({}) });
+    rail.append(card);
+    rail.scrollLeft = 110;
+    fireEvent.touchStart(rail);
+    fireEvent.touchEnd(rail);
+    fireEvent(rail, new Event('scrollend'));
+    expect(rail.style.scrollSnapType).toBe('none');
+    const advance = (time: number) => {
+      const [id, callback] = [...frames.entries()][0]!;
+      frames.delete(id);
+      at = time;
+      callback(at);
+    };
+    advance(110);
+    expect(rail.scrollLeft).toBeGreaterThan(110);
+    expect(rail.scrollLeft).toBeLessThan(164);
+    advance(220);
+    expect(rail.scrollLeft).toBe(164);
+    expect(rail.style.scrollSnapType).toBe('x proximity');
+    view.unmount();
+    vi.restoreAllMocks();
   });
   it('hands a touch device the browser’s own scrolling and a mouse a grab cursor', () => {
     const touch = getTouchScrollStyle();

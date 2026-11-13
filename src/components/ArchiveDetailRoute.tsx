@@ -430,7 +430,7 @@ detailBasePath?: string | undefined }) {
           onPointerCancel={cancelIncognitoPress}
           onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
-        ><BookOpen aria-hidden="true" /><span className="archive-action-label">{readLabel}</span>{progress.hasProgress && <span className="archive-action-label-short">{progress.completed ? '已读完' : '继续'}</span>}</Link>}
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label archive-action-label-read">{readLabel}</span>{progress.hasProgress && <span className="archive-action-label-short" aria-hidden="true">{progress.completed ? '已读完' : '继续'}</span>}</Link>}
         {detailActions.includes('readingList') && <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
           if (!scopeId || readingOwner.current.busy) return;
           const identity = readingIdentity;
@@ -446,6 +446,7 @@ detailBasePath?: string | undefined }) {
         }} aria-label={inReadingList ? '移出待看' : '加入待看'} title={inReadingList ? '移出待看' : '加入待看'}>
           {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
+          {inReadingList && <span className="archive-action-label-short" aria-hidden="true">待看</span>}
         </button>}
         {detailActions.includes('favorites') && <button disabled={!favoriteReady || favoriteBusy} className="secondary-action" type="button" aria-pressed={favorite} onClick={() => {
           if (!serverId) return;
@@ -459,7 +460,7 @@ detailBasePath?: string | undefined }) {
             if (failed) setMessage('未能更新服务器收藏夹');
             else setFavorite(next);
           }).finally(() => { if (ownsMutation()) setFavoriteBusy(false); });
-        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span></button>}
+        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span>{favorite && <span className="archive-action-label-short" aria-hidden="true">收藏</span>}</button>}
         {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
           if (!serverId || currentDownloadOwner.busy || !currentDownloadOwner.active) return;
           currentDownloadOwner.busy = true;
@@ -475,7 +476,7 @@ detailBasePath?: string | undefined }) {
         }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
         {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
 
-        {detailActions.includes('clearProgress') && progress.hasProgress && <button className="secondary-action" type="button" aria-label="清除阅读进度" title="清除阅读进度" disabled={progress.busy} aria-busy={progress.busy} onClick={() => { void progress.clear(); }}><RotateCcw aria-hidden="true" /><span className="archive-action-label">清除进度</span></button>}
+        {detailActions.includes('clearProgress') && progress.hasProgress && <button className="secondary-action" type="button" aria-label="清除阅读进度" title="清除阅读进度" disabled={progress.busy} aria-busy={progress.busy} onClick={() => { void progress.clear(); }}><RotateCcw aria-hidden="true" /><span className="archive-action-label">清除进度</span><span className="archive-action-label-short" aria-hidden="true">清除</span></button>}
         {serverId && detailActions.includes('delete') && (
           <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
           {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate(shelfBase, { replace: true })} />}</>
@@ -504,12 +505,12 @@ detailBasePath?: string | undefined }) {
       <div className="archive-detail-panel-tabs" role="tablist" aria-label="详情内容" onKeyDown={(event) => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
-        const next = event.key === 'Home' ? 'media' : event.key === 'End' ? 'comments' : detailPanel === 'media' ? 'comments' : 'media';
+        const next = event.key === 'Home' ? 'media' : event.key === 'End' ? 'comments' : pager.selectedPanel === 'media' ? 'comments' : 'media';
         pager.goTo(next);
         event.currentTarget.querySelector<HTMLButtonElement>(`[data-panel="${next}"]`)?.focus();
       }}>
-        <button type="button" role="tab" data-panel="media" aria-controls={`${panelId}-media`} aria-selected={detailPanel === 'media'} tabIndex={detailPanel === 'media' ? 0 : -1} className={detailPanel === 'media' ? 'is-active' : ''} onClick={() => pager.goTo('media')}><DetailGlyph /><span>详情</span></button>
-        <button type="button" role="tab" data-panel="comments" aria-controls={`${panelId}-comments`} aria-selected={detailPanel === 'comments'} tabIndex={detailPanel === 'comments' ? 0 : -1} className={detailPanel === 'comments' ? 'is-active' : ''} onClick={() => pager.goTo('comments')}><MessageCircle aria-hidden="true" />评论</button>
+        <button type="button" role="tab" data-panel="media" aria-controls={`${panelId}-media`} aria-selected={pager.selectedPanel === 'media'} tabIndex={pager.selectedPanel === 'media' ? 0 : -1} className={pager.selectedPanel === 'media' ? 'is-active' : ''} onClick={() => pager.goTo('media')}><DetailGlyph /><span>详情</span></button>
+        <button type="button" role="tab" data-panel="comments" aria-controls={`${panelId}-comments`} aria-selected={pager.selectedPanel === 'comments'} tabIndex={pager.selectedPanel === 'comments' ? 0 : -1} className={pager.selectedPanel === 'comments' ? 'is-active' : ''} onClick={() => pager.goTo('comments')}><MessageCircle aria-hidden="true" />评论</button>
       </div>
 
       <div ref={pager.containerRef} className={pager.containerClass}>

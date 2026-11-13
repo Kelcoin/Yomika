@@ -103,11 +103,10 @@ function readNavMirror(): Partial<NavMirror> {
     return {
       ...(typeof value.computeCenterEnabled === 'boolean' ? { computeCenterEnabled: value.computeCenterEnabled } : {}),
       ...(typeof value.floatingNav === 'boolean' ? { floatingNav: value.floatingNav } : {}),
-      // 元素只验到「是字符串」：认得哪几个 key 的是底栏自己（AppShell 的
-      // NAV_KEY_ROUTES），不认识的 key 在那边会被过滤掉——所以这里的断言安全，
-      // 也不必把路由表搬到 app 层来。
+      // Match native normalization before first paint: settings moved to the
+      // home header, and home/library must stay reachable even in old mirrors.
       ...(Array.isArray(value.bottomNavItems)
-        ? { bottomNavItems: value.bottomNavItems.filter((item): item is string => typeof item === 'string') as PreferenceSnapshot['bottomNavItems'] }
+        ? { bottomNavItems: ['home', 'library', 'history', 'watchlist', 'to-read', 'downloads'].filter(key => key === 'home' || key === 'library' || (value.bottomNavItems as unknown[]).includes(key)) as PreferenceSnapshot['bottomNavItems'] }
         : {}),
     };
   } catch {

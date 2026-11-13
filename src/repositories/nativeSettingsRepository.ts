@@ -70,10 +70,11 @@ export const PreferenceSnapshotSchema = z.object({
    * scroll-down and returns on scroll-up. */
   floatingNav: z.boolean().default(false),
   /** Which entries the compact bottom bar shows, in the app's canonical order.
-   * 档案库 and 设置 are pinned UI-side and re-pinned by the backend. */
+   * Home and library are pinned; settings lives in the mobile home header. */
   bottomNavItems: z
     .array(z.enum(['home', 'library', 'history', 'watchlist', 'to-read', 'downloads', 'settings']))
-    .default(['home', 'library', 'history', 'watchlist', 'settings']),
+    .default(['home', 'library', 'history', 'watchlist'])
+    .transform(items => (['home', 'library', 'history', 'watchlist', 'to-read', 'downloads'] as const).filter(key => key === 'home' || key === 'library' || items.includes(key))),
   /** 自动同步：启动、回到前台、写入之后、网络恢复与定时巡检各触发一次。
    * 关掉就只剩设置里的「立即同步」。 */
   startWithWindows: z.boolean().default(false),
@@ -143,7 +144,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   detailDateKind: 'published',
   customCss: '',
   floatingNav: false,
-  bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'],
+  bottomNavItems: ['home', 'library', 'history', 'watchlist'],
   startWithWindows: false,
   closeToTray: false,
   tagTranslationEnabled: true,

@@ -127,7 +127,7 @@ describe('archive detail route', () => {
     expect(stage.className).toContain('is-dragging');
     expect(comments).not.toHaveAttribute('hidden');
     expect(details.getAttribute('style')).toContain('translate3d(-60px, 0, 0)');
-    expect(comments.getAttribute('style')).toContain('translate3d(calc(100% - 60px), 0, 0)');
+    expect(comments.getAttribute('style')).toContain('translate3d(calc(100% + 16px - 60px), 0, 0)');
     // 标签页要等松手那一刻才算换过。
     expect(screen.getByRole('tab', { name: '详情' })).toHaveAttribute('aria-selected', 'true');
 

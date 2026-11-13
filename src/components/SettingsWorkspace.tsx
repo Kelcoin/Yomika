@@ -171,8 +171,8 @@ function firstPerId(models: InstalledModel[]): InstalledModel[] {
   });
 }
 
-/** The compact bar's selectable entries, in display order; 档案库 由偏好规范化与
- * UI 双重固定（没有它就进不了档案库），其余都可以关掉——关掉的项目会出现在「更多」里。 */
+/** The compact bar's selectable entries, in display order; 首页、档案库由偏好规范化与
+ * UI 双重固定；首页承载设置及其他未选入底栏的入口。 */
 const BOTTOM_NAV_OPTIONS = [
   { key: 'home', label: '首页' },
   { key: 'library', label: '档案库' },
@@ -180,7 +180,6 @@ const BOTTOM_NAV_OPTIONS = [
   { key: 'watchlist', label: '收藏夹' },
   { key: 'to-read', label: '待看' },
   { key: 'downloads', label: '下载' },
-  { key: 'settings', label: '设置' },
 ] as const;
 
 type BottomNavItemKey = (typeof BOTTOM_NAV_OPTIONS)[number]['key'];
@@ -230,12 +229,14 @@ export function SettingsWorkspace() {
   const [loadError, setLoadError] = useState<string>();
   const [loadRetryable, setLoadRetryable] = useState(false);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
-  const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>('settings-general');
+  const requestedSection = `settings-${new URLSearchParams(location.search).get('section')}`;
+  const initialSection = settingsSections.find(section => section.id === requestedSection)?.id;
+  const [selectedSettingsSection, setSelectedSettingsSection] = useState<(typeof settingsSections)[number]['id']>(initialSection ?? 'settings-general');
   /** In the compact layout the sections are a list that drills into one section
    * at a time, so a phone shows either the list or one section — never a strip
    * of eight tabs above squeezed content. Ignored in the wide layout. */
   const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
-  const [compactDrilled, setCompactDrilled] = useState(false);
+  const [compactDrilled, setCompactDrilled] = useState(Boolean(initialSection));
   const showSectionList = !compact || !compactDrilled;
   const showSectionContent = !compact || compactDrilled;
   // 一级一级退：手机上的返回手势走的是 webview 历史（`AppPlugin` 把返回键交给
@@ -397,7 +398,7 @@ export function SettingsWorkspace() {
     });
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const requested = new URLSearchParams(location.search).get('section');
     if (requested && settingsSections.some((section) => section.id === `settings-${requested}`)) {
       setSelectedSettingsSection(`settings-${requested}` as (typeof settingsSections)[number]['id']);
@@ -876,8 +877,8 @@ export function SettingsWorkspace() {
 
   /** The compact bar answers scrolling the way the scroll-to-top disc does. */
   function toggleBottomNavItem(key: BottomNavItemKey) {
-    // 档案库固定显示，对应的行是禁用态，这里只是双保险。
-    if (key === 'library') return;
+    // 首页与档案库固定显示，禁用行外再防止程序调用取消。
+    if (key === 'home' || key === 'library') return;
     const current = preferenceDraft.bottomNavItems;
     const next = current.includes(key) ? current.filter((item) => item !== key) : [...current, key];
     editPreferences({ bottomNavItems: next });
@@ -932,7 +933,7 @@ export function SettingsWorkspace() {
            switch between a tall and a short section. */
         <div className="settings-sidebar-slot">
         <aside className="settings-sidebar" aria-label="设置分类">
-          {compact && <header className="settings-compact-heading"><h2>设置</h2></header>}
+          {compact && <header className="settings-compact-heading is-landing"><h2><Settings2 aria-hidden="true" /><span>设置</span></h2></header>}
           {compact ? (
             /* 移动端直接复用内部面板的渲染路径：preferences-form > settings-group
                > SettingsRow——同一套父链与类，不写任何样式覆盖。 */
@@ -975,7 +976,7 @@ export function SettingsWorkspace() {
           <button className="reader-icon-button" type="button" aria-label="返回设置分类" onClick={() => setCompactDrilled(false)}>
             <ArrowLeft aria-hidden="true" />
           </button>
-          <h2>{sectionLabel(selectedSettingsSection)}</h2>
+          <h2>{settingsSections.find((section) => section.id === selectedSettingsSection)?.icon}<span>{sectionLabel(selectedSettingsSection)}</span></h2>
         </header>
       )}
       {(PREFERENCE_SECTIONS as readonly string[]).includes(selectedSettingsSection) && (
@@ -1253,13 +1254,13 @@ export function SettingsWorkspace() {
               <SettingsPanel
                 icon={<ListChecks />}
                 label="底栏项目"
-                hint="只影响移动端底栏，没勾的收进「更多」"
+                hint="首页和档案库固定，其余未勾选入口显示在首页顶栏"
                 ariaLabel="底栏项目"
                 value={`${preferenceDraft.bottomNavItems.length} 项`}
               >
                 <CheckRowGroup label="底栏项目">
                   {BOTTOM_NAV_OPTIONS.map(({ key, label }) => {
-                    const pinned = key === 'library';
+                    const pinned = key === 'home' || key === 'library';
                     return (
                       <CheckRow
                         key={key}

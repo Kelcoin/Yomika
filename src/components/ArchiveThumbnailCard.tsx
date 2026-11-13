@@ -84,12 +84,15 @@ export function ArchiveThumbMeta({ children }: { children: ReactNode }) {
     };
     fitRef.current = fit;
     fit();
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => fit());
+    let frame = 0;
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; fit(); });
+    });
     observer?.observe(node);
     // Font metrics can change at the same width; only that signal bypasses
     // the text/width cache. A parent render must not restart font measurement.
     void document.fonts?.ready.then(() => fit(true));
-    return () => { active = false; fitRef.current = undefined; observer?.disconnect(); };
+    return () => { active = false; fitRef.current = undefined; observer?.disconnect(); cancelAnimationFrame(frame); };
   }, [pageActive]);
   useLayoutEffect(() => { fitRef.current?.(); }, [children, pageActive]);
   return <div ref={root} className="archive-thumb-card-meta">{children}</div>;

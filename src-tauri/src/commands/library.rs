@@ -616,6 +616,80 @@ fn reader_response_failure<T>(error: reqwest::Error) -> CommandResult<T> {
     CommandResult::failure(code, error.to_string(), true)
 }
 
+async fn read_reader_segment(
+    mut response: reqwest::Response,
+    bytes: &mut Vec<u8>,
+    expected: Option<u64>,
+    idle: std::time::Duration,
+) -> bool {
+    loop {
+        match tokio::time::timeout(idle, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                bytes.extend_from_slice(&chunk);
+                if let Some(length) = expected {
+                    if bytes.len() as u64 >= length { return bytes.len() as u64 == length; }
+                }
+            }
+            Ok(Ok(None)) => return expected.is_none_or(|length| bytes.len() as u64 == length),
+            _ => return false,
+        }
+    }
+}
+
+/// Recover a stalled binary transfer without discarding the bytes already read.
+/// LANraragi/proxy responses can advertise a full page but stop sending its body.
+/// Ranges are bounded below that observed stall size; overlapping bytes and exact
+/// Content-Range validation prevent appending a full/changed/misaligned response.
+async fn read_reader_page_body(
+    response: reqwest::Response,
+    url: &str,
+    api_key: &str,
+    idle: std::time::Duration,
+) -> Result<Vec<u8>, ReaderRequestError> {
+    let failure = || ReaderRequestError {
+        code: "NETWORK", message: "阅读图片传输中断，续传未完成".into(),
+    };
+    let expected = response.content_length();
+    let validator = response.headers().get(reqwest::header::ETAG)
+        .filter(|value| !value.as_bytes().starts_with(b"W/"))
+        .or_else(|| response.headers().get(reqwest::header::LAST_MODIFIED)).cloned();
+    let mut bytes = Vec::new();
+    if read_reader_segment(response, &mut bytes, expected, idle).await { return Ok(bytes); }
+    let total = expected.filter(|length| *length > bytes.len() as u64).ok_or_else(failure)?;
+    if bytes.is_empty() { return Err(failure()); }
+    let client = lanraragi_client().map_err(ReaderRequestError::configuration)?;
+    // Stay within the screen's request deadline, including range recovery.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    for _ in 0..64 {
+        let overlap = bytes.len().min(64 * 1024);
+        let start = (bytes.len() - overlap) as u64;
+        let end = (start + 4 * 1024 * 1024 - 1).min(total - 1);
+        let mut request = client.get(url)
+            .header(reqwest::header::AUTHORIZATION, authorization_value(api_key))
+            .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .timeout(std::time::Duration::from_secs(8));
+        if let Some(value) = &validator { request = request.header(reqwest::header::IF_RANGE, value); }
+        let response = tokio::time::timeout_at(deadline, request.send()).await
+            .map_err(|_| failure())?.map_err(ReaderRequestError::transport)?;
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+            || response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok())
+                != Some(format!("bytes {start}-{end}/{total}").as_str()) {
+            return Err(failure());
+        }
+        let mut segment = Vec::new();
+        let _ = tokio::time::timeout_at(deadline,
+            read_reader_segment(response, &mut segment, Some(end - start + 1), idle)).await.map_err(|_| failure())?;
+        if segment.len() <= overlap || segment.len() as u64 > end - start + 1
+            || segment[..overlap] != bytes[bytes.len() - overlap..] {
+            return Err(failure());
+        }
+        bytes.extend_from_slice(&segment[overlap..]);
+        if bytes.len() as u64 == total { return Ok(bytes); }
+    }
+    Err(failure())
+}
+
 async fn reader_request(
     method: reqwest::Method,
     url: String,
@@ -2313,6 +2387,46 @@ fn record_local_archive(
 #[cfg(test)]
 mod archive_download_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reader_page_resumes_a_stalled_body_and_rejects_inconsistent_ranges() {
+        use std::io::{Read, Write};
+        for (status, range, body, succeeds) in [
+            (206, "bytes 0-9/10", "abcdefghij", true),
+            (200, "bytes 0-9/10", "abcdefghij", false),
+            (206, "bytes 1-9/10", "bcdefghij", false),
+            (206, "bytes 0-9/11", "abcdefghij", false),
+            (206, "bytes 0-9/10", "xyzdefghij", false),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/page", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let mut held = Vec::new();
+                for attempt in 0..2 {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+                        request.push(byte[0]);
+                    }
+                    if attempt == 0 {
+                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc").unwrap();
+                        held.push(stream); // Keep the partial body open, like the observed server.
+                    } else {
+                        assert!(String::from_utf8(request).unwrap().to_ascii_lowercase().contains("range: bytes=0-9"));
+                        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Range: {range}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                    }
+                }
+            });
+            let response = reqwest::get(&url).await.unwrap();
+            let result = read_reader_page_body(response, &url, "test-key", std::time::Duration::from_millis(50)).await;
+            if succeeds { assert_eq!(result.unwrap(), b"abcdefghij"); }
+            else { assert!(result.is_err()); }
+            server.join().unwrap();
+        }
+    }
 
     // Exercise real reqwest headers and replay behavior against a local server,
     // without credentials or a dependency on a live LANraragi instance.
@@ -4177,7 +4291,7 @@ async fn load_reader_page_bytes(
         }
     };
     url.query_pairs_mut().append_pair("path", &path);
-    let response = match reader_request(reqwest::Method::GET, url.to_string(), api_key).await {
+    let response = match reader_request(reqwest::Method::GET, url.to_string(), api_key.clone()).await {
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };
@@ -4194,7 +4308,7 @@ async fn load_reader_page_bytes(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    match response.bytes().await {
+    match read_reader_page_body(response, url.as_str(), &api_key, std::time::Duration::from_secs(4)).await {
         Ok(bytes) => {
             // A failed cache write means every later read re-fetches, so it
             // must not vanish silently.
@@ -4209,9 +4323,9 @@ async fn load_reader_page_bytes(
             ) {
                 eprintln!("yomika: reader page cache write failed: {error}");
             }
-            Ok(CommandResult::success(bytes.to_vec()))
+            Ok(CommandResult::success(bytes))
         }
-        Err(error) => Ok(reader_response_failure(error)),
+        Err(error) => Ok(CommandResult::failure(error.code, error.message, true)),
     }
 }
 

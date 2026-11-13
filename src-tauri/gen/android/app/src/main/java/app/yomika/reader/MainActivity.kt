@@ -35,6 +35,11 @@ class MainActivity : TauriActivity() {
     super.onStop()
   }
 
+  override fun onUserLeaveHint() {
+    NativeAppSecurity.userLeave(this)
+    super.onUserLeaveHint()
+  }
+
   override fun onResume() {
     super.onResume()
     val root = findViewById<View>(android.R.id.content)

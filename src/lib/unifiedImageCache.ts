@@ -44,6 +44,8 @@ export interface AdoptedImage {
 
 export interface ImageLoadOptions {
   signal?: AbortSignal;
+  /** Evaluated when a slot opens, so reader navigation can promote queued pages. */
+  priority?: () => number;
   /** 最后一个消费者放手之后，这张图继续留在内存里（仍受下面的 LRU 预算约束），好让
    * 重新挂载的第一帧就能用 `peek`/`peekUrl` 同步拿到它。
    *
@@ -143,7 +145,7 @@ export class UnifiedImageCache {
     if (!pending) {
       const controller = new AbortController();
       pending = { promise: Promise.resolve(null as never), controller, consumers: 0, settled: false };
-      pending.promise = this.readOrFetch(identity, controller.signal);
+      pending.promise = this.readOrFetch(identity, controller.signal, options.priority);
       this.pending.set(key, pending);
       const entry = pending;
       void pending.promise.then(() => {
@@ -252,28 +254,39 @@ export class UnifiedImageCache {
     return this.pending.size;
   }
 
-  private async readOrFetch(identity: ImageCacheIdentity, signal: AbortSignal): Promise<CachedImageData> {
-    const cached = await this.repository.read(identity);
-    if (cached && cached.bytes.byteLength > 0) return cached;
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  private async readOrFetch(identity: ImageCacheIdentity, signal: AbortSignal, priority?: () => number): Promise<CachedImageData> {
     const derived = identity.rendition === 'enhanced' || identity.rendition === 'dlssnr' || identity.rendition === 'remote';
-    const gate = derived ? this.computeGate : this.fetchGate;
-    const fetched = await gate.run(() => {
+    // Completed enhancements must remain available while a different page is
+    // computing. The compute gate serializes inference, not cache hits.
+    if (derived) {
+      const cached = await this.repository.read(identity);
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      const request = this.repository.fetch(identity, signal);
+      if (cached && cached.bytes.byteLength > 0) return cached;
+    }
+    const gate = derived ? this.computeGate : this.fetchGate;
+    return gate.run(() => {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      const request = (async () => {
+        // Disk hits also transfer the full image over IPC. Starting all reads
+        // before the gate floods the bridge just as surely as parallel fetches.
+        const cached = derived ? null : await this.repository.read(identity);
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (cached && cached.bytes.byteLength > 0) return cached;
+        const fetched = await this.repository.fetch(identity, signal);
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (fetched.bytes.byteLength === 0) throw new Error('Image response was empty');
+        await this.repository.store(identity, fetched);
+        return fetched;
+      })();
       if (derived) return request;
-      // Native thumbnail IPC may ignore AbortSignal. A cancelled consumer must
-      // still free its ordinary-image slot so other ready covers can proceed.
+      // Native IPC may ignore AbortSignal, including during disk reads.
       return new Promise<CachedImageData>((resolve, reject) => {
         const abort = () => reject(new DOMException('Aborted', 'AbortError'));
         signal.addEventListener('abort', abort, { once: true });
         if (signal.aborted) abort();
         request.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
       });
-    });
-    if (fetched.bytes.byteLength === 0) throw new Error('Image response was empty');
-    await this.repository.store(identity, fetched);
-    return fetched;
+    }, { signal, ...(priority ? { priority } : {}) });
   }
 
   private forConsumer<T>(key: string, entry: PendingEntry, signal?: AbortSignal): Promise<T> {

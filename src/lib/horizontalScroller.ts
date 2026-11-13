@@ -64,6 +64,18 @@ export function getHorizontalWheelDelta(
   return delta === 0 ? null : delta;
 }
 
+export function getNearestRailSnap(scrollLeft: number, cardOffsets: readonly number[], maxScroll: number, padding = 0): number {
+  const maximum = Math.max(0, maxScroll);
+  let nearest = 0;
+  let distance = Number.POSITIVE_INFINITY;
+  for (const offset of cardOffsets) {
+    const target = Math.max(0, Math.min(maximum, offset - padding));
+    const nextDistance = Math.abs(target - scrollLeft);
+    if (nextDistance < distance) { nearest = target; distance = nextDistance; }
+  }
+  return nearest;
+}
+
 type DragState = {
   active: boolean;
   element: HTMLElement | null;
@@ -91,6 +103,7 @@ export function useHorizontalScroller() {
   const touchRef = useRef(false);
   const touchSettlingRef = useRef(false);
   const touchIdleRef = useRef<number>();
+  const wheelIdleRef = useRef<number>();
   const snapRef = useRef<{ element: HTMLElement; value: string }>();
   const restoreSnap = useCallback(() => {
     if (snapRef.current) snapRef.current.element.style.scrollSnapType = snapRef.current.value;
@@ -101,13 +114,40 @@ export function useHorizontalScroller() {
     coastRef.current = undefined;
     restoreSnap();
   }, [restoreSnap]);
+  const settleToNearest = useCallback((element: HTMLElement) => {
+    const cards = [...element.querySelectorAll<HTMLElement>('.archive-rail-item')];
+    if (!cards.length || !element.isConnected || element.closest('[hidden]')) { restoreSnap(); return; }
+    if (coastRef.current !== undefined) window.cancelAnimationFrame(coastRef.current);
+    coastRef.current = undefined;
+    const padding = parseFloat(getComputedStyle(element).scrollPaddingInlineStart) || 0;
+    const railLeft = element.getBoundingClientRect().left;
+    const offsets = cards.map(card => element.scrollLeft + card.getBoundingClientRect().left - railLeft);
+    const target = getNearestRailSnap(element.scrollLeft, offsets, element.scrollWidth - element.clientWidth, padding);
+    const start = element.scrollLeft;
+    const distance = target - start;
+    if (Math.abs(distance) < 1 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { element.scrollLeft = target; restoreSnap(); return; }
+    const started = performance.now();
+    const animate = (now: number) => {
+      if (!element.isConnected || element.closest('[hidden]')) { coastRef.current = undefined; restoreSnap(); return; }
+      const progress = Math.min(1, Math.max(0, (now - started) / 220));
+      const eased = 1 - (1 - progress) ** 3;
+      element.scrollLeft = start + distance * eased;
+      if (progress >= 1) { coastRef.current = undefined; element.scrollLeft = target; restoreSnap(); return; }
+      coastRef.current = window.requestAnimationFrame(animate);
+    };
+    snapRef.current ??= { element, value: element.style.scrollSnapType };
+    element.style.scrollSnapType = 'none';
+    coastRef.current = window.requestAnimationFrame(animate);
+  }, [restoreSnap]);
   const finishTouch = useCallback(() => {
     if (touchRef.current || !touchSettlingRef.current) return;
     touchSettlingRef.current = false;
     if (touchIdleRef.current !== undefined) window.clearTimeout(touchIdleRef.current);
     touchIdleRef.current = undefined;
-    restoreSnap();
-  }, [restoreSnap]);
+    const element = snapRef.current?.element;
+    if (element) settleToNearest(element);
+    else restoreSnap();
+  }, [restoreSnap, settleToNearest]);
   const settleTouch = useCallback(() => {
     if (touchRef.current || !touchSettlingRef.current || !snapRef.current) return;
     if (touchIdleRef.current !== undefined) window.clearTimeout(touchIdleRef.current);
@@ -117,6 +157,8 @@ export function useHorizontalScroller() {
   }, [finishTouch]);
   const beginTouch = useCallback(() => {
     stopCoast();
+    if (wheelIdleRef.current !== undefined) window.clearTimeout(wheelIdleRef.current);
+    wheelIdleRef.current = undefined;
     if (touchIdleRef.current !== undefined) window.clearTimeout(touchIdleRef.current);
     touchIdleRef.current = undefined;
     touchRef.current = true;
@@ -145,8 +187,8 @@ export function useHorizontalScroller() {
     window.removeEventListener('mousemove', handleWindowMouseMove);
     window.removeEventListener('mouseup', finishDrag);
     window.removeEventListener('blur', finishDrag);
-    if (edgeRef.current?.isActive()) { edgeRef.current.release(); restoreSnap(); return; }
-    if (event?.type !== 'mouseup' || !state.moved || !state.element || performance.now() - state.lastAt > 80 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { restoreSnap(); return; }
+    if (edgeRef.current?.isActive()) { edgeRef.current.release(); if (state.element) settleToNearest(state.element); else restoreSnap(); return; }
+    if (event?.type !== 'mouseup' || !state.moved || !state.element || performance.now() - state.lastAt > 80 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { if (state.moved && state.element) settleToNearest(state.element); else restoreSnap(); return; }
     const element = state.element;
     let velocity = Math.max(-2.5, Math.min(2.5, state.velocity));
     let previousAt = performance.now();
@@ -158,12 +200,12 @@ export function useHorizontalScroller() {
       const before = element.scrollLeft;
       element.scrollLeft = Math.max(0, Math.min(element.scrollWidth - element.clientWidth, before + velocity * 180 * (1 - decay)));
       velocity *= decay;
-      if (Math.abs(velocity) < .02 || element.scrollLeft === before) { stopCoast(); return; }
+      if (Math.abs(velocity) < .02 || element.scrollLeft === before) { coastRef.current = undefined; settleToNearest(element); return; }
       coastRef.current = window.requestAnimationFrame(coast);
     };
     if (Math.abs(velocity) >= .02) coastRef.current = window.requestAnimationFrame(coast);
-    else restoreSnap();
-  }, [restoreSnap, stopCoast]);
+    else settleToNearest(element);
+  }, [restoreSnap, settleToNearest, stopCoast]);
 
   const handleWindowMouseMove = useCallback((event: MouseEvent) => {
     const state = dragRef.current;
@@ -212,7 +254,14 @@ export function useHorizontalScroller() {
     element.scrollLeft = clamped;
     if (desired !== clamped) edgeRef.current?.wheel(desired - clamped);
     else edgeRef.current?.reset();
-  }, [stopCoast]);
+    if (wheelIdleRef.current !== undefined) window.clearTimeout(wheelIdleRef.current);
+    snapRef.current ??= { element, value: element.style.scrollSnapType };
+    element.style.scrollSnapType = 'none';
+    wheelIdleRef.current = window.setTimeout(() => {
+      wheelIdleRef.current = undefined;
+      settleToNearest(element);
+    }, 140);
+  }, [settleToNearest, stopCoast]);
 
   /** 按设备档把样式落到导轨上，并跟着设备档的变化改（插拔鼠标、切换平板模式）。
    *
@@ -248,6 +297,8 @@ export function useHorizontalScroller() {
       edgeRef.current = undefined;
       previous.removeEventListener('wheel', handleWheel, true);
       cancelTouch();
+      if (wheelIdleRef.current !== undefined) window.clearTimeout(wheelIdleRef.current);
+      wheelIdleRef.current = undefined;
       previous.removeEventListener('touchstart', beginTouch);
       previous.removeEventListener('touchend', endTouch);
       previous.removeEventListener('touchcancel', cancelTouch);
@@ -310,6 +361,8 @@ export function useHorizontalScroller() {
     cancelTouch();
     stopCoast();
     finishDrag();
+    if (wheelIdleRef.current !== undefined) window.clearTimeout(wheelIdleRef.current);
+    wheelIdleRef.current = undefined;
     const element = elementRef.current;
     if (element) element.scrollLeft = 0;
   }, [cancelTouch, stopCoast, finishDrag]);

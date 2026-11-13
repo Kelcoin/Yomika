@@ -121,6 +121,11 @@ pub async fn write_text_file(app: &AppHandle, path: &str, contents: &str) -> Res
     .map(|_| ())
 }
 
+pub async fn write_clipboard_text(app: &AppHandle, text: &str) -> Result<(), String> {
+    call::<serde_json::Value>(app, "writeClipboardText", json!({ "text": text }))
+        .await.map(|_| ())
+}
+
 /// 通过 SAF 的 `content://` URI（或普通路径）读一份文本。
 pub async fn read_text_file(app: &AppHandle, path: &str) -> Result<String, String> {
     #[derive(serde::Deserialize)]

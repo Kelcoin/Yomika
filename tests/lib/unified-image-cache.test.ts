@@ -34,6 +34,58 @@ function repository(bytes = new Uint8Array([1, 2, 3])): ImageCacheRepository & {
 afterEach(() => vi.restoreAllMocks());
 
 describe('UnifiedImageCache', () => {
+  it('bounds disk reads and lets the newest visible page overtake queued prefetch', async () => {
+    const urls = blobUrlFactory();
+    const reads: number[] = [];
+    const finish = new Map<number, (data: CachedImageData) => void>();
+    const data = { bytes: new Uint8Array([1]), mime: 'image/png' };
+    const repo: ImageCacheRepository = {
+      read: async (identity) => {
+        reads.push(identity.pageIndex!);
+        return new Promise<CachedImageData>((resolve) => finish.set(identity.pageIndex!, resolve));
+      },
+      fetch: vi.fn(async () => data), store: vi.fn(async () => undefined),
+    };
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024, maxConcurrentFetches: 1 });
+    let visible = 0;
+    const load = (pageIndex: number) => cache.load({ scopeId: 's', archiveId: 'a', pageIndex, rendition: 'reader-page' },
+      { priority: () => -Math.abs(visible - pageIndex) });
+    const first = load(0);
+    const prefetch = load(1);
+    const target = load(2);
+    await vi.waitFor(() => expect(reads).toEqual([0]));
+    visible = 2;
+    finish.get(0)!(data);
+    cache.release(await first);
+    await vi.waitFor(() => expect(reads).toEqual([0, 2]));
+    finish.get(2)!(data);
+    cache.release(await target);
+    await vi.waitFor(() => expect(reads).toEqual([0, 2, 1]));
+    finish.get(1)!(data);
+    cache.release(await prefetch);
+  });
+
+  it('cancels an unresponsive disk read without starving the next page', async () => {
+    const urls = blobUrlFactory();
+    const data = { bytes: new Uint8Array([1]), mime: 'image/png' };
+    const repo: ImageCacheRepository = {
+      read: vi.fn(async (identity) => identity.pageIndex === 0 ? new Promise<CachedImageData>(() => {}) : data),
+      fetch: vi.fn(async () => data), store: vi.fn(async () => undefined),
+    };
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024, maxConcurrentFetches: 1 });
+    const controller = new AbortController();
+    const base = { scopeId: 's', archiveId: 'a', rendition: 'reader-page' as const };
+    const first = cache.load({ ...base, pageIndex: 0 }, { signal: controller.signal });
+    const rejected = expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    const next = cache.load({ ...base, pageIndex: 1 });
+    await Promise.resolve();
+    expect(repo.read).toHaveBeenCalledTimes(1);
+    controller.abort();
+    await rejected;
+    cache.release(await next);
+    expect(repo.fetch).not.toHaveBeenCalled();
+  });
+
   it('frees a cover fetch slot even when native IPC ignores cancellation', async () => {
     const urls = blobUrlFactory();
     let started!: () => void;
@@ -91,6 +143,29 @@ describe('UnifiedImageCache', () => {
     } finally {
       finishDerived(data);
       cache.release(await derived);
+    }
+  });
+
+  it('serves a cached enhancement even while another enhancement is computing', async () => {
+    const urls = blobUrlFactory();
+    const data = { bytes: new Uint8Array([1]), mime: 'image/png' };
+    let finish!: (value: CachedImageData) => void;
+    const repo: ImageCacheRepository = {
+      read: async identity => identity.pageIndex === 1 ? data : null,
+      fetch: vi.fn(() => new Promise<CachedImageData>(resolve => { finish = resolve; })),
+      store: async () => undefined,
+    };
+    const cache = new UnifiedImageCache(repo, { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024 });
+    const base = { scopeId: 's', archiveId: 'a', rendition: 'dlssnr' as const };
+    const active = cache.load({ ...base, pageIndex: 0 });
+    await vi.waitFor(() => expect(repo.fetch).toHaveBeenCalledTimes(1));
+    try {
+      const cached = await Promise.race([cache.load({ ...base, pageIndex: 1 }), new Promise<undefined>(resolve => setTimeout(resolve, 100))]);
+      expect(cached).toBeDefined();
+      if (cached) cache.release(cached);
+    } finally {
+      finish(data);
+      cache.release(await active);
     }
   });
 

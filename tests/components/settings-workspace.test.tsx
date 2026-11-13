@@ -1550,26 +1550,20 @@ describe('settings workspace', () => {
     // 勾选 待看（追加到末尾）、取消 历史。
     await user.click(within(menu).getByRole('checkbox', { name: '底栏显示待看' }));
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...DEFAULT_PREFERENCES, bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings', 'to-read'] },
+      input: { ...DEFAULT_PREFERENCES, bottomNavItems: ['home', 'library', 'history', 'watchlist', 'to-read'] },
     }));
     await user.click(within(menu).getByRole('checkbox', { name: '底栏显示历史' }));
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
-      input: { ...DEFAULT_PREFERENCES, bottomNavItems: ['home', 'library', 'watchlist', 'settings', 'to-read'] },
-    }));
-    // 行值随之更新（默认 5 项 − 历史 + 待看 = 5 项）。
-    expect(screen.getByRole('button', { name: '底栏项目' })).toBeEnabled();
-    expect(screen.getByText('5 项')).toBeInTheDocument();
-
-    // 设置不再是固定项：可以取消勾选，并且真的写进偏好。取消掉也不会失联——
-    // 没收进底栏的页面统一出现在「更多」里。
-    const settings = within(menu).getByRole('checkbox', { name: '底栏显示设置' });
-    expect(settings).toBeEnabled();
-    expect(settings).toHaveAttribute('aria-checked', 'true');
-    await user.click(settings);
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', {
       input: { ...DEFAULT_PREFERENCES, bottomNavItems: ['home', 'library', 'watchlist', 'to-read'] },
     }));
-    expect(within(menu).getByRole('checkbox', { name: '底栏显示设置' })).toHaveAttribute('aria-checked', 'false');
+    // 默认四项，取消历史、加入待看后仍是四项。
+    expect(screen.getByRole('button', { name: '底栏项目' })).toBeEnabled();
+    expect(within(screen.getByRole('button', { name: '底栏项目' })).getByText('4 项')).toBeInTheDocument();
+
+    expect(within(menu).queryByRole('checkbox', { name: '底栏显示设置' })).toBeNull();
+    const home = within(menu).getByRole('checkbox', { name: '底栏显示首页' });
+    expect(home).toBeDisabled();
+    expect(home).toHaveAttribute('aria-checked', 'true');
     // 详情页功能按钮的默认值同样是 4 项，所以计数要读在它自己那一行上。
     expect(within(screen.getByRole('button', { name: '底栏项目' })).getByText('4 项')).toBeInTheDocument();
   });
@@ -1598,8 +1592,8 @@ describe('settings workspace', () => {
       );
       const compactNav = await compact.findByRole('navigation', { name: '移动导航' });
       const compactNames = Array.from(compactNav.querySelectorAll('a')).map((link) => link.textContent);
-      // 结尾的「更多」是入口本身（独立页面 /more），不是底栏放不下的那个页面。
-      expect(compactNames).toEqual(['首页', '档案库', '本地档案', '设置', '更多']);
+      // 设置与未选择的项目转移至首页顶栏。
+      expect(compactNames).toEqual(['首页', '档案库', '本地档案']);
       compact.unmount();
 
       // 桌面侧边栏不受该偏好影响，仍然完整。

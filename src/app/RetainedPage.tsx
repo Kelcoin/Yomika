@@ -3,6 +3,14 @@ import { createContext, useContext, useLayoutEffect, useRef, type ReactNode } fr
 const PageActiveContext = createContext(true);
 export const usePageActive = () => useContext(PageActiveContext);
 
+export function animateRouteEntry(panel: HTMLElement): Animation | undefined {
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || typeof panel.animate !== 'function') return undefined;
+  return panel.animate([{ opacity: 0.9 }, { opacity: 1 }], {
+    duration: 180,
+    easing: 'cubic-bezier(.2, .8, .2, 1)',
+  });
+}
+
 /** 把 scrollTop 直接写到位，而不是让它滚过去。
  *
  * 样式表给 `.workspace` 与滚动区加了 `scroll-behavior: smooth`（视觉优化那一批），
@@ -18,11 +26,17 @@ function writeInstantScroll(region: HTMLElement, write: () => void) {
 
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
-export function RetainedPage({ active, flow = false, motionSurface = false, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; children: ReactNode }) {
+export function RetainedPage({ active, flow = false, motionSurface = false, transitionKey, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; children: ReactNode }) {
   const parentActive = usePageActive();
   const visible = active && parentActive;
   const root = useRef<HTMLElement>(null);
   const positions = useRef(new Map<HTMLElement, number>());
+  useLayoutEffect(() => {
+    const node = root.current;
+    if (!visible || !node) return;
+    const animation = animateRouteEntry(node);
+    return () => animation?.cancel();
+  }, [visible, transitionKey]);
   useLayoutEffect(() => {
     if (!visible || !root.current) return;
     const panel = root.current;

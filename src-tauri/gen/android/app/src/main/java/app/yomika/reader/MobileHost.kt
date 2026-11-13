@@ -3,6 +3,8 @@ package app.yomika.reader
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
@@ -49,6 +51,11 @@ class WriteTextFileArgs {
 }
 
 @InvokeArg
+class ClipboardTextArgs {
+  lateinit var text: String
+}
+
+@InvokeArg
 class ReadTextFileArgs {
   lateinit var path: String
 }
@@ -73,8 +80,9 @@ class StatusBarVisibilityArgs {
 @InvokeArg
 class SecurityConfigureArgs {
   var expectedLockGeneration: Long = -1
-  var passwordEnabled: Boolean = false
+  var protectionEnabled: Boolean = false
   var lockOnBackground: Boolean = false
+  var backgroundLockSeconds: Int = 0
   var hidePreview: Boolean = false
   var locked: Boolean = false
 }
@@ -241,6 +249,20 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
    * 写一份文本到用户选定的位置。SAF 给的是 `content://` URI（系统的「新建文档」已经把
    * 文件建好了，零字节），普通路径直接写文件。
    */
+  @Command
+  fun writeClipboardText(invoke: Invoke) {
+    val args = invoke.parseArgs(ClipboardTextArgs::class.java)
+    hostActivity.runOnUiThread {
+      try {
+        val clipboard = hostActivity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Yomika", args.text))
+        invoke.resolve(JSObject())
+      } catch (error: Exception) {
+        invoke.reject(error.message ?: "无法写入系统剪贴板")
+      }
+    }
+  }
+
   @Command
   fun writeTextFile(invoke: Invoke) {
     try {

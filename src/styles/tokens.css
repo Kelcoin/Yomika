@@ -233,7 +233,7 @@
        above the bar, so the two can never drift apart. ------------------- */
     --reader-title-size: 22px;
     --reader-title-leading: 28px;
-    --reader-toolbar-height: 80px;
+    --reader-toolbar-height: 64px;
 
     /* ---- Elevation: menus, dialogs and masks only ----------------------- */
     --shadow-menu: 0 8px 24px rgb(26 28 26 / 0.16);

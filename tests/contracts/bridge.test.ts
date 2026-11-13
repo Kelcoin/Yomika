@@ -15,6 +15,19 @@ afterEach(() => {
 });
 
 describe('typed invoke bridge', () => {
+  it('does not include copied text in clipboard failure diagnostics', async () => {
+    const written: ErrorLogRecord[] = [];
+    setErrorLogSinkForTests(async (records) => { written.push(...records); return true; });
+    setInvokeAdapterForTests(async () => ({ ok: false, error: {
+      code: 'PLATFORM_UNAVAILABLE', message: 'Clipboard unavailable', retryable: true,
+    } }));
+    const secret = 'private clipboard content 859a';
+    await invokeCommand('write_clipboard_text', { text: secret }, z.unknown());
+    await flushErrorLog();
+    expect(written.some((record) => record.source === 'bridge/write_clipboard_text')).toBe(true);
+    expect(JSON.stringify(written)).not.toContain(secret);
+  });
+
   it('returns a schema-validated native value', async () => {
     setInvokeAdapterForTests(async () => ({ ok: true, value: { ready: true } }));
 

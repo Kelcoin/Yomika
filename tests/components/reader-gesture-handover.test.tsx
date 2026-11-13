@@ -1,11 +1,16 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Profiler } from 'react';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 
 afterEach(() => { setImageDecoderForTests(undefined); vi.restoreAllMocks(); });
+beforeEach(() => {
+  // These tests operate on an already displayed/decoded original image.
+  vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(128);
+});
 const plain = 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=';
 const touches = (distance: number) => [{ clientX: 200 - distance / 2, clientY: 300 }, { clientX: 200 + distance / 2, clientY: 300 }];
 const view = (derived = new Map<number, string>()) => <MemoryRouter><ReaderScreen archiveId="a" title="Reader" layout="single" pages={[plain]} derivedPages={derived} /></MemoryRouter>;

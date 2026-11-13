@@ -1,6 +1,6 @@
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { Server } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 
 /** 「添加服务器」的图标：一格机架（指示灯 + 槽位）加右下角一枚加号。
  *
@@ -32,6 +32,8 @@ function AddServerGlyph() {
  * 32px、档案库的列表面板 16px、书架不加），只靠 `.first-run` 自己排，同一个提示会
  * 在三个高度上出现。 */
 export function ServerRequiredPrompt() {
+  const { pathname } = useLocation();
+  const origin = pathname === '/' ? { homeEntry: true } : undefined;
   return (
     <div className="first-run-page">
       <section className="first-run" aria-labelledby="first-run-title">
@@ -44,11 +46,11 @@ export function ServerRequiredPrompt() {
         {/* 两个入口并排一行，图标都在文字左边：竖排满宽像两条横幅，而图标一左一右
             时读起来像两种不同的东西。 */}
         <div className="first-run-actions">
-          <Link className="primary-action" to="/settings">
+          <Link className="primary-action" to="/settings" state={origin}>
             <AddServerGlyph />
             添加服务器
           </Link>
-          <Link className="secondary-action" to="/settings?section=data">
+          <Link className="secondary-action" to="/settings?section=data" state={origin}>
             <RefreshCw aria-hidden="true" />
             导入数据
           </Link>

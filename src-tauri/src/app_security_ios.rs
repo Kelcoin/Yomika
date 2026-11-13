@@ -41,7 +41,7 @@ thread_local! {
 pub fn available() -> bool {
     unsafe {
         LAContext::new()
-            .canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthenticationWithBiometrics)
+            .canEvaluatePolicy_error(LAPolicy::DeviceOwnerAuthentication)
             .is_ok()
     }
 }
@@ -53,7 +53,7 @@ pub fn biometric_label() -> &'static str {
         match context.biometryType() {
             LABiometryType::FaceID => "Face ID",
             LABiometryType::TouchID => "Touch ID",
-            _ => "Face ID / Touch ID",
+            _ => "系统认证",
         }
     }
 }
@@ -209,7 +209,7 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
             // notification callbacks need it, without taking ownership of the pointer.
             let root = unsafe { Retained::retain(webview.inner().cast::<UIView>()) };
             ROOT.with(|slot| *slot.borrow_mut() = root);
-            cover(true);
+            if LOCKED.load(Ordering::SeqCst) { cover(true); }
             let center = NSNotificationCenter::defaultCenter();
             for name in [
                 ns_string!("UIApplicationWillResignActiveNotification"),
@@ -227,6 +227,7 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
                         if !backgrounded && auth_resume {
                             return;
                         }
+                        if backgrounded { crate::commands::app_security::foreground(&app); }
                         if backgrounded || !AUTHENTICATING.load(Ordering::SeqCst) {
                             // This asks React to fetch authoritative state while the
                             // native shield remains until its ready acknowledgement.
@@ -236,6 +237,7 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
                     }
                     if is_background {
                         BACKGROUNDED.store(true, Ordering::SeqCst);
+                        crate::commands::app_security::background(&app);
                         AUTH_RESUME_PENDING.store(false, Ordering::SeqCst);
                         // Going Home is a real departure, even while a Face ID
                         // sheet is active and automatic background lock is off.
@@ -252,7 +254,7 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
                     }
                     let lock =
                         PASSWORD.load(Ordering::SeqCst) && LOCK_BACKGROUND.load(Ordering::SeqCst);
-                    if HIDE_PREVIEW.load(Ordering::SeqCst) || lock {
+                    if HIDE_PREVIEW.load(Ordering::SeqCst) || PASSWORD.load(Ordering::SeqCst) {
                         cover(true);
                     }
                     if lock {

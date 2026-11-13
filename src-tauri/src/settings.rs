@@ -273,9 +273,9 @@ fn default_upscale_auto_blacklist() -> String { "other:3d\ncategory:cosplay\ncat
 fn default_compute_center_port() -> u16 {
     47653
 }
-/// The historical five mobile entries.
+/// Default mobile entries; settings is fixed in the home header.
 fn default_bottom_nav_items() -> Vec<String> {
-    ["home", "library", "history", "watchlist", "settings"]
+    ["home", "library", "history", "watchlist"]
         .into_iter()
         .map(String::from)
         .collect()
@@ -409,22 +409,13 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
     })
 }
 
-/// Dedupe, keep the canonical order, and pin 档案库 — without it there is no way
-/// into the library at all.
-///
-/// 设置 is deliberately *not* pinned. An unchecked entry is not lost: the compact
-/// bar grows a 更多 entry that lists exactly the ones it has no room for, and 设置
-/// appears there like any other. Pinning it made the choice look available when it
-/// was not.
-///
-/// Rebuilt by filtering the canonical order, so the bar is always in the app's
-/// order rather than in whatever order the stored list happened to arrive in, and a
-/// pinned entry lands in its canonical position instead of at the end.
+/// Keep home (the secondary-navigation hub) and library reachable.
+/// Legacy settings entries are accepted on read, then removed from the bottom bar.
 fn normalize_bottom_nav_items(items: &[String]) -> Vec<String> {
-    let order = ["home", "library", "history", "watchlist", "to-read", "downloads", "settings"];
+    let order = ["home", "library", "history", "watchlist", "to-read", "downloads"];
     order
         .iter()
-        .filter(|key| **key == "library" || items.iter().any(|item| item == *key))
+        .filter(|key| (**key == "home" || **key == "library") || items.iter().any(|item| item == *key))
         .map(|key| (*key).to_string())
         .collect()
 }
@@ -1001,7 +992,6 @@ mod tests {
                 "home".into(),
                 "library".into(),
                 "to-read".into(),
-                "settings".into(),
             ],
             custom_css: ":root { --brand-vermilion: #1f6f8b; }".into(),
             start_with_windows: false,
@@ -1034,15 +1024,25 @@ mod tests {
     }
 
     #[test]
-    fn the_bottom_bar_pins_the_library_and_may_drop_settings() {
-        // 档案库 is load-bearing: unpinning it would leave no way into the library.
-        // 设置 is not, so unchecking it has to survive the save — and the result is
-        // in the canonical order regardless of the order it was stored in.
+    fn the_bottom_bar_pins_home_and_library_and_drops_legacy_settings() {
+        // Home hosts the secondary links and settings; neither home nor library can disappear.
         let keys = |items: &[&str]| normalize_bottom_nav_items(&items.iter().map(|item| item.to_string()).collect::<Vec<_>>());
-        assert_eq!(keys(&["settings", "home"]), ["home", "library", "settings"]);
-        assert_eq!(keys(&["downloads"]), ["library", "downloads"]);
-        assert_eq!(keys(&["home", "settings", "library"]), ["home", "library", "settings"]);
-        assert_eq!(keys(&[]), ["library"]);
+        assert_eq!(keys(&["settings", "home"]), ["home", "library"]);
+        assert_eq!(keys(&["downloads"]), ["home", "library", "downloads"]);
+        assert_eq!(keys(&["home", "settings", "library"]), ["home", "library"]);
+        assert_eq!(keys(&[]), ["home", "library"]);
+    }
+
+    #[test]
+    fn old_bottom_navigation_is_normalized_on_load_and_saved_without_settings() {
+        let mut connection = settings_db();
+        connection.execute("INSERT INTO settings (key,value_json) VALUES ('preferences.bottom_nav_items', ?1)",
+            [r#"["settings","downloads","downloads"]"#]).unwrap();
+        let loaded = load_preferences_from(&connection).unwrap();
+        assert_eq!(loaded.bottom_nav_items, ["home", "library", "downloads"]);
+        save_preferences_to(&mut connection, loaded).unwrap();
+        let stored: String = connection.query_row("SELECT value_json FROM settings WHERE key='preferences.bottom_nav_items'", [], |row| row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<Vec<String>>(&stored).unwrap(), ["home", "library", "downloads"]);
     }
 
     #[test]

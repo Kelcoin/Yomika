@@ -2056,12 +2056,6 @@ body::-webkit-scrollbar,
   .library-shell-detail { border-left: 0; width: 100%; min-width: 0; }
 }
 
-/* Six labelled actions need roughly this much room. Below it they keep their
-   icons and lose the words rather than folding onto a second row. */
-@container app-main (max-width: 700px) {
-  .archive-detail-route-actions .archive-action-label { display: none; }
-}
-
 /* The status bar is a 28px band of --surface-panel pinned to the bottom of every
    route. Every other route keeps 80px of workspace padding above it, so it reads
    as chrome; the library zeroes that padding to run edge to edge, which left the
@@ -2272,15 +2266,10 @@ body::-webkit-scrollbar,
 .archive-detail-facts dd { min-width: 0; flex: 1; margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
 .archive-detail-tag-section { width: 100%; min-width: 0; margin-top: 20px; }
 
-/* One row, always. This was `repeat(4, minmax(0, 1fr))` while the toolbar grew
-   to six actions, so grid put the last two on a second row — at every width, not
-   only narrow ones. Flex without wrapping keeps them on one line and lets each
-   shrink; the labels drop out below the width where six of them fit, and the
-   icon plus its title still names the action. */
+/* Share one row; label visibility follows each button's available width,
+   including when the user customises how many actions are shown. */
 .archive-detail-route-actions {
   display: flex;
-  container-type: inline-size;
-  container-name: detail-actions;
   align-items: stretch;
   /* A 400px pane splits six ways; the pill's own padding and this gap are the
      slack a two-character label lives on, so both stay at the floor. */
@@ -2297,14 +2286,8 @@ body::-webkit-scrollbar,
 .archive-detail-route-actions::-webkit-scrollbar {
   display: none;
 }
-@container detail-actions (max-width: 510px) {
-  .archive-detail-route-actions .archive-action-label { display: none; }
-}
 
-/* The detail toolbar's labels: six actions in one row. Below the container
-   width they drop their words and keep their icons rather than folding. When a
-   shared pill runs out of room (a toggled label is four characters wide), the
-   label degrades to an ellipsis instead of a hard mid-glyph clip. */
+/* Long labels truncate without wrapping as a final fallback. */
 .archive-action-label {
   display: block;
   min-width: 0;
@@ -2313,18 +2296,28 @@ body::-webkit-scrollbar,
   white-space: nowrap;
 }
 
-/* 「从 12 页继续」是这一排里最长的一个词，宽的时候它比「阅读」多占三四个字的位置，
-   窄的时候整排都会被它挤走。所以它另有一份短写法：宽容器用长的，窄容器换成
-   「继续」，再窄才和别的动作一样只剩图标（上面那条 `max-width: 510px` 的规则）。
-   短写法只在有进度时才渲染，没读过的一本仍然是「阅读」。 */
+/* Prefer compact aliases before falling back to icons. Complete action names
+   and states remain in the controls' accessible labels. */
 .archive-action-label-short {
   display: none;
   min-width: 0;
   white-space: nowrap;
 }
 
-@container detail-actions (max-width: 510px) {
-  .archive-detail-route-actions .archive-action-label-short { display: block; }
+@container detail-action (max-width: 168px) {
+  .archive-action-label-read:has(+ .archive-action-label-short) { display: none; }
+  .archive-action-label-read + .archive-action-label-short { display: block; }
+}
+@container detail-action (max-width: 100px) {
+  .archive-action-label:has(+ .archive-action-label-short) { display: none; }
+  .archive-action-label-short { display: block; }
+}
+@container detail-action (max-width: 68px) {
+  .archive-action-label-read + .archive-action-label-short { font-size: var(--text-xs); }
+}
+@container detail-action (max-width: 60px) {
+  .archive-action-label,
+  .archive-action-label + .archive-action-label-short { display: none; }
 }
 
 /* The row's buttons share the full width. The old .archive-action-button carried
@@ -2337,6 +2330,8 @@ body::-webkit-scrollbar,
 .archive-detail-route-actions > .secondary-action,
 .archive-detail-route-actions > a.primary-action,
 .archive-detail-route-actions > a.secondary-action {
+  container-type: inline-size;
+  container-name: detail-action;
   flex: 1 1 0;
   min-width: 0;
   padding: 0 var(--space-1);
@@ -4443,7 +4438,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    返回手势。逐设备的取值由 `src/lib/horizontalScroller.ts` 的
    `getTouchScrollStyle()` / `getMouseScrollStyle()` 以行内样式落上去（行内赢过这里），
    这一条是首帧与没有脚本时的兜底，两边必须一致。 */
-.archive-rail-grid { width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: none; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: x proximity; touch-action: auto; }
+.archive-rail-grid { width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: none; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: none; touch-action: auto; }
 .archive-rail-track { display: flex; align-items: flex-start; gap: var(--space-3); width: max-content; min-width: 100%; }
 /* Snap uses an untransformed wrapper: pressing the first card must not
    move its snap area and scroll the entire rail sideways. */
@@ -7179,11 +7174,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .archive-recommendations-tabs .archive-recommendations-tab-creator { transition: none; }
 }
 
-/* Workspace routes keep their viewport overlays in portals. An opacity-only
-   entry preserves those anchors and never flashes through an empty page. */
-.route-cache-panel[data-bounce-surface]:not([hidden]) {
-  animation: workspace-in var(--motion-page) backwards;
-}
 .archive-list-pull { transition: transform var(--motion-bounce); }
 
 :where(:root[data-layout='compact']) {
@@ -7209,7 +7199,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   scale: .96;
 }
 @media (prefers-reduced-motion: reduce) {
-  .route-cache-panel[data-bounce-surface]:not([hidden]) { animation: none; }
   :is(.icon-button, .primary-action, .secondary-action, .nav-link, .sidebar-toggle):is(.is-pressed, :active):not(:disabled) { scale: 1; }
 }
 
@@ -7302,3 +7291,27 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 /* Inset menu rows own rounded hover surfaces instead of full-width square bars. */
 .settings-menu-body .settings-row { border-radius: var(--radius-card); }
+
+/* Mobile home chrome is a separate grid row: content bounces beneath it. */
+.app-main.has-home-topbar { grid-template-rows: auto minmax(0, 1fr); }
+.mobile-home-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 64px;
+  padding: var(--space-2) max(var(--space-4), var(--safe-right)) var(--space-2) max(var(--space-4), var(--safe-left));
+  background: var(--surface-panel);
+}
+.mobile-home-brand { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; font-size: var(--text-lg); font-weight: var(--weight-semibold); color: var(--on-surface); }
+.mobile-home-brand .yomika-mark { flex-shrink: 0; }
+.mobile-home-shortcuts { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-1); flex: 1 1 0; min-width: 0; }
+.mobile-home-shortcuts-scroll { display: flex; align-items: center; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; touch-action: pan-x; }
+.mobile-home-shortcuts .icon-button { width: 44px; min-width: 44px; height: 44px; flex: 0 0 44px; }
+.mobile-home-settings { flex-shrink: 0; }
+
+/* One rhythm from the fixed header through every home component. */
+.app-main.has-home-topbar .library-shell-list { padding-block-start: var(--space-6); }
+.app-main.has-home-topbar .workspace-home { display: grid; gap: var(--space-6); }
+.app-main.has-home-topbar .workspace-home > .archive-rail { margin-block: 0; }
+.app-main.has-home-topbar .workspace-home > .first-run-page { padding-block-start: 0; }

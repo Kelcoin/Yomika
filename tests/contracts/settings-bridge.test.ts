@@ -35,7 +35,7 @@ const preferences = {
   detailDateKind: 'published' as 'added' | 'published',
   customCss: '',
   floatingNav: false,
-  bottomNavItems: ['home', 'library', 'history', 'watchlist', 'settings'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads' | 'settings'>,
+  bottomNavItems: ['home', 'library', 'history', 'watchlist'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads'>,
   startWithWindows: false,
   closeToTray: false,
   tagTranslationEnabled: true,
@@ -142,4 +142,11 @@ describe('native settings bridge', () => {
       error: { code: 'INVALID_RESPONSE', retryable: false },
     });
   });
+});
+
+
+it('normalizes legacy bottom navigation without losing the home/settings access path', async () => {
+  setInvokeAdapterForTests(async () => ({ ok: true, value: { ...preferences, bottomNavItems: ['settings', 'downloads', 'downloads'] } }));
+  const result = await new NativeSettingsRepository().load();
+  expect(result.ok && result.value.bottomNavItems).toEqual(['home', 'library', 'downloads']);
 });

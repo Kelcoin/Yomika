@@ -29,10 +29,17 @@ pub fn platform_capabilities() -> CommandResult<PlatformCapabilities> {
  * permission on every write; the native side writes without any prompt, so
  * text exports (cookies, archive ids, migration JSON) go through here. */
 #[tauri::command]
-pub fn write_clipboard_text(text: String) -> CommandResult<()> {
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn write_clipboard_text(app: tauri::AppHandle, text: String) -> CommandResult<()> {
+    #[cfg(target_os = "android")]
     {
-        let _ = text;
+        return match crate::mobile_host::write_clipboard_text(&app, &text).await {
+            Ok(()) => CommandResult::success(()),
+            Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
+        };
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, text);
         return CommandResult::failure(
             "PLATFORM_UNAVAILABLE",
             "Native clipboard is not available on this platform",
@@ -41,6 +48,7 @@ pub fn write_clipboard_text(text: String) -> CommandResult<()> {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        let _ = app;
         let mut clipboard = match arboard::Clipboard::new() {
             Ok(clipboard) => clipboard,
             Err(error) => return CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), false),

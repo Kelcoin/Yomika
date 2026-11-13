@@ -686,7 +686,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (screenOwned) screenOwnedPagesRef.current.add(pageIndex);
     const existing = pageHandlesRef.current.get(pageIndex);
     if (existing) return existing.url;
-    const pending = pendingPagesRef.current.get(pageIndex);
+    const pendingController = pendingPageAbortsRef.current.get(pageIndex);
+    const pending = !pendingController?.signal.aborted && pendingPagesRef.current.get(pageIndex);
     if (pending) return pending;
 
     // Bound even sweep-owned requests: a screen joining one must not inherit
@@ -705,7 +706,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         pageIndex,
         rendition: 'reader-page',
         sourcePath: path,
-      }, { signal: controller.signal });
+      }, {
+        signal: controller.signal,
+        priority: () => {
+          const visible = [...visiblePagesRef.current];
+          return visible.length ? 1000 - Math.min(...visible.map(index => Math.abs(index - pageIndex))) : 0;
+        },
+      });
       const current = contextRef.current;
       if (!mountedRef.current || !current || current.generation !== context.generation || controller.signal.aborted) {
         imageCache.release(handle);

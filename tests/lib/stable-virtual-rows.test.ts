@@ -15,3 +15,11 @@ it('keeps mounted cards during a hidden viewport collapse but accepts real visib
   hook.rerender({ items: [], measurable: false, count: 0 });
   expect(hook.result.current.items).toEqual([]);
 });
+
+it('accepts the first asynchronous measurement instead of retaining an empty initial snapshot', () => {
+  const hook = renderHook(({ items }) => useStableVirtualRows(items, 1000, 10, false), { initialProps: { items: [] as number[] } });
+  hook.rerender({ items: [0, 1, 2] });
+  expect(hook.result.current.items).toEqual([0, 1, 2]);
+  hook.rerender({ items: [] });
+  expect(hook.result.current.items).toEqual([0, 1, 2]);
+});

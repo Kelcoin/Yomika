@@ -48,7 +48,7 @@ it('does not read layout for unrelated scroll events while preserving owned scro
   } finally { unrelated.remove(); }
 });
 
-it('keeps footer measurement stable across unchanged renders and invalidates on text, width and activation', () => {
+it('keeps footer measurement stable across unchanged renders and invalidates on text, width and activation', async () => {
   let width = 90;
   const observers: ResizeObserverCallback[] = [];
   const observe = vi.fn();
@@ -70,7 +70,7 @@ it('keeps footer measurement stable across unchanged renders and invalidates on 
   expect(reads.mock.calls.length).toBeGreaterThan(0);
   reads.mockClear();
   width = 200;
-  act(() => observers[0]!([], {} as ResizeObserver));
+  await act(async () => { observers[0]!([], {} as ResizeObserver); await new Promise(requestAnimationFrame); });
   expect(reads.mock.calls.length).toBeGreaterThan(0);
   reads.mockClear();
   rerender(footer(false));

@@ -89,9 +89,12 @@ export function SettingsMenu({ title, icon, action, onClose, onBack, backLabel, 
       if (body.style.height !== height) body.style.height = height;
     };
     measure();
-    const observer = new ResizeObserver(measure);
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; measure(); });
+    });
     observer.observe(content);
-    return () => observer.disconnect();
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, [pageActive]);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;

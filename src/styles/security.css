@@ -4,6 +4,7 @@ body[data-app-security-covered="true"] > :not(.app-security-overlay) * { visibil
 .app-security-content { display: contents; }
 .app-security-overlay { position: fixed; inset: 0; z-index: var(--z-security); display: grid; place-items: center; padding: max(var(--space-6), var(--safe-overlay-top)) var(--space-6) max(var(--space-6), var(--safe-bottom)); background: var(--surface); color: var(--on-surface); }
 .app-security-card { width: min(100%, 340px); display: grid; justify-items: center; gap: var(--space-5); }
+.app-security-card:focus-visible { outline: none; box-shadow: none; }
 .app-security-card h1 { font-size: var(--text-heading); margin: 0; }
 .app-security-card form, .security-form { display: grid; width: 100%; gap: var(--space-4); }
 .security-password-field { display: grid; gap: var(--space-2); font-size: var(--text-md); }
@@ -13,3 +14,13 @@ body[data-app-security-covered="true"] > :not(.app-security-overlay) * { visibil
 .security-form p { margin: 0; line-height: 1.6; }
 .security-form [role="alert"], .app-security-card [role="alert"] { color: var(--error); }
 .security-note { padding: var(--space-3) var(--space-5); color: var(--on-surface-variant); font-size: var(--text-sm); line-height: var(--leading-relaxed); }
+.pattern-lock { display: grid; justify-items: center; gap: var(--space-3); width: 100%; }
+.pattern-lock > .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.pattern-lock-grid { position: relative; width: min(100%, 280px); aspect-ratio: 1; display: grid; grid-template-columns: repeat(3, 1fr); touch-action: none; user-select: none; }
+.pattern-lock-grid svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.pattern-lock-grid polyline { fill: none; stroke: var(--primary); stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+.pattern-lock-grid button { border: 0; border-radius: 50%; background: transparent; padding: 0; min-width: 0; position: relative; }
+.pattern-lock-grid button span { width: 14px; height: 14px; border-radius: 50%; background: var(--outline); pointer-events: none; }
+.pattern-lock-grid button[aria-pressed="true"] span { background: var(--primary); box-shadow: 0 0 0 10px var(--primary-container); }
+.pattern-lock-actions { display: flex; gap: var(--space-3); width: 100%; }
+.pattern-lock-actions > button { flex: 1; min-width: 0; }

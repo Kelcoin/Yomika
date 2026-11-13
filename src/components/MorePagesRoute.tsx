@@ -4,12 +4,7 @@ import { SettingsRow } from './SettingsRow';
 import { PanelsTopLeft } from 'lucide-react';
 import { EmptyState } from './EmptyState';
 
-/** 底栏放不下的页面在这里列出来。
- *
- * 以前它是一个左上角的弹出菜单：点「更多」出面板、点外面关掉，键盘与读屏都要多绕
- * 一步，和设置页那种「一行一个入口」的语言也不一致。现在它是一张独立页面，行样式
- * 直接复用设置页的 SettingsRow，只是点了会跳转。哪些页面进来仍由底栏偏好决定——
- * 底栏装得下全部时连「更多」入口都不会出现。 */
+/** Compatibility route for saved /more links; mobile navigation lives in the home header. */
 export function MorePagesRoute() {
   const { preferences } = usePreferences();
   const hidden = compactNavHiddenItems(preferences.bottomNavItems);

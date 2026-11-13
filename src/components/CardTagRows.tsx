@@ -65,6 +65,7 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
     const element = root.current;
     if (!element) return;
     let active = true;
+    let frame = 0;
     const measureTags = () => {
       if (!active) return;
       // Use layout widths: painted rects shrink with card press animations,
@@ -95,11 +96,11 @@ export function CardTagRows({ tags, rowCount, className, colorFor, fill = false,
         // 槽宽变了要连胶囊一起重量：只把槽宽写回去，会把上一次那份（可能是 0 宽的）
         // 胶囊表配上新槽宽。重新量一遍走的是同一个 `setMeasured`，逐项相等时它
         // 返回原对象，所以这次观察不会自己把自己再触发一轮。
-        measureTags();
+        if (!frame) frame = requestAnimationFrame(() => { frame = 0; measureTags(); });
       }) : undefined;
     observer?.observe(element);
     void document.fonts?.ready.then(measureTags);
-    return () => { active = false; observer?.disconnect(); };
+    return () => { active = false; observer?.disconnect(); cancelAnimationFrame(frame); };
   // Retained pages reveal before ResizeObserver delivers: measure in the
   // activation layout effect so the fallback rows never reach the screen.
   }, [labelKey, fill, pageActive, layout]);

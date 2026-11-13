@@ -53,10 +53,13 @@ export function MetadataTagRows({ tags, onDelete }: { tags: string[]; onDelete: 
         ? previous : { rows: next, widths });
     };
     measure();
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(measure);
+    let frame = 0;
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; measure(); });
+    });
     observer?.observe(element);
     void document.fonts?.ready.then(measure);
-    return () => { active = false; observer?.disconnect(); };
+    return () => { active = false; observer?.disconnect(); cancelAnimationFrame(frame); };
   }, [tags, translatedKey]);
   return <div className="metadata-tag-rows" ref={root}>
     <div className="metadata-tag-measures" aria-hidden="true">{tags.map((tag, index) => (

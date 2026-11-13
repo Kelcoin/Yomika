@@ -414,7 +414,7 @@ function HomeWorkspace() {
                   重试读取服务器
                 </button>
               )}
-              <Link className="secondary-action" to="/settings">打开设置</Link>
+              <Link className="secondary-action" to="/settings" state={{ homeEntry: true }}>打开设置</Link>
             </div>
           </section>
         </div>
@@ -1023,7 +1023,7 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, activ
         </Routes>
       </Suspense>
   ), [saved]);
-  return <RetainedPage active={active} motionSurface flow={flow}>
+  return <RetainedPage active={active} motionSurface flow={flow} transitionKey={`${saved.pathname}${saved.search}${saved.hash}`}>
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });

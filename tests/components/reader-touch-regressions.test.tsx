@@ -1,11 +1,16 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import * as platform from '../../src/bridge/platform';
 import { Profiler } from 'react';
 
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+beforeEach(() => {
+  // Fixture blob URLs represent decoded pages; jsdom never loads them itself.
+  vi.spyOn(HTMLImageElement.prototype, 'complete', 'get').mockReturnValue(true);
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(128);
+});
 function mount() {
   render(<MemoryRouter><ReaderScreen archiveId="touch" title="Touch" pages={['blob:a']} layout="single" /></MemoryRouter>);
   return screen.getByRole('main', { name: '漫画阅读器' });

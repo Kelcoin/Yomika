@@ -6,7 +6,6 @@ import {
   HardDrive,
   History,
   Home,
-  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Settings,
@@ -17,6 +16,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
 import { getPlatformCapabilities } from '../bridge/platform';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isMobileDevice } from '../lib/layoutMode';
 import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
@@ -38,11 +38,8 @@ const navigation = [
 ] as const;
 
 type NavKey = (typeof navigation)[number]['to'];
-/** The compact bar's entries are a preference keyed by these route ids. 档案库 is
- * load-bearing — without it there is no way into the library — so it is always
- * present. 设置 is not: an unselected entry reappears under 更多, which is where
- * the bar sends whatever it has no room for. */
-const PINNED_NAV_KEYS: NavKey[] = ['/library'];
+/** Home hosts secondary navigation and settings; both home and library stay reachable. */
+const PINNED_NAV_KEYS: NavKey[] = ['/', '/library'];
 const NAV_KEY_ROUTES: Record<string, NavKey> = {
   home: '/',
   library: '/library',
@@ -50,7 +47,6 @@ const NAV_KEY_ROUTES: Record<string, NavKey> = {
   watchlist: '/watchlist',
   'to-read': '/to-read',
   downloads: '/downloads',
-  settings: '/settings',
 };
 
 function compactNavItems(bottomNavItems: readonly string[]) {
@@ -59,11 +55,10 @@ function compactNavItems(bottomNavItems: readonly string[]) {
   return navigation.filter(({ to }) => routes.has(to));
 }
 
-/** The entries the bottom bar has no room for: the 更多 page lists exactly these,
- * and the 更多 entry itself only exists while the list is not empty. */
+/** Secondary entries shown before the fixed settings link in the home header. */
 export function compactNavHiddenItems(bottomNavItems: readonly string[] = []) {
   const items = compactNavItems(bottomNavItems);
-  return navigation.filter(({ to }) => !items.some((entry) => entry.to === to));
+  return navigation.filter(({ to }) => to !== '/settings' && !items.some((entry) => entry.to === to));
 }
 
 const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
@@ -95,11 +90,6 @@ interface AppShellProps {
 function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
   const items = compact && bottomNavItems ? compactNavItems(bottomNavItems) : navigation;
-  // 底栏放不下的页面收进「更多」——它现在是独立页面（/more），不再是弹出菜单；
-  // 底栏装得下全部时连这个入口都不出现，人在那些页面或 /more 上时保持选中。
-  const hiddenItems = compact ? compactNavHiddenItems(bottomNavItems) : [];
-  const showMore = compact && hiddenItems.length > 0;
-  const moreActive = location.pathname === '/more' || hiddenItems.some(({ to }) => to === location.pathname);
   return (
     <>
       <nav
@@ -118,25 +108,31 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
             end={to === '/'}
             key={to}
             to={to}
+            state={{ navigationTab: true }}
             title={label}
           >
             <Icon aria-hidden="true" />
             <span>{label}</span>
           </NavLink>
         ))}
-        {showMore && (
-          <NavLink
-            className={`nav-link nav-more${moreActive ? ' is-active' : ''}`}
-            to="/more"
-            title="更多"
-          >
-            <MoreHorizontal aria-hidden="true" />
-            <span>更多</span>
-          </NavLink>
-        )}
+
       </nav>
     </>
   );
+}
+
+/** Pinned home chrome stays outside the overscrolling, retained page content. */
+function MobileHomeTopbar({ bottomNavItems }: { bottomNavItems: readonly string[] }) {
+  const hidden = compactNavHiddenItems(bottomNavItems);
+  return <header className="mobile-home-topbar">
+    <div className="mobile-home-brand" aria-label="Yomika"><YomikaMark size={30} /><span>Yomika</span></div>
+    <nav className="mobile-home-shortcuts" aria-label="首页快捷导航">
+      <div className="mobile-home-shortcuts-scroll">
+        {hidden.map(({ to, label, icon: Icon }) => <Link key={to} to={to} state={{ homeEntry: true }} className="icon-button" aria-label={label} title={label}><Icon aria-hidden="true" /></Link>)}
+      </div>
+      <Link to="/settings" state={{ homeEntry: true }} className="icon-button mobile-home-settings" aria-label="设置" title="设置"><Settings aria-hidden="true" /></Link>
+    </nav>
+  </header>;
 }
 
 /** Remembered so the rail opens the way it was left. */
@@ -144,6 +140,8 @@ const SIDEBAR_COLLAPSED_KEY = 'yomika.sidebar-collapsed';
 
 export function AppShell({ children }: AppShellProps) {
   const { pathname } = useLocation();
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  const homeTopbar = compact && pathname === '/';
   const { preferences } = usePreferences();
   const floatingNav = preferences.floatingNav;
   // The rail's collapsed state is a preference, not session state: it used to
@@ -385,7 +383,8 @@ export function AppShell({ children }: AppShellProps) {
         </div>
       </aside>
 
-      <div className="app-main">
+      <div className={`app-main${homeTopbar ? ' has-home-topbar' : ''}`}>
+        {homeTopbar && <MobileHomeTopbar bottomNavItems={preferences.bottomNavItems} />}
         <main
           id="main-content"
           // The shelves render the library's own list, so they take the library's

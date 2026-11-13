@@ -5,10 +5,38 @@
   top: 0;
   z-index: var(--z-raised);
   min-height: var(--icon-button-size);
-  background: var(--surface);
-  box-shadow: 0 1px 0 var(--hairline);
+  background: var(--surface-panel);
+}
+
+/* Extend the opaque sticky surface through the pane's horizontal padding.
+   Keep the controls aligned with the detail content underneath. */
+.archive-detail-route-header::before {
+  content: '';
+  position: absolute;
+  inset: 0 calc(-1 * var(--space-4));
+  background: inherit;
+  z-index: -1;
+  pointer-events: none;
 }
 
 .archive-detail-panels {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
   touch-action: pan-y pinch-zoom;
+  overflow-anchor: none;
+  margin-top: var(--space-5);
+  padding-bottom: var(--space-5);
+}
+
+.archive-detail-panels > [role='tabpanel'] {
+  grid-area: 1 / 1;
+  min-width: 0;
+  min-height: max(0px, calc(var(--panel-min-height, 280px) - var(--space-5)));
+}
+.archive-detail-panels > [role='tabpanel'] > .archive-detail-tag-section { margin-top: 0; }
+.archive-detail-panels > [role='tabpanel'] > .eh-comments { margin-block: 0; }
+.archive-detail-panels > [role='tabpanel'] > .eh-comments:not(:has(.eh-comments-list)) {
+  min-height: inherit;
+  grid-template-rows: auto 1fr auto;
 }

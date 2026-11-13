@@ -102,7 +102,7 @@ describe('application shell', () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
   });
 
-  it('exposes full desktop navigation and compact five-item navigation', async () => {
+  it('exposes full desktop navigation and compact four-item navigation', async () => {
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_servers' || command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
@@ -117,9 +117,8 @@ describe('application shell', () => {
     expect(within(desktop).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
 
     const compact = screen.getByRole('navigation', { name: '移动导航' });
-    // 五个页面 + 「更多」入口（它现在也是一个链接，指向独立页面而不是弹出菜单）。
-    expect(within(compact).getAllByRole('link')).toHaveLength(6);
-    expect(within(compact).getByRole('link', { name: /更多/ })).toHaveAttribute('href', '/more');
+    expect(within(compact).getAllByRole('link')).toHaveLength(4);
+    expect(within(compact).queryByRole('link', { name: /更多|设置/ })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: 'E-Hentai' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '本地档案' })).not.toBeInTheDocument();
     expect(within(compact).queryByRole('link', { name: '同步' })).not.toBeInTheDocument();
@@ -479,7 +478,7 @@ describe('application shell', () => {
     expect(screen.getByRole('button', { name: '展开侧栏' })).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('lists the pages the compact bar cannot fit on the 更多 page', async () => {
+  it('places secondary pages before fixed settings in the mobile home header', async () => {
     const user = userEvent.setup();
     const original = window.matchMedia;
     window.matchMedia = ((query: string) => ({
@@ -500,13 +499,18 @@ describe('application shell', () => {
       });
       renderAt('/');
 
-      await user.click(await screen.findByRole('link', { name: /更多/ }));
-      // 独立页面而不是弹出菜单：行样式与设置页同一套，只列底栏放不下的页面。
-      expect(await screen.findByRole('heading', { name: '更多' })).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: '打开待看' })).toHaveAttribute('href', '/to-read');
-      expect(screen.getByRole('link', { name: '打开本地档案' })).toHaveAttribute('href', '/downloads');
-      // 已在底栏里的页面不再重复出现。
-      expect(screen.queryByRole('link', { name: '打开历史' })).not.toBeInTheDocument();
+      const topbar = await screen.findByRole('navigation', { name: '首页快捷导航' });
+      const links = within(topbar).getAllByRole('link');
+      expect(links.map(link => link.getAttribute('aria-label'))).toEqual(['待看', '本地档案', '设置']);
+      expect(within(topbar).queryByRole('link', { name: '历史' })).not.toBeInTheDocument();
+      expect(topbar.closest('header')?.parentElement).toHaveClass('has-home-topbar');
+      expect(topbar.closest('.workspace')).toBeNull();
+      expect(within(screen.getByRole('navigation', { name: '移动导航' })).queryByRole('link', { name: '更多' })).toBeNull();
+      await user.click(within(topbar).getByRole('link', { name: '设置' }));
+      expect(await screen.findByRole('complementary', { name: '设置分类' })).toBeInTheDocument();
+      expect(screen.queryByRole('navigation', { name: '首页快捷导航' })).toBeNull();
+      fireEvent(window, new Event('yomika-mobile-back', { cancelable: true }));
+      expect(await screen.findByRole('navigation', { name: '首页快捷导航' })).toBeInTheDocument();
     } finally {
       window.matchMedia = original;
     }

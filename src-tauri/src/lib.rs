@@ -309,7 +309,8 @@ pub fn run() {
                 .iter()
                 .find(|window| window.label == "main")
                 .ok_or_else(|| std::io::Error::other("Main window configuration unavailable"))?;
-            let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
+            let builder = tauri::WebviewWindowBuilder::from_config(app, config)?
+                .initialization_script(commands::app_security::bootstrap_script(app.handle()).map_err(std::io::Error::other)?);
             // Windows draws its own themed title bar (TitleBar.tsx); other
             // desktop platforms keep their native window chrome. `decorations`
             // only exists in Tauri's desktop build — the mobile runtime has no
@@ -405,6 +406,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(desktop)]
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Focused(true)) {
+                commands::app_security::foreground(window.app_handle());
+            }
             #[cfg(desktop)]
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Focused(false)) {
                 commands::app_security::background(window.app_handle());

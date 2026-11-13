@@ -72,14 +72,14 @@ const TAGS = [
 ];
 
 describe('card tag rows', () => {
-  it('retains measured packing when a refresh returns equal tags in a new array', () => {
+  it('retains measured packing when a refresh returns equal tags in a new array', async () => {
     const fake = installMeasureFake();
     try {
       const { container, rerender } = render(<CardTagRows tags={TAGS} rowCount={2} fill className="tags" />);
       const root = container.querySelector<HTMLElement>('.tags')!;
       fake.track(root);
       fake.state.laidOut = true;
-      act(() => fake.fire(root));
+      await act(async () => { fake.fire(root); await new Promise(requestAnimationFrame); });
       expect(rowLengths(container)).toEqual([1, 1]);
       fake.state.laidOut = false;
       rerender(<CardTagRows tags={[...TAGS]} rowCount={2} fill className="tags" />);
@@ -122,7 +122,7 @@ describe('card tag rows', () => {
     } finally { fake.restore(); }
   });
 
-  it('keeps tag packing stable while the card is visually scaled on press', () => {
+  it('keeps tag packing stable while the card is visually scaled on press', async () => {
     const fake = installMeasureFake();
     try {
       const { container } = render(<CardTagRows tags={TAGS} rowCount={2} fill className="tags" />);
@@ -130,15 +130,15 @@ describe('card tag rows', () => {
       fake.track(root);
       fake.state.laidOut = true;
       fake.state.chipWidth = 64;
-      act(() => fake.fire(root));
+      await act(async () => { fake.fire(root); await new Promise(requestAnimationFrame); });
       expect(rowLengths(container)).toEqual([1, 1]);
       fake.state.paintScale = .97;
-      act(() => fake.fire(root));
+      await act(async () => { fake.fire(root); await new Promise(requestAnimationFrame); });
       expect(rowLengths(container)).toEqual([1, 1]);
     } finally { fake.restore(); }
   });
 
-  it('re-measures the chips when a card that mounted unseen is laid out at last', () => {
+  it('re-measures the chips when a card that mounted unseen is laid out at last', async () => {
     const fake = installMeasureFake();
     try {
       const { container } = render(
@@ -154,7 +154,7 @@ describe('card tag rows', () => {
 
       // 容器显示出来：槽宽 134、每个胶囊 70 —— 134 装不下两个（70 + 4 + 70 > 134）。
       fake.state.laidOut = true;
-      act(() => fake.fire(root));
+      await act(async () => { fake.fire(root); await new Promise(requestAnimationFrame); });
 
       expect(rowLengths(container)).toEqual([1, 1]);
     } finally {

@@ -2,6 +2,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 import { Link, MemoryRouter, useLocation } from 'react-router-dom';
 import { describe, expect, it, vi } from 'vitest';
 import { usePageActive } from '../../src/app/RetainedPage';
+import { animateRouteEntry, RetainedPage } from '../../src/app/RetainedPage';
 
 const counts = vi.hoisted(() => ({ more: 0, upload: 0 }));
 vi.mock('../../src/components/MorePagesRoute', () => ({ MorePagesRoute: () => {
@@ -16,6 +17,22 @@ vi.mock('../../src/components/DeduplicationWorkspace', () => ({ DeduplicationWor
 import { WorkspaceRoutes, lazyPages } from '../../src/app/routes';
 
 describe('retained navigation render budget', () => {
+  it('uses an opacity-only route transition and respects reduced motion', () => {
+    const panel = document.createElement('section');
+    const cancel = vi.fn();
+    const animate = vi.fn(() => ({ cancel }) as unknown as Animation);
+    Object.defineProperty(panel, 'animate', { configurable: true, value: animate });
+    const originalMatchMedia = window.matchMedia;
+    let reducedMotion = false;
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: reducedMotion }) });
+    const animation = animateRouteEntry(panel);
+    expect(animate).toHaveBeenCalledWith([{ opacity: 0.9 }, { opacity: 1 }], expect.objectContaining({ duration: 180 }));
+    animation?.cancel();
+    expect(cancel).toHaveBeenCalledOnce();
+    reducedMotion = true;
+    expect(animateRouteEntry(panel)).toBeUndefined();
+    Object.defineProperty(window, 'matchMedia', { configurable: true, value: originalMatchMedia });
+  });
   it('keeps editor Back usable while its code is still loading', () => {
     const loader = vi.spyOn(lazyPages, 'metadataEdit').mockImplementation(() => new Promise<never>(() => {}));
     try {

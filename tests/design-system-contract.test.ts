@@ -1182,14 +1182,11 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.archive-rail')).toMatch(/padding:\s*var\(--space-4\);/);
     expect(ruleBody(shell, '.archive-rail-heading')).not.toMatch(/padding-inline/);
     expect(ruleBody(shell, '.archive-rail-grid')).not.toContain('justify-content');
-    // 另一半原因（用户第 ④ 轮第 1 条：「首页待看的左侧空隙又回退到之前的比别的组件宽
-    // 一点的状态了，依然打开详情页时会变成一致的」）：snapport 默认是滚动口的 padding box，
-    // 所以卡片的 `scroll-snap-align: start` 第一个吸附位置落在 `scrollLeft = 6px`，正好把
-    // 网格那 6px 内边距滚出视野。能滚的轨道被吸附到 6px、从不溢出的停在 0，同一条轨道于是
-    // 有两种左空隙；左栏一变窄再重新吸附，两者又合并。`scroll-padding-inline` 必须与网格的
-    // 6px 内边距相等，吸附位置才会回到 0、藏不掉内边距。
+    // Custom settling uses the same 6px inset when it aligns a card. Native
+    // proximity snapping is disabled so it cannot add a second abrupt motion.
     expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/padding:\s*6px 6px var\(--space-2\);/);
     expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/scroll-padding-inline:\s*6px;/);
+    expect(ruleBody(shell, '.archive-rail-grid')).toMatch(/scroll-snap-type:\s*none/);
     expect(shell).toMatch(/\.archive-thumb-card\s*\{[\s\S]*width:\s*150px/);
     expect(shell).toMatch(/\.archive-thumb-card\.is-wide\s*\{[\s\S]*width:\s*316px/);
     expect(shell).toMatch(/\.archive-thumb-card-media\s*\{[\s\S]*height:\s*210px/);
@@ -1276,7 +1273,7 @@ describe('design system contract', () => {
 
     expect(tokens).toMatch(/--reader-title-size:\s*22px/);
     expect(tokens).toMatch(/--reader-title-leading:\s*28px/);
-    expect(tokens).toMatch(/--reader-toolbar-height:\s*80px/);
+    expect(tokens).toMatch(/--reader-toolbar-height:\s*64px/);
     expect(tokens).toMatch(/--reader-primary:\s*#ffb4a9/);
     // 阅读器只剩「画布 + 压在画面上的东西」这一组固定深色令牌；两条栏专用的
     // --reader-surface / --reader-surface-container 已随这一轮删掉——它们现在读主题。
@@ -1288,7 +1285,7 @@ describe('design system contract', () => {
     expect(tokens).not.toMatch(/--reader-bar-container/);
 
     const top = ruleBody(reader, '.reader-chrome-top');
-    expect(top).toMatch(/height:\s*calc\(64px \+ var\(--safe-top\)\)/);
+    expect(top).toMatch(/height:\s*calc\(var\(--reader-toolbar-height\) \+ var\(--safe-top\)\)/);
     expect(top).toMatch(/padding:\s*var\(--safe-top\)\s+var\(--space-1\)\s+0/);
     // 容器高度是定的，不是 min-height：内容在 64dp 里居中，多一行也不会长高。
     expect(top).not.toMatch(/min-height/);
@@ -1367,7 +1364,7 @@ describe('design system contract', () => {
     // on-surface-variant。底栏那一排动作全走 on-surface-variant，页码是 on-surface。
     // 底栏那条要按规则本体匹配：`.reader-toolbar button` 先出现在上面那条共享几何规则
     // 的选择器列表里，`ruleBody` 取的是第一个。
-    expect(reader).not.toMatch(/\.reader-chrome-top \.reader-icon-button\s*\{/);
+    expect(reader).not.toMatch(/\.reader-chrome-top \.reader-icon-button\s*\{[^}]*color:/);
     expect(ruleBody(reader, '.reader-chrome-top .reader-chrome-settings,\n.reader-chrome-top .reader-chrome-window,\n.reader-chrome-top .reader-chrome-thumbnails'))
       .toMatch(/color:\s*var\(--on-surface-variant\)/);
     expect(reader).toMatch(/\.reader-toolbar button \{\s*color:\s*var\(--on-surface-variant\);\s*\}/);
@@ -2810,15 +2807,13 @@ describe('design system contract', () => {
     expect(workspace).not.toMatch(/aria-label="刷新"/);
   });
 
-  it('pins only the library in the compact bar', () => {
-    // 档案库 is load-bearing: unchecking it would leave no way into the library.
-    // 设置 is not — an unselected entry reappears under 更多 — and pinning it made
-    // the checkbox look like a choice while refusing it.
+  it('pins home and library in the compact bar', () => {
+    // Home provides access to settings and secondary links; pin it alongside library.
     const shell = read('src/components/AppShell.tsx');
-    expect(shell).toMatch(/const PINNED_NAV_KEYS: NavKey\[\] = \['\/library'\];/);
+    expect(shell).toMatch(/const PINNED_NAV_KEYS: NavKey\[\] = \['\/', '\/library'\];/);
     const settings = read('src/components/SettingsWorkspace.tsx');
-    expect(settings).toMatch(/const pinned = key === 'library';/);
-    expect(settings).toMatch(/if \(key === 'library'\) return;/);
+    expect(settings).toMatch(/const pinned = key === 'home' \|\| key === 'library';/);
+    expect(settings).toMatch(/if \(key === 'home' \|\| key === 'library'\) return;/);
     // The stored preference is re-pinned on the native side too, and that is the
     // copy that actually decides: unpinning it only in the UI would have been
     // undone on the next save.

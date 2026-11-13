@@ -166,14 +166,6 @@
   position: relative;
 }
 
-/* Only large pages get a prepared, bounded gesture texture. The original stays
-   mounted for layout, source leases and touch ownership, and supplies full detail
-   again once the gesture's settling window ends. */
-.reader-gesture-texture { position: absolute; inset: 0; margin: auto; visibility: hidden; pointer-events: none; }
-.reader-screen[data-image-interaction='true'] .reader-single .reader-gesture-texture[data-ready='true'],
-.reader-screen[data-image-interaction='true'] .reader-spread .reader-gesture-texture[data-ready='true'] { visibility: visible; }
-.reader-screen[data-image-interaction='true'] :is(.reader-single, .reader-spread) .reader-page.has-gesture-texture { opacity: 0; }
-
 /* 「超分 / DLSSNR 处理中」：这一页的图先照常画着，等本机把那一版算出来再换上去。
    算一页要好几秒（两个模型一起近二十秒），从前这段时间屏幕上没有任何动静——
    按下去像没反应，功能看起来就是坏的。胶囊只说在算，不拦任何操作：它
@@ -447,7 +439,7 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-1);
-  height: calc(64px + var(--safe-top));
+  height: calc(var(--reader-toolbar-height) + var(--safe-top));
   padding: var(--safe-top) var(--space-1) 0;
   border-bottom: 1px solid var(--hairline);
   background: var(--surface-container);
@@ -775,9 +767,9 @@
   display: flex;
   align-items: center;
   flex: none;
-  gap: 2px;
-  min-height: 48px;
-  padding: 2px 4px;
+  gap: var(--space-1);
+  min-height: var(--icon-button-size);
+  padding: 0;
 }
 
 /* 三列各就各位：左=布局，中=页码，右=画面处理。DOM 顺序就是这三段。
@@ -1069,15 +1061,19 @@
   }
   .reader-toolbar-group { min-height: 44px; gap: 0; padding-inline: 0; }
   .reader-toolbar-pages { justify-content: center; }
-  .reader-toolbar button { width: 36px; min-width: 36px; flex-basis: 36px; }
+  .reader-toolbar button,
+  .reader-chrome-top .reader-icon-button { width: 36px; min-width: 36px; flex-basis: 36px; }
+  .reader-chrome-actions { gap: 0; }
   .reader-toolbar span:not(.reader-toolbar-turn) { min-width: 58px; }
 }
 
 @media (max-width: 380px) {
   .reader-toolbar { gap: 2px; }
-  .reader-toolbar button { width: 30px; min-width: 30px; flex-basis: 30px; }
+  .reader-toolbar button,
+  .reader-chrome-top .reader-icon-button { width: 30px; min-width: 30px; flex-basis: 30px; }
   .reader-toolbar span:not(.reader-toolbar-turn) { min-width: 52px; font-size: var(--text-xs); }
-  .reader-toolbar svg { width: 22px; height: 22px; }
+  .reader-toolbar svg,
+  .reader-chrome-top .reader-icon-button svg { width: 22px; height: 22px; }
 }
 
 /* The reader's own scrollers, for the same reason as the shell's: a webtoon that

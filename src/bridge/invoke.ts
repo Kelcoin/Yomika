@@ -37,7 +37,7 @@ export async function invokeCommand<TRequest extends Record<string, unknown>, TR
 ): Promise<CommandResult<TResponse>> {
   // Reading and workspace payloads are private; diagnostics need only the action.
   const securityCommand = name.startsWith('app_security_');
-  const loggedRequest = securityCommand ? {} : name.startsWith('lrr_bridge_') ? { scopeId: request.scopeId, action: request.action } : request;
+  const loggedRequest = securityCommand || name === 'write_clipboard_text' ? {} : name.startsWith('lrr_bridge_') ? { scopeId: request.scopeId, action: request.action } : request;
   try {
     const adapter = testAdapter ?? await loadNativeAdapter();
     const payload = await adapter(name, request);

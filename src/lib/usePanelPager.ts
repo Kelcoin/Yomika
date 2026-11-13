@@ -12,7 +12,8 @@ import { rubberBand } from './motion';
 export const PANEL_SLIDE_MS = 220;
 const SLIDE_EASING = 'cubic-bezier(.22, .72, .2, 1)';
 /** 离触点这么远才算「有方向的拖动」，否则仍可能是抖动或纵向滚动。 */
-const SLOP_PX = 10;
+const SLOP_PX = 6;
+const PANEL_GAP_PX = 16;
 /** 屏幕两侧属于系统：从那里起手是返回手势，不是换面板。 */
 const EDGE_PX = 24;
 /** 已经到头还继续拖时，阻力最多让它挪出这么远。 */
@@ -35,7 +36,8 @@ interface Slide<T> {
  * `dx` 是手指额外拖出来的像素。百分比按元素自身宽度算，也就是舞台宽度。 */
 export function panelOffset(percent: number, dx: number): string {
   if (percent === 0) return `translate3d(${dx}px, 0, 0)`;
-  const travel = dx === 0 ? `${percent}%` : `calc(${percent}% ${dx > 0 ? '+' : '-'} ${Math.abs(dx)}px)`;
+  const gap = Math.abs(percent / 100) * PANEL_GAP_PX;
+  const travel = `calc(${percent}% ${percent > 0 ? '+' : '-'} ${gap}px${dx === 0 ? '' : ` ${dx > 0 ? '+' : '-'} ${Math.abs(dx)}px`})`;
   return `translate3d(${travel}, 0, 0)`;
 }
 
@@ -50,6 +52,8 @@ export interface PanelPager<T extends string> {
   containerRef: RefObject<HTMLDivElement>;
   /** 舞台的类名：静止时只有基础类，手势期间多 `is-sliding`，跟手期间再加 `is-dragging`。 */
   containerClass: string;
+  /** Destination is selected as soon as settling starts, before its animation finishes. */
+  selectedPanel: T;
   panelProps: (panel: T) => { ref: (node: HTMLDivElement | null) => void; hidden: boolean; 'aria-hidden': boolean; inert?: '' };
   /** 点标签页换边：和滑动走同一段动画。 */
   goTo: (panel: T) => void;
@@ -78,6 +82,55 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   const animations = useRef<Animation[]>([]);
   /** 已经起过动画的那一个 slide 对象；同一个不重起。 */
   const animatedFor = useRef<Slide<T> | null>(null);
+  const stageHeight = useRef(0);
+  const scrollportRef = useRef<HTMLElement>();
+  const prepareStage = useCallback(() => {
+    const element = containerRef.current;
+    if (!element) return;
+    const rect = element.getBoundingClientRect();
+    const bottom = scrollportRef.current ? Math.min(window.innerHeight, scrollportRef.current.getBoundingClientRect().bottom) : window.innerHeight;
+    const floor = Math.ceil(Math.max(280, bottom - rect.top));
+    element.style.minHeight = `${floor}px`;
+    element.style.setProperty('--panel-min-height', `${floor}px`);
+    stageHeight.current = Math.max(rect.height, floor);
+  }, []);
+
+  // The short/empty panel still owns the touch area below the tabs. Keep
+  // enough height for the current scroll offset so switching cannot clamp the
+  // outer scrollport. The floor shrinks naturally as the user scrolls back up.
+  useLayoutEffect(() => {
+    const element = containerRef.current;
+    if (!element || !enabled) return;
+    let frame = 0;
+    let scrollport: HTMLElement | undefined;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      if (/(auto|scroll)/.test(getComputedStyle(parent).overflowY)) { scrollport = parent; break; }
+    }
+    scrollportRef.current = scrollport;
+    const measure = (allowGrow = false) => {
+      frame = 0;
+      if (slideRef.current) return;
+      const bottom = scrollport ? Math.min(window.innerHeight, scrollport.getBoundingClientRect().bottom) : window.innerHeight;
+      const height = Math.ceil(Math.max(280, bottom - element.getBoundingClientRect().top));
+      const next = allowGrow ? height : Math.min(parseFloat(element.style.minHeight) || height, height);
+      if (element.style.minHeight !== `${next}px`) {
+        element.style.minHeight = `${next}px`;
+        element.style.setProperty('--panel-min-height', `${next}px`);
+      }
+    };
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(() => measure()); };
+    const resize = () => measure(true);
+    measure(true);
+    window.addEventListener('scroll', schedule, true);
+    window.addEventListener('resize', resize);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', schedule, true);
+      window.removeEventListener('resize', resize);
+      element.style.minHeight = '';
+      element.style.removeProperty('--panel-min-height');
+    };
+  }, [enabled, panel]);
 
   const clearTransforms = useCallback(() => {
     for (const node of nodes.current.values()) node.style.transform = '';
@@ -99,16 +152,27 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   }, []);
 
   const settle = useCallback((from: T, to: T, dx: number) => {
+    if (!slideRef.current) prepareStage();
     travelRef.current = dx;
     setSlide({ from, to, settling: true });
-  }, []);
+  }, [prepareStage]);
 
   /** 收势与「点标签页」共用一段动画：先把两块面板摆上舞台（这一次渲染），
    * 再在布局阶段起动画——反过来的话，正在 `display: none` 的元素上起动画，
    * 等它显示出来时动画已经跑完一半了。 */
   useLayoutEffect(() => {
     const current = slide;
-    if (!current) return;
+    if (!current) {
+      // React has now committed the destination's visibility and normal layout.
+      // Removing the animation/drag transform any earlier briefly repaints the
+      // departing panel at x=0 inside the still-active sliding grid.
+      stopAnimations();
+      clearTransforms();
+      if (containerRef.current) containerRef.current.style.height = '';
+      animatedFor.current = null;
+      return;
+    }
+    if (containerRef.current) containerRef.current.style.height = `${stageHeight.current}px`;
     if (!current.settling) { paint(current.from, travelRef.current); return; }
     if (animatedFor.current === current) return;
     animatedFor.current = current;
@@ -118,8 +182,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
     const dx = travelRef.current;
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const finish = () => {
-      stopAnimations();
-      clearTransforms();
+      if (slideRef.current !== current) return;
       setSlide(null);
       onChangeRef.current(current.to);
     };
@@ -187,8 +250,13 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       const dy = touch.clientY - gesture.y;
       if (!gesture.horizontal) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) < SLOP_PX) return;
-        if (Math.abs(dx) < Math.abs(dy) * 1.25 || !event.cancelable) { gesture = undefined; return; }
+        if (Math.abs(dy) > Math.abs(dx) * 1.3) { gesture = undefined; return; }
+        // Chromium can make the next stream noncancelable while a previous
+        // vertical fling settles. CSS pan-y already excludes native horizontal
+        // panning; a clearly horizontal new drag can still own this pager.
+        if (Math.abs(dx) < Math.abs(dy) * (event.cancelable ? 1.05 : 1.6)) return;
         gesture.horizontal = true;
+        prepareStage();
         travelRef.current = 0;
       }
       // Resolve direction on every move: a drag can cross its starting point.
@@ -238,7 +306,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       element.removeEventListener('touchcancel', cancel);
       element.removeEventListener('click', click, true);
     };
-  }, [clearTransforms, enabled, paint, settle, stopAnimations]);
+  }, [clearTransforms, enabled, paint, prepareStage, settle, stopAnimations]);
 
   const setters = useRef(new Map<T, (node: HTMLDivElement | null) => void>());
   const refFor = (id: T) => {
@@ -258,12 +326,15 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
 
   return {
     containerRef,
+    selectedPanel: slide?.settling ? slide.to : panel,
     containerClass: `archive-detail-panels${slide ? ' is-sliding' : ''}${slide && !slide.settling ? ' is-dragging' : ''}`,
     panelProps: (id: T) => ({
       ref: refFor(id),
-      hidden: panel !== id && !(slide !== null && slide.to === id),
-      'aria-hidden': panel !== id,
-      ...(panel !== id ? { inert: '' as const } : {}),
+      // Both remain visible throughout snap-back too: the incoming panel must
+      // slide out rather than disappear the instant the finger is released.
+      hidden: slide === null && panel !== id,
+      'aria-hidden': (slide?.settling ? slide.to : panel) !== id,
+      ...((slide?.settling ? slide.to : panel) !== id ? { inert: '' as const } : {}),
     }),
     goTo,
   };

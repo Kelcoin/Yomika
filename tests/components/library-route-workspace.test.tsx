@@ -52,7 +52,7 @@ describe('library route workspace', () => {
     await screen.findByRole('button', { name: /^Archive tail\b/ });
     const requests = headRequests;
     const user = userEvent.setup();
-    await user.click(screen.getByRole('link', { name: '更多' }));
+    await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('link', { name: '首页' }));
     await user.click(screen.getAllByRole('link', { name: '档案库' })[0]!);
     await waitFor(() => expect(headRequests).toBeGreaterThan(requests));
     expect(await screen.findByRole('button', { name: /^Archive tail\b/ })).toBeInTheDocument();

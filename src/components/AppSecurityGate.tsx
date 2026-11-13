@@ -3,11 +3,12 @@ import { createPortal } from 'react-dom';
 import { FocusScope } from '@radix-ui/react-focus-scope';
 import { Fingerprint, LockKeyhole } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
-import { appSecurityRepository, AppSecurityStatusSchema, hasNativeSecurity, type AppSecurityStatus } from '../repositories/nativeAppSecurityRepository';
+import { appSecurityRepository, AppSecurityStatusSchema, hasNativeSecurity, hasUnprotectedNativeBootstrap, type AppSecurityStatus } from '../repositories/nativeAppSecurityRepository';
+import { PatternLock } from './PatternLock';
 import '../styles/security.css';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 
-type SecurityContext = { status: AppSecurityStatus | undefined; supported: boolean; update: (status: AppSecurityStatus) => void; refresh: () => Promise<void> };
+type SecurityContext = { status: AppSecurityStatus | undefined; supported: boolean; loadError: string; update: (status: AppSecurityStatus) => void; refresh: () => Promise<void>; configure: typeof appSecurityRepository.configure };
 const Context = createContext<SecurityContext | undefined>(undefined);
 export function useAppSecurity() {
   const value = useContext(Context);
@@ -17,9 +18,11 @@ export function useAppSecurity() {
 
 export function AppSecurityGate({ children }: { children: ReactNode }) {
   const native = hasNativeSecurity();
+  const bootstrapUnprotected = useRef(hasUnprotectedNativeBootstrap()).current;
   const [status, setStatus] = useState<AppSecurityStatus>();
-  const [checking, setChecking] = useState(native);
+  const [checking, setChecking] = useState(native && !bootstrapUnprotected);
   const [error, setError] = useState('');
+  const [loadError, setLoadError] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [obscured, setObscured] = useState(false);
@@ -30,18 +33,35 @@ export function AppSecurityGate({ children }: { children: ReactNode }) {
   const generation = useRef(0);
   const current = useRef(status);
   current.current = status;
-  const covered = native && (checking || !status || status.locked || obscured || !!error);
+  const covered = native && (checking || (!status && !bootstrapUnprotected) || status?.locked || obscured || !!error);
   // System back must not navigate the retained route behind the authentication gate.
   useOverlayBackGuard(covered, useCallback(() => {}, []));
-  const update = useCallback((value: AppSecurityStatus) => { generation.current++; setStatus(value); setChecking(false); setError(''); }, []);
-  const refresh = useCallback(async () => {
+  const update = useCallback((value: AppSecurityStatus) => {
+    generation.current++; setStatus(value); setChecking(false); setError(''); setLoadError('');
+    // A background IPC reply can arrive after resume and supersede its pending
+    // status read. Every authoritative foreground update must release the
+    // preview-only shield too, even when no credential was ever configured.
+    if (document.visibilityState !== 'hidden') setObscured(false);
+  }, []);
+  const unprotected = useCallback(() => current.current ? !current.current.passwordEnabled && !current.current.biometricEnabled && !current.current.hidePreview : bootstrapUnprotected, [bootstrapUnprotected]);
+  const configure = useCallback<typeof appSecurityRepository.configure>(async (config) => {
+    // Native settings may invoke the OS credential activity. Its temporary
+    // visibility changes must not replace the retained settings form.
+    systemAuthenticating.current = true;
+    try { return await appSecurityRepository.configure(config); }
+    finally { systemAuthenticating.current = false; }
+  }, []);
+  const refresh = useCallback(async (forceGate = false, foreground = false) => {
     if (!native) return;
     const requestGeneration = ++generation.current;
-    const result = await appSecurityRepository.status();
+    const result = await (foreground ? appSecurityRepository.resume() : appSecurityRepository.status());
     if (requestGeneration !== generation.current) return;
     if (result.ok) { update(result.value); if (document.visibilityState !== 'hidden') setObscured(false); }
-    else { setChecking(false); setError('无法读取安全状态，请重试'); }
-  }, [native, update]);
+    else {
+      setChecking(false); setLoadError('无法读取安全状态，请重试');
+      if (forceGate || !unprotected()) setError('无法读取安全状态，请重试');
+    }
+  }, [native, update, unprotected]);
   useEffect(() => { void refresh(); return () => { generation.current++; }; }, [refresh]);
   useLayoutEffect(() => {
     if (covered) document.body.dataset.appSecurityCovered = 'true';
@@ -49,7 +69,9 @@ export function AppSecurityGate({ children }: { children: ReactNode }) {
     // The native resume cover is removed only after this commit has covered the page.
     // A failed status read also has a solid, actionable error gate. Keeping the
     // native WebView hidden there would make its Retry button unreachable.
-    if (native && !checking && document.visibilityState !== 'hidden') void appSecurityRepository.ready();
+    // A document reload can reuse an older initialization seed after protection
+    // was configured. Never release a native cover using only that seed.
+    if (native && !checking && (status || (covered && error)) && document.visibilityState !== 'hidden') void appSecurityRepository.ready();
     return () => { delete document.body.dataset.appSecurityCovered; };
   }, [covered, checking, native, status, obscured, error]);
   useEffect(() => {
@@ -62,19 +84,20 @@ export function AppSecurityGate({ children }: { children: ReactNode }) {
     const lockSubscription = listen('app-security-lock', () => {
       document.body.dataset.appSecurityCovered = 'true';
       setObscured(true);
-      setChecking(true);
-      void refresh();
+      // Native resume notifications also cover unlocked privacy-only returns.
+      // Retain the current view beneath the shield until status resolves.
+      void refresh(true);
     }).catch(() => undefined);
     const background = () => {
       if (document.visibilityState !== 'hidden' || systemAuthenticating.current) return;
       const value = current.current;
-      if (value?.hidePreview || (value?.passwordEnabled && value.lockOnBackground)) {
+      if (value?.hidePreview || ((value?.passwordEnabled || value?.biometricEnabled) && value.lockOnBackground)) {
         const requestGeneration = ++generation.current;
         // Set synchronously: React's next commit may be after the OS takes its snapshot.
         document.body.dataset.appSecurityCovered = 'true';
         setObscured(true);
-        if (value.passwordEnabled && value.lockOnBackground) setStatus({ ...value, locked: true });
-        else setChecking(true);
+        if ((value.passwordEnabled || value.biometricEnabled) && value.lockOnBackground && (value.backgroundLockSeconds ?? 0) === 0) setStatus({ ...value, locked: true });
+
         void appSecurityRepository.background().then((result) => { if (!disposed && requestGeneration === generation.current && result.ok && document.visibilityState !== 'hidden') update(result.value); });
       }
     };
@@ -82,9 +105,7 @@ export function AppSecurityGate({ children }: { children: ReactNode }) {
       if (systemAuthenticating.current) return;
       if (document.visibilityState === 'hidden') return;
       // Re-read native authoritative state before revealing any retained content.
-      document.body.dataset.appSecurityCovered = 'true';
-      setChecking(true);
-      void refresh();
+      void refresh(false, true);
     };
     const visibility = () => document.visibilityState === 'hidden' ? background() : resume();
     document.addEventListener('visibilitychange', visibility);
@@ -96,7 +117,7 @@ export function AppSecurityGate({ children }: { children: ReactNode }) {
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('yomika-security-resume', resume);
     };
-  }, [native, refresh, update]);
+  }, [native, refresh, update, unprotected]);
   const unlock = async (biometric: boolean) => {
     if (authenticating.current) return;
     authenticating.current = true;
@@ -108,18 +129,17 @@ export function AppSecurityGate({ children }: { children: ReactNode }) {
       setPassword('');
       if (requestGeneration !== generation.current) return;
       if (result.ok) update(result.value);
-      else setError('认证未完成或密码错误，请重试');
+      else setError(status?.credentialKind === 'pattern' ? '认证未完成或手势错误，请重试' : '认证未完成或密码错误，请重试');
     } finally { authenticating.current = false; systemAuthenticating.current = false; setBusy(false); }
   };
-  return <Context.Provider value={{ status, supported: native && (status?.supported ?? true), update, refresh }}>
+  return <Context.Provider value={{ status, supported: native && (status?.supported ?? true), loadError, update, refresh, configure }}>
     <div className="app-security-content" aria-hidden={covered || undefined} {...(covered ? { inert: '' } : {})}>{children}</div>
     {covered && createPortal(<div className="app-security-overlay">
       <FocusScope trapped loop asChild><section className="app-security-card" role="dialog" aria-modal="true" aria-label="应用已锁定">
-        <LockKeyhole size={36} aria-hidden="true" />
-        <h1>{checking ? '正在检查安全状态' : '应用已锁定'}</h1>
+        {(checking || status?.locked || error) && <LockKeyhole size={36} aria-hidden="true" />}
+        {(checking || status?.locked || error) && <h1>{checking ? '正在检查安全状态' : status?.locked ? '应用已锁定' : '无法读取安全状态'}</h1>}
         {!checking && status?.locked && <form onSubmit={(event) => { event.preventDefault(); void unlock(false); }}>
-          <label className="security-password-field">密码<input type="password" autoComplete="current-password" autoFocus value={password} disabled={busy} onChange={(event) => setPassword(event.target.value)} /></label>
-          <button className="primary-action" type="submit" disabled={busy || !password}>解锁</button>
+          {status.passwordEnabled && (status.credentialKind === 'pattern' ? <PatternLock key={`${busy}`} label="手势密码" disabled={busy} onComplete={setPassword} primaryAction={<button className="primary-action" type="submit" disabled={busy || !password}>解锁</button>} /> : <><label className="security-password-field">密码<input type="password" autoComplete="current-password" autoFocus value={password} disabled={busy} onChange={(event) => setPassword(event.target.value)} /></label><button className="primary-action" type="submit" disabled={busy || !password}>解锁</button></>)}
           {status.biometricEnabled && status.biometricAvailable && <button className="secondary-action" type="button" disabled={busy} onClick={() => void unlock(true)}><Fingerprint aria-hidden="true" />使用{status.biometricLabel ?? '生物认证'}</button>}
         </form>}
         {error && <p role="alert">{error}</p>}

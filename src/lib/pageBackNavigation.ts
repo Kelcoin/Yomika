@@ -15,13 +15,21 @@ export function pageRoot(path: string): string {
 export class PageBackHistory {
   private pages = new Map<string, string[]>();
   private owner = '/';
+  private homeEntries = new Set<string>();
 
-  visit(url: string, returnTo?: string): void {
+  visit(url: string, returnTo?: string, homeEntry = false, navigationTab = false): void {
     const path = url.split('?')[0]!;
     // Reader/editor routes belong to the page which opened them, even if their
     // route prefix is /library or /reader. Never inherit another tab's stack.
     const leaf = path.startsWith('/reader/') || path.endsWith('/edit');
     const owner = leaf ? (returnTo ? this.ownerFor(returnTo) : this.owner) : pageRoot(path);
+    // Home shortcuts open a page excursion; bottom tabs explicitly select an
+    // independent workspace and must never inherit that excursion later.
+    if (navigationTab || (owner !== this.owner && !homeEntry)) this.homeEntries.delete(owner);
+    if (homeEntry && owner !== '/') {
+      this.homeEntries.add(owner);
+      this.pages.set(owner, [owner]);
+    }
     const stack = this.pages.get(owner) ?? [owner];
     const existing = stack.indexOf(url);
     if (existing >= 0) stack.splice(existing + 1);
@@ -37,7 +45,10 @@ export class PageBackHistory {
 
   back(): string | undefined {
     const stack = this.pages.get(this.owner);
-    if (!stack || stack.length <= 1) return undefined;
+    if (!stack || stack.length <= 1) {
+      if (this.homeEntries.delete(this.owner)) return '/';
+      return undefined;
+    }
     stack.pop();
     return stack.at(-1);
   }
@@ -51,8 +62,8 @@ export function usePageBackNavigation(): void {
   const history = useRef(new PageBackHistory());
   const current = useRef({ url: '', state: null as unknown });
   useLayoutEffect(() => {
-    const returnTo = (location.state as { returnTo?: string } | null)?.returnTo;
-    history.current.visit(`${location.pathname}${location.search}`, returnTo);
+    const state = location.state as { returnTo?: string; homeEntry?: boolean; navigationTab?: boolean } | null;
+    history.current.visit(`${location.pathname}${location.search}`, state?.returnTo, state?.homeEntry, state?.navigationTab);
     current.current = { url: `${location.pathname}${location.search}${location.hash}`, state: window.history.state };
   }, [location]);
   useLayoutEffect(() => {

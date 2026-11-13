@@ -87,12 +87,13 @@ it('rebinds replaced list nodes when crossing the compact breakpoint without res
   expect(move.defaultPrevented).toBe(true);
 });
 
-it('only claims its active subtree gestures and cancels pulls on deactivation', () => {
+it('only claims its active subtree gestures and cancels pulls on deactivation', async () => {
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
   const refresh = vi.fn();
   const archives = [{ serverId: 's', archiveId: 'a', title: 'Gesture archive', pageCount: 10, updatedAt: '2026-10-14' }];
   const content = (active: boolean) => <MemoryRouter><main className="workspace" style={{ overflowY: 'auto' }}><RetainedPage active={active}><LibraryWorkspace archives={archives} showDetail={false} onRefresh={refresh} /></RetainedPage><button>Visible sibling</button></main></MemoryRouter>;
   const view = render(content(true));
+  await act(async () => { await new Promise(requestAnimationFrame); });
   const pull = (target: Element) => {
     fireEvent.touchStart(target, { touches: [{ clientY: 0 }] });
     return fireEvent.touchMove(target, { touches: [{ clientY: 200 }] });

@@ -14,6 +14,11 @@ it('tracks natural menu growth and shrinkage without measuring the animated view
     observe = observe;
     disconnect = disconnect;
   });
+  let scheduled: FrameRequestCallback | undefined;
+  vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => { scheduled = callback; return 1; }));
+  const cancel = vi.fn();
+  vi.stubGlobal('cancelAnimationFrame', cancel);
+  const flush = () => act(() => { const callback = scheduled; scheduled = undefined; callback?.(0); });
   let height = 120;
   vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
     return this.classList.contains('settings-menu-content') ? height : 0;
@@ -23,11 +28,18 @@ it('tracks natural menu growth and shrinkage without measuring the animated view
   expect(body.style.height).toBe('120px');
   expect(observe).toHaveBeenCalledWith(body.firstElementChild);
   act(() => { height = 280; resize([], {} as ResizeObserver); });
+  expect(body.style.height).toBe('120px'); // No layout writes during observer delivery.
+  act(() => resize([], {} as ResizeObserver));
+  expect(requestAnimationFrame).toHaveBeenCalledTimes(1);
+  flush();
   expect(body.style.height).toBe('280px');
   act(() => { height = 80; resize([], {} as ResizeObserver); });
+  flush();
   expect(body.style.height).toBe('80px');
+  act(() => resize([], {} as ResizeObserver));
   unmount();
   expect(disconnect).toHaveBeenCalledOnce();
+  expect(cancel).toHaveBeenLastCalledWith(1);
 });
 
 it('uses the same back control for nested controls and restores the parent without closing it', async () => {

@@ -16,15 +16,16 @@ export function AutoTextarea(props: TextareaHTMLAttributes<HTMLTextAreaElement>)
     };
     fit();
     let width = element.clientWidth;
+    let frame = 0;
     const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
       if (width === element.clientWidth) return;
       width = element.clientWidth;
-      fit();
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; fit(); });
     });
     observer?.observe(element);
     element.addEventListener('input', fit);
     window.addEventListener('resize', fit);
-    return () => { observer?.disconnect(); element.removeEventListener('input', fit); window.removeEventListener('resize', fit); };
+    return () => { observer?.disconnect(); cancelAnimationFrame(frame); element.removeEventListener('input', fit); window.removeEventListener('resize', fit); };
   }, [props.value, props.defaultValue]);
   return <textarea {...props} ref={ref} style={{ ...props.style, resize: 'none' }} />;
 }

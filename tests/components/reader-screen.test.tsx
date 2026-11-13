@@ -31,11 +31,24 @@ const pages = [
 ];
 
 function renderReader() {
-  return render(
+  const view = render(
     <MemoryRouter>
       <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
     </MemoryRouter>,
   );
+  // jsdom does not decode the inline fixture. Model a successfully loaded image.
+  markImagesReady(view.container);
+  return view;
+}
+
+function markImagesReady(container: HTMLElement) {
+  for (const image of container.querySelectorAll('img')) {
+    Object.defineProperties(image, {
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 128 },
+      naturalHeight: { configurable: true, value: 192 },
+    });
+  }
 }
 
 function pageIndicator() {
@@ -1115,6 +1128,8 @@ describe('reader screen', () => {
   it('follows a drag from the box it took at the press, not from a fresh measurement per move', () => {
     vi.useFakeTimers();
     const view = renderReader();
+    // Exclude initial loaded-image/page-indicator measurements from the gesture.
+    act(() => { vi.advanceTimersByTime(300); });
     const rects = countRects();
     try {
       const reader = screen.getByRole('main', { name: '漫画阅读器' });
@@ -1210,11 +1225,43 @@ describe('reader screen', () => {
     expect(animate).toHaveBeenCalledWith([
       { transform: 'translate3d(-300px,0,0)' },
       { transform: `translate3d(${-window.innerWidth}px,0,0)` },
-    ], expect.objectContaining({ duration: 240 }));
+    ], expect.objectContaining({ duration: expect.any(Number) }));
+    const duration = (animate.mock.calls[0] as unknown as [unknown, KeyframeAnimationOptions])[1].duration as number;
+    expect(duration).toBeGreaterThanOrEqual(90);
+    expect(duration).toBeLessThanOrEqual(220);
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
     act(() => animation.onfinish?.());
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
     expect(track.style.transform).toBe('translate3d(0,0,0)');
+  });
+
+  it('accepts another touch swipe before the previous landing animation completes', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const track = reader.querySelector('.reader-track') as HTMLDivElement;
+    const animations: { cancel: ReturnType<typeof vi.fn>; onfinish: (() => void) | undefined }[] = [];
+    const animate = vi.fn(() => {
+      const animation = { cancel: vi.fn(), onfinish: undefined as (() => void) | undefined };
+      animations.push(animation);
+      return animation;
+    });
+    Object.defineProperty(track, 'animate', { value: animate, configurable: true });
+    const swipe = () => {
+      fireEvent.touchStart(reader, { touches: [{ clientX: 340, clientY: 400 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: 100, clientY: 400 }] });
+      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 100, clientY: 400 }] });
+    };
+    swipe();
+    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    const oldFinish = animations[0]!.onfinish;
+    swipe();
+    expect(animate).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    // A stale completion from the interrupted animation must not turn twice.
+    act(() => oldFinish?.());
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
+    act(() => animations[1]!.onfinish?.());
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
   });
 
   it('allows a damped undershoot but settles back to 100 percent', () => {
@@ -1405,6 +1452,7 @@ describe('reader screen', () => {
       </MemoryRouter>,
     );
     const zoomed = () => container.querySelector('.reader-single') as HTMLElement;
+    markImagesReady(container);
 
     fireEvent.wheel(screen.getByRole('main', { name: '漫画阅读器' }), { deltaY: -120 });
     await act(async () => { await new Promise(requestAnimationFrame); });
@@ -1693,6 +1741,25 @@ describe('reader screen', () => {
     expect(loadPage.mock.calls.some(([index]) => index === 59)).toBe(false);
   });
 
+  it('retires obsolete loads during rapid navigation without poisoning a return to that page', async () => {
+    const signals = new Map<number, AbortSignal[]>();
+    const loadPage = vi.fn((index: number, signal?: AbortSignal) => {
+      signals.set(index, [...(signals.get(index) ?? []), signal!]);
+      return index >= 8 ? Promise.resolve(`blob:page-${index}`) : new Promise<string>(() => {});
+    });
+    const view = render(<MemoryRouter><ReaderScreen archiveId="a" title="Reader" pages={Array.from({ length: 15 }, () => '')}
+      layout="single" direction="ltr" prefetchDistance={1} loadPage={loadPage} /></MemoryRouter>);
+    await waitFor(() => expect(signals.has(0)).toBe(true));
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    for (let i = 0; i < 8; i += 1) fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    expect(await screen.findByRole('img', { name: '第 9 页' })).toHaveAttribute('src', 'blob:page-8');
+    expect(signals.get(0)![0]!.aborted).toBe(true);
+    for (let i = 0; i < 8; i += 1) fireEvent.keyDown(reader, { key: 'ArrowLeft' });
+    await waitFor(() => expect(signals.get(0)).toHaveLength(2));
+    expect(signals.get(0)![1]!.aborted).toBe(false);
+    view.unmount();
+  });
+
   it('shows a page that has not arrived as loading rather than as a failure', async () => {
     let resolvePage: ((value: string | undefined) => void) | undefined;
     const loadPage = vi.fn(() => new Promise<string | undefined>((resolve) => { resolvePage = resolve; }));
@@ -1723,6 +1790,68 @@ describe('reader screen', () => {
     fireEvent.touchStart(reader, { touches: [{ clientX: 50, clientY: 100 }] });
     fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 200, clientY: 100 }] });
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+  });
+
+  it.each(['failed', 'timed out'] as const)('retries a %s page without requiring navigation', async (failure) => {
+    vi.useFakeTimers();
+    const loadPage = vi.fn<() => Promise<string | undefined>>()
+      .mockImplementationOnce(() => failure === 'failed' ? Promise.resolve(undefined) : new Promise(() => {}))
+      .mockResolvedValue('blob:recovered');
+    const view = render(<MemoryRouter><ReaderScreen archiveId="a" title="Reader" pages={['']} loadPage={loadPage} /></MemoryRouter>);
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(loadPage).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status', { name: '正在加载' })).toBeInTheDocument();
+      if (failure === 'timed out') await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+      expect(loadPage).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:recovered');
+    } finally { view.unmount(); vi.useRealTimers(); }
+  });
+
+  it('keeps the same full-resolution image during touch and never creates a reduced gesture canvas', async () => {
+    const bitmap = vi.fn();
+    vi.stubGlobal('createImageBitmap', bitmap);
+    const view = renderReader();
+    try {
+      const image = screen.getByRole('img', { name: '第 1 页' });
+      const source = image.getAttribute('src');
+      Object.defineProperties(image, {
+        naturalWidth: { configurable: true, value: 6000 },
+        naturalHeight: { configurable: true, value: 8000 },
+      });
+      fireEvent.load(image);
+      const reader = screen.getByRole('main', { name: '漫画阅读器' });
+      fireEvent.touchStart(reader, { touches: [{ clientX: 100, clientY: 400 }, { clientX: 200, clientY: 400 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: 75, clientY: 400 }, { clientX: 225, clientY: 400 }] });
+      await act(async () => { await new Promise(requestAnimationFrame); });
+      expect(screen.getByRole('img', { name: '第 1 页' })).toBe(image);
+      expect(image).toHaveAttribute('src', source);
+      expect(view.container.querySelector('canvas.reader-gesture-texture')).toBeNull();
+      fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 75, clientY: 400 }] });
+      expect(bitmap).not.toHaveBeenCalled();
+    } finally { view.unmount(); vi.unstubAllGlobals(); }
+  });
+
+  it('blocks wheel, double click and pinch zoom until the current image has loaded', async () => {
+    const { container } = renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const image = screen.getByRole('img', { name: '第 1 页' });
+    Object.defineProperties(image, {
+      complete: { configurable: true, value: false },
+      naturalWidth: { configurable: true, value: 0 },
+    });
+    const frame = container.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
+    fireEvent.wheel(reader, { deltaY: -120 });
+    fireEvent.doubleClick(reader, { clientX: 195, clientY: 400 });
+    fireEvent.touchStart(reader, { touches: [{ clientX: 100, clientY: 400 }, { clientX: 200, clientY: 400 }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: 50, clientY: 400 }, { clientX: 250, clientY: 400 }] });
+    fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 50, clientY: 400 }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
+    markImagesReady(container);
+    fireEvent.doubleClick(reader, { clientX: 195, clientY: 400 });
+    expect(frame.style.transform).toContain('scale(2)');
   });
 
   it('preserves the decoded neighbouring image when a swipe lands', () => {

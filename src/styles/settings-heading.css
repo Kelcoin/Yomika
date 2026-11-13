@@ -1,7 +1,19 @@
 /* Keep the landing title and drilled title on exactly the same 44px row. */
 .settings-compact-heading {
+  position: relative;
+  justify-content: center;
   min-height: var(--icon-button-size);
+  padding-inline: calc(var(--icon-button-size) + var(--space-2));
 }
+
+.settings-compact-heading > button {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 0;
+}
+
+.settings-compact-heading h2 { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); min-width: 0; }
+.settings-compact-heading h2 svg { width: 22px; height: 22px; flex: none; color: var(--primary); }
 
 :root[data-layout='compact'] .settings-sidebar {
   padding-top: 0;

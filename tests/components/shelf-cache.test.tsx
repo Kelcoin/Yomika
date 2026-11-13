@@ -99,6 +99,7 @@ describe('shelf snapshots', () => {
     });
     render(<MemoryRouter initialEntries={['/watchlist']}><PreferencesProvider><ToastProvider><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
     expect(await screen.findByText(/离线缓存：显示上次收藏快照/)).toBeInTheDocument();
+    await act(async () => { await new Promise(requestAnimationFrame); });
     expect(screen.getByText('Verified old remote favorite')).toBeInTheDocument();
     clock.mockRestore();
   });

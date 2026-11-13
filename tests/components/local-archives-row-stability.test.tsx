@@ -181,7 +181,7 @@ describe('local archives rows across a hidden panel', () => {
     // 切去别的页面：面板被加上 `hidden`，量到的高度变成 0。
     await act(async () => { rerender(<Harness active={false} />); });
     await waitFor(() => expect(document.querySelector('.route-cache-panel')?.hasAttribute('hidden')).toBe(true));
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise(requestAnimationFrame); });
 
     // 藏起来的时候整屏的行不能卸载：它们一卸载，回来那一帧就是一段空列表，
     // 封面、标签、行高全都要重新建一遍——用户看到的就是「固定闪烁」。
@@ -190,7 +190,7 @@ describe('local archives rows across a hidden panel', () => {
     for (const [index, node] of onScreen) expect(away.get(index)).toBe(node);
 
     await act(async () => { rerender(<Harness active />); });
-    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await new Promise(requestAnimationFrame); });
 
     // 回来之后，还在窗口里的每一行都必须是原来那个 DOM 节点：同一个节点
     // 复用就不会重新取封面。

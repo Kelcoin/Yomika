@@ -94,3 +94,6 @@ NVIDIA Corporation/
 !/docs/superpowers/plans/
 /docs/superpowers/plans/*
 !/docs/superpowers/plans/2026-11-09-lrr-bridge.md
+
+# Codex 侧的浏览器探针产物（Edge 配置档、截图、一次性脚本），不随仓库走。
+/.codex-artifacts/

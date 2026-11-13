@@ -16,6 +16,23 @@ describe('workspace-scoped Back', () => {
     expect(history.back()).toBe('/');
     expect(history.back()).toBeUndefined();
   });
+  it('returns home after a shortcut excursion and clears that origin for bottom tabs', () => {
+    const history = new PageBackHistory();
+    history.visit('/');
+    history.visit('/history', undefined, true);
+    history.visit('/history/a');
+    expect(history.back()).toBe('/history');
+    history.visit('/history');
+    expect(history.back()).toBe('/');
+    history.visit('/');
+    history.visit('/history', undefined, false, true);
+    expect(history.back()).toBeUndefined();
+    history.visit('/');
+    history.visit('/downloads', undefined, true);
+    history.visit('/library', undefined, false, true);
+    history.visit('/downloads', undefined, false, true);
+    expect(history.back()).toBeUndefined();
+  });
   it('drops the entries ahead when a page is visited again', () => {
     // Going back and then opening something else must not leave the abandoned
     // page reachable: Back would jump to a URL the user has already left.
@@ -41,7 +58,7 @@ describe('workspace-scoped Back', () => {
 function Navigation() {
   usePageBackNavigation();
   const location = useLocation();
-  return <><p data-testid="route">{location.pathname}</p><Link to="/home/a">detail</Link><Link to="/library">library</Link></>;
+  return <><p data-testid="route">{location.pathname}</p><Link to="/home/a">detail</Link><Link to="/library">library</Link><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></>;
 }
 function back() { act(() => { window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true })); }); }
 
@@ -85,4 +102,27 @@ it('closes a native overlay first and returns the route on the following gesture
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
   back();
   expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+});
+
+
+it('returns to home from a shortcut using the native back action', () => {
+  render(<MemoryRouter><Navigation /></MemoryRouter>);
+  fireEvent.click(screen.getByText('home settings'));
+  expect(screen.getByTestId('route')).toHaveTextContent('/settings');
+  back();
+  expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+});
+
+
+it('preserves home shortcut origin when mobile browser POP is intercepted', () => {
+  document.documentElement.dataset.nativeMobile = 'true';
+  window.history.replaceState({}, '', '/');
+  render(<BrowserRouter><Navigation /></BrowserRouter>);
+  fireEvent.click(screen.getByText('home settings'));
+  act(() => {
+    window.history.replaceState({}, '', '/');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  });
+  expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+  expect(window.location.pathname).toBe('/');
 });
