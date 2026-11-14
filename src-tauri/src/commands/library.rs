@@ -11,7 +11,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Client;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, SeekFrom, Write};
 use tauri::{Manager, State};
 use tokio::task::JoinSet;
@@ -4022,6 +4021,7 @@ const DELETION_RETRY_DELAY_MS: u64 = 150;
 ///
 /// 收藏删不掉就不删档案：设置里写的是「删除档案时一并删除对应的收藏」，做不到时
 /// 宁可让用户先处理登录（或关掉这次同步），也不留一个删不掉的收藏。
+/// 例外是 EH 已明确确认画廊删除或版权移除：不存在的画廊不再阻止删除 LRR 档案。
 pub(crate) async fn delete_archive_with_favorite_sync(
     server_id: String,
     archive_id: String,
@@ -4071,10 +4071,9 @@ pub(crate) async fn delete_archive_with_favorite_sync(
                 )
                 .await?
                 {
-                    CommandResult::Success { .. } => break,
+                    outcome if favorite_sync_satisfied(&outcome) => break,
                     failure => {
-                        // 只有网络抖动这类可重试的失败才重来；登录失效、画廊被删
-                        // 这些重试多少次都是同一个答案。
+                        // 只重试临时故障；认证/访问失败和无法确认仍保留档案。
                         if !retryable_failure(&failure) || attempt >= DELETION_ATTEMPTS {
                             return Ok(failure);
                         }
@@ -4098,6 +4097,18 @@ pub(crate) async fn delete_archive_with_favorite_sync(
             DELETION_RETRY_DELAY_MS * attempt as u64,
         ))
         .await;
+    }
+}
+
+// Same policy as archiveDeletion.ts: only a confirmed permanent gallery loss
+// bypasses favorite verification. A generic "unavailable" never qualifies.
+fn favorite_sync_satisfied(result: &CommandResult<()>) -> bool {
+    match result {
+        CommandResult::Success { .. } => true,
+        CommandResult::Failure { error, .. } => matches!(
+            error.code,
+            "EH_GALLERY_DELETED" | "EH_GALLERY_COPYRIGHT_REMOVED"
+        ),
     }
 }
 
@@ -8460,6 +8471,22 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
+
+    #[test]
+    fn favorite_sync_only_allows_confirmed_permanent_gallery_loss() {
+        assert!(favorite_sync_satisfied(&CommandResult::success(())));
+        for code in ["EH_GALLERY_DELETED", "EH_GALLERY_COPYRIGHT_REMOVED"] {
+            assert!(favorite_sync_satisfied(&CommandResult::failure(code, "Gone", false)));
+        }
+        for code in [
+            "EH_UNAVAILABLE", "EH_RATE_LIMIT", "EH_REAUTH_REQUIRED",
+            "EH_CLOUDFLARE", "EH_ACCESS_BLOCKED", "EH_CONTENT_WARNING", "EH_UNEXPECTED_PAGE",
+        ] {
+            for retryable in [true, false] {
+                assert!(!favorite_sync_satisfied(&CommandResult::failure(code, "Not confirmed", retryable)), "{code} must keep the archive");
+            }
+        }
+    }
 
     #[test]
     fn history_never_expires_by_age() {

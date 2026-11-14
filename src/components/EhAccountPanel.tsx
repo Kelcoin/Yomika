@@ -1,3 +1,4 @@
+import { StateIcon } from './StateIcon';
 import { ContentSkeleton } from './ContentSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
@@ -207,15 +208,15 @@ export function EhAccountPanel({ accounts, onCheckHealth, loading, onSave, onPas
         <div className="eh-login">
           <div className="eh-login-tabs" role="tablist" aria-label="登录方式">
             <button type="button" role="tab" aria-selected={mode === 'password'} className={`secondary-action${mode === 'password' ? ' is-active' : ''}`} onClick={() => setMode('password')}>
-              <LogIn aria-hidden="true" />账号登录
+              <StateIcon name="login" selected={mode === 'password'} />账号登录
             </button>
             {(onBrowserLogin || onInAppLogin) && (
               <button type="button" role="tab" aria-selected={mode === 'browser'} className={`secondary-action${mode === 'browser' ? ' is-active' : ''}`} onClick={() => setMode('browser')}>
-                <KeyRound aria-hidden="true" />网页登录
+                <StateIcon name="globe" selected={mode === 'browser'} />网页登录
               </button>
             )}
             <button type="button" role="tab" aria-selected={mode === 'cookie'} className={`secondary-action${mode === 'cookie' ? ' is-active' : ''}`} onClick={() => setMode('cookie')}>
-              <KeyRound aria-hidden="true" />Cookie 导入
+              <StateIcon name="cookie" selected={mode === 'cookie'} />Cookie 导入
             </button>
           </div>
 

@@ -11,7 +11,7 @@
  * Colours ride the theme tokens, so every colour scheme recolours it.
  *
  * `plate={false}` drops the tile and keeps only the letterforms, scaled into the
- * 24-grid with a 2px stroke — the shape the settings rows draw every other icon
+ * 24-grid with a 1.75px stroke — the shape the settings rows draw every other icon
  * in, where a filled chip next to a row of plain glyphs read as a foreign badge. */
 export function EhMark({ size = 20, className, plate = true }: { size?: number; className?: string; plate?: boolean }) {
   const classes = `eh-mark${className ? ` ${className}` : ''}`;
@@ -31,13 +31,13 @@ export function EhMark({ size = 20, className, plate = true }: { size?: number; 
   if (!plate) {
     // The letterforms already sit centred on (256, 256) in the 512 box, so the
     // glyph version is just a scale into the icon grid: 0.0909 × 22 units keeps
-    // the 2px stroke weight the other row icons are drawn with.
+    // the 1.75px stroke weight the other row icons are drawn with.
     return (
-      <svg className={classes} width={size} height={size} viewBox="0 0 24 24" fill="none" role="img" aria-hidden="true">
+      <svg className={classes} width={size} height={size} viewBox="0 0 24 24" fill="none" role="img" aria-hidden="true" focusable="false">
         <g
           transform="translate(12 12) scale(0.0909) translate(-256 -256)"
           stroke="currentColor"
-          strokeWidth="22"
+          strokeWidth="19.25"
           strokeLinecap="round"
           strokeLinejoin="round"
         >
@@ -56,6 +56,7 @@ export function EhMark({ size = 20, className, plate = true }: { size?: number; 
       fill="none"
       role="img"
       aria-hidden="true"
+      focusable="false"
     >
       <rect width="512" height="512" rx="112" fill="var(--eh-mark-plate, var(--primary-container))" />
       <g

@@ -1,5 +1,5 @@
 import { AutoTextarea } from './AutoTextarea';
-import { ArrowLeft, BookOpen, LoaderCircle, Play, RotateCcw, Save, Trash2 } from 'lucide-react';
+import { ArrowLeft, BookOpen, Play, RotateCcw, Save, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 

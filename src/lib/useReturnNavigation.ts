@@ -16,13 +16,13 @@ export function useReturnNavigation(fallback = '/library') {
     }
     const returnTo = (location.state as { returnTo?: unknown } | null)?.returnTo;
     if (typeof returnTo === 'string' && returnTo.startsWith('/')) {
-      navigate(returnTo, { replace: true });
+      navigate(returnTo, { replace: true, state: { routeDirection: -1 } });
       return;
     }
     // Router keys track in-app navigation, unlike window.history.length which
     // may count pages outside this application and disagrees with MemoryRouter.
     const index = window.history.state?.idx;
     if (typeof index === 'number' ? index > 0 : location.key !== 'default') navigate(-1);
-    else navigate(fallback, { replace: true });
+    else navigate(fallback, { replace: true, state: { routeDirection: -1 } });
   }, [fallback, location.key, location.state, navigate]);
 }

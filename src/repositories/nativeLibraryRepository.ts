@@ -28,12 +28,8 @@ import { invalidateRouteCache } from '../lib/routeCache';
 import { rememberServerPresence } from '../lib/serverPresence';
 import { NativeLrrBridgeRepository, bridgeProgress, bridgeWatchlist, bridgeHistory, invalidateLrrBridgeConfig, type BridgeCollectionRecord } from './nativeLrrBridgeRepository';
 import { ok, err } from '../domain/result';
+import type { ServerIdentity } from '../domain/server';
 const lrrBridge = new NativeLrrBridgeRepository();
-function invalidateHosted<T>(result: CommandResult<T>): CommandResult<T> {
-  if (result.ok) { invalidateRouteCache('home:'); invalidateRouteCache('state:'); }
-  return result;
-}
-
 function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
   if (result.ok) {
     invalidateRouteCache('home:');
@@ -45,7 +41,6 @@ function invalidateFavorites<T>(result: CommandResult<T>): CommandResult<T> {
   if (result.ok) invalidateRouteCache('favorites:');
   return invalidateShelves(result);
 }
-import type { ServerIdentity } from '../domain/server';
 
 type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'> & { allowProgressRegression?: boolean };
 /** 同一个键上的写入串成一条链：**后一次派发**等前一次落定再发。
@@ -190,7 +185,7 @@ export class NativeLibraryRepository {
       if (!config.ok) return config;
       if (!config.value.enabled) return invokeCommand('set_reading_list', { scopeId, archiveId, added }, WatchlistRecordSchema).then(invalidateShelves);
       const result = await lrrBridge.apply(scopeId, archiveId, added ? 'watchlist_add' : 'watchlist_remove');
-      return invalidateHosted(result.ok ? ok(bridgeWatchlist(scopeId, result.value)) : result);
+      return invalidateShelves(result.ok ? ok(bridgeWatchlist(scopeId, result.value)) : result);
     });
   }
   async listReadingList(scopeId: string): Promise<CommandResult<WatchlistRecord[]>> {
@@ -282,7 +277,7 @@ export class NativeLibraryRepository {
         if (!result.ok) return result;
         count++;
       }
-      return invalidateHosted(ok(count));
+      return invalidateShelves(ok(count));
     }
     return invokeCommand('delete_history_records', { scopeId, archiveIds }, z.number().int().nonnegative()).then((result) => {
       if (result.ok && result.value > 0) invalidateShelves(result);
@@ -296,7 +291,7 @@ export class NativeLibraryRepository {
       if (!config.ok) return config;
       if (!config.value.enabled) return invokeCommand('clear_reading_progress', { scopeId, archiveId }, VoidResponseSchema).then(invalidateShelves);
       const result = await lrrBridge.apply(scopeId, archiveId, 'progress_clear');
-      return invalidateHosted(result.ok ? ok(undefined) : result);
+      return invalidateShelves(result.ok ? ok(undefined) : result);
     });
   }
   /** LANraragi 的 🔖 Favorites 这一条分类（`null` = 服务器上没有这条）。
@@ -615,7 +610,7 @@ export class NativeLibraryRepository {
         });
         if (!result.ok) return result;
         const value = bridgeProgress(progress.scopeId, result.value);
-        return invalidateHosted(value ? ok(value) : err('INVALID_RESPONSE', '托管进度响应无效', false));
+        return invalidateShelves(value ? ok(value) : err('INVALID_RESPONSE', '托管进度响应无效', false));
       },
     );
   }

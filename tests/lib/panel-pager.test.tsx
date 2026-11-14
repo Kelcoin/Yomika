@@ -1,13 +1,13 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { useState } from 'react';
-import { usePanelPager } from '../../src/lib/usePanelPager';
+import { mapPanelDepth, usePanelPager } from '../../src/lib/usePanelPager';
 
 const order = ['details', 'comments'] as const;
 function Pager() {
   const [panel, setPanel] = useState<(typeof order)[number]>('details');
   const pager = usePanelPager({ order, panel, enabled: true, onChange: setPanel });
-  return <><button onClick={() => pager.goTo('comments')} aria-pressed={pager.selectedPanel === 'comments'}>Comments</button><output>{panel}</output><output data-testid="selected">{pager.selectedPanel}</output><div ref={pager.containerRef} className={pager.containerClass} data-testid="stage">
+  return <><button onClick={() => pager.goTo('details')}>Details</button><button onClick={() => pager.goTo('comments')} aria-pressed={pager.selectedPanel === 'comments'}>Comments</button><output>{panel}</output><output data-testid="selected">{pager.selectedPanel}</output><div ref={pager.containerRef} className={pager.containerClass} data-testid="stage">
     <div {...pager.panelProps('details')} data-testid="details"><a href="#target">Open</a></div>
     <div {...pager.panelProps('comments')} data-testid="comments"><input aria-label="draft" defaultValue="retained" /></div>
   </div></>;
@@ -22,6 +22,30 @@ afterEach(() => {
 });
 
 describe('panel gesture lifecycle', () => {
+  it('repositions the scrollport after a long-to-short transition and restores the long panel on return', () => {
+    render(<div data-testid="scrollport" style={{ overflowY: 'auto' }}><Pager /></div>);
+    const host = screen.getByTestId('scrollport');
+    const stage = screen.getByTestId('stage');
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 768, height: 768 } as DOMRect);
+    vi.spyOn(stage, 'getBoundingClientRect').mockImplementation(() => ({ top: 300 - host.scrollTop, height: 6000 } as DOMRect));
+    vi.spyOn(screen.getByTestId('details'), 'scrollHeight', 'get').mockReturnValue(6000);
+    vi.spyOn(screen.getByTestId('comments'), 'scrollHeight', 'get').mockReturnValue(600);
+    host.scrollTop = 5000;
+    fireEvent.click(screen.getByRole('button', { name: 'Comments' }));
+    expect(host.scrollTop).toBe(300);
+    expect(screen.getByTestId('comments').hidden).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Details' }));
+    expect(host.scrollTop).toBe(5000);
+    expect(screen.getByTestId('details').hidden).toBe(false);
+  });
+
+  it('maps a deep visit into a short panel and restores each panel independently', () => {
+    expect(mapPanelDepth(1800, 3000, 900, 600)).toBe(225);
+    expect(mapPanelDepth(1800, 3000, 400, 600)).toBe(0);
+    expect(mapPanelDepth(200, 900, 3000, 600, 1800)).toBe(1800);
+    expect(mapPanelDepth(200, 900, 800, 600, 1800)).toBe(200);
+    expect(mapPanelDepth(0, 400, 3000, 600)).toBe(0);
+  });
   it('freezes the outgoing stage during a swipe and keeps a short target from clamping the outer scroll', () => {
     render(<Pager />);
     const stage = screen.getByTestId('stage');
@@ -32,7 +56,7 @@ describe('panel gesture lifecycle', () => {
     expect(stage.style.height).toBe('1200px');
     fireEvent.touchEnd(details, { touches: [] });
     expect(stage.style.height).toBe('');
-    expect(parseFloat(stage.style.minHeight)).toBe(window.innerHeight + 400);
+    expect(parseFloat(stage.style.minHeight)).toBe(window.innerHeight);
     expect(screen.getAllByText('comments', { selector: 'output' })).toHaveLength(2);
   });
 

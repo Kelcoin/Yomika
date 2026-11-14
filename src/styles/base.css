@@ -100,6 +100,13 @@ svg.lucide {
   stroke-linejoin: round;
 }
 
+/* Both icon states occupy the same box. Inline SVGs otherwise leave a text
+   descender gap inside wrappers, shifting one state even when its paths match. */
+svg.app-icon {
+  display: block;
+  flex-shrink: 0;
+}
+
 .select-field {
   position: relative;
   width: 100%;
@@ -295,9 +302,16 @@ input[type='radio'] {
   accent-color: var(--brand-vermilion);
 }
 
-button,
-a {
+/* Cover role-based controls and SVG hit targets as well as native buttons.
+   WebView's long-press highlight is independent of our pressed state. */
+:root {
   -webkit-tap-highlight-color: transparent;
+}
+
+:where(button, a[href], summary, [role='button'], [role='tab'], [role='menuitem'], [role='switch'], [role='checkbox'], [role='radio']) {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 a {

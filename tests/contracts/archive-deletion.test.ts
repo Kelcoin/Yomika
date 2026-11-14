@@ -8,6 +8,27 @@ const metadata = { archiveId: 'a', title: 'Title', filename: 'a.zip', tags: 'sou
 const account = { id: 'eh', label: 'EH', host: 'e-hentai.org', cookieRef: 'secret-ref', isActive: true, status: 'verified', createdAt: '', updatedAt: '' };
 
 describe('archive deletion with favorite sync', () => {
+  it.each(['EH_GALLERY_DELETED', 'EH_GALLERY_COPYRIGHT_REMOVED'])('continues deletion when the source gallery is permanently unavailable: %s', async (code) => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_eh_accounts') return { ok: true, value: [account] };
+      if (command === 'remove_eh_favorite') return { ok: false, error: { code, message: 'Gallery no longer available', retryable: false } };
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    await deleteArchiveWithFavoriteSync(archive, true);
+    expect(adapter.mock.calls.map(([command]) => command)).toEqual(['load_archive_metadata', 'list_eh_accounts', 'remove_eh_favorite', 'delete_archive']);
+  });
+  it.each(['EH_CLOUDFLARE', 'EH_ACCESS_BLOCKED', 'EH_CONTENT_WARNING', 'EH_UNEXPECTED_PAGE'])('still keeps the archive when remote state is unknown: %s', async (code) => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'list_eh_accounts') return { ok: true, value: [account] };
+      return { ok: false, error: { code, message: 'Remote state is unknown', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    await expect(deleteArchiveWithFavoriteSync(archive, true)).rejects.toThrow('Remote state is unknown');
+    expect(adapter.mock.calls.some(([command]) => command === 'delete_archive')).toBe(false);
+  });
   it('keeps the archive when all transient favorite retries fail', async () => {
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };

@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { compactNavItems, compactNavHiddenItems } from '../src/lib/navigationOrder';
 
 const root = resolve(__dirname, '..');
 // 归一化行尾：git 的 autocrlf checkout 会把源文件写成 CRLF，而合同的换行
@@ -95,7 +96,8 @@ describe('design system contract', () => {
     // 舞台上才只留一个高度（矮的那块不会被高的那块撑出一段空白）。
     const stage = ruleBody(shell, '.archive-detail-panels.is-sliding');
     expect(stage).toMatch(/display:\s*grid/);
-    expect(stage).toMatch(/overflow:\s*hidden/);
+    expect(stage).toMatch(/overflow:\s*visible/);
+    expect(stage).toContain('clip-path: inset(-100vmax calc(-1 * var(--space-4)))');
     expect(ruleBody(shell, ".archive-detail-panels.is-sliding > [role='tabpanel']")).toMatch(/grid-area:\s*1 \/ 1/);
     // 原来的纵向淡入必须让位：滑完再播一次上浮，看着像弹了两下。
     expect(shell).not.toContain('detail-panel-enter');
@@ -1053,8 +1055,6 @@ describe('design system contract', () => {
     // 变换是机械的：把悬停选择器里的 `:hover` 原样换成 `:is(.is-pressed, :active)`，
     // 祖先上下文与 `:not(...)` 守卫都不动——这样特异性和悬停完全一致，凡是悬停压得住
     // 的静止态，按下态也压得住。机制见 src/lib/pressFeedback.ts。
-    const shell = read('src/styles/shell.css');
-    const source = shell.replace(/\/\*[\s\S]*?\*\//g, '');
     // 选择器列表要按**顶层**逗号切：`:is(.is-pressed, :active)` 自己带一个逗号。
     const splitSelectors = (list: string): string[] => {
       const parts: string[] = [];
@@ -1897,6 +1897,13 @@ describe('design system contract', () => {
     expect(read('src/components/LibraryRouteWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">档案库<\/h1>/);
     expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">设置<\/h1>/);
     expect(read('src/components/LocalArchivesWorkspace.tsx')).toMatch(/<h1 className="visually-hidden">本地档案<\/h1>/);
+  });
+
+  it('does not reserve the mobile top safe area twice on metadata editing', () => {
+    const shell = read('src/styles/shell.css');
+    const metadataWorkspace = ruleBody(shell, '.workspace:has(> .route-cache-panel:not([hidden]) .metadata-edit-page)');
+    expect(metadataWorkspace).toMatch(/padding-top:\s*var\(--space-3\)/);
+    expect(metadataWorkspace).not.toContain('--safe-top');
   });
 
   it('centres the history rail node on the rail line', () => {
@@ -2809,8 +2816,9 @@ describe('design system contract', () => {
 
   it('pins home and library in the compact bar', () => {
     // Home provides access to settings and secondary links; pin it alongside library.
-    const shell = read('src/components/AppShell.tsx');
-    expect(shell).toMatch(/const PINNED_NAV_KEYS: NavKey\[\] = \['\/', '\/library'\];/);
+    expect(compactNavItems([]).map(({ to }) => to)).toEqual(['/', '/library']);
+    expect(compactNavItems(['settings', 'history']).map(({ to }) => to)).toEqual(['/', '/library', '/history']);
+    expect(compactNavHiddenItems([]).map(({ to }) => to)).toEqual(['/history', '/watchlist', '/to-read', '/downloads']);
     const settings = read('src/components/SettingsWorkspace.tsx');
     expect(settings).toMatch(/const pinned = key === 'home' \|\| key === 'library';/);
     expect(settings).toMatch(/if \(key === 'home' \|\| key === 'library'\) return;/);
@@ -3459,13 +3467,9 @@ describe('the 2026-10-17 UI batch', () => {
     );
   });
 
-  it('draws the vote glyph as the Material thumb, buttons first and the score to their right', () => {
+  it('keeps voting buttons before the score and aligned to the comment metadata', () => {
     const comments = read('src/components/EhComments.tsx');
-    expect(comments, '投票用实心 Material 拇指（用户图 4 的形状）').toContain(
-      'M2 20h2c.55 0 1-.45 1-1v-9c0-.55-.45-1-1-1H2v11z',
-    );
-    expect(comments, '向下那一枚是同一路径转 180°，两枚永远同形').toContain('rotate(180 12 12)');
-    expect(comments, '不再用 Lucide 的描边拇指').not.toMatch(/ThumbsUp|ThumbsDown/);
+    // The current vote's outlined/filled geometry is checked by eh-comments.test.
     const actionsAt = comments.indexOf('eh-comment-votes-actions');
     const scoreAt = comments.indexOf('eh-comment-score');
     expect(actionsAt, '投票按钮那一组在标记里存在').toBeGreaterThan(-1);

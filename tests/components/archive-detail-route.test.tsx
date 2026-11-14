@@ -42,7 +42,32 @@ function renderDetail(detailBasePath?: string) {
 }
 
 describe('archive detail route', () => {
-  it('refreshes the reading label after metadata hydrates missing server progress', async () => {
+  it('keeps the read label and action available when the optional progress fact fails', async () => {
+    let attempts = 0;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'load_reading_progress') return ++attempts === 1
+        ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } }
+        : { ok: true, value: { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 4, pageCount: 12, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } };
+      return { ok: true, value: [] };
+    });
+    function LocationProbe() { return <output data-testid="reading-retry-location">{useLocation().pathname}</output>; }
+    render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /><LocationProbe /></MemoryRouter>);
+    await screen.findByRole('heading', { name: metadata.title });
+    const read = screen.getByRole('link', { name: '阅读' });
+    expect(read).toHaveTextContent('阅读');
+    expect(read).toHaveAttribute('aria-disabled', 'false');
+    expect(document.querySelector('.archive-read-label-skeleton')).toBeNull();
+    fireEvent.click(read);
+    await waitFor(() => expect(screen.getByTestId('reading-retry-location')).toHaveTextContent('/reader/archive-a'));
+  });
+
+  it('keeps the read label fixed and puts hydrated progress in the page-count fact', async () => {
+    // A cached snapshot can paint immediately, but must not publish a label
+    // before fresh metadata has hydrated the remote reading progress.
+    writeRouteCache(`archive-detail:${server.id}:archive-a`, metadata);
+    writeRouteCache('archive-detail:last:archive-a', metadata);
     let finishMetadata!: (value: unknown) => void;
     const request = new Promise(resolve => { finishMetadata = resolve; });
     let hydrated = false;
@@ -56,9 +81,11 @@ describe('archive detail route', () => {
     setInvokeAdapterForTests(adapter);
     renderDetail();
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('load_reading_progress', { scopeId: server.scopeId, archiveId: metadata.archiveId }));
+    expect(screen.getByRole('link', { name: '阅读' })).toHaveTextContent('阅读');
     hydrated = true;
     finishMetadata({ ok: true, value: { ...metadata, progress: 5 } });
-    expect(await screen.findByRole('link', { name: '从 5 页继续' })).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-fact="pages"] dd')).toHaveTextContent('5 / 12 页'));
+    expect(screen.getByRole('link', { name: '阅读' })).toHaveTextContent('阅读');
   });
   it('swipes the content between details and comments without stealing vertical or rail gestures', async () => {
     setInvokeAdapterForTests(async command => {
@@ -193,7 +220,7 @@ describe('archive detail route', () => {
     expect(stage.className).toBe('archive-detail-panels');
     expect(comments.getAttribute('style') ?? '').toBe('');
   });
-  it('labels the final saved page as completed', async () => {
+  it('shows final saved progress beside the cover while keeping the read label fixed', async () => {
     setInvokeAdapterForTests(async command => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
@@ -204,7 +231,8 @@ describe('archive detail route', () => {
       return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
     });
     renderDetail();
-    expect(await screen.findByRole('link', { name: '已读完' })).toBeInTheDocument();
+    await waitFor(() => expect(document.querySelector('[data-fact="pages"] dd')).toHaveTextContent('12 / 12 页'));
+    expect(screen.getByRole('link', { name: '阅读' })).toHaveTextContent('阅读');
   });
 
   it('refreshes retained progress, reading-list membership and metadata after synchronization', async () => {
@@ -264,6 +292,7 @@ describe('archive detail route', () => {
   });
   it.each([false, true])('retires an incognito press or prompt when its page hides (open=%s)', async open => {
     setInvokeAdapterForTests(async command => {
+      if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'cache_read_image') return { ok: true, value: [] };
@@ -338,6 +367,7 @@ describe('archive detail route', () => {
 
   it.each([false, true])('does not carry an incognito press or dialog into the next archive (open=%s)', async open => {
     setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, archiveId: args?.archiveId, title: args?.archiveId } };
       if (command === 'cache_read_image') return { ok: true, value: [] };
@@ -569,7 +599,7 @@ describe('archive detail route', () => {
     // title slot holds a skeleton of its own size (it used to show the raw
     // archive id), and the copy column mirrors the tag rows it will hold.
     expect(await screen.findByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line-title');
-    await waitFor(() => expect(document.querySelector('.archive-detail-copy-skeleton')).not.toBeNull());
+    await waitFor(() => expect(document.querySelector('.archive-detail-tags-skeleton')).not.toBeNull());
     expect(screen.getByRole('status', { name: '正在加载档案详情' })).toHaveClass('skeleton-line-title');
     expect(screen.queryByText('正在加载档案详情…')).not.toBeInTheDocument();
   });
@@ -670,6 +700,7 @@ describe('archive detail route', () => {
 
   it('defaults to reading, reading list, favorites and download in the toolbar', async () => {
     setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'list_watchlist') return { ok: true, value: [] };
@@ -692,6 +723,7 @@ describe('archive detail route', () => {
 
   it('offers incognito by long-pressing 阅读 rather than a button of its own', async () => {
     setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
       if (command === 'list_watchlist' || command === 'list_categories' || command === 'list_reading_list') return { ok: true, value: [] };
@@ -911,7 +943,7 @@ describe('archive detail route', () => {
     expect(screen.getByRole('region', { name: 'E-Hentai 评论' })).toBe(comments);
     expect(adapter.mock.calls.filter(([command]) => command === 'get_eh_comments')).toHaveLength(1);
     fireEvent.click(screen.getByRole('link', { name: 'https://exhentai.org/g/4256859/531b16d2ae/' }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: '打开档案详情' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '跳转LRR详情' }));
     expect(await screen.findByText('Linked archive /home/matched?server=server-a')).toBeInTheDocument();
   });
 
@@ -1042,11 +1074,8 @@ describe('archive detail route', () => {
       && (callArgs?.input as { start?: number }).start === 2)).toHaveLength(1);
   });
 
-  it('searches again when the cached answer came back short', async () => {
-    // 取数被截断（页数用满、半途失败或整段走了镜像）时写下的缓存只是先把上一次的答案
-    // 画出来：它不能把短答案在这里钉一天，下一次进详情页要在后台补齐。
+  it('reuses a successfully sampled pool even when the search reaches its page budget', async () => {
     let round = 0;
-    const gates: Array<() => void> = [];
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
@@ -1054,9 +1083,6 @@ describe('archive detail route', () => {
       if (command === 'search_archives_page') {
         const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
         if (start === 0) round += 1;
-        // 把补齐那次搜索的第一页闸住：不闸的话它在同一串微任务里就换完答案了，
-        // 「缓存先画、后台再补」这一段根本观察不到。
-        if (round > 1 && start === 0) await new Promise<void>((resolve) => gates.push(resolve));
         return { ok: true, value: {
           items: [{ serverId: server.id, archiveId: `r${round}-${start}`, title: `第 ${round} 轮 ${start}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] }],
           total: 60,
@@ -1073,7 +1099,52 @@ describe('archive detail route', () => {
     const first = renderDetail('/home');
     const rail = await screen.findByRole('region', { name: '推荐' });
     expect(await within(rail).findByRole('link', { name: /第 1 轮 0/ })).toBeInTheDocument();
-    // 这一轮被页数上限截断了，写下的快照必须自己承认「这份答案可能是短的」。
+    expect(readRouteCache<{ complete?: boolean }>('recommendations:server-a:archive-a')?.complete).toBe(true);
+    const searches = adapter.mock.calls.filter(([command]) => command === 'search_archives_page').length;
+    first.unmount();
+
+    renderDetail('/home');
+    await screen.findByRole('link', { name: /第 1 轮 0/ });
+    await act(async () => {});
+    expect(adapter.mock.calls.filter(([command]) => command === 'search_archives_page')).toHaveLength(searches);
+    // Explicit refresh still replaces the sampled pool.
+    fireEvent.click(screen.getByRole('button', { name: '刷新推荐' }));
+    expect(await screen.findByRole('link', { name: /第 2 轮 0/ })).toBeInTheDocument();
+  });
+
+  it('retries a network-partial pool on the next visit while retaining cached cards', async () => {
+    // A network error after the first page preserves the partial pool, then
+    // retries in the background on the next visit.
+    let round = 0;
+    const gates: Array<() => void> = [];
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
+      if (command === 'search_archives_page') {
+        const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
+        if (start === 0) round += 1;
+        // 把补齐那次搜索的第一页闸住：不闸的话它在同一串微任务里就换完答案了，
+        // 「缓存先画、后台再补」这一段根本观察不到。
+        if (round > 1 && start === 0) await new Promise<void>((resolve) => gates.push(resolve));
+        if (round === 1 && start > 0) return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } };
+        return { ok: true, value: {
+          items: [{ serverId: server.id, archiveId: `r${round}-${start}`, title: `第 ${round} 轮 ${start}`, pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses'] }],
+          total: 60,
+          hasMore: true,
+        } };
+      }
+      if (command === 'verify_archives_exist') return { ok: true, value: [] };
+      if (command === 'cache_read_image') return { ok: false, error: { code: 'LRR_NOT_FOUND', message: 'no cover', retryable: false } };
+      if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'no cover', retryable: true } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+
+    const first = renderDetail('/home');
+    const rail = await screen.findByRole('region', { name: '推荐' });
+    expect(await within(rail).findByRole('link', { name: /第 1 轮 0/ })).toBeInTheDocument();
+    // This request failed mid-search, unlike a successful bounded sample.
     expect(readRouteCache<{ complete?: boolean }>('recommendations:server-a:archive-a')?.complete).toBe(false);
     first.unmount();
 
@@ -1186,6 +1257,7 @@ it('retains detail DOM and thumbnail requests across repeated tab switches', asy
 
 it('opens the shared menu from the header and downloads from the default toolbar', async () => {
   const adapter = vi.fn(async (command: string) => {
+    if (command === 'load_reading_progress') return { ok: true, value: null };
     if (command === 'list_servers') return { ok: true, value: [server] };
     if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'source:https://example.com/gallery/1', pageCount: 0 } };
     if (command === 'download_archive') return { ok: true, value: 'C:/Downloads/archive.cbz' };

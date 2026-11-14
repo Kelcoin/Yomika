@@ -46,6 +46,7 @@ rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 keyring = { version = "3", features = ["windows-native"] }
 url = "2"
 base64 = "0.22"
+scraper = "0.24"
 sha2 = "0.10"
 blake3 = "1"
 # 解主 exe 里那份 worker 载荷（`src/compute/worker_binary.rs`）：交付一个文件，跑起来

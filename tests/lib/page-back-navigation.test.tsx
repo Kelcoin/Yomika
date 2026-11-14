@@ -4,6 +4,7 @@ import { BrowserRouter, Link, MemoryRouter, useLocation } from 'react-router-dom
 import { MOBILE_BACK_EVENT, PageBackHistory, usePageBackNavigation } from '../../src/lib/pageBackNavigation';
 import { useState } from 'react';
 import { useOverlayBackGuard } from '../../src/lib/overlayBackGuard';
+import { useRouteDirection } from '../../src/lib/useRouteDirection';
 
 describe('workspace-scoped Back', () => {
   it('never returns from one tab to another, including root gestures', () => {
@@ -58,7 +59,8 @@ describe('workspace-scoped Back', () => {
 function Navigation() {
   usePageBackNavigation();
   const location = useLocation();
-  return <><p data-testid="route">{location.pathname}</p><Link to="/home/a">detail</Link><Link to="/library">library</Link><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></>;
+  const direction = useRouteDirection();
+  return <><output data-testid="direction">{direction}</output><p data-testid="route">{location.pathname}</p><Link to="/home/a">detail</Link><Link to="/library">library</Link><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></>;
 }
 function back() { act(() => { window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true })); }); }
 
@@ -67,9 +69,12 @@ afterEach(() => { delete document.documentElement.dataset.nativeMobile; });
 it('handles Android Back without traversing global Router history', () => {
   render(<MemoryRouter><Navigation /></MemoryRouter>);
   fireEvent.click(screen.getByText('detail'));
+  expect(screen.getByTestId('direction')).toHaveTextContent('1');
   back();
   expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+  expect(screen.getByTestId('direction')).toHaveTextContent('-1');
   fireEvent.click(screen.getByText('library'));
+  expect(screen.getByTestId('direction')).toHaveTextContent('1');
   back();
   expect(screen.getByTestId('route')).toHaveTextContent('/library');
 });

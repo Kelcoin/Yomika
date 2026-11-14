@@ -288,6 +288,7 @@ describe('application shell', () => {
     // app not having one at all: the rails, the recommendation rail and the
     // shelves all ignored the click.
     setInvokeAdapterForTests(async (command) => {
+      if (command === 'load_reading_progress') return { ok: true, value: null };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'a1', pageIndex: 4, visitedAt: '2026-08-28T00:00:00Z', deviceId: 'device-a', revision: 1 }] };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };

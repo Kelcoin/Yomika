@@ -1,5 +1,6 @@
+import { StateIcon } from './StateIcon';
 import { AutoTextarea } from './AutoTextarea';
-import { CloudDownload, FolderOpen, Play, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
+import { FolderOpen, Play, Plus, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { usePageActive } from '../app/RetainedPage';
@@ -7,12 +8,7 @@ import { usePageActive } from '../app/RetainedPage';
 import { onFileDrop } from '../bridge/fileDrop';
 import { pickArchiveFiles } from '../bridge/filePicker';
 import { pickServer } from '../domain/server';
-import {
-  appendUploadItems,
-  parseUploadUrls,
-  partitionUploadPaths,
-  type UploadQueueItem,
-} from '../domain/upload';
+import { appendUploadItems, parseUploadUrls, partitionUploadPaths, type UploadQueueItem } from '../domain/upload';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { useToast } from './Toast';
 import { EmptyState } from './EmptyState';
@@ -148,10 +144,10 @@ export function UploadPanel() {
       <h2 className="sr-only" id="upload-panel-title">添加档案</h2>
       <div className="segmented-control upload-mode-tabs" role="tablist" aria-label="添加方式">
         <button type="button" role="tab" aria-selected={mode === 'local'} className={mode === 'local' ? 'is-active' : ''} onClick={() => setMode('local')}>
-          <span className="upload-mode-label"><FolderOpen aria-hidden="true" />从本地添加</span>
+          <span className="upload-mode-label"><StateIcon name="folder" selected={mode === 'local'} />从本地添加</span>
         </button>
         <button type="button" role="tab" aria-selected={mode === 'url'} className={mode === 'url' ? 'is-active' : ''} onClick={() => setMode('url')}>
-          <span className="upload-mode-label"><CloudDownload aria-hidden="true" />从互联网添加</span>
+          <span className="upload-mode-label"><StateIcon name="cloudDownload" selected={mode === 'url'} />从互联网添加</span>
         </button>
       </div>
 

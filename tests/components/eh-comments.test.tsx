@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
@@ -23,7 +24,24 @@ const comment = {
   myVote: 0,
 };
 
+const gallery = {
+  title: 'Linked EH gallery', category: 'Manga', uploader: 'Artist', pageCount: 42,
+  size: '20 MB', posted: '2026-11-13', tags: [], cover: null,
+  favoriteCategory: null, favoriteCategories: ['Default', 'Comics'], favoriteNote: '', thumbnails: [], thumbnailPageCount: 1,
+};
+
 describe('E-Hentai comments', () => {
+  it.each([-1, 0, 1])('draws only the current vote as filled (vote=%s)', async myVote => {
+    setInvokeAdapterForTests(async () => ({ ok: true, value: [{ ...comment, myVote }] }));
+    render(<EhComments accountId="eh-a" galleryId="vote-icons" token="abc" />);
+    const up = await screen.findByRole('button', { name: '赞同 Reader 的评论' });
+    const down = screen.getByRole('button', { name: '反对 Reader 的评论' });
+    expect(up).toHaveAttribute('aria-pressed', String(myVote === 1));
+    expect(down).toHaveAttribute('aria-pressed', String(myVote === -1));
+    expect(up.querySelector('svg')).toHaveAttribute('data-icon-state', myVote === 1 ? 'filled' : 'outline');
+    expect(down.querySelector('svg')).toHaveAttribute('data-icon-state', myVote === -1 ? 'filled' : 'outline');
+  });
+
   it('preloads EH suffix matches, deduplicates hosts and offers an anchored archive choice', async () => {
     const archive = { serverId: 's', archiveId: 'matched', title: 'Matched archive', pageCount: 10, updatedAt: 'now' };
     const onOpenArchive = vi.fn();
@@ -40,18 +58,20 @@ describe('E-Hentai comments', () => {
     fireEvent.click(screen.getByRole('link', { name: 'https://exhentai.org/g/4256859/531b16d2ae/' }));
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
     await act(async () => finishSearch({ ok: true, value: { items: [archive], total: 1, hasMore: false } }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: '打开档案详情' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '跳转LRR详情' }));
     expect(onOpenArchive).toHaveBeenCalledWith(expect.objectContaining({ archiveId: 'matched' }));
     expect(adapter.mock.calls.some(([command]) => command === 'open_external_url')).toBe(false);
     fireEvent.click(screen.getByRole('link', { name: 'https://e-hentai.org/g/4256859/531b16d2ae' }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: '打开链接' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('open_external_url', { url: 'https://e-hentai.org/g/4256859/531b16d2ae' }));
+    expect(await screen.findByRole('menuitem', { name: '跳转E站详情' })).toBeVisible();
+    expect(screen.queryByRole('menuitem', { name: '打开链接' })).not.toBeInTheDocument();
     expect(adapter.mock.calls.filter(([command]) => command === 'search_archives_page')).toHaveLength(1);
   });
 
-  it.each([false, true])('opens unmatched or failed EH lookups externally (failure=%s)', async failure => {
+  it.each([false, true])('opens unmatched or failed EH lookups in authenticated gallery details (failure=%s)', async failure => {
     const url = 'https://e-hentai.org/g/4256859/531b16d2ae';
     const adapter = vi.fn(async (command: string) => {
+      if (command === 'get_eh_gallery') return { ok: true, value: gallery };
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
       if (command === 'get_eh_comments') return { ok: true, value: [{ ...comment, body: url }] };
       if (command === 'search_archives_page') return failure
         ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'Offline', retryable: true } }
@@ -61,8 +81,81 @@ describe('E-Hentai comments', () => {
     setInvokeAdapterForTests(adapter);
     render(<EhComments accountId="eh-a" galleryId="12345" token="abc" serverId="s" onOpenArchive={vi.fn()} />);
     fireEvent.click(await screen.findByRole('link', { name: url }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('open_external_url', { url }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('get_eh_gallery', { accountId: 'eh-a', galleryId: '4256859', token: '531b16d2ae', page: 0 }));
+    expect(await screen.findByRole('heading', { name: gallery.title })).toBeInTheDocument();
+    expect(adapter.mock.calls.some(([command]) => command === 'open_external_url')).toBe(false);
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('opens EH links directly without a LANraragi match and saves the chosen EH favorite category and note', async () => {
+    const url = 'https://exhentai.org/g/4256859/531b16d2ae/';
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'get_eh_gallery') return { ok: true, value: gallery };
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'get_eh_comments') return { ok: true, value: args?.galleryId === '12345' ? [{ ...comment, body: url }] : [] };
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><EhComments accountId="eh-a" galleryId="12345" token="abc" /></ToastProvider>);
+    fireEvent.click(await screen.findByRole('link', { name: url }));
+    await screen.findByRole('heading', { name: gallery.title });
+    expect(within(screen.getByRole('toolbar', { name: '画廊操作' })).getAllByRole('button')).toHaveLength(2);
+    fireEvent.click(screen.getByRole('button', { name: '收藏' }));
+    fireEvent.click(screen.getByRole('button', { name: '编辑收藏备注' }));
+    fireEvent.change(screen.getByRole('textbox', { name: '收藏备注' }), { target: { value: 'Keep this' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Comics' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('set_eh_gallery_favorite', {
+      accountId: 'eh-a', galleryId: '4256859', token: '531b16d2ae', category: 1, note: 'Keep this',
+    }));
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: '收藏' })).toHaveAttribute('aria-pressed', 'true'));
+    fireEvent.click(screen.getByRole('button', { name: '收藏' }));
+    expect(screen.getByRole('button', { name: 'Comics' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Default' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('set_eh_gallery_favorite', {
+      accountId: 'eh-a', galleryId: '4256859', token: '531b16d2ae', category: 0, note: 'Keep this',
+    }));
+    await vi.waitFor(() => expect(screen.queryByRole('dialog', { name: '选择收藏夹' })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: '收藏' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Default' }));
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('remove_eh_favorite', { accountId: 'eh-a', galleryId: '4256859', token: '531b16d2ae' }));
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: '收藏' })).toHaveAttribute('aria-pressed', 'false'));
+    fireEvent.click(screen.getByRole('button', { name: '返回评论' }));
+    expect(screen.queryByRole('dialog', { name: '画廊详情' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: url })).toBeVisible();
+  });
+
+  it('loads authenticated cover and shared thumbnail sprites, translates category and paginates', async () => {
+    const url = 'https://exhentai.org/g/4256859/531b16d2ae/';
+    const cover = 'https://s.exhentai.org/t/cover.jpg';
+    const sprite = 'https://test.hath.network/sprite.jpg';
+    const image = 'data:image/png;base64,aGVsbG8=';
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_eh_accounts') return { ok: true, value: [] };
+      if (command === 'get_eh_comments') return { ok: true, value: args?.galleryId === '12345' ? [{ ...comment, body: url }] : [] };
+      if (command === 'get_eh_gallery_image') return { ok: true, value: image };
+      if (command === 'get_eh_gallery') return { ok: true, value: { ...gallery, cover, pageCount: 4, thumbnailPageCount: 2, thumbnails: [
+        { url: sprite, page: args?.page === 1 ? 3 : 1, width: 100, height: 150, offset: 0 },
+        { url: sprite, page: args?.page === 1 ? 4 : 2, width: 100, height: 150, offset: -100 },
+      ] } };
+      return { ok: true, value: null };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<StrictMode><ToastProvider><EhComments accountId="eh-a" galleryId="12345" token="abc" /></ToastProvider></StrictMode>);
+    fireEvent.click(await screen.findByRole('link', { name: url }));
+    expect(await screen.findByAltText('第 1 页缩略图')).toHaveAttribute('src', image);
+    expect(screen.getByAltText('第 2 页缩略图')).toHaveStyle({ left: '-100%' });
+    expect(screen.getByText('漫画')).toBeVisible();
+    expect(adapter.mock.calls.filter(([command, args]) => command === 'get_eh_gallery_image' && args?.url === sprite)).toHaveLength(1);
+    expect(adapter).toHaveBeenCalledWith('get_eh_gallery_image', { accountId: 'eh-a', url: cover });
+    expect(screen.queryByRole('button', { name: '下一页' })).not.toBeInTheDocument();
+    expect(await screen.findByAltText('第 3 页缩略图')).toBeVisible();
+    expect(adapter).toHaveBeenCalledWith('get_eh_gallery', { accountId: 'eh-a', galleryId: '4256859', token: '531b16d2ae', page: 1 });
+    fireEvent.click(screen.getByRole('button', { name: '收藏' }));
+    expect(screen.getByRole('dialog', { name: '选择收藏夹' })).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '编辑收藏备注' }));
+    const input = screen.getByRole('textbox', { name: '收藏备注' });
+    input.focus();
+    expect(input).toHaveFocus();
   });
 
   it('discards a pending link choice when the gallery changes', async () => {
@@ -141,9 +234,10 @@ describe('E-Hentai comments', () => {
     await screen.findByText('Useful comment');
     fireEvent.change(screen.getByRole('textbox'), { target: { value: 'Draft for the first gallery' } });
     rerender(<EhComments accountId="eh-a" galleryId="other" token="def" />);
-    expect(screen.getByRole('textbox')).toHaveValue('');
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.queryByText('Useful comment')).not.toBeInTheDocument();
     await act(async () => { finishSecond({ ok: true, value: [] }); });
+    expect(screen.getByRole('textbox')).toHaveValue('');
   });
 
   it('renders comment metadata and updates the score in place after voting', async () => {
@@ -212,7 +306,7 @@ describe('E-Hentai comments', () => {
     ['EH_GALLERY_COPYRIGHT_REMOVED', 'removed', '版权要求被移除'],
     ['EH_GALLERY_DELETED', 'missing', '不存在或已被删除'],
     ['EH_UNAVAILABLE', '网络连接失败，请重试。', '网络连接失败'],
-  ])('keeps the failure reason inline for %s', async (code, message, reason) => {
+  ])('shows a full unavailable state without a composer for %s', async (code, message, reason) => {
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'get_eh_comments') return { ok: false, error: { code, message, retryable: true } };
       throw new Error(`Unexpected command: ${command}`);
@@ -220,7 +314,12 @@ describe('E-Hentai comments', () => {
     render(<ToastProvider><EhComments accountId="eh-a" galleryId="12345" token="abc" /></ToastProvider>);
 
     const region = await screen.findByRole('region', { name: 'E-Hentai 评论' });
-    expect(await within(region).findByRole('alert')).toHaveTextContent(reason);
+    const unavailable = await within(region).findByRole('alert');
+    expect(unavailable).toHaveTextContent(reason);
+    expect(within(unavailable).getByRole('heading', { name: new RegExp(reason) })).toBeVisible();
+    expect(unavailable.querySelector('svg')).not.toBeNull();
+    expect(within(region).queryByRole('textbox')).not.toBeInTheDocument();
+    expect(within(region).queryByRole('button', { name: '发送评论' })).not.toBeInTheDocument();
     expect(within(region).queryByText('暂无评论')).not.toBeInTheDocument();
     expect(within(region).getByRole('button', { name: '刷新 E-Hentai 评论' })).toBeEnabled();
   });
@@ -235,8 +334,34 @@ describe('E-Hentai comments', () => {
     fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('版权要求被移除');
     expect(screen.getByText('Useful comment')).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
     await vi.waitFor(() => expect(screen.getByRole('button', { name: '刷新 E-Hentai 评论' })).toBeEnabled());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: '发表评论' })).toBeVisible();
   });
+
+  it('waits for an available comments response before showing the composer', async () => {
+    let finish!: (result: unknown) => void;
+    setInvokeAdapterForTests(async () => new Promise(resolve => { finish = resolve; }));
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await act(async () => { finish({ ok: true, value: [] }); });
+    expect(screen.getByText('暂无评论')).toBeVisible();
+    expect(screen.getByRole('textbox', { name: '发表评论' })).toBeVisible();
+  });
+
+  it('retains the composer draft after a posting error on an available gallery', async () => {
+    setInvokeAdapterForTests(async command => command === 'get_eh_comments'
+      ? { ok: true, value: [] }
+      : { ok: false, error: { code: 'EH_UNAVAILABLE', message: '发送失败，请重试。', retryable: true } });
+    render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
+    const input = await screen.findByRole('textbox', { name: '发表评论' });
+    fireEvent.change(input, { target: { value: 'Keep this draft' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送评论' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('发送失败');
+    expect(screen.getByRole('textbox')).toHaveValue('Keep this draft');
+    expect(screen.getByRole('button', { name: '发送评论' })).toBeEnabled();
+  });
+
 });

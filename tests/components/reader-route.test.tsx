@@ -233,7 +233,7 @@ function enhancedReader(
   const { archiveId = 'enhancement-test', ...hostOptions } = host;
   installHost({ ...hostOptions, lease });
   const cache = getNativeImageCache();
-  const load = vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
+  vi.spyOn(cache, 'load').mockImplementation(async (identity) => (
     { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:plain-${identity.pageIndex}`, bytes: 1 }
   ));
   const release = vi.spyOn(cache, 'release').mockImplementation(() => {});

@@ -1,3 +1,4 @@
+import { SvgIcon } from './SvgIcon';
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 
 export type WindowApi = {
@@ -91,34 +92,34 @@ export function useWindowMaximized(api: WindowApi | undefined): boolean {
 }
 
 /** The caption glyphs, drawn in the project's own rounded stroke language
- * (lucide ratios: 2/24 stroke, round caps) rather than the hairline Segoe
+ * (lucide ratios: 1.75/24 stroke, round caps) rather than the hairline Segoe
  * shapes that clashed with every other icon in the app. */
 export function WindowGlyph({ kind }: { kind: 'minimize' | 'maximize' | 'restore' | 'close' }) {
   if (kind === 'minimize') {
     return (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" aria-hidden="true">
+      <SvgIcon>
         <path d="M5 12h14" />
-      </svg>
+      </SvgIcon>
     );
   }
   if (kind === 'restore') {
     return (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <SvgIcon>
         <rect x="5.5" y="9" width="10" height="10" rx="2.5" />
         <path d="M9.5 5.5h6a2.5 2.5 0 0 1 2.5 2.5v6" />
-      </svg>
+      </SvgIcon>
     );
   }
   if (kind === 'close') {
     return (
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" aria-hidden="true">
+      <SvgIcon>
         <path d="M6.5 6.5 17.5 17.5M17.5 6.5 6.5 17.5" />
-      </svg>
+      </SvgIcon>
     );
   }
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <SvgIcon>
       <rect x="6" y="6" width="12" height="12" rx="2.5" />
-    </svg>
+    </SvgIcon>
   );
 }

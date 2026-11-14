@@ -456,7 +456,6 @@ describe('library route workspace', () => {
   });
 
   it('refreshes categories silently while the cached dropdown is on screen', async () => {
-    const user = userEvent.setup();
     let categoryRequests = 0;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };

@@ -3,6 +3,13 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { invalidateRouteCache } from './routeCache';
 
+// Keep this policy aligned with favorite_sync_satisfied in commands/library.rs
+// (dedup deletion). Missing galleries cannot be unfavorited through a live page;
+// authentication, access challenges and transient outages are still failures.
+function missingEhGallery(code: string): boolean {
+  return code === 'EH_GALLERY_DELETED' || code === 'EH_GALLERY_COPYRIGHT_REMOVED';
+}
+
 export function ehGalleryFromTags(tags: readonly string[]) {
   for (const tag of tags) {
     const normalized = tag.trim();
@@ -32,12 +39,13 @@ export async function deleteArchiveWithFavoriteSync(archive: Pick<ArchiveRecord,
       const account = accounts.value.find((account) => account.isActive);
       if (!account) throw new Error('请先登录 E-Hentai，或关闭本次收藏同步删除');
       let removed = await eh.removeFavorite(account.id, gallery.galleryId, gallery.token);
-      // Only transient failures are retried. Exhaustion must leave the archive intact.
-      for (let attempt = 1; !removed.ok && removed.error.retryable && attempt < 3; attempt += 1) {
+      // Permanent gallery removal does not prevent deleting the LRR archive.
+      // Only transient failures are retried; exhaustion keeps the archive intact.
+      for (let attempt = 1; !removed.ok && !missingEhGallery(removed.error.code) && removed.error.retryable && attempt < 3; attempt += 1) {
         await new Promise((resolve) => window.setTimeout(resolve, attempt * 150));
         removed = await eh.removeFavorite(account.id, gallery.galleryId, gallery.token);
       }
-      if (!removed.ok) throw new Error(`收藏同步删除失败：${removed.error.message}`);
+      if (!removed.ok && !missingEhGallery(removed.error.code)) throw new Error(`收藏同步删除失败：${removed.error.message}`);
     }
   }
   const result = await library.deleteArchive(archive.serverId, archive.archiveId);

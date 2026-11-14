@@ -1,3 +1,4 @@
+import { CalendarPlus, Clock, Files, Folder, HardDrive, MapPin } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { FocusScope } from '@radix-ui/react-focus-scope';
 import { OverlayLayer } from './OverlayLayer';
@@ -10,6 +11,8 @@ import { getNativeImageCache } from '../lib/nativeImageCache';
 import { categorizeSearchableTags, type SearchableTagGroup } from '../lib/tags';
 import { TagSearchLink } from './TagSearchLink';
 import { useEhMyTags } from './useEhMyTags';
+import { useLoadingReveal } from '../lib/useLoadingReveal';
+import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 
 /** 详情页上「这份档案是什么」的几块：标题、封面、事实网格、标签分组。档案详情
  * （/library/:id）和本地档案的详情面板渲染的是同一批组件、同一批类名，两边的长相
@@ -24,6 +27,12 @@ export interface DetailFact {
   value: string;
 }
 
+/** Reading progress is zero-based in storage, one-based in the visible count. */
+export function detailPageCount(total: number, pageIndex: number | null, hasProgress: boolean): string {
+  if (!hasProgress || pageIndex === null || total <= 0) return total > 0 ? `${total} 页` : '未知';
+  return `${Math.min(total, Math.max(1, pageIndex + 1))} / ${total} 页`;
+}
+
 /** `date_added:` / `timestamp:` 里的时间戳，写成日期时间。 */
 export function detailTagTime(tags: readonly string[], namespace: string): string {
   const tag = tags.find((value) => value.split(':', 1)[0]?.trim().toLowerCase() === namespace);
@@ -36,22 +45,24 @@ export function detailTagTime(tags: readonly string[], namespace: string): strin
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+const factIcons = {
+  pages: Files,
+  size: HardDrive,
+  category: Folder,
+  added: CalendarPlus,
+  published: Clock,
+  path: MapPin,
+} as const;
+
 export function DetailFactGlyph({ kind }: { kind: DetailFactKind }) {
-  const paths: Record<DetailFactKind, string> = {
-    pages: 'M7 2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm0 2v12h10V4H7ZM3 6v14h12v2H3a2 2 0 0 1-2-2V6h2Z',
-    size: 'M4 3h16a2 2 0 0 1 2 2v4H2V5a2 2 0 0 1 2-2Zm0 2v2h16V5H4ZM3 11h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Zm2 2v7h14v-7H5Zm4 1h6v2H9v-2Z',
-    category: 'M4 4h5l2 2h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 2v2h18V8H4Zm0 4v8h18v-8H4Z',
-    added: 'M7 1h2v2h6V1h2v2h3a2 2 0 0 1 2 2v15a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3V1ZM4 5v3h16V5H4Zm0 5v10h16V10H4Zm7 1h2v3h3v2h-3v3h-2v-3H8v-2h3v-3Z',
-    published: 'M12 2a10 10 0 1 1 0 20 10 10 0 0 1 0-20Zm0 2a8 8 0 1 0 0 16 8 8 0 0 0 0-16Zm-1 2h2v5.6l3.7 2.2-1 1.7-4.7-2.8V6Z',
-    // 本地档案那一格写的是磁盘上的位置，用一块盘而不是文件夹：文件夹在这个网格里
-    // 已经是「分类」了。
-    path: 'M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 2v3h16V6H4Zm0 5v7h16v-7H4Zm3 1.5h4v2H7v-2Z',
-  };
-  return <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor" aria-hidden="true"><path d={paths[kind]} /></svg>;
+  const Icon = factIcons[kind];
+  return <Icon aria-hidden="true" focusable="false" />;
 }
 
 export function ArchiveDetailFacts({ facts, loading = false }: { facts: readonly DetailFact[]; loading?: boolean }) {
-  return <dl className="archive-detail-facts" aria-label="档案信息">
+  const root = useRef<HTMLDListElement>(null);
+  useLoadingReveal(root, loading);
+  return <dl ref={root} className="archive-detail-facts" aria-label="档案信息">
     {facts.map(({ kind, label, value }) => (
       <div key={kind} data-fact={kind} title={label}>
         <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
@@ -236,8 +247,17 @@ export function ArchiveDetailTagSection({ groups, loading = false, colorFor, onS
   colorFor?: ((query: string) => string | undefined) | undefined;
   onSelect?: ((tag: { label: string; query: string }) => void) | undefined;
 }) {
+  const pending = loading && groups.length === 0;
+  const skeleton = useDelayedUnmount(pending, 220);
   return <div className="archive-detail-tag-section">
-    {loading && <div className="archive-detail-copy-skeleton" aria-hidden="true"><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /><div className="skeleton-line skeleton-line-short" /><div className="skeleton-line" /></div>}
+    {skeleton.mounted && <div className={`archive-detail-tags archive-detail-tags-skeleton${pending ? '' : ' is-exiting'}`} aria-hidden="true">
+      {[3, 5, 4, 2].map((count, row) => <section className="tag-group" key={row}>
+        <h2 className="skeleton-block" />
+        <div className="archive-detail-tag-row"><span className="archive-detail-tag-values">
+          {Array.from({ length: count }, (_, index) => <span className="metadata-chip skeleton-block" key={index} style={{ width: `${[76, 108, 60, 92, 124][(row + index) % 5]}px` }} />)}
+        </span></div>
+      </section>)}
+    </div>}
     {groups.length > 0 && (
       <div className="archive-detail-tags" aria-label="档案标签">
         {groups.map((group) => (

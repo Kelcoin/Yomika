@@ -1,11 +1,16 @@
 import { RefreshIcon as RefreshCw } from '../components/RefreshIcon';
 import { loadFavoriteArchives } from '../lib/favoritesMirror';
 import { Bookmark, BookOpen, Eraser, FolderHeart, Server, Shuffle } from 'lucide-react';
-import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { z } from 'zod';
 import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
 import { RetainedPage, usePageActive } from './RetainedPage';
+import { useRouteDirection } from '../lib/useRouteDirection';
+import type { RouteDirection } from './RetainedPage';
+import type { RouteMotion } from '../lib/routeMotion';
+import { useWorkspaceRouteMotion } from '../lib/useWorkspaceRouteMotion';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { EmptyState } from '../components/EmptyState';
 import { LibraryShell } from '../components/LibraryShell';
 import { HomeShell } from '../components/HomeShell';
@@ -80,7 +85,7 @@ import type { ArchiveRecord, ReadingHistoryRecord, WatchlistRecord } from '../do
 import { ArchiveRecordSchema, ReadingHistoryRecordSchema, ServerRecordSchema, WatchlistRecordSchema } from '../domain/library';
 import { DomainErrorSchema } from '../domain/errors';
 import type { SearchPreset, Category } from '../repositories/nativeLibraryRepository';
-import type { EhAccount, SaveEhAccountInput } from '../domain/eh';
+
 
 const workspaces = {
   history: ['历史', '开始阅读后，进度会保存在这里。'],
@@ -966,8 +971,18 @@ function UploadRoute() {
   );
 }
 
-export function WorkspaceRoutes() {
-  const location = useLocation();
+export function WorkspaceRoutes({ direction: navigationDirection, motion: outerMotion, surfaceRef, previewLocation }: { direction?: RouteDirection; motion?: RouteMotion; surfaceRef?: MutableRefObject<HTMLElement | null>; previewLocation?: ReturnType<typeof useLocation> | undefined } = {}) {
+  const routerLocation = useLocation();
+  const detectedDirection = useRouteDirection();
+  const direction = navigationDirection ?? detectedDirection;
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  const active = usePageActive();
+  // App normally stages the whole shell; standalone routes keep that behavior
+  // too. Never run a second exit animation beneath App's saved-location router.
+  const transition = useWorkspaceRouteMotion(routerLocation, compact, direction, active && !outerMotion);
+  const { location } = transition;
+  const motion = outerMotion ?? transition.motion;
+  const surface = surfaceRef ?? transition.surface;
   /** 一条详情路由与它的列表同属一页：`/library/:id` 归 `/library`，三个书架的
    * `/history/:id` 之类归各自的书架，首页的 `/home/:id` 归 `/`。保留页面按这个键
    * 复用（见 RetainedPage）。 */
@@ -975,10 +990,13 @@ export function WorkspaceRoutes() {
   // Editors are temporary destinations, not the library tab's remembered page.
   const keyFor = (path: string) => path.endsWith('/edit') ? path : pageKeys[path.split('/')[1] ?? ''] ?? path;
   const routeKey = keyFor(location.pathname);
+  const preview = previewLocation ?? transition.previewLocation;
+  const previewKey = preview ? keyFor(preview.pathname) : undefined;
   const visited = useRef(new Map<string, typeof location>());
   visited.current.set(routeKey, location);
+  if (preview && previewKey) visited.current.set(previewKey, preview);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedWorkspacePage key={key} saved={saved} active={routeKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
+    <RetainedWorkspacePage key={key} saved={saved} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
   ))}</>;
 }
 
@@ -993,8 +1011,8 @@ function WorkspaceRouteFallback({ path }: { path: string }) {
 
 /** Stable route elements keep unrelated retained pages out of navigation renders.
  * Active context still reaches consumers for freshness and scroll restoration. */
-const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, active, flow }: {
-  saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean;
+const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, active, flow, direction, motion, surfaceRef }: {
+  saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
 }) {
   // Routes(location=...) still subscribes to the outer LocationContext. Isolate
   // that subscription too, otherwise every hidden useLocation consumer updates.
@@ -1023,7 +1041,8 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, activ
         </Routes>
       </Suspense>
   ), [saved]);
-  return <RetainedPage active={active} motionSurface flow={flow} transitionKey={`${saved.pathname}${saved.search}${saved.hash}`}>
+  const transitionKey = saved.pathname === '/downloads' ? `${saved.pathname}:${new URLSearchParams(saved.search).get('path') ?? ''}` : saved.pathname;
+  return <RetainedPage active={active} motionSurface flow={flow} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey}>
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });

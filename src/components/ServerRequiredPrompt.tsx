@@ -1,3 +1,4 @@
+import { SvgIcon } from './SvgIcon';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { Server } from 'lucide-react';
 import { Link, useLocation } from 'react-router-dom';
@@ -6,11 +7,11 @@ import { Link, useLocation } from 'react-router-dom';
  *
  * 上一版用的是通用箭头 `→`——那是「继续 / 下一步」的意思，放在「添加服务器」上什么
  * 也没说；lucide 的 `Server` 又只说「服务器」。这一枚把两件事合起来：机架是服务器，
- * 加号是添加。线条规格跟着应用里其它图标走（24 网格、currentColor、2px 圆头描边），
+ * 加号是添加。线条规格跟着应用里其它图标走（24 网格、currentColor、1.75px 圆头描边），
  * 所以在 17px 的按钮里和旁边的 `RefreshCw` 一样重。 */
 function AddServerGlyph() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <SvgIcon>
       {/* 机架：一格机箱，左边一颗指示灯、右边一条槽位。 */}
       <rect x="2.5" y="3.5" width="19" height="7" rx="2" />
       <path d="M6.5 7h.01" />
@@ -18,7 +19,7 @@ function AddServerGlyph() {
       {/* 加号：这一台是「再加一台」。 */}
       <path d="M18 13.5v7" />
       <path d="M14.5 17h7" />
-    </svg>
+    </SvgIcon>
   );
 }
 

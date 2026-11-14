@@ -400,7 +400,6 @@ pub struct AppBuildInfo {
 
 #[tauri::command]
 pub fn app_build_info(app: tauri::AppHandle) -> CommandResult<AppBuildInfo> {
-    use tauri::Manager;
     CommandResult::success(AppBuildInfo {
         version: env!("CARGO_PKG_VERSION"),
         build_time: option_env!("YOMIKA_BUILD_TIME").unwrap_or(""),

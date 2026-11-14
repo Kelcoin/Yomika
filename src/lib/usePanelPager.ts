@@ -34,11 +34,19 @@ interface Slide<T> {
 
 /** 一块面板的位移：`percent` 是它相对起手那块的第几个身位（0、+1、-1），
  * `dx` 是手指额外拖出来的像素。百分比按元素自身宽度算，也就是舞台宽度。 */
-export function panelOffset(percent: number, dx: number): string {
-  if (percent === 0) return `translate3d(${dx}px, 0, 0)`;
+export function panelOffset(percent: number, dx: number, dy = 0): string {
+  const y = dy === 0 ? '0' : `${dy}px`;
+  if (percent === 0) return `translate3d(${dx}px, ${y}, 0)`;
   const gap = Math.abs(percent / 100) * PANEL_GAP_PX;
   const travel = `calc(${percent}% ${percent > 0 ? '+' : '-'} ${gap}px${dx === 0 ? '' : ` ${dx > 0 ? '+' : '-'} ${Math.abs(dx)}px`})`;
-  return `translate3d(${travel}, 0, 0)`;
+  return `translate3d(${travel}, ${y}, 0)`;
+}
+
+/** First visit follows the same relative depth; revisits restore that panel's
+ * own last position, clamped if its content has since become shorter. */
+export function mapPanelDepth(offset: number, fromHeight: number, toHeight: number, viewport: number, remembered?: number): number {
+  const range = Math.max(0, toHeight - viewport);
+  return Math.min(range, Math.max(0, remembered ?? (offset / Math.max(1, fromHeight - viewport)) * range));
 }
 
 /** 松手后到底换不换：拖够阈值，或者一次够快够远的划动。 */
@@ -59,11 +67,12 @@ export interface PanelPager<T extends string> {
   goTo: (panel: T) => void;
 }
 
-export function usePanelPager<T extends string>({ order, panel, enabled, onChange }: {
+export function usePanelPager<T extends string>({ order, panel, enabled, onChange, resetKey }: {
   order: readonly T[];
   panel: T;
   enabled: boolean;
   onChange: (panel: T) => void;
+  resetKey?: string;
 }): PanelPager<T> {
   const containerRef = useRef<HTMLDivElement>(null);
   const nodes = useRef(new Map<T, HTMLDivElement>());
@@ -84,16 +93,39 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   const animatedFor = useRef<Slide<T> | null>(null);
   const stageHeight = useRef(0);
   const scrollportRef = useRef<HTMLElement>();
+  const positions = useRef(new Map<T, number>());
+  const verticalOffsets = useRef(new Map<T, number>());
+  const mapped = useRef(false);
+  const geometry = useRef({ offset: 0, viewport: 1, scrollTop: 0, stageTop: 0, viewportTop: 0 });
+  const restoreScroll = useRef<number>();
+  const identity = useRef(resetKey);
+  if (identity.current !== resetKey) {
+    identity.current = resetKey;
+    positions.current.clear();
+    verticalOffsets.current.clear();
+    mapped.current = false;
+  }
+  const viewportBounds = useCallback(() => {
+    const scroller = scrollportRef.current;
+    const rect = scroller?.getBoundingClientRect();
+    const header = containerRef.current?.closest('.archive-detail-route')?.querySelector('.archive-detail-route-header');
+    const top = Math.max(0, rect?.top ?? 0) + (header?.getBoundingClientRect().height ?? 0);
+    return { top, bottom: Math.min(window.innerHeight, rect?.bottom ?? window.innerHeight) };
+  }, []);
   const prepareStage = useCallback(() => {
     const element = containerRef.current;
     if (!element) return;
     const rect = element.getBoundingClientRect();
-    const bottom = scrollportRef.current ? Math.min(window.innerHeight, scrollportRef.current.getBoundingClientRect().bottom) : window.innerHeight;
-    const floor = Math.ceil(Math.max(280, bottom - rect.top));
+    const { top, bottom } = viewportBounds();
+    const floor = Math.ceil(Math.max(280, bottom - Math.max(top, rect.top)));
     element.style.minHeight = `${floor}px`;
     element.style.setProperty('--panel-min-height', `${floor}px`);
     stageHeight.current = Math.max(rect.height, floor);
-  }, []);
+    const host = scrollportRef.current ?? document.scrollingElement;
+    geometry.current = { offset: Math.max(0, top - rect.top), viewport: Math.max(1, bottom - top), scrollTop: host?.scrollTop ?? 0, stageTop: rect.top, viewportTop: top };
+    verticalOffsets.current.clear();
+    mapped.current = false;
+  }, [viewportBounds]);
 
   // The short/empty panel still owns the touch area below the tabs. Keep
   // enough height for the current scroll offset so switching cannot clamp the
@@ -110,8 +142,8 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
     const measure = (allowGrow = false) => {
       frame = 0;
       if (slideRef.current) return;
-      const bottom = scrollport ? Math.min(window.innerHeight, scrollport.getBoundingClientRect().bottom) : window.innerHeight;
-      const height = Math.ceil(Math.max(280, bottom - element.getBoundingClientRect().top));
+      const { top, bottom } = viewportBounds();
+      const height = Math.ceil(Math.max(280, bottom - Math.max(top, element.getBoundingClientRect().top)));
       const next = allowGrow ? height : Math.min(parseFloat(element.style.minHeight) || height, height);
       if (element.style.minHeight !== `${next}px`) {
         element.style.minHeight = `${next}px`;
@@ -130,7 +162,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       element.style.minHeight = '';
       element.style.removeProperty('--panel-min-height');
     };
-  }, [enabled, panel]);
+  }, [enabled, panel, viewportBounds]);
 
   const clearTransforms = useCallback(() => {
     for (const node of nodes.current.values()) node.style.transform = '';
@@ -142,7 +174,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
     for (const [id, node] of nodes.current) {
       const index = ids.indexOf(id);
       if (index < 0) continue;
-      node.style.transform = panelOffset((index - origin) * 100, dx);
+      node.style.transform = panelOffset((index - origin) * 100, dx, verticalOffsets.current.get(id) ?? 0);
     }
   }, []);
 
@@ -169,10 +201,33 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       stopAnimations();
       clearTransforms();
       if (containerRef.current) containerRef.current.style.height = '';
+      if (restoreScroll.current !== undefined) {
+        const host = scrollportRef.current ?? document.scrollingElement;
+        if (host instanceof HTMLElement) {
+          const previous = host.style.scrollBehavior;
+          host.style.scrollBehavior = 'auto';
+          host.scrollTop = restoreScroll.current;
+          host.style.scrollBehavior = previous;
+        }
+        restoreScroll.current = undefined;
+      }
       animatedFor.current = null;
       return;
     }
     if (containerRef.current) containerRef.current.style.height = `${stageHeight.current}px`;
+    if (!mapped.current) {
+      const { offset, viewport } = geometry.current;
+      const source = nodes.current.get(current.from);
+      const sourceHeight = source?.scrollHeight || source?.getBoundingClientRect().height || viewport;
+      positions.current.set(current.from, offset);
+      for (const [id, node] of nodes.current) {
+        if (id === current.from) { verticalOffsets.current.set(id, 0); continue; }
+        const height = node.scrollHeight || node.getBoundingClientRect().height || viewport;
+        const target = mapPanelDepth(offset, sourceHeight, height, viewport, positions.current.get(id));
+        verticalOffsets.current.set(id, offset - target);
+      }
+      mapped.current = true;
+    }
     if (!current.settling) { paint(current.from, travelRef.current); return; }
     if (animatedFor.current === current) return;
     animatedFor.current = current;
@@ -183,6 +238,12 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     const finish = () => {
       if (slideRef.current !== current) return;
+      if (current.to !== current.from) {
+        const { scrollTop, stageTop, viewportTop, offset } = geometry.current;
+        const target = Math.max(0, offset - (verticalOffsets.current.get(current.to) ?? 0));
+        positions.current.set(current.to, target);
+        restoreScroll.current = Math.max(0, scrollTop + Math.min(0, stageTop - viewportTop) + target);
+      }
       setSlide(null);
       onChangeRef.current(current.to);
     };
@@ -192,8 +253,8 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
         const index = ids.indexOf(id);
         if (index < 0 || typeof node.animate !== 'function') continue;
         running.push(node.animate([
-          { transform: panelOffset((index - origin) * 100, dx) },
-          { transform: panelOffset((index - target) * 100, 0) },
+          { transform: panelOffset((index - origin) * 100, dx, verticalOffsets.current.get(id) ?? 0) },
+          { transform: panelOffset((index - target) * 100, 0, verticalOffsets.current.get(id) ?? 0) },
         ], { duration: PANEL_SLIDE_MS, easing: SLIDE_EASING, fill: 'forwards' }));
       }
     }

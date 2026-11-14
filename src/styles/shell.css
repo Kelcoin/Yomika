@@ -2078,6 +2078,7 @@ body::-webkit-scrollbar,
 }
 .library-shell-detail {
   overflow: auto;
+  background: var(--surface-panel);
   overscroll-behavior: contain;
   scrollbar-width: none;
 }
@@ -2179,6 +2180,27 @@ body::-webkit-scrollbar,
 }
 
 .route-cache-panel[hidden] { display: none; }
+
+/* A zoom moves the complete page surface, including its canvas. Transparent
+   wrappers made the outgoing text appear to float over the restored page. */
+.route-cache-panel[data-bounce-surface] { background: var(--surface-panel); }
+
+/* A returning detail floats over its already-mounted list. Restore the list's
+   final layout before measuring its card; never reveal a fresh page at the end. */
+:root .route-cache-panel[data-detail-return] .library-shell[data-group] { display: block !important; }
+:root .route-cache-panel[data-detail-return] .library-shell > [data-panel]:has(.library-shell-list) {
+  display: block !important; width: 100% !important; flex: 1 1 100% !important;
+}
+:root .route-cache-panel[data-detail-return] .library-shell-list { display: block !important; }
+:root .route-cache-panel[data-detail-return] .library-shell > [data-panel]:has(.library-shell-detail) {
+  display: block !important; width: 0 !important; height: 0 !important;
+  min-height: 0 !important; overflow: visible !important; flex: none !important;
+}
+:root .route-cache-panel[data-detail-return] .library-shell-detail { display: block !important; }
+:root .route-cache-panel[data-detail-return] .panel-separator { display: none !important; }
+:root .workspace:has(> .route-cache-panel[data-detail-return] .library-shell.is-home) { overflow-y: auto; }
+:root .workspace > .route-cache-panel.is-flow[data-detail-return]:has(.library-shell.is-home) { height: auto; overflow: visible; }
+:root .route-cache-panel[data-detail-return] .library-shell.is-home .library-shell-list { overflow: visible; height: auto; }
 
 .archive-detail-cover-trigger {
   display: block;
@@ -2304,16 +2326,9 @@ body::-webkit-scrollbar,
   white-space: nowrap;
 }
 
-@container detail-action (max-width: 168px) {
-  .archive-action-label-read:has(+ .archive-action-label-short) { display: none; }
-  .archive-action-label-read + .archive-action-label-short { display: block; }
-}
 @container detail-action (max-width: 100px) {
   .archive-action-label:has(+ .archive-action-label-short) { display: none; }
   .archive-action-label-short { display: block; }
-}
-@container detail-action (max-width: 68px) {
-  .archive-action-label-read + .archive-action-label-short { font-size: var(--text-xs); }
 }
 @container detail-action (max-width: 60px) {
   .archive-action-label,
@@ -2378,7 +2393,10 @@ body::-webkit-scrollbar,
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
-  overflow: hidden;
+  /* Keep horizontal page boundaries without making this an extra scrollport
+     or cutting vertical bounce/shadows at the short panel's height. */
+  overflow: visible;
+  clip-path: inset(-100vmax calc(-1 * var(--space-4)));
 }
 .archive-detail-panels.is-sliding > [role='tabpanel'] {
   grid-area: 1 / 1;
@@ -2392,6 +2410,15 @@ body::-webkit-scrollbar,
 .archive-detail-summary { white-space: pre-wrap; line-height: var(--leading-relaxed); }
 
 .eh-comments { display: grid; min-width: 0; gap: var(--space-4); margin: var(--space-6) 0; padding: var(--space-4); border: 1px solid var(--outline-variant); border-radius: var(--radius-card); background: var(--surface-container); }
+/* The message occupies the content region; form controls only follow a
+   successful load. Reuse the shared centered empty-state typography. */
+.eh-comments-content { display: grid; align-content: start; gap: var(--space-4); min-width: 0; }
+.eh-comments:not(:has(.eh-comments-list)) .eh-comments-content { align-content: stretch; }
+.eh-comments-content > .empty-state,
+.eh-comments-unavailable > .empty-state { height: 100%; }
+.eh-comments-unavailable { display: grid; min-width: 0; }
+.eh-comments-unavailable .empty-state > svg { color: var(--ink-secondary); }
+.eh-comments-unavailable .empty-state h2 { max-width: 48ch; overflow-wrap: anywhere; text-wrap: pretty; line-height: var(--leading-relaxed); }
 .eh-comments-heading,
 .library-controls,
 .library-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
@@ -3632,7 +3659,7 @@ body::-webkit-scrollbar,
 }
 .archive-page-thumbnails-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(108px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
   gap: var(--space-2);
   height: auto;
   overflow: visible;
@@ -3640,39 +3667,46 @@ body::-webkit-scrollbar,
 }
 .archive-page-thumbnails-grid::-webkit-scrollbar { display: none; }
 .archive-page-thumbnail {
+  display: grid;
+  align-items: stretch;
+  justify-content: stretch;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto 20px;
+  gap: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-secondary);
+  text-align: center;
+}
+button.archive-page-thumbnail { cursor: pointer; }
+.archive-page-thumbnail-media {
   position: relative;
   display: grid;
   place-items: center;
+  width: 100%;
   min-width: 0;
   aspect-ratio: 3 / 4;
-  padding: 0;
   overflow: hidden;
-  border: 1px solid var(--hairline);
   border-radius: var(--radius-control);
-  background: var(--surface-muted);
-  color: var(--ink-faint);
-  cursor: pointer;
+  background: var(--surface-container);
 }
-.archive-page-thumbnail img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
+.archive-page-thumbnail-media.is-skeleton {
+  background: linear-gradient(90deg, var(--surface-container), var(--surface-container-high), var(--surface-container));
+  background-size: 200% 100%;
+  animation: skeleton-shimmer var(--duration-shimmer) var(--ease-pulse) infinite;
 }
-
-/* Page number under the thumbnail: without it a grid of covers gives no way to
-   tell which page you are about to open. */
+.archive-page-thumbnail img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.archive-page-thumbnail-media > img { position: absolute; inset: 0; }
 .archive-page-thumbnail-number {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  padding: 1px 0 2px;
-  background: color-mix(in srgb, var(--surface-overlay) 72%, transparent);
-  color: var(--ink-on-overlay);
+  display: block;
+  height: 20px;
+  line-height: 20px;
   font-family: var(--font-utility);
   font-size: var(--text-xs);
-  line-height: 13px;
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 
@@ -3706,6 +3740,10 @@ body::-webkit-scrollbar,
 
 .archive-context-menu-item[data-highlighted] { background: var(--surface-muted); }
 .archive-context-menu-item svg { width: 16px; height: 16px; }
+.eh-comment-link-menu { min-width: 0; width: max-content; max-width: min(360px, calc(100vw - 24px)); }
+.eh-comment-link-menu .archive-context-menu-item { gap: var(--space-2); padding-inline: var(--space-2); overflow-wrap: anywhere; }
+.eh-comment-link-menu svg { flex: none; }
+.eh-comments-list p { overflow: clip; padding-block: .15em; }
 .archive-context-menu-separator { height: 1px; margin: 4px 2px; background: var(--hairline); }
 .archive-context-menu-item[data-disabled] { color: var(--on-surface-variant); cursor: default; }
 /* The category group: a label row, then the targets indented under it. */
@@ -7167,7 +7205,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 /* Edit forms already provide their own compact header spacing. */
-.workspace:has(> .route-cache-panel:not([hidden]) .metadata-edit-page) { padding-top: calc(var(--safe-top) + var(--space-3)); }
+.workspace:has(> .route-cache-panel:not([hidden]) .metadata-edit-page) { padding-top: var(--space-3); }
 
 @media (prefers-reduced-motion: reduce) {
   .archive-recommendations-tabs,

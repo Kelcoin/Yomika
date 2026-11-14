@@ -15,7 +15,8 @@ vi.mock('../../src/components/LibraryRouteWorkspace', () => ({
 
 import { WorkspaceRoutes } from '../../src/app/routes';
 import { PreferencesProvider } from '../../src/app/preferences';
-import { AppShell, navEntryActive } from '../../src/components/AppShell';
+import { AppShell } from '../../src/components/AppShell';
+import { navEntryActive } from '../../src/lib/navigationOrder';
 import { ToastProvider } from '../../src/components/Toast';
 import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 

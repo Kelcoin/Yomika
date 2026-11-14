@@ -3,17 +3,20 @@
 .archive-detail-route-header {
   position: sticky;
   top: 0;
-  z-index: var(--z-raised);
-  min-height: var(--icon-button-size);
+  z-index: var(--z-sticky);
+  isolation: isolate;
+  min-height: calc(var(--icon-button-size) + var(--space-4));
+  margin-inline: calc(-1 * var(--detail-inline-inset, var(--space-4)));
+  padding: var(--space-2) var(--detail-inline-inset, var(--space-4));
   background: var(--surface-panel);
 }
 
-/* Extend the opaque sticky surface through the pane's horizontal padding.
-   Keep the controls aligned with the detail content underneath. */
+/* Cover the entire area above the sticky edge, including scroller padding
+   and the mobile safe area. Covers and shadows cannot peek above the bar. */
 .archive-detail-route-header::before {
   content: '';
   position: absolute;
-  inset: 0 calc(-1 * var(--space-4));
+  inset: -100vmax 0 0;
   background: inherit;
   z-index: -1;
   pointer-events: none;
@@ -34,9 +37,64 @@
   min-width: 0;
   min-height: max(0px, calc(var(--panel-min-height, 280px) - var(--space-5)));
 }
+/* Panels remain focusable for keyboard navigation, but are content surfaces,
+   not controls. WebView can focus them after touching or dismissing a menu. */
+.archive-detail-panels > [role='tabpanel']:focus {
+  outline: none;
+  box-shadow: none;
+}
 .archive-detail-panels > [role='tabpanel'] > .archive-detail-tag-section { margin-top: 0; }
 .archive-detail-panels > [role='tabpanel'] > .eh-comments { margin-block: 0; }
 .archive-detail-panels > [role='tabpanel'] > .eh-comments:not(:has(.eh-comments-list)) {
   min-height: inherit;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.archive-detail-panels > [role='tabpanel'] > .eh-comments:not(:has(.eh-comments-list)):has(.eh-comment-composer) {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+/* Remote gallery details reuse the normal detail layout in a viewport surface.
+   The background archive stays mounted and keeps its scroll position. */
+.eh-gallery-detail-overlay {
+  position: fixed;
+  inset: 0;
+  /* Sheets are portaled later at the same overlay level; cover previews retain
+     the higher modal level. The gallery must not cover its own favorite sheet. */
+  z-index: var(--z-overlay);
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--surface-panel);
+  padding: var(--safe-top) max(var(--safe-right), var(--space-4)) max(var(--safe-bottom), var(--space-4)) max(var(--safe-left), var(--space-4));
+}
+.eh-gallery-detail { width: 100%; max-width: 1000px; margin-inline: auto; }
+.eh-gallery-detail-overlay { --detail-inline-inset: max(var(--space-4), var(--safe-left), var(--safe-right)); }
+/* The scrollport already reserves the safe inset in its padding. */
+.eh-gallery-detail-overlay .archive-detail-route-header { top: 0; }
+.eh-gallery-cover { min-width: 0; display: grid; gap: var(--space-2); align-content: start; }
+.eh-thumbnail-sprite { position: absolute; display: block; left: 50%; top: 50%; transform: translate(-50%, -50%); overflow: hidden; }
+.archive-page-thumbnail .eh-thumbnail-sprite img { position: absolute; top: 0; height: 100%; width: auto; max-width: none; }
+.eh-favorite-categories { display: grid; gap: var(--space-1); }
+.eh-favorite-category { min-height: 44px; padding: var(--space-2) var(--space-4); border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--ink-primary); font-size: var(--text-md); font-weight: var(--weight-regular); text-align: center; cursor: pointer; transition: background var(--motion-fast), color var(--motion-fast); }
+.eh-favorite-category[aria-pressed='true'] { background: var(--primary-container); color: var(--on-primary-container); }
+@media (hover: hover) and (pointer: fine) {
+  .eh-favorite-category:hover { background: var(--surface-container-high); }
+  .eh-favorite-category[aria-pressed='true']:hover { background: color-mix(in srgb, var(--primary-container) 84%, var(--primary)); }
+}
+.eh-favorite-note { display: flex; align-items: flex-end; gap: var(--space-2); border-top: 1px solid var(--hairline); margin-top: var(--space-2); padding-top: var(--space-2); }
+.eh-favorite-note > button { flex: none; margin-left: auto; }
+.eh-favorite-note-input { display: flex; align-items: center; gap: var(--space-1); flex: 1; min-width: 0; height: 44px; overflow: hidden; visibility: hidden; opacity: 0; transition: opacity var(--motion-fast), visibility var(--motion-fast); }
+.eh-favorite-note.is-open .eh-favorite-note-input { visibility: visible; opacity: 1; }
+.eh-favorite-note-input input { min-width: 0; flex: 1; width: 100%; height: 44px; }
+.archive-detail-tags-skeleton h2.skeleton-block { height: 26px; min-height: 26px; padding: 0; box-shadow: none; background: var(--surface-container-high); }
+.archive-detail-tags-skeleton .metadata-chip { height: 26px; border: 0; }
+
+.archive-detail-tag-section { position: relative; }
+.archive-detail-tags-skeleton.is-exiting { position: absolute; inset: 0 0 auto; pointer-events: none; animation: detail-content-out 220ms ease-out both; }
+.archive-detail-tags[aria-label] { animation: detail-content-in 220ms ease-out both; }
+@keyframes detail-content-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes detail-content-out { from { opacity: 1; } to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .archive-detail-tags-skeleton.is-exiting { animation: none; opacity: 0; }
+  .archive-detail-tags[aria-label] { animation: none; }
 }

@@ -24,6 +24,14 @@ it('bounds a 10,000-page grid to visible rows and scrolls to distant pages', () 
   const grid = view.container.firstElementChild as HTMLElement;
   expect(screen.getAllByRole('button').length).toBeLessThan(50);
   expect(screen.getByRole('button', { name: 'Page 1' })).toBeInTheDocument();
+  // Returning details move as a live surface; scroll restoration underneath
+  // must not swap its thumbnails in the middle of the shrinking animation.
+  grid.setAttribute('data-detail-return', '');
+  grid.scrollTop = 20000;
+  fireEvent.scroll(grid);
+  act(() => vi.advanceTimersByTime(32));
+  expect(screen.getByRole('button', { name: 'Page 1' })).toBeInTheDocument();
+  grid.removeAttribute('data-detail-return');
   grid.scrollTop = 20000;
   fireEvent.scroll(grid);
   act(() => vi.advanceTimersByTime(32));

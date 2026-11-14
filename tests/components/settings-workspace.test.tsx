@@ -151,7 +151,7 @@ describe('settings workspace', () => {
   });
   it('opens About links through the native external browser command', async () => {
     const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    const adapter = vi.fn(async (command: string, _args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'open_external_url') return { ok: true, value: null };
@@ -340,7 +340,6 @@ describe('settings workspace', () => {
   it('no longer offers a manual history prune in settings — that lives on the history shelf', async () => {
     // 清理的入口在历史页：多选之后清掉选中的记录。设置里那条「立即清理」按年龄清，
     // 要清哪几条只有看着列表的人知道，所以整行都撤了。
-    const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       return { ok: true, value: [] };
@@ -1372,7 +1371,7 @@ describe('settings workspace', () => {
 
   it('imports a data file through dynamically generated checkboxes', async () => {
     const user = userEvent.setup();
-    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    const adapter = vi.fn(async (command: string, _args?: Record<string, unknown>) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [] };
       if (command === 'import_data') {
@@ -1691,6 +1690,9 @@ describe('settings workspace', () => {
       view.rerender(<Owner active={false} />);
       view.rerender(<Owner active={false} dialog />);
       expect(window.history.state?.yomikaOverlay).toBe(1);
+      view.rerender(<Owner active />);
+      expect(await screen.findByRole('heading', { name: '设置', level: 2 })).toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: '通用' })).not.toBeInTheDocument();
       view.unmount();
       await settle();
     } finally {

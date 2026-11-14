@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { invokeBinaryCommand, invokeCommand, VoidResponseSchema } from '../bridge/invoke';
+import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
 import { buildModelAssetUrl, mirrorPrefix, type ModelMirrorId } from '../domain/modelRelease';
 

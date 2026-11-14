@@ -1,24 +1,12 @@
+import { StateIcon } from './StateIcon';
+import { DetailPageThumbnail, DETAIL_THUMBNAIL_WIDTH, DETAIL_THUMBNAIL_FOOTER } from './DetailPageThumbnail';
 import { DialogSurface, DialogHeading } from './DialogSurface';
 import { useArchiveReadingProgress } from './useArchiveReadingProgress';
 import { VirtualPageGrid } from './VirtualPageGrid';
 import { EmptyState } from './EmptyState';
 import { usePageActive } from '../app/RetainedPage';
 import * as Dialog from '@radix-ui/react-dialog';
-import {
-  ArrowLeft,
-  Bookmark,
-  BookmarkX,
-  BookOpen,
-  Heart,
-  Download,
-  EyeOff,
-  MoreVertical,
-  X,
-  MessageCircle,
-  Pencil,
-  RotateCcw,
-  Trash2,
-} from 'lucide-react';
+import { ArrowLeft, BookOpen, Download, EyeOff, MoreVertical, X, MessageCircle, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 
@@ -34,11 +22,7 @@ import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache } from '../lib/nativeImageCache';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
-import {
-  ArchiveMetadataSchema,
-  NativeLibraryRepository,
-  type ArchiveMetadata,
-} from '../repositories/nativeLibraryRepository';
+import { ArchiveMetadataSchema, NativeLibraryRepository, type ArchiveMetadata } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
 import { ArchiveRecordSchema } from '../domain/library';
 import { downloadResultMessage, downloadResultTone } from '../lib/downloadResult';
@@ -51,7 +35,7 @@ import { findMissingArchives } from '../lib/archiveExistence';
 import { ehGalleryFromTags } from '../lib/archiveDeletion';
 import { EhComments } from './EhComments';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
-import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailTagTime, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailPageCount, detailTagTime, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
 import { useDetailActions, useDetailDateKind } from '../app/preferences';
 import '../styles/detail-pager.css';
 
@@ -73,16 +57,6 @@ const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 function readDetailSnapshot(key: string, archiveId: string) {
   const parsed = ArchiveMetadataSchema.safeParse(readRouteCache<unknown>(key, DETAIL_SNAPSHOT_FRESH_MS));
   return parsed.success && parsed.data.archiveId === archiveId ? parsed.data : undefined;
-}
-
-function DetailGlyph() {
-  return (
-    <svg className="detail-panel-glyph" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
-      <path d="M7 16.5 10.5 13l2.5 2.5 2.5-3 2.5 4" />
-      <circle cx="9" cy="8.5" r="1.25" />
-    </svg>
-  );
 }
 
 export function ArchiveDetailRoute({ archiveId, detailBasePath = '/library' }: { archiveId: string; /** See `ArchiveThumbnailCard`: which page owns this detail. The 推荐 rail
@@ -136,6 +110,7 @@ detailBasePath?: string | undefined }) {
   /** Both subtrees stay mounted; only their layout visibility changes. */
   const pager = usePanelPager({
     order: DETAIL_PANELS,
+    resetKey: archiveId,
     panel: detailPanel,
     enabled: favoritePageActive && !(error && !metadata),
     onChange: setDetailPanel,
@@ -226,7 +201,6 @@ detailBasePath?: string | undefined }) {
       if (scopedLast) setMetadata(scopedLast);
       if (cached) {
         setMetadata(cached);
-        setMetadataLoading(false);
       } else {
         setMetadata(undefined);
       }
@@ -334,11 +308,9 @@ detailBasePath?: string | undefined }) {
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
   const progress = useArchiveReadingProgress(scopeId, archiveId, metadata);
-  /** 有进度时阅读按钮写成「从 N 页继续」：这一页真正的下一步是接着读，而不是从第一页
-   * 重来。窄容器里退成「继续」（`shell.css` 的 `detail-actions` 容器查询），再窄就只剩
-   * 图标——和这一排其它动作同一套退化。 */
-  const readPage = progress.pageIndex ?? 0;
-  const readLabel = progress.completed ? '已读完' : progress.hasProgress && readPage > 0 ? `从 ${readPage + 1} 页继续` : '阅读';
+  // The reader loads the resume position itself. Progress must not delay or
+  // rename this action; it belongs to the page-count fact beside the cover.
+  const readReady = Boolean(metadata && serverId);
   const [downloading, setDownloading] = useState(false);
   const downloadOwner = useRef({ identity: readingIdentity, busy: false, active: true });
   if (downloadOwner.current.identity !== readingIdentity) downloadOwner.current = { identity: readingIdentity, busy: false, active: true };
@@ -387,7 +359,7 @@ detailBasePath?: string | undefined }) {
     .join(' · ');
   const dateKind = detailDateKind;
   const facts = [
-    { kind: 'pages' as const, label: '页数', value: `${metadata?.pageCount ?? 0} 页` },
+    { kind: 'pages' as const, label: '页数', value: detailPageCount(metadata?.pageCount ?? 0, progress.pageIndex, progress.hasProgress) },
     { kind: 'size' as const, label: '体积', value: formatBytes(metadata?.size ?? 0) },
     { kind: 'category' as const, label: '分类', value: categoryLabel },
     dateKind === 'added'
@@ -422,15 +394,16 @@ detailBasePath?: string | undefined }) {
         {detailActions.includes('read') && <Link
           className="secondary-action"
           to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
-          aria-label={readLabel}
+          aria-label="阅读"
+          aria-disabled={!readReady}
           title="阅读（长按进入无痕阅读）"
           onPointerDown={startIncognitoPress}
           onPointerUp={cancelIncognitoPress}
           onPointerLeave={cancelIncognitoPress}
           onPointerCancel={cancelIncognitoPress}
-          onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
+          onClick={(event) => { if (!readReady) { event.preventDefault(); return; } if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
-        ><BookOpen aria-hidden="true" /><span className="archive-action-label archive-action-label-read">{readLabel}</span>{progress.hasProgress && <span className="archive-action-label-short" aria-hidden="true">{progress.completed ? '已读完' : '继续'}</span>}</Link>}
+        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>}
         {detailActions.includes('readingList') && <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
           if (!scopeId || readingOwner.current.busy) return;
           const identity = readingIdentity;
@@ -444,7 +417,7 @@ detailBasePath?: string | undefined }) {
             else setMessage(result.error.message);
           }).finally(() => { if (ownsMutation()) { readingOwner.current.busy = false; setReadingBusy(false); } });
         }} aria-label={inReadingList ? '移出待看' : '加入待看'} title={inReadingList ? '移出待看' : '加入待看'}>
-          {inReadingList ? <BookmarkX aria-hidden="true" /> : <Bookmark aria-hidden="true" />}
+          <StateIcon name="bookmark" selected={inReadingList} />
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
           {inReadingList && <span className="archive-action-label-short" aria-hidden="true">待看</span>}
         </button>}
@@ -460,7 +433,7 @@ detailBasePath?: string | undefined }) {
             if (failed) setMessage('未能更新服务器收藏夹');
             else setFavorite(next);
           }).finally(() => { if (ownsMutation()) setFavoriteBusy(false); });
-        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><Heart aria-hidden="true" fill={favorite ? 'currentColor' : 'none'} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span>{favorite && <span className="archive-action-label-short" aria-hidden="true">收藏</span>}</button>}
+        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><StateIcon name="heart" selected={favorite} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span>{favorite && <span className="archive-action-label-short" aria-hidden="true">收藏</span>}</button>}
         {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
           if (!serverId || currentDownloadOwner.busy || !currentDownloadOwner.active) return;
           currentDownloadOwner.busy = true;
@@ -509,8 +482,8 @@ detailBasePath?: string | undefined }) {
         pager.goTo(next);
         event.currentTarget.querySelector<HTMLButtonElement>(`[data-panel="${next}"]`)?.focus();
       }}>
-        <button type="button" role="tab" data-panel="media" aria-controls={`${panelId}-media`} aria-selected={pager.selectedPanel === 'media'} tabIndex={pager.selectedPanel === 'media' ? 0 : -1} className={pager.selectedPanel === 'media' ? 'is-active' : ''} onClick={() => pager.goTo('media')}><DetailGlyph /><span>详情</span></button>
-        <button type="button" role="tab" data-panel="comments" aria-controls={`${panelId}-comments`} aria-selected={pager.selectedPanel === 'comments'} tabIndex={pager.selectedPanel === 'comments' ? 0 : -1} className={pager.selectedPanel === 'comments' ? 'is-active' : ''} onClick={() => pager.goTo('comments')}><MessageCircle aria-hidden="true" />评论</button>
+        <button type="button" role="tab" data-panel="media" aria-controls={`${panelId}-media`} aria-selected={pager.selectedPanel === 'media'} tabIndex={pager.selectedPanel === 'media' ? 0 : -1} className={pager.selectedPanel === 'media' ? 'is-active' : ''} onClick={() => pager.goTo('media')}><StateIcon name="image" selected={pager.selectedPanel === 'media'} /><span>详情</span></button>
+        <button type="button" role="tab" data-panel="comments" aria-controls={`${panelId}-comments`} aria-selected={pager.selectedPanel === 'comments'} tabIndex={pager.selectedPanel === 'comments' ? 0 : -1} className={pager.selectedPanel === 'comments' ? 'is-active' : ''} onClick={() => pager.goTo('comments')}><StateIcon name="comments" selected={pager.selectedPanel === 'comments'} />评论</button>
       </div>
 
       <div ref={pager.containerRef} className={pager.containerClass}>
@@ -525,7 +498,7 @@ detailBasePath?: string | undefined }) {
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <section className="archive-page-thumbnails" aria-label="页面缩略图">
-          <VirtualPageGrid count={metadata.pageCount} className="archive-page-thumbnails-grid" minWidth={108}>
+          <VirtualPageGrid count={metadata.pageCount} className="archive-page-thumbnails-grid" minWidth={DETAIL_THUMBNAIL_WIDTH} footerHeight={DETAIL_THUMBNAIL_FOOTER}>
             {(index) => (
               <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)} />
             )}
@@ -551,10 +524,8 @@ interface RecommendationSnapshot {
    *  省掉重复搜索、又不让推荐栏每天都是同一份。 */
   similarPool: ArchiveRecord[];
   sameCreator: ArchiveRecord[];
-  /** 上一次取数有没有被自己的上限截断（页数用满、中途出错或整段走了镜像回退）。
-   *
-   * 缓存只是先把上一次的答案画出来；`false` 的意思是「这份答案可能是短的」，
-   * 命中缓存后要再搜一次补齐，而不是让一个短答案在这里钉一天。 */
+  /** All requested samples succeeded. A bounded candidate pool is reusable even
+   * when a common tag has more pages; only failures/fallbacks need another try. */
   complete: boolean;
 }
 
@@ -632,12 +603,9 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       const mirrored = await repository.listArchivesPage(serverId, 0, RECOMMENDATION_SEED_LIMIT, { query: seed });
       return { items: mirrored.ok ? mirrored.value.items : [], complete: false };
     };
-    /** 服务端才是标签的权威：镜像只有同步过的那一部分，把它当全集时答案就会短一截
-     * （同作者栏从前正是这样，而且搜到的条数还被当成 24 小时的定论）。
-     *
-     * 一个种子按 `has_more` 往后翻，翻不动或到上限为止；半途失败也把已经拿到的那几条
-     * 交出来，只有一条都没拿到才回去问镜像。`complete` 记的是这次取数有没有被我们
-     * 自己的上限截断——它决定这份答案配不配被缓存锁住。 */
+    /** Sample the authoritative server within the page budget. Reaching that
+     * budget is normal; treating it as failure would repeat every search on
+     * every visit for popular tags. Partial network results remain retryable. */
     const searchSeed = async (seed: string): Promise<{ items: ArchiveRecord[]; complete: boolean }> => {
       const items: ArchiveRecord[] = [];
       let start = 0;
@@ -650,7 +618,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
         if (!result.value.hasMore || result.value.items.length === 0) return { items, complete: true };
         start += result.value.items.length;
       }
-      return { items, complete: false };
+      return { items, complete: true };
     };
     const searchByTags = async (seeds: readonly string[]) => {
       const found = new Map<string, ArchiveRecord>();
@@ -724,8 +692,8 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
         setSimilarPool(nextSimilar);
         setSameCreator(nextCreator);
         writeRouteCache(snapshotKey, { similarPool: nextSimilar, sameCreator: nextCreator, complete: cached.complete === true } satisfies RecommendationSnapshot);
-        // 上面那份答案可能是短的（页数用满、半途失败、或整段走了镜像），也可能是修复
-        // 之前写下的老缓存：卡片先在屏幕上，补齐的那次搜索在后台跑。
+        // Only network-partial or mirror results need background recovery.
+        // Successful bounded samples stay cached until expiry or explicit refresh.
         if (cached.complete === true) return;
         const fresh = await runSearch(progress);
         if (!active || !fresh) return;
@@ -831,7 +799,7 @@ function ArchivePageThumbnail({
   const [src, setSrc] = useState<string>();
   const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [retry, setRetry] = useState(0);
-  const [node, setNode] = useState<HTMLButtonElement | null>(null);
+  const [node, setNode] = useState<HTMLSpanElement | null>(null);
   useEffect(() => {
     if (!node) return undefined;
     const controller = new AbortController();
@@ -869,12 +837,9 @@ function ArchivePageThumbnail({
     };
   }, [archiveId, node, page, retry, scopeId, serverId]);
   return (
-    <button ref={setNode} className={`archive-page-thumbnail${src ? '' : ' is-skeleton'}`} type="button" aria-label={`查看第 ${page} 页`} onClick={() => onOpen(page)}>
-      {/* Loading is conveyed by the shimmer, the same as library covers; no
-          "加载中" text on top of the image slot. */}
-      {src ? <img src={src} alt="" loading="lazy" decoding="async" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true">{state === 'idle' ? page : ''}</span>}
-      <span className="archive-page-thumbnail-number" aria-hidden="true">{page}</span>
-    </button>
+    <DetailPageThumbnail page={page} mediaRef={setNode} loading={!src && state !== 'error'} onOpen={() => onOpen(page)}>
+      {src ? <img src={src} alt="" loading="lazy" decoding="async" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true" />}
+    </DetailPageThumbnail>
   );
 }
 

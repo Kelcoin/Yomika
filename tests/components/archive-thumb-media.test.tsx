@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 vi.hoisted(() => vi.resetModules());
 const cache = vi.hoisted(() => ({ load: vi.fn(), release: vi.fn(), peekUrl: vi.fn() }));
-const observe = vi.hoisted(() => vi.fn((node: Element, load: () => void) => { load(); return () => {}; }));
+const observe = vi.hoisted(() => vi.fn((_node: Element, load: () => void) => { load(); return () => {}; }));
 vi.mock('../../src/lib/nativeImageCache', () => ({ getNativeImageCache: () => cache }));
 vi.mock('../../src/lib/sharedIntersectionObserver', () => ({ observeOnceInScroll: observe }));
 import { ArchiveThumbMedia } from '../../src/components/ArchiveThumbnailCard';

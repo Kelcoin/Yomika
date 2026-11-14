@@ -1710,17 +1710,10 @@ describe('reader screen', () => {
     expect(off.upscale).not.toBe(on.upscale);
     expect(off.dlssnr).not.toBe(on.dlssnr);
 
-    // off 态那道斜杠：属性顺序不进判据，只认这四条几何值（跟 lucide 的 off 图标同一句）。
-    const offSlash = (markup: string) => {
-      const line = /<line\b[^>]*>/.exec(markup)?.[0] ?? '';
-      return ['x1="2"', 'y1="2"', 'x2="22"', 'y2="22"'].every((attr) => line.includes(attr));
-    };
-    expect(offSlash(off.upscale), '关闭态的超分图标带斜杠').toBe(true);
-    expect(offSlash(off.dlssnr), '关闭态的 DLSSNR 图标带斜杠').toBe(true);
-    expect(on.upscale, '启用态不再带斜杠').not.toContain('<line');
-    expect(on.dlssnr, '启用态不再带斜杠').not.toContain('<line');
-    // DLSSNR 的启用态还把最上面那层板填实——关闭态是同一枚空心几何加斜杠。
-    expect(on.dlssnr, '启用态的画法本身也不同').toContain('fill="currentColor"');
+    // Selection changes geometry, independent of the control's colour.
+    expect(on.upscale).toContain('fill="currentColor"');
+    expect(off.upscale).not.toContain('fill="currentColor"');
+    expect(on.dlssnr).toContain('fill="currentColor"');
     expect(off.dlssnr).not.toContain('fill="currentColor"');
   });
 

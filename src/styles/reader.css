@@ -22,6 +22,33 @@
   box-shadow: none;
 }
 
+/* Readoshi's thin countdown, kept below the safe inset and above both bars.
+   Only transform animates: no per-frame React state or width/layout updates. */
+.reader-auto-turn-progress {
+  position: absolute;
+  top: max(var(--safe-top), var(--safe-overlay-top));
+  inset-inline: 0;
+  z-index: calc(var(--z-reader-chrome) + 1);
+  height: 2px;
+  background: var(--reader-border-muted);
+  pointer-events: none;
+}
+.reader-auto-turn-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--reader-primary);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.reader-auto-turn-progress[data-direction='rtl'] > span { transform-origin: right; }
+.reader-auto-turn-progress[data-running='true'] > span { animation: reader-auto-turn-fill var(--reader-auto-turn-duration) linear forwards; }
+@keyframes reader-auto-turn-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@media (prefers-reduced-motion: reduce) {
+  /* Elapsed time is information: the global 1ms motion override must not make
+     the countdown appear finished while its five-second timer is still live. */
+  .reader-auto-turn-progress[data-running='true'] > span { animation-duration: var(--reader-auto-turn-duration) !important; }
+}
+
 /* Final-page feedback floats above the artwork, below the reader chrome. Its
    progress is painted with the page drag, without re-rendering the page tree. */
 .reader-exit-hint {

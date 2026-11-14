@@ -133,9 +133,11 @@ export function useArchiveContextMenu(options: {
 
   const menu = (<>
     <ArchiveContextMenu
-      target={progress.ready || unavailableTarget === target ? target : undefined}
+      // Progress is optional menu data. A failed lookup must not hide reading,
+      // downloading, metadata and membership actions forever.
+      target={progress.ready || progress.error || unavailableTarget === target ? target : undefined}
       hiddenActions={options.hiddenActions}
-      onClearProgress={progress.hasProgress && !progress.busy ? () => { void progress.clear(); } : undefined}
+      onClearProgress={progress.ready && progress.hasProgress && !progress.error && !progress.busy ? () => { void progress.clear(); } : undefined}
       onClose={() => setTarget(undefined)}
       onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)}
       onDelete={setDeleteTarget}

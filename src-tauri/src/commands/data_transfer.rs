@@ -174,7 +174,6 @@ fn restore_app_setting(
 fn restore_legacy_non_duplicate(
     transaction: &rusqlite::Transaction<'_>,
     scope_id: &str,
-    object: &RecordObject,
     payload: &serde_json::Value,
 ) -> Result<bool, String> {
     let path = payload_text(payload, "path")?;
@@ -357,7 +356,7 @@ fn restore_object(
         }
         "app_setting" => restore_app_setting(transaction, object, &object.payload),
         "legacy_non_duplicate" => {
-            restore_legacy_non_duplicate(transaction, scope_id, object, &object.payload)
+            restore_legacy_non_duplicate(transaction, scope_id, &object.payload)
         }
         "dedup_non_duplicate" => {
             restore_dedup_relation(transaction, scope_id, object, &object.payload)

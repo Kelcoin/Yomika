@@ -19,6 +19,20 @@ function Menu() {
 }
 
 describe('archive actions', () => {
+  it('keeps independent actions available when the progress lookup fails', async () => {
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'S', baseUrl: 'https://lrr.test' }] };
+      if (command === 'load_reading_progress') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: false } };
+      return { ok: true, value: null };
+    });
+    render(<MemoryRouter><Menu /></MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
+    expect(await screen.findByRole('menuitem', { name: '阅读' })).toBeEnabled();
+    expect(screen.getByRole('menuitem', { name: '下载档案' })).toBeEnabled();
+    expect(screen.queryByRole('menuitem', { name: '清除阅读进度' })).not.toBeInTheDocument();
+  });
+
   it('refreshes an already open menu when synchronization changes membership', async () => {
     let reading = false;
     setInvokeAdapterForTests(async command => {

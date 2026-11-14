@@ -1143,14 +1143,6 @@ describe('library cover flashes between pages', () => {
     resetInvokeAdapterForTests();
   });
 
-  const coverIdentity = (archiveId: string) => ({
-    scopeId: 'local',
-    serverId: 'local',
-    archiveId,
-    rendition: 'cover' as const,
-    pageIndex: 0,
-  });
-
   const card = (archive: ArchiveRecord) => (
     <MemoryRouter><ArchiveThumbnailCard archive={archive} scopeId="local" serverId="local" /></MemoryRouter>
   );

@@ -540,7 +540,7 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         {DLSSNR_PRESETS.map((preset) => (
           <SettingsRow
             key={preset.id}
-            icon={<DlssnrParameterIcon kind={preset.id === 'cg-light' ? 'light' : preset.id === 'cg-standard' ? 'standard' : 'strong'} />}
+            icon={<DlssnrParameterIcon kind={preset.id === 'cg-light' ? 'light' : preset.id === 'cg-standard' ? 'standard' : 'strong'} selected={activePreset === preset.id} />}
             label={preset.label}
             hint={preset.note}
             value={activePreset === preset.id ? '当前' : `${preset.passes.length} 层`}

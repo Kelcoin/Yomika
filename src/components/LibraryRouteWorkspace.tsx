@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { RotateCcw, ServerCrash } from 'lucide-react';
 import { z } from 'zod';
 
@@ -168,7 +168,6 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
   const [scopeId, setScopeId] = useState<string>();
   const [metadata, setMetadata] = useState<import('../repositories/nativeLibraryRepository').ArchiveMetadata>();
   const [metadataLoading, setMetadataLoading] = useState(false);
-  const [deleteError, setDeleteError] = useState<string>();
   /** 分类在会话之间也保持可见：路由快照过期或应用重启后，用上一次的
    * localStorage 镜像同步注水，下拉不再闪骨架——原生六小时快照随后静默
    * 校正。镜像按服务器分开（?server= 未指定时归入 default）。 */
@@ -234,7 +233,6 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
   /** Card style lives in preferences: the shelves render the same cards, and as
    * component state the choice reset on every navigation. */
   const { cardStyle, setCardStyle } = useCardStyle();
-  const navigate = useNavigate();
   /** One place that knows what deleting does to everything derived from the
    * list, whether it was one card or a selection. */
   const removeArchives = useCallback((archiveIds: string[]) => {
@@ -292,9 +290,6 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
   useEffect(() => {
     if (error) showToast(error, 'error');
   }, [error, showToast]);
-  useEffect(() => {
-    if (deleteError) showToast(deleteError, 'error');
-  }, [deleteError, showToast]);
   useEffect(() => {
     if (refreshError) showToast(refreshError, 'error');
   }, [refreshError, showToast]);

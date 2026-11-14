@@ -3,10 +3,11 @@ import { usePageActive } from '../app/RetainedPage';
 
 /** Keep page previews bounded by the viewport, including detail grids which
  * scroll with their enclosing page rather than an extra nested scroller. */
-export function VirtualPageGrid({ count, className, minWidth, children, onRangeChange }: {
+export function VirtualPageGrid({ count, className, minWidth, children, onRangeChange, footerHeight = 0 }: {
   count: number;
   className: string;
   minWidth: number;
+  footerHeight?: number;
   children: (index: number) => ReactNode;
   onRangeChange?: ((start: number, end: number) => void) | undefined;
 }) {
@@ -25,10 +26,12 @@ export function VirtualPageGrid({ count, className, minWidth, children, onRangeC
     const measure = () => {
       frame = undefined;
       const width = grid.clientWidth;
-      if (width <= 0 || grid.closest('[hidden]')) return;
+      // The outgoing detail is a frozen live surface. Its transformed bounds
+      // must not change the virtual range while it shrinks toward its card.
+      if (width <= 0 || grid.closest('[hidden], [data-detail-return], [data-page-return]')) return;
       const gap = parseFloat(getComputedStyle(grid).columnGap) || 8;
       const columns = Math.max(1, Math.floor((width + gap) / (minWidth + gap)));
-      const stride = ((width - gap * (columns - 1)) / columns) * 4 / 3 + gap;
+      const stride = ((width - gap * (columns - 1)) / columns) * 4 / 3 + footerHeight + gap;
       const top = host === grid ? grid.scrollTop : Math.max(0, host.getBoundingClientRect().top - grid.getBoundingClientRect().top);
       const height = host.clientHeight || globalThis.innerHeight || 800;
       const start = Math.min(Math.max(0, Math.ceil(count / columns) - 1), Math.max(0, Math.floor(top / stride) - 3)) * columns;
@@ -49,7 +52,7 @@ export function VirtualPageGrid({ count, className, minWidth, children, onRangeC
       globalThis.removeEventListener('resize', schedule);
       observer?.disconnect();
     };
-  }, [active, count, minWidth]);
+  }, [active, count, minWidth, footerHeight]);
   const start = Math.min(count, window.start);
   const end = Math.min(count, window.end);
   useLayoutEffect(() => { if (active) rangeCallback.current?.(start, end); }, [active, start, end]);

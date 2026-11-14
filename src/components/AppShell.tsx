@@ -1,17 +1,6 @@
+import { StateIcon } from './StateIcon';
 import { useEdgeBounce } from '../lib/useEdgeBounce';
-import {
-  Archive,
-  Bookmark,
-  Download,
-  HardDrive,
-  History,
-  Home,
-  PanelLeftClose,
-  PanelLeftOpen,
-  Settings,
-  Star,
-  ArrowUp,
-} from 'lucide-react';
+import { PanelLeftClose, PanelLeftOpen, Settings, ArrowUp } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation } from 'react-router-dom';
 
@@ -22,97 +11,36 @@ import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
 import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
+import { NAVIGATION_ENTRIES, compactNavItems, compactNavHiddenItems, navEntryActive } from '../lib/navigationOrder';
 
 /** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
  * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
 const isMobileShell = isMobileDevice;
 
-const navigation = [
-  { to: '/', label: '首页', icon: Home },
-  { to: '/library', label: '档案库', icon: Archive },
-  { to: '/history', label: '历史', icon: History },
-  { to: '/watchlist', label: '收藏夹', icon: Star },
-  { to: '/to-read', label: '待看', icon: Bookmark },
-  { to: '/downloads', label: '本地档案', icon: HardDrive },
-  { to: '/settings', label: '设置', icon: Settings },
-] as const;
-
-type NavKey = (typeof navigation)[number]['to'];
-/** Home hosts secondary navigation and settings; both home and library stay reachable. */
-const PINNED_NAV_KEYS: NavKey[] = ['/', '/library'];
-const NAV_KEY_ROUTES: Record<string, NavKey> = {
-  home: '/',
-  library: '/library',
-  history: '/history',
-  watchlist: '/watchlist',
-  'to-read': '/to-read',
-  downloads: '/downloads',
-};
-
-function compactNavItems(bottomNavItems: readonly string[]) {
-  const routes = new Set(bottomNavItems.map((key) => NAV_KEY_ROUTES[key]).filter(Boolean));
-  for (const to of PINNED_NAV_KEYS) routes.add(to);
-  return navigation.filter(({ to }) => routes.has(to));
-}
-
-/** Secondary entries shown before the fixed settings link in the home header. */
-export function compactNavHiddenItems(bottomNavItems: readonly string[] = []) {
-  const items = compactNavItems(bottomNavItems);
-  return navigation.filter(({ to }) => to !== '/settings' && !items.some((entry) => entry.to === to));
-}
-
-const routeTitles = Object.fromEntries(navigation.map(({ to, label }) => [to, label]));
-
-/** 侧栏那一条指向哪儿（`to`）与它代表哪几段路径是两件事。
- *
- * 首页的详情是它自己的一条路由（`/home/:archiveId`），而侧栏那一条指向 `/`：`end`
- * 让 `/` 只认根路径，于是「在首页点开一张档案」会把首页图标熄灭。档案库、历史、收藏
- * 的详情都挂在自己的前缀下（`/library/:archiveId`、`/history/:archiveId` …），
- * react-router 本来就认，所以只有首页有这个毛病。
- *
- * 导出是为了能直接量这条规则——它是纯函数，不必把整棵树渲染起来。 */
-const NAV_EXTRA_PREFIXES: Record<string, string> = { '/': '/home/' };
-
-export function navEntryActive(to: string, isActive: boolean, pathname: string): boolean {
-  if (isActive) return true;
-  const prefix = NAV_EXTRA_PREFIXES[to];
-  return prefix !== undefined && pathname.startsWith(prefix);
-}
-
-// DOM nodes are replaced when a route unmounts, but the user's reading position
-// belongs to the route. Keep it outside React so switching tabs does not turn a
-// scroll restoration into another render or request.
-
 interface AppShellProps {
   children: ReactNode;
+  returningHome?: boolean;
 }
 
 function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
-  const items = compact && bottomNavItems ? compactNavItems(bottomNavItems) : navigation;
+  const items = compact && bottomNavItems ? compactNavItems(bottomNavItems) : NAVIGATION_ENTRIES;
   return (
     <>
       <nav
         className={compact ? `compact-nav${floating ? ' is-floating' : ''}${hidden ? ' is-hidden' : ''}` : 'side-nav'}
         aria-label={compact ? '移动导航' : '主导航'}
       >
-        {items.map(({ to, label, icon: Icon }) => (
+        {items.map(({ to, label, icon }) => (
           <NavLink
-            className={({ isActive }) => {
-              const queryOnly = to.includes('?');
-              const active = queryOnly
-                ? isActive && location.search === to.slice(to.indexOf('?'))
-                : navEntryActive(to, isActive, location.pathname);
-              return `nav-link${active ? ' is-active' : ''}`;
-            }}
+            className={({ isActive }) => `nav-link${navEntryActive(to, isActive, location.pathname) ? ' is-active' : ''}`}
             end={to === '/'}
             key={to}
             to={to}
             state={{ navigationTab: true }}
             title={label}
           >
-            <Icon aria-hidden="true" />
-            <span>{label}</span>
+            {({ isActive }) => <><StateIcon name={icon} selected={navEntryActive(to, isActive, location.pathname)} /><span>{label}</span></>}
           </NavLink>
         ))}
 
@@ -128,7 +56,7 @@ function MobileHomeTopbar({ bottomNavItems }: { bottomNavItems: readonly string[
     <div className="mobile-home-brand" aria-label="Yomika"><YomikaMark size={30} /><span>Yomika</span></div>
     <nav className="mobile-home-shortcuts" aria-label="首页快捷导航">
       <div className="mobile-home-shortcuts-scroll">
-        {hidden.map(({ to, label, icon: Icon }) => <Link key={to} to={to} state={{ homeEntry: true }} className="icon-button" aria-label={label} title={label}><Icon aria-hidden="true" /></Link>)}
+        {hidden.map(({ to, label, icon }) => <Link key={to} to={to} state={{ homeEntry: true }} className="icon-button" aria-label={label} title={label}><StateIcon name={icon} /></Link>)}
       </div>
       <Link to="/settings" state={{ homeEntry: true }} className="icon-button mobile-home-settings" aria-label="设置" title="设置"><Settings aria-hidden="true" /></Link>
     </nav>
@@ -138,10 +66,10 @@ function MobileHomeTopbar({ bottomNavItems }: { bottomNavItems: readonly string[
 /** Remembered so the rail opens the way it was left. */
 const SIDEBAR_COLLAPSED_KEY = 'yomika.sidebar-collapsed';
 
-export function AppShell({ children }: AppShellProps) {
+export function AppShell({ children, returningHome = false }: AppShellProps) {
   const { pathname } = useLocation();
   const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
-  const homeTopbar = compact && pathname === '/';
+  const homeTopbar = compact && (pathname === '/' || returningHome);
   const { preferences } = usePreferences();
   const floatingNav = preferences.floatingNav;
   // The rail's collapsed state is a preference, not session state: it used to
@@ -402,7 +330,7 @@ export function AppShell({ children }: AppShellProps) {
           // 滚不到。首页的全宽与内边距由 shell.css 里 `:has(.workspace-home)` 那条规则给；
           // 详情一开则由 `:has(.library-shell.is-home.has-detail)` 那三条把它钳成一屏两栏
           // （右栏要能自己滚），所以那一态同样不能套这条「整页滚」的容器。
-          className={`workspace${/^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
+          className={`workspace${!returningHome && /^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
           ref={workspaceRef}
           tabIndex={-1}
         >

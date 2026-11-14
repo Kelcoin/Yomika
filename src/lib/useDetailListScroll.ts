@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react';
+import { DETAIL_RETURN_ALIGNED, DETAIL_RETURN_PREVIEW } from './detailReturn';
 
 /** The compact list and detail share the workspace scrollport. Hiding the
  * list shrinks that port and clamps scrollTop; never save the clamped value
@@ -32,6 +33,10 @@ export function useDetailListScroll(detailOpen: boolean, list: RefObject<HTMLEle
       if (listScroll || (region === workspace && !detailOpen)) saved.current.set(region, region.scrollTop);
     };
     document.addEventListener('scroll', save, true);
-    return () => { if (frame !== undefined) cancelAnimationFrame(frame); document.removeEventListener('scroll', save, true); };
+    const preview = () => { if (section.closest('[data-detail-return]')) restore(); };
+    const aligned = () => { if (section.closest('[data-detail-return]')) saved.current.forEach((_, region) => saved.current.set(region, region.scrollTop)); };
+    document.addEventListener(DETAIL_RETURN_PREVIEW, preview);
+    document.addEventListener(DETAIL_RETURN_ALIGNED, aligned);
+    return () => { if (frame !== undefined) cancelAnimationFrame(frame); document.removeEventListener('scroll', save, true); document.removeEventListener(DETAIL_RETURN_PREVIEW, preview); document.removeEventListener(DETAIL_RETURN_ALIGNED, aligned); };
   }, [detailOpen, list]);
 }

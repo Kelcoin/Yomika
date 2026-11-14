@@ -5,7 +5,7 @@ import { setImageDecoderForTests } from '../src/lib/decodeImage';
 import { resetRouteCacheForTests } from '../src/lib/routeCache';
 import { resetOverlayBackGuardForTests } from '../src/lib/overlayBackGuard';
 import { resetServerPresenceForTests } from '../src/lib/serverPresence';
-import { registerTauriListener, resetTauriEvents } from './tauriEvents';
+import { resetTauriEvents } from './tauriEvents';
 
 // jsdom 里没有 Tauri 的事件总线，`listen` 会 reject（应用里那句 `.catch` 把它咽掉），
 // 于是事件驱动的 UI 在测试里根本到不了。换成内存里的最小实现，测试用

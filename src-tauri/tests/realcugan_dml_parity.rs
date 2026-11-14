@@ -661,6 +661,7 @@ fn candidate_timings_on_a_real_tile() {
 /// cannot be told apart, so this runs one provider per process and prints its own
 /// markers for the sampler to bracket.
 #[test]
+#[ignore = "manual resource sampler; requires YOMIKA_PROBE_MODEL and a compatible execution provider"]
 fn holds_a_steady_load_for_resource_sampling() {
     let provider = std::env::var("YOMIKA_PROBE_PROVIDER").unwrap_or_else(|_| "dml".into());
     let fallback = rewritten(CONSERVATIVE);

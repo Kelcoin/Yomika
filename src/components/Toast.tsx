@@ -1,3 +1,4 @@
+import { SvgIcon } from './SvgIcon';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 
@@ -13,12 +14,12 @@ type ToastType = 'info' | 'success' | 'error';
  * circled cross: 8px from the toast's own close button, it read as a second way
  * to dismiss the message. None of these marks is a cross. */
 function ToastMark({ type }: { type: ToastType }) {
-  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+  return <SvgIcon>
     <circle cx="12" cy="12" r="9" />
     {type === 'success' && <path d="M8 12.4l2.7 2.7L16 9.6" />}
     {type === 'error' && <><path d="M12 7.6v5.6" /><path d="M12 16.4h.01" /></>}
     {type === 'info' && <><path d="M12 11.4v5" /><path d="M12 7.6h.01" /></>}
-  </svg>;
+  </SvgIcon>;
 }
 // `| undefined` 是必须的：`exactOptionalPropertyTypes` 开着，可选的 `testId?: string`
 // 不许被显式赋成 `undefined`，而调用方（`ComputeWorkerToasts`）永远是整份 meta 一起传。

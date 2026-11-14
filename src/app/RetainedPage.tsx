@@ -1,13 +1,25 @@
-import { createContext, useContext, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useLayoutEffect, useRef, type MutableRefObject, type ReactNode } from 'react';
+import { animateDetail, NAVIGATION_MOTION, routeMotionAllowed, type RouteMotion } from '../lib/routeMotion';
+export type { RouteDirection } from '../lib/routeMotion';
+import type { RouteDirection } from '../lib/routeMotion';
 
 const PageActiveContext = createContext(true);
 export const usePageActive = () => useContext(PageActiveContext);
 
-export function animateRouteEntry(panel: HTMLElement): Animation | undefined {
-  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || typeof panel.animate !== 'function') return undefined;
-  return panel.animate([{ opacity: 0.9 }, { opacity: 1 }], {
-    duration: 180,
-    easing: 'cubic-bezier(.2, .8, .2, 1)',
+export function animateRouteEntry(panel: HTMLElement, motionSurface = false, direction: RouteDirection = 1, motion?: RouteMotion): Animation | undefined {
+  if (!routeMotionAllowed() || typeof panel.animate !== 'function' || motion?.kind === 'none' || motion?.kind === 'detail-close' || motion?.kind === 'page-close') return undefined;
+  if (motion?.kind === 'page-open') return animateDetail(panel);
+  if (motion?.kind === 'detail-open') {
+    const detail = panel.querySelector<HTMLElement>('.library-shell-detail');
+    return detail ? animateDetail(detail) : undefined;
+  }
+  const axis = motion?.axis === 'y' ? 'Y' : 'X';
+  const sign = motion?.direction ?? direction;
+  return panel.animate(motionSurface
+    ? [{ opacity: 0.7, transform: `translate${axis}(${sign * 100}%)` }, { opacity: 1, transform: `translate${axis}(0)` }]
+    : [{ opacity: 0 }, { opacity: 1 }], {
+    duration: motionSurface ? NAVIGATION_MOTION.duration : 240,
+    easing: motionSurface ? NAVIGATION_MOTION.easing : 'cubic-bezier(.2, .8, .2, 1)',
   });
 }
 
@@ -26,17 +38,25 @@ function writeInstantScroll(region: HTMLElement, write: () => void) {
 
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
-export function RetainedPage({ active, flow = false, motionSurface = false, transitionKey, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; children: ReactNode }) {
+export function RetainedPage({ active, flow = false, motionSurface = false, transitionKey, direction = 1, motion, surfaceRef, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; direction?: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined; children: ReactNode }) {
   const parentActive = usePageActive();
   const visible = active && parentActive;
-  const root = useRef<HTMLElement>(null);
+  const root = useRef<HTMLElement | null>(null);
+  const setRoot = useCallback((node: HTMLElement | null) => {
+    root.current = node;
+    if (surfaceRef) surfaceRef.current = node;
+  }, [surfaceRef]);
   const positions = useRef(new Map<HTMLElement, number>());
+  const directionRef = useRef(direction);
+  directionRef.current = direction;
+  const motionRef = useRef(motion);
+  motionRef.current = motion;
   useLayoutEffect(() => {
     const node = root.current;
     if (!visible || !node) return;
-    const animation = animateRouteEntry(node);
+    const animation = animateRouteEntry(node, motionSurface, directionRef.current, motionRef.current);
     return () => animation?.cancel();
-  }, [visible, transitionKey]);
+  }, [visible, transitionKey, motionSurface]);
   useLayoutEffect(() => {
     if (!visible || !root.current) return;
     const panel = root.current;
@@ -71,6 +91,6 @@ export function RetainedPage({ active, flow = false, motionSurface = false, tran
   return <PageActiveContext.Provider value={visible}>
     {/* Workspace pages keep viewport-fixed UI in body portals. The outer shell
         and reader deliberately do not opt into this transform contract. */}
-    <section ref={root} data-bounce-surface={motionSurface ? '' : undefined} className={`route-cache-panel${flow ? ' is-flow' : ''}`} hidden={!visible}>{children}</section>
+    <section ref={setRoot} data-bounce-surface={motionSurface ? '' : undefined} className={`route-cache-panel${flow ? ' is-flow' : ''}`} hidden={!visible}>{children}</section>
   </PageActiveContext.Provider>;
 }

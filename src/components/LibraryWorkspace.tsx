@@ -1,11 +1,13 @@
+import { StateIcon } from './StateIcon';
 import { ArchiveListSkeleton } from './ArchiveListSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
-import { ArchiveCardTags, CardTagRows } from './CardTagRows';
+import { ArchiveCardTags } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useStableVirtualRows } from '../lib/useStableVirtualRows';
-import { FolderHeart, ArrowDown, ArrowUp, BookmarkPlus, BookOpen, Check, ListChecks, ListTodo, Pencil, Plus, Save, SquareCheckBig, Star, Grid2X2, Rows3, Trash2, X } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookOpen, Check, Pencil, Save, Grid2X2, Rows3, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
+import { useLoadingReveal } from '../lib/useLoadingReveal';
 import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
 import { useDefaultLayout } from 'react-resizable-panels';
@@ -18,21 +20,21 @@ import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
 import { EmptyState } from './EmptyState';
 import { longPressHandlers } from '../lib/longPressMenu';
-import { StatusLine } from './StatusLine';
+
 import { SearchPresetField } from './SearchPresetField';
 import { SelectField } from './SelectField';
-import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, getCategoryDisplayName, sortCategoriesForDisplay, translateRawTag } from '../lib/tags';
+import { FAVORITES_CATEGORY_NAME, UNTAGGED_FILTER_ID, categorizeSearchableTags, getCategoryDisplayName, sortCategoriesForDisplay } from '../lib/tags';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { TagSuggest } from './TagSuggest';
 import type { ImageHandle } from '../lib/unifiedImageCache';
-import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberCoverRatio, CARD_TAG_LIMIT_THUMBNAIL, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
+import { archiveCategoryKey, archiveCategoryLabel, archiveLanguageLabel, formatArchiveDate, formatArchivePageMeta, isWideCoverMarked, isWideCoverRatio, rememberCoverRatio, CARD_TAG_LIMIT_WIDE } from '../lib/archiveCardPresentation';
 import { ARCHIVE_DAY_DIVIDER_HEIGHT, ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE, getArchiveGridColumns, packArchiveGridRows } from '../lib/archiveGridLayout';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { isCommittableSearchQuery } from '../lib/searchQuery';
-import { normalizeMyTagKey, readableInkOnHex } from '../lib/ehMyTags';
+
 import { TagSearchLink } from './TagSearchLink';
 import { ArchiveProgressBar, ArchiveThumbCardBody } from './ArchiveThumbnailCard';
-import { useEhMyTags } from './useEhMyTags';
+
 import { panelLayout } from '../lib/panelLayout';
 import '../styles/library-loading.css';
 
@@ -84,8 +86,6 @@ const PULL_THRESHOLD = rubberBand(128, 104);
 const PULL_CLAIM_PX = EDGE_CLAIM_PX;
 const PULL_MAX = 104;
 const BOUNCE_MAX = 72;
-/** A wheel has no release event, so the gesture is over once it stops. */
-const PULL_SETTLE_MS = 140;
 /** 滚轮是**有刻度**的：一格一格之间隔着几十毫秒，按触摸那条 140ms 的收势窗口算，
  * 每格都会先被拉出去、再被收势弹回原位，然后下一格又拉一次——用户看到的是过滚内容
  * 疯狂颤动。滚轮的窗口按「这一串刻度结束了」来定：连滚时只在停手之后收一次势。 */
@@ -310,7 +310,7 @@ interface LibraryWorkspaceProps {
   onCardStyleChange?: ((value: 'thumbnail' | 'wide') => void) | undefined;
 }
 
-export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, peekThumbnail, totalCount, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortTimeLabel = '添加时间', archiveDateById, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
+export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect, onDelete, onRefresh, refreshing, categories, categoriesLoading, onUpdateMetadata, thumbnail, onLoadThumbnail, onReleaseThumbnail, peekThumbnail, hasMore, loadingMore, listLoading, emptyContent, onLoadMore, isFavorite, onToggleFavorite, searchQuery: controlledSearchQuery, onSearchQueryChange, sortTimeLabel = '添加时间', archiveDateById, sortMode: controlledSortMode, onSortModeChange, sortOrder: controlledSortOrder, onSortOrderChange, categoryFilter: controlledCategoryFilter, onCategoryFilterChange, readingProgressByArchiveId, progressScope, showDetail = true, detailBasePath = '/library', heading = '档案库', showSearch = true, selectedArchiveIds, selectionMode = false, onSelectionModeChange, onSelectionChange, selectionActions, finishedArchiveIds, freshArchiveIds, onArchiveContextMenu, presets, onApplyPreset, onSavePreset, onDeletePreset, onEditPreset, searchScope, showToolbar = true, timelineByArchiveId, cardStyle: controlledCardStyle, onCardStyleChange }: LibraryWorkspaceProps) {
   const [skeletonVisible, setSkeletonVisible] = useState(Boolean(listLoading && archives.length === 0));
   useEffect(() => {
     if (listLoading && archives.length === 0) {
@@ -437,6 +437,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const overscrollSettleTimer = useRef<number | undefined>(undefined);
   /** 被手指拖着走的那层列表，与它里面那枚箭头：手势期间直接写它们。 */
   const pullRef = useRef<HTMLDivElement | null>(null);
+  useLoadingReveal(pullRef, Boolean(listLoading));
   const pullArrowRef = useRef<HTMLSpanElement | null>(null);
   const onRefreshRef = useRef(onRefresh);
   const refreshingRef = useRef(refreshing);
@@ -1180,7 +1181,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             disabled={archives.length === 0}
             onClick={() => onSelectionModeChange(!selectionMode)}
           >
-            <ListChecks aria-hidden="true" />
+            <StateIcon name="list" selected={selectionMode} />
           </button>
         )}
       </div>}
@@ -1214,7 +1215,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
             disabled={archives.length === 0}
             onClick={() => onSelectionModeChange(!selectionMode)}
           >
-            <ListChecks aria-hidden="true" />
+            <StateIcon name="list" selected={selectionMode} />
           </button>
         )}
         <button
@@ -1237,11 +1238,11 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                 accessible name and the tooltip, so a row of actions reads as one
                 row of symbols whatever the language. */}
             <button className="secondary-action has-action-label" type="button" aria-pressed={allVisibleSelected} aria-label={allVisibleSelected ? '取消全选' : '全选当前'} title={allVisibleSelected ? '取消全选' : '全选当前'} onClick={toggleAllVisible} disabled={archives.length === 0}>
-              <SquareCheckBig aria-hidden="true" />
+              <StateIcon name="select" selected={allVisibleSelected} />
             <span className="action-label">{allVisibleSelected ? '取消全选' : '全选当前'}</span></button>
             {finishedArchiveIds && (
               <button className="secondary-action has-action-label" type="button" aria-pressed={allFinishedSelected} aria-label={allFinishedSelected ? '取消全选已读完' : '全选已读完'} title={allFinishedSelected ? '取消全选已读完' : '全选已读完'} onClick={toggleAllFinished} disabled={finishedVisible.length === 0}>
-                <ListTodo aria-hidden="true" />
+                <StateIcon name="finished" selected={allFinishedSelected} />
               <span className="action-label">{allFinishedSelected ? '取消全选已读完' : '全选已读完'}</span></button>
             )}
             {selectionActions}
@@ -1396,7 +1397,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   setEditingMetadata(true);
                 }}><Pencil aria-hidden="true" />编辑元数据</button>
               )}
-              {onToggleFavorite && <button className="secondary-action" type="button" aria-pressed={isFavorite} onClick={() => void onToggleFavorite()}><Star aria-hidden="true" fill={isFavorite ? 'currentColor' : 'none'} />{isFavorite ? '已收藏' : '加入收藏'}</button>}
+              {onToggleFavorite && <button className="secondary-action" type="button" aria-pressed={isFavorite} onClick={() => void onToggleFavorite()}><StateIcon name="heart" selected={isFavorite} />{isFavorite ? '已收藏' : '加入收藏'}</button>}
               {metadata && metadata.archiveId === selected.archiveId && onUpdateMetadata && editingMetadata && (
                 <form key={editorIdentity} className="metadata-form" aria-busy={savingMetadata} onSubmit={(event) => {
                   event.preventDefault();

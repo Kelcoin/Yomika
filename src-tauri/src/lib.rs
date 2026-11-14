@@ -66,7 +66,7 @@ use cache::{
     cache_clear_images, cache_evict, cache_invalidate_archive, cache_purge_reader_renditions,
     cache_read_image, cache_stats,
 };
-use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
+use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, get_eh_gallery, get_eh_gallery_image, set_eh_gallery_favorite, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
 use error_log::{error_log_append, error_log_append_batch, error_log_clear, error_log_export, error_log_read};
 use commands::library::{
@@ -623,6 +623,9 @@ pub fn run() {
             remove_eh_favorite,
             vote_eh_comment,
             get_eh_comments,
+            get_eh_gallery,
+            get_eh_gallery_image,
+            set_eh_gallery_favorite,
             post_eh_comment,
             check_eh_login_health,
             fetch_eh_forum_username,

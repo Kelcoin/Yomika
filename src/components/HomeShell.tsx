@@ -9,6 +9,7 @@ import { panelLayout } from '../lib/panelLayout';
 import { ArchiveDetailRoute } from './ArchiveDetailRoute';
 import { useDetailListScroll } from '../lib/useDetailListScroll';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
+import { DETAIL_RETURN_ALIGNED, DETAIL_RETURN_PREVIEW } from '../lib/detailReturn';
 
 /** 换容器后重写位置的帧数上限：60 帧 ≈ 1s。
  *
@@ -92,6 +93,27 @@ export function HomeShell({ children }: { children: ReactNode }) {
   const anchorRef = useRef<HomeScrollAnchor | null>(null);
   /** 现在这个 effect 盯的是哪个元素，用来分辨「第一次接管」与「换了容器」。 */
   const watchingRef = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    const preview = () => {
+      const section = listRef.current;
+      const workspace = section?.closest<HTMLElement>('.workspace');
+      if (!section?.closest('[data-detail-return]') || !workspace) return;
+      const behavior = workspace.style.scrollBehavior;
+      workspace.style.scrollBehavior = 'auto';
+      workspace.scrollTop = homeScrollTarget(workspace, anchorRef.current) ?? offsetRef.current;
+      workspace.style.scrollBehavior = behavior;
+    };
+    const aligned = () => {
+      const section = listRef.current;
+      const workspace = section?.closest<HTMLElement>('.workspace');
+      if (!section?.closest('[data-detail-return]') || !workspace) return;
+      offsetRef.current = workspace.scrollTop;
+      anchorRef.current = homeScrollAnchor(workspace);
+    };
+    document.addEventListener(DETAIL_RETURN_PREVIEW, preview);
+    document.addEventListener(DETAIL_RETURN_ALIGNED, aligned);
+    return () => { document.removeEventListener(DETAIL_RETURN_PREVIEW, preview); document.removeEventListener(DETAIL_RETURN_ALIGNED, aligned); };
+  }, []);
   const layout = useDefaultLayout({
     id: 'home-shell-split',
     panelIds: ['home-shell-list', 'home-shell-detail'],

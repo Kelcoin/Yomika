@@ -1,3 +1,4 @@
+import { StateIcon } from './StateIcon';
 import { PositionedMenu } from './PositionedMenu';
 import { DialogSurface, DialogHeading } from './DialogSurface';
 import { ContentSkeleton } from './ContentSkeleton';
@@ -5,7 +6,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { usePageActive } from '../app/RetainedPage';
-import { ExternalLink, LayoutGrid, Ban, Check, Eraser, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2, Link2Off, Play, RotateCcw, Save, ListChecks, Trash2, Undo2, WandSparkles, X } from 'lucide-react';
+import { ExternalLink, LayoutGrid, Ban, Eraser, CircleHelp, CirclePlay, CircleStop, FileText, FolderOpen, History, Image as ImageIcon, Link2Off, Play, RotateCcw, Save, Trash2, Undo2, WandSparkles } from 'lucide-react';
 import type { ArchiveIdentity, ArchiveRecord, ServerRecord } from '../domain/library';
 import { countDuplicateGroupsWithLargePageGap, getDedupeGroupFilterData, getDedupeSmartSignals, mergeSmartDuplicateSelection, normalizeDuplicateSelection, toDedupeDayString, toPairKey, type DedupeArchive, type DuplicateSource } from '../domain/deduplication';
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
@@ -183,7 +184,6 @@ const DedupMemberCard = memo(function DedupMemberCard({ member, scopeId, serverI
 export function DeduplicationWorkspace() {
   const pageActive = usePageActive();
   const { showToast } = useToast();
-  const [servers, setServers] = useState<ServerRecord[]>([]);
   const [initializing, setInitializing] = useState(true);
   const [server, setServer] = useState<ServerRecord>();
   const [archives, setArchives] = useState<ArchiveIdentity[]>([]);
@@ -256,7 +256,6 @@ export function DeduplicationWorkspace() {
     void library.listServers().then((response) => {
       setInitializing(false);
       if (!response.ok) { showToast(response.error.message, 'error'); return; }
-      setServers(response.value);
       // 不再让用户挑服务器：当前启用的那台就是默认目标（pickServer 的既有语义）。
       const active = pickServer(response.value, undefined);
       if (active) setServer(active);
@@ -436,10 +435,6 @@ export function DeduplicationWorkspace() {
     });
     selectionWrites.current = write.then(() => undefined, () => undefined);
     return write;
-  }
-
-  async function persistSelection(nextSelected: string[]) {
-    await applySelection(nextSelected);
   }
 
   // 卡片是记忆化的，回调必须稳定：内部通过 ref 读最新的选择集合。
@@ -1009,7 +1004,7 @@ export function DeduplicationWorkspace() {
           <button className="secondary-action has-action-label" type="button" aria-label={savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存扫描结果'} title="保存扫描结果" disabled={busy || savingResult || groups.length === 0 || savedSessionId === result.session.sessionId} onClick={() => void saveCurrentResult()}><Save aria-hidden="true" /><span className="action-label">{savingResult ? '保存中' : savedSessionId === result.session.sessionId ? '已保存' : '保存结果'}</span></button>
           <button className="secondary-action has-action-label" type="button" aria-label="智能选择" title="智能选择" onClick={requestSmartSelect}><WandSparkles aria-hidden="true" /><span className="action-label">智能选择</span></button>
           <button className="secondary-action has-action-label" type="button" aria-label="清除选择" title="清除选择" disabled={busy || (!selected.size && !selectedGroupKeys.size)} onClick={() => void clearSelection()}><Eraser aria-hidden="true" /><span className="action-label">清除选择</span></button>
-          <button className="secondary-action has-action-label" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><ListChecks aria-hidden="true" /><span className="action-label">{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</span></button>
+          <button className="secondary-action has-action-label" type="button" aria-pressed={groups.length > 0 && selectedGroupKeys.size === groups.length} aria-label={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} title={groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'} disabled={!groups.length} onClick={() => void toggleAllGroups()}><StateIcon name="list" selected={groups.length > 0 && selectedGroupKeys.size === groups.length} /><span className="action-label">{groups.length > 0 && selectedGroupKeys.size === groups.length ? '取消全选' : '全选分组'}</span></button>
           {/* 主按钮样式与「开始扫描」一致：都是这一步的主动作，删除的危险性由确认
               弹窗承担，不靠按钮颜色提前喊。 */}
           <button className="primary-action has-action-label" type="button" aria-label={busy ? '执行中' : '执行所选'} title={busy ? '执行中' : '执行所选'} disabled={(!selectedGroupKeys.size && !selected.size) || busy} aria-busy={busy} onClick={requestExecuteSelected}>{busy ? <LoadingIndicator inline /> : <CirclePlay aria-hidden="true" />}<span className="action-label">{busy ? '执行中' : '执行所选'}</span></button>
@@ -1063,7 +1058,7 @@ export function DeduplicationWorkspace() {
           {mountedSections.map((section) => section.isChain
             ? <li className="dedup-chain" key={section.key}>
               <div className="dedup-chain-heading">
-                <button className="secondary-action is-compact" type="button" aria-pressed={section.fullGroups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={'关联重复链 ' + section.number} title={'关联重复链 ' + section.number} onClick={() => void toggleChainSelection(section.fullGroups)}><Link2 aria-hidden="true" />{section.number}</button>
+                <button className="secondary-action is-compact" type="button" aria-pressed={section.fullGroups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} aria-label={'关联重复链 ' + section.number} title={'关联重复链 ' + section.number} onClick={() => void toggleChainSelection(section.fullGroups)}><StateIcon name="chain" selected={section.fullGroups.every((group) => selectedGroupKeys.has(groupKeyOf(group)))} />{section.number}</button>
               </div>
               <ul className="dedup-group-grid">
                 {section.groups.map((group) => renderGroup(group))}

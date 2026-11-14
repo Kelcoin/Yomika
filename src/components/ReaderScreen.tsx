@@ -1,5 +1,6 @@
+import { StateIcon } from './StateIcon';
 import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LayoutGrid, LogOut, Pause, Play, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LogOut, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { flushSync } from 'react-dom';
@@ -28,6 +29,7 @@ const PAGE_RETENTION_MARGIN = 3;
 /** Attempts before a page is left alone. */
 const MAX_PAGE_LOAD_ATTEMPTS = 8;
 const PAGE_LOAD_TIMEOUT_MS = 30_000;
+const AUTO_TURN_INTERVAL_MS = 5_000;
 /** Height of the bands at the top and bottom of the canvas that summon the
  * chrome. A tap anywhere used to raise the bars over what was being read; the
  * bands sit where the bars themselves appear, so the target is where the result
@@ -575,6 +577,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * click that follows can be ignored. */
   const gestureMovedRef = useRef(false);
   const [autoPlay, setAutoPlay] = useState(false);
+  const [autoTurnReadyKey, setAutoTurnReadyKey] = useState<string>();
+  const [autoTurnForeground, setAutoTurnForeground] = useState(() => document.visibilityState !== 'hidden');
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
   const [thumbnailRange, setThumbnailRange] = useState({ start: 0, end: 0 });
   const onThumbnailRange = useCallback((start: number, end: number) => {
@@ -596,7 +600,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // Undefined keeps tap/keyboard behaviour; mouse movement chooses one edge.
   // 可见性、感应带与自动隐藏都在 `useReaderChrome` 里——加载态的 `ReaderRoute` 用同一个
   // hook，所以「加载中」和「加载完」的顶栏是同一套行为，而不是两处各写一遍的近似。
-  const { topChromeVisible, bottomChromeVisible, topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive: stopChromeToggle, clearHover } = useReaderChrome({
+  const { topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive: stopChromeToggle, clearHover } = useReaderChrome({
     rootRef,
     visible: state.phase === 'chrome-visible',
     active: pageActive,
@@ -1045,13 +1049,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // otherwise the user must click first, and that click toggles the chrome.
   useEffect(() => { if (pageActive) rootRef.current?.focus({ preventScroll: true }); }, [pageActive]);
 
-  useEffect(() => {
-    if (!pageActive || !autoPlay) return undefined;
-    // 自动翻页读到末页就停：那里 `move` 的第二参数正是为它准备的（见 `move` 的注释）。
-    const timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') move('next', false); }, 5000);
-    return () => window.clearInterval(timer);
-  }, [autoPlay, effectiveLayout, state.direction, state.layout, pageActive]);
-
   /** Past this much travel a gesture is a drag rather than a tap. */
   const TAP_SLOP = 5;
 
@@ -1084,6 +1081,37 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // Touch handlers survive layout/direction changes; their exit must use the current route.
   const moveRef = useRef(move);
   moveRef.current = move;
+
+  // Like Readoshi, count time spent reading a loaded page, not time waiting for
+  // its image. A neighbour/derived-image measurement must not reset the clock.
+  const autoTurnPageKey = `${effectiveLayout}:${visibleIndexes.join(',')}`;
+  useLayoutEffect(() => {
+    if (!pageActive || !autoPlay) { setAutoTurnReadyKey(undefined); return; }
+    const image = effectiveLayout === 'webtoon' ? webtoonRef.current?.querySelector<HTMLImageElement>(`img.reader-page:not(.is-candidate)[alt="第 ${state.pageIndex + 1} 页"]`) : undefined;
+    const ready = effectiveLayout === 'webtoon' ? !!image?.complete && image.naturalWidth > 0 : canZoomCurrentImage();
+    setAutoTurnReadyKey(ready ? autoTurnPageKey : undefined);
+  }, [autoPlay, pageActive, effectiveLayout, autoTurnPageKey, state.pageIndex, pageMeasurement, loadedPages, exhaustedPages, canZoomCurrentImage]);
+  useEffect(() => {
+    if (!autoPlay || !pageActive) return;
+    const update = () => setAutoTurnForeground(document.visibilityState !== 'hidden');
+    update();
+    document.addEventListener('visibilitychange', update);
+    return () => document.removeEventListener('visibilitychange', update);
+  }, [autoPlay, pageActive]);
+  const autoTurnRunning = autoPlay && pageActive && autoTurnForeground && autoTurnReadyKey === autoTurnPageKey;
+  useEffect(() => {
+    if (!autoTurnRunning) return;
+    const timer = window.setTimeout(() => {
+      if (document.visibilityState === 'hidden') return;
+      const current = readerStateRef.current;
+      // advanceReader's intents describe physical left/right, so forward in an
+      // RTL book is `previous`. Always advance the logical page/spread index.
+      const intent = current.direction === 'rtl' ? 'previous' : 'next';
+      if (advanceReader(current, intent).pageIndex === current.pageIndex) setAutoPlay(false);
+      else moveRef.current(intent, false);
+    }, AUTO_TURN_INTERVAL_MS);
+    return () => window.clearTimeout(timer);
+  }, [autoTurnRunning, autoTurnPageKey, state.direction]);
 
   function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -1583,7 +1611,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     Number(Boolean(upscale?.configured)) + Number(Boolean(dlssnr?.configured));
   const autoPlayJoinsProcessing = enhancementCount < 2;
   const autoPlayControl = (
-    <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}>{autoPlay ? <Pause aria-hidden="true" /> : <Play aria-hidden="true" />}</button>
+    <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}><StateIcon name={autoPlay ? 'pause' : 'play'} selected={autoPlay} /></button>
   );
   /** The Readoshi page pill: what is on screen and out of how many, spread
    * ranges joined with an en dash. It sits outside the auto-hiding chrome so
@@ -1887,6 +1915,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         </div>
       )}
 
+      {autoPlay && pageActive && (
+        <div className="reader-auto-turn-progress" role="progressbar" aria-label="自动翻页进度" aria-valuetext={autoTurnRunning ? '每页停留 5 秒' : '等待当前页加载或返回前台'} data-running={autoTurnRunning} data-direction={state.direction}>
+          <span key={`${autoTurnPageKey}:${state.direction}:${autoTurnRunning}`} style={{ '--reader-auto-turn-duration': `${AUTO_TURN_INTERVAL_MS}ms` } as CSSProperties} />
+        </div>
+      )}
+
       {effectiveLayout !== 'webtoon' && <div ref={exitHintRef} className="reader-exit-hint" data-visible="false" data-ready="false" data-side="right" role="status" aria-hidden="true">
         <span className="reader-exit-hint-icon"><LogOut aria-hidden="true" />
           <svg className="reader-exit-hint-progress" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="21" pathLength="100" /></svg>
@@ -1918,7 +1952,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               {renderWindowMaximize()}
             {/* 缩略面板从底栏挪上来：它是「这块档案」的一件事，和返回、标题、阅读
                 设置同一层；底栏留给翻页与画面处理。 */}
-              <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><LayoutGrid aria-hidden="true" /></button>
+              <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><StateIcon name="grid" selected={thumbnailPanelOpen} /></button>
               <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
             </div>
           </header>
@@ -1971,7 +2005,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
                   aria-label={upscale.configured ? (upscale.active ? '关闭超分' : '开启超分') : '超分：未选择模型'}
                   title={upscale.configured ? '超分' : '超分：先在阅读设置里选择模型'}
                   onClick={upscale.toggle}
-                ><UpscaleIcon enabled={upscale.active} /></button>
+                ><UpscaleIcon enabled={upscale.configured && upscale.active} /></button>
               )}
               {dlssnr?.configured && (
                 <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon enabled={dlssnr.active} /></button>

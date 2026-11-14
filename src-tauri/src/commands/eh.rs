@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 use url::Url;
 
+#[path = "eh_gallery.rs"]
+mod gallery;
+pub use gallery::{get_eh_gallery, get_eh_gallery_image, set_eh_gallery_favorite};
+
 use crate::{db::Database, domain::result::CommandResult};
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────
@@ -35,22 +39,6 @@ fn read_account_cookie(
 
 fn classify_eh_status(status: u16, body: &str) -> Option<(&'static str, String, bool)> {
     let lower = body.to_lowercase();
-    // EH and ExHentai can return a non-gallery page with HTTP 200 or 404.
-    // Inspect the body first so copyright removals are not reduced to 404.
-    if lower.contains("copyright claim")
-        || lower.contains("copyright infringement")
-        || lower.contains("copyright complaint")
-        || lower.contains("copyright holder")
-        || lower.contains("dmca")
-        || lower.contains("removed due to copyright")
-        || lower.contains("unavailable due to a copyright")
-    {
-        return Some((
-            "EH_GALLERY_COPYRIGHT_REMOVED",
-            "E-Hentai gallery was removed due to a copyright claim".into(),
-            false,
-        ));
-    }
     if lower.contains("cf-browser-verification")
         || lower.contains("_cf_chl_opt")
         || lower.contains("cf-challenge")
@@ -105,19 +93,55 @@ fn classify_eh_status(status: u16, body: &str) -> Option<(&'static str, String, 
             false,
         ));
     }
-    if status == 404
-        || lower.contains("gallery not found")
-        || lower.contains("gallery does not exist")
-        || lower.contains("gallery has been removed")
+    // Only a non-gallery error page can prove permanent loss. Normal titles,
+    // comments and favorite notes may themselves mention DMCA or missing
+    // galleries; these words must never bypass favorite-sync deletion guards.
+    static PAGE_CONTENT: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?is)<(?:div|h1)\b[^>]*\bid\s*=\s*(?:"(?:gn|gdt|gdf)"|'(?:gn|gdt|gdf)'|(?:gn|gdt|gdf)\b)|<(?:input|select)\b[^>]*\bname\s*=\s*(?:"favcat"|'favcat'|favcat\b)"#).unwrap()
+    });
+    let gallery_error_page = (matches!(status, 404 | 410) || (200..300).contains(&status))
+        && !PAGE_CONTENT.is_match(body);
+    // jhentai reads the site's .d > p error explanation, not arbitrary page
+    // text. Ignore scripts/notes and don't classify an unknown proxy 404 as a
+    // deleted gallery. Plain-text responses are retained for older EH pages.
+    let error_text = if gallery_error_page && body.contains('<') {
+        let document = scraper::Html::parse_document(body);
+        let selector = scraper::Selector::parse(".d > p, title").unwrap();
+        document.select(&selector).flat_map(|node| node.text()).collect::<Vec<_>>().join(" ").to_lowercase()
+    } else {
+        lower.clone()
+    };
+    // Copyright reasons take precedence over a bare 404, but never over
+    // authentication, challenges or server failures handled above/below.
+    if gallery_error_page && (error_text.contains("copyright claim")
+        || error_text.contains("copyright infringement")
+        || error_text.contains("copyright complaint")
+        || error_text.contains("removed due to copyright"))
+    {
+        return Some((
+            "EH_GALLERY_COPYRIGHT_REMOVED",
+            "E-Hentai gallery was removed due to a copyright claim".into(),
+            false,
+        ));
+    }
+    if gallery_error_page && (status == 410
+        || error_text.contains("gallery not found")
+        || error_text.contains("gallery does not exist")
+        || error_text.contains("gallery has been removed")
+        || error_text.contains("this gallery is unavailable")
+        || error_text.contains("this gallery is not available"))
     {
         return Some((
             "EH_GALLERY_DELETED",
-            "E-Hentai gallery was deleted or not found".into(),
+            "E-Hentai gallery was removed, restricted or not found".into(),
             false,
         ));
     }
     if status >= 500 || status < 200 {
         return Some(("EH_UNAVAILABLE", "E-Hentai is unavailable".into(), true));
+    }
+    if status == 404 {
+        return Some(("EH_UNEXPECTED_PAGE", "E-Hentai returned an unrecognized not-found page".into(), false));
     }
     None
 }
@@ -1316,17 +1340,45 @@ fn gallery_favorite_state(body: &str) -> Option<bool> {
     if label.is_empty() { None } else { Some(!label.eq_ignore_ascii_case("Add to Favorites")) }
 }
 
+/// The popup POST acknowledges removal by updating the opener's real favorite
+/// control. Unlike the gallery detail page, this works for copyright-blocked
+/// galleries too. Never infer membership from the popup's default selection.
+fn favorite_removal_acknowledged(body: &str) -> bool {
+    static UPDATE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?is)window\.opener\.document\.getElementById\(\s*["']favoritelink["']\s*\)\.innerHTML\s*=\s*(?:'([^']*)'|"([^"]*)")\s*;"#).unwrap()
+    });
+    let document = scraper::Html::parse_document(body);
+    let scripts = scraper::Selector::parse("script").unwrap();
+    document.select(&scripts).any(|script| {
+        UPDATE.captures_iter(&script.text().collect::<String>()).any(|update| {
+            let html = update.get(1).or_else(|| update.get(2)).unwrap().as_str();
+            let label = decode_html_text(&strip_tags(html));
+            label.split_whitespace().collect::<Vec<_>>().join(" ").eq_ignore_ascii_case("Add to Favorites")
+        })
+    })
+}
+
 async fn remove_eh_favorite_request(
     cookie: &str,
     host: &str,
     gallery_id: &str,
     token: &str,
 ) -> CommandResult<()> {
-    let url = format!("https://{host}/gallerypopups.php");
     let client = match eh_http_client() {
         Ok(value) => value,
         Err(error) => return CommandResult::failure("EH_UNAVAILABLE", error, true),
     };
+    remove_eh_favorite_at(&client, cookie, &format!("https://{host}"), gallery_id, token).await
+}
+
+async fn remove_eh_favorite_at(
+    client: &reqwest::Client,
+    cookie: &str,
+    origin: &str,
+    gallery_id: &str,
+    token: &str,
+) -> CommandResult<()> {
+    let url = format!("{origin}/gallerypopups.php");
     let popup = client
         .get(&url)
         .query(&[("gid", gallery_id), ("t", token), ("act", "addfav")])
@@ -1355,9 +1407,12 @@ async fn remove_eh_favorite_request(
     if let Some((code, message, retryable)) = classify_eh_status(status, &body) {
         return CommandResult::failure(code, message, retryable);
     }
-    // The popup may still preselect a category for an unfavorited gallery.
-    // Verify the actual gallery control instead, before permitting deletion.
-    let verify = client.get(format!("https://{host}/g/{gallery_id}/{token}/"))
+    if favorite_removal_acknowledged(&body) {
+        return CommandResult::success(());
+    }
+    // Older/unrecognized popup responses need an independent membership check.
+    // Do not require detail access when the operation already acknowledged it.
+    let verify = client.get(format!("{origin}/g/{gallery_id}/{token}/"))
         .header("Cookie", cookie).header("Cache-Control", "no-cache, no-store")
         .header("Pragma", "no-cache");
     let (status, body) = match read_http_response(verify).await {
@@ -3276,6 +3331,82 @@ mod tests {
 
     // ── remove_eh_favorite tests ──────────────────────────────────────────
 
+    const REMOVED_POPUP: &str = r#"<script>
+        if(window.opener.document.getElementById("favoritelink") != undefined) {
+          window.opener.document.getElementById("favoritelink").innerHTML='<img src="https://exhentai.org/img/mr.gif" /> Add to Favorites';
+        } window.close();</script><noscript>The requested action has been performed.</noscript>"#;
+
+    #[test]
+    fn removal_acknowledgement_comes_from_the_operation_not_default_selection() {
+        assert!(favorite_removal_acknowledged(REMOVED_POPUP));
+        for body in [
+            "<input name='favcat' value='0' checked>",
+            "<p>The requested action has been performed.</p>",
+            "<p>Add to Favorites</p>",
+            r#"<script>window.opener.document.getElementById("favoritelink").innerHTML='My favorites';</script>"#,
+            r#"<textarea>window.opener.document.getElementById("favoritelink").innerHTML='Add to Favorites';</textarea>"#,
+            r#"<textarea><script>window.opener.document.getElementById("favoritelink").innerHTML='Add to Favorites';</script></textarea>"#,
+        ] { assert!(!favorite_removal_acknowledged(body)); }
+    }
+
+    async fn run_favorite_sequence(responses: Vec<(u16, &'static str)>) -> (CommandResult<()>, Vec<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for (status, body) in responses {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0; 4096];
+                    let count = socket.read(&mut buffer).unwrap();
+                    if count == 0 { break; }
+                    bytes.extend_from_slice(&buffer[..count]);
+                    if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok())).unwrap_or(0);
+                        if bytes.len() >= end + 4 + length { break; }
+                    }
+                }
+                requests.push(String::from_utf8(bytes).unwrap());
+                write!(socket, "HTTP/1.1 {status} Response\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            requests
+        });
+        let client = reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(5)).build().unwrap();
+        let result = remove_eh_favorite_at(&client, "test-cookie=fixture", &origin, "3986333", "86c2d5df75").await;
+        (result, server.join().unwrap())
+    }
+
+    #[tokio::test]
+    async fn favorite_removal_does_not_fetch_unavailable_detail_after_acknowledgement() {
+        let form = "<input name='favcat' value='0' checked><input type='hidden' name='nonce' value='fixture'>";
+        let (result, requests) = run_favorite_sequence(vec![(200, form), (200, REMOVED_POPUP)]).await;
+        assert!(matches!(result, CommandResult::Success { .. }));
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("GET /gallerypopups.php?"));
+        assert!(requests[1].starts_with("POST /gallerypopups.php?"));
+        assert!(requests[1].contains("favcat=favdel"));
+        assert!(requests[1].contains("nonce=fixture"));
+    }
+
+    #[tokio::test]
+    async fn favorite_removal_keeps_failures_and_unrecognized_responses_blocking() {
+        let form = "<input name='favcat' value='0' checked>";
+        for (responses, code) in [
+            (vec![(200, form), (403, "cf-chl-captcha")], "EH_CLOUDFLARE"),
+            (vec![(200, form), (401, "Login required")], "EH_REAUTH_REQUIRED"),
+            (vec![(200, form), (503, "Temporarily unavailable")], "EH_UNAVAILABLE"),
+            (vec![(200, form), (200, form), (200, "Unknown page")], "EH_UNEXPECTED_PAGE"),
+            (vec![(200, form), (200, form), (200, "<div id='gdf'><a id='favoritelink'>My collection</a></div>")], "EH_UNAVAILABLE"),
+        ] {
+            let (result, _) = run_favorite_sequence(responses).await;
+            match result { CommandResult::Failure { error, .. } => assert_eq!(error.code, code), _ => panic!("unexpected deletion success") }
+        }
+    }
+
     #[test]
     fn gallery_favorite_reads_nested_real_markup() {
         let removed = r##"<div id="gdf" onclick="return pop_fav()"><div id="fav"></div>
@@ -3474,6 +3605,27 @@ mod tests {
         let result = classify_eh_status(404, "gallery does not exist");
         assert!(result.is_some());
         assert_eq!(result.unwrap().0, "EH_GALLERY_DELETED");
+    }
+
+    #[test]
+    fn classify_only_permanent_gallery_error_pages_as_missing() {
+        for (status, body) in [(200, "This gallery is unavailable."), (200, "This gallery is not available."), (410, "Gone")] {
+            assert_eq!(classify_eh_status(status, body).unwrap().0, "EH_GALLERY_DELETED");
+        }
+        for body in [
+            r#"<h1 id="gn">DMCA: gallery not found</h1>"#,
+            r#"<div id='gdf'>Add to Favorites</div><p>This gallery is unavailable due to a copyright claim</p>"#,
+            r#"<input name='favcat' value='0'><textarea>DMCA</textarea>"#,
+        ] {
+            assert!(classify_eh_status(200, body).is_none());
+        }
+        assert_eq!(classify_eh_status(200, "Temporarily unavailable"), None);
+        assert_eq!(classify_eh_status(503, "This gallery is unavailable due to a copyright claim").unwrap().0, "EH_UNAVAILABLE");
+        assert_eq!(classify_eh_status(401, "DMCA please login").unwrap().0, "EH_REAUTH_REQUIRED");
+        assert_eq!(classify_eh_status(403, "Just a moment DMCA").unwrap().0, "EH_CLOUDFLARE");
+        assert_eq!(classify_eh_status(404, "<h1>Proxy route not found</h1>").unwrap().0, "EH_UNEXPECTED_PAGE");
+        assert_eq!(classify_eh_status(404, "<div class='d'><p>This gallery has been removed or is unavailable.</p></div>").unwrap().0, "EH_GALLERY_DELETED");
+        assert_eq!(classify_eh_status(404, "<div class='d'><p>This gallery is unavailable due to a copyright claim by Example.</p></div>").unwrap().0, "EH_GALLERY_COPYRIGHT_REMOVED");
     }
 
     #[test]

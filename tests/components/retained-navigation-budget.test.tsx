@@ -1,8 +1,9 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { Link, MemoryRouter, useLocation } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { useRouteDirection } from '../../src/lib/useRouteDirection';
 import { describe, expect, it, vi } from 'vitest';
 import { usePageActive } from '../../src/app/RetainedPage';
-import { animateRouteEntry, RetainedPage } from '../../src/app/RetainedPage';
+import { animateRouteEntry } from '../../src/app/RetainedPage';
 
 const counts = vi.hoisted(() => ({ more: 0, upload: 0 }));
 vi.mock('../../src/components/MorePagesRoute', () => ({ MorePagesRoute: () => {
@@ -17,6 +18,28 @@ vi.mock('../../src/components/DeduplicationWorkspace', () => ({ DeduplicationWor
 import { WorkspaceRoutes, lazyPages } from '../../src/app/routes';
 
 describe('retained navigation render budget', () => {
+  it('keeps real navigation direction across the cached Routes location boundary', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'animate');
+    const animate = vi.fn((_frames: Keyframe[] | PropertyIndexedKeyframes | null, _options?: number | KeyframeAnimationOptions) => ({ cancel: vi.fn() }) as unknown as Animation);
+    Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: animate });
+    function Owner() {
+      const location = useLocation();
+      const direction = useRouteDirection();
+      const navigate = useNavigate();
+      return <><button onClick={() => navigate('/tools/upload')}>Open page</button><button onClick={() => navigate(-1)}>Back page</button>
+        <Routes location={location}><Route path="*" element={<WorkspaceRoutes direction={direction} />} /></Routes></>;
+    }
+    try {
+      render(<MemoryRouter initialEntries={['/more']}><Owner /></MemoryRouter>);
+      fireEvent.click(screen.getByText('Open page'));
+      expect(animate.mock.lastCall?.[0]).toEqual([{ opacity: 0.7, transform: 'translateX(100%)' }, { opacity: 1, transform: 'translateX(0)' }]);
+      fireEvent.click(screen.getByText('Back page'));
+      expect(animate.mock.lastCall?.[0]).toEqual([{ opacity: 0.7, transform: 'translateX(-100%)' }, { opacity: 1, transform: 'translateX(0)' }]);
+    } finally {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, 'animate', descriptor);
+      else delete (HTMLElement.prototype as Partial<HTMLElement>).animate;
+    }
+  });
   it('uses an opacity-only route transition and respects reduced motion', () => {
     const panel = document.createElement('section');
     const cancel = vi.fn();
@@ -26,7 +49,17 @@ describe('retained navigation render budget', () => {
     let reducedMotion = false;
     Object.defineProperty(window, 'matchMedia', { configurable: true, value: () => ({ matches: reducedMotion }) });
     const animation = animateRouteEntry(panel);
-    expect(animate).toHaveBeenCalledWith([{ opacity: 0.9 }, { opacity: 1 }], expect.objectContaining({ duration: 180 }));
+    expect(animate).toHaveBeenCalledWith([{ opacity: 0 }, { opacity: 1 }], expect.objectContaining({ duration: 240 }));
+    animateRouteEntry(panel, true);
+    expect(animate).toHaveBeenLastCalledWith([
+      { opacity: 0.7, transform: 'translateX(100%)' },
+      { opacity: 1, transform: 'translateX(0)' },
+    ], expect.objectContaining({ duration: 180 }));
+    animateRouteEntry(panel, true, -1);
+    expect(animate).toHaveBeenLastCalledWith([
+      { opacity: 0.7, transform: 'translateX(-100%)' },
+      { opacity: 1, transform: 'translateX(0)' },
+    ], expect.objectContaining({ duration: 180 }));
     animation?.cancel();
     expect(cancel).toHaveBeenCalledOnce();
     reducedMotion = true;

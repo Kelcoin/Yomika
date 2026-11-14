@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { EhWorkspace } from '../../src/components/EhWorkspace';
 import type { EhAccount } from '../../src/domain/eh';
 

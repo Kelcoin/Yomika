@@ -19,15 +19,9 @@ import { checkDlssnrAvailability } from '../lib/dlssnrGate';
 import { logError } from '../lib/errorLog';
 import { useToast } from './Toast';
 import { usePreferences } from '../app/preferences';
-import {
-  NativeComputeCenterRepository,
-  parseRemoteOps,
-  remoteServiceReady,
-  type RemoteCapabilities,
-  type RemoteService,
-} from '../repositories/nativeComputeCenterRepository';
+import { NativeComputeCenterRepository, parseRemoteOps, remoteServiceReady, type RemoteCapabilities, type RemoteService } from '../repositories/nativeComputeCenterRepository';
 import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/nativeDlssnrRepository';
-import { loadLocalRenditions, loadReaderComputedPage, READER_UPSCALE_STAGE_ID, type ReaderPageEngine, type ReaderPageFailure } from '../lib/readerComputedPage';
+import { loadLocalRenditions, type ReaderPageEngine, type ReaderPageFailure } from '../lib/readerComputedPage';
 import type { ImageCacheIdentity } from '../domain/cache';
 import { imageResidentBytes, type ImageHandle } from '../lib/unifiedImageCache';
 import { useReturnNavigation } from '../lib/useReturnNavigation';

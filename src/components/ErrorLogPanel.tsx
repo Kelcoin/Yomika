@@ -26,9 +26,6 @@ function formatEntryTime(value: string): string {
   return at.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-/** 与原生侧 `read_buckets` 拼的是同一个前缀。 */
-const LAST_RUN_PREFIX = '上次运行 · ';
-
 /** 收起时元素要在树上多留这么久，把出场动画播完（见 `useDelayedUnmount`）。
  *
  *  必须与 CSS 里 `.error-log-reveal.is-leaving` 那条动画的时长同值（`--duration-exit`）：

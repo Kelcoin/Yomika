@@ -1,9 +1,10 @@
+import { StateIcon } from './StateIcon';
 import { DialogSurface, DialogHeading } from './DialogSurface';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useStableVirtualRows } from '../lib/useStableVirtualRows';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, ListChecks, MoreVertical, Pause, Play, SquareCheckBig, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, MoreVertical, Pause, Play, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
@@ -11,13 +12,15 @@ import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panel
 
 import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
 import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './ArchiveContextMenu';
-import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailPageCount, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
+import { useArchiveReadingProgress } from './useArchiveReadingProgress';
 import { useDetailListScroll } from '../lib/useDetailListScroll';
 import { EmptyState } from './EmptyState';
 import { SearchPresetField } from './SearchPresetField';
 import { SelectField, type SelectOption } from './SelectField';
 import { ArchiveListSkeleton } from './ArchiveListSkeleton';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
+import { useLoadingReveal } from '../lib/useLoadingReveal';
 import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
@@ -442,6 +445,7 @@ export function LocalArchivesWorkspace() {
   // Partial results can already render; a slower task read must not cover ready archives.
   const initialLoading = (loading || !archivesLoaded) && listRows.length === 0 && !error && !taskError;
   const skeleton = useDelayedUnmount(initialLoading, 180);
+  useLoadingReveal(listRef, initialLoading);
 
   const list = (
     <div className="local-archives">
@@ -521,7 +525,7 @@ export function LocalArchivesWorkspace() {
             setSelected(new Set());
           }}
         >
-          <ListChecks aria-hidden="true" />
+          <StateIcon name="list" selected={selectionMode} />
         </button>
       </div>
       {/* 槽位常驻并切换 is-open：展开与收起共用同一段过渡，收起时列表跟着合拢
@@ -531,7 +535,7 @@ export function LocalArchivesWorkspace() {
           <span className="archive-selection-count" role="status" aria-live="polite">已选 {selected.size} 个</span>
           {/* 与档案库那一条同形：纯图标 + 可访问名/提示，两个列表的多选栏是同一套。 */}
           <button className="secondary-action has-action-label" type="button" aria-pressed={selectAll} aria-label={selectAll ? '取消全选' : '全选当前'} title={selectAll ? '取消全选' : '全选当前'} disabled={visibleArchives.length === 0} onClick={toggleAll}>
-            <SquareCheckBig aria-hidden="true" />
+            <StateIcon name="select" selected={selectAll} />
           <span className="action-label">{selectAll ? '取消全选' : '全选当前'}</span></button>
           <button className="secondary-action is-danger has-action-label" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setDeletePaths([...selected])}>
             <Trash2 aria-hidden="true" />
@@ -700,8 +704,9 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
     enabled: Boolean(serverCopy),
   });
   const titleRef = useSingleLineTitle(archive.title);
+  const readingProgress = useArchiveReadingProgress(serverCopy?.scopeId, serverCopy?.archiveId);
   const facts = [
-    { kind: 'pages' as const, label: '页数', value: archive.pageCount ? `${archive.pageCount} 页` : '未知' },
+    { kind: 'pages' as const, label: '页数', value: detailPageCount(archive.pageCount ?? 0, readingProgress.pageIndex, readingProgress.hasProgress) },
     { kind: 'size' as const, label: '体积', value: formatByteSize(archive.fileSize) },
     { kind: 'category' as const, label: '分类', value: archiveCategoryLabel(archive) || '未知' },
     { kind: 'added' as const, label: '下载时间', value: formatArchiveDate(Math.floor(archive.addedAt / 1000)) || '未知' },

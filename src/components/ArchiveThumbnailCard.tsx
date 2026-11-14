@@ -1,8 +1,9 @@
+import { StateIcon } from './StateIcon';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
-import { CardTagRows, ArchiveCardTags } from './CardTagRows';
+import { ArchiveCardTags } from './CardTagRows';
 import { CardProgressBar } from './CardProgressBar';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Heart } from 'lucide-react';
+
 import { Link, matchPath, useLocation } from 'react-router-dom';
 import type { ArchiveRecord } from '../domain/library';
 import { getNativeImageCache } from '../lib/nativeImageCache';
@@ -46,7 +47,7 @@ export function ArchiveProgressBar({ page, pageCount, visibility, scope = 'elsew
 export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL, progressPage, pageCount = 0, progressVisibility, progressScope }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number; progressPage?: number | null | undefined; pageCount?: number; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined }) {
   return <div className="archive-thumb-card-body">
     <ArchiveProgressBar page={progressPage} pageCount={pageCount} visibility={progressVisibility} scope={progressScope} />
-    <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <Heart aria-hidden="true" fill="currentColor" />}</div>
+    <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <StateIcon name="heart" selected />}</div>
     {/* fill: the two rows pack top-down and the rest of the (deliberately
         generous) tag list is dropped, so the slot reads full at any card
         width — the list row's waterfall keeps its own spreading behaviour. */}

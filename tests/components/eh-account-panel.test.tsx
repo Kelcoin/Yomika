@@ -186,7 +186,7 @@ describe('EhAccountPanel', () => {
     );
     const items = screen.getAllByRole('listitem');
     await user.click(within(items[0]!).getByRole('button', { name: /编辑 / }));
-    const input = await screen.findByRole('textbox', { name: '账户名' });
+    await screen.findByRole('textbox', { name: '账户名' });
     // 空白提交：视为取消，不保存。
     await user.click(within(items[1]!).getByText('E 站用户'));
     await user.keyboard('{Enter}');

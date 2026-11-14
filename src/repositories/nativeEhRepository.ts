@@ -29,9 +29,29 @@ export const EhCommentSchema = z.object({
   myVote: z.number().int(),
 });
 
+export const EhGallerySchema = z.object({
+  title: z.string(), category: z.string(), uploader: z.string(),
+  pageCount: z.number().int().nonnegative(), size: z.string(), posted: z.string(),
+  tags: z.array(z.string()), cover: z.string().nullable(),
+  favoriteCategory: z.number().int().min(0).max(9).nullable(),
+  favoriteCategories: z.array(z.string()), favoriteNote: z.string(),
+  thumbnails: z.array(z.object({ url: z.string(), page: z.number().int(), width: z.number(), height: z.number(), offset: z.number() })),
+  thumbnailPageCount: z.number().int().positive(),
+});
+export type EhGallery = z.infer<typeof EhGallerySchema>;
+
 export type EhSearchBridgeParams = { category?: number; page?: number };
 
 export class NativeEhRepository {
+  getGallery(accountId: string, galleryId: string, token: string, page = 0): Promise<CommandResult<EhGallery>> {
+    return invokeCommand('get_eh_gallery', { accountId, galleryId, token, page }, EhGallerySchema);
+  }
+  getGalleryImage(accountId: string, url: string): Promise<CommandResult<string>> {
+    return invokeCommand('get_eh_gallery_image', { accountId, url }, z.string());
+  }
+  setGalleryFavorite(accountId: string, galleryId: string, token: string, category: number, note: string): Promise<CommandResult<void>> {
+    return invokeCommand('set_eh_gallery_favorite', { accountId, galleryId, token, category, note }, VoidResponseSchema);
+  }
   saveAccount(input: SaveEhAccountInput): Promise<CommandResult<EhAccount>> {
     return invokeCommand('save_eh_account', { input }, EhAccountSchema).then((result) => {
       if (result.ok) notifyEhAccountsChanged();

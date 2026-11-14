@@ -16,6 +16,10 @@ import { PairingCodeNotice } from '../components/PairingCodeNotice';
 import { RenderGuard } from '../components/RenderGuard';
 import { ArchiveTitleTooltip } from '../components/ArchiveTitleTooltip';
 import { usePageBackNavigation } from '../lib/pageBackNavigation';
+import { useRouteDirection } from '../lib/useRouteDirection';
+import { useWorkspaceRouteMotion } from '../lib/useWorkspaceRouteMotion';
+import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
+import { installDetailOrigins } from '../lib/detailReturn';
 
 /** Applies the 启动时打开 preference, once, and only while the app is still on
  * the route it launched at — a later visit to the home page is the user's own
@@ -47,12 +51,19 @@ const MAX_RETAINED_READERS = 2;
 export function App() {
   usePageBackNavigation();
   const location = useLocation();
+  // Read the real router before Routes(location=...) isolates cached pages;
+  // that saved-location boundary reports every navigation as POP.
+  const direction = useRouteDirection();
   const { pathname } = location;
   const foregroundPath = useRef(pathname);
   foregroundPath.current = pathname;
   const reading = pathname.startsWith('/reader/');
   const workspaceLocation = useRef<typeof location | undefined>(reading ? undefined : location);
   if (!reading) workspaceLocation.current = location;
+  const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
+  // Stage the shell and content together. Otherwise returning from a home
+  // detail inserts the home topbar before the outgoing detail has shrunk.
+  const workspaceTransition = useWorkspaceRouteMotion(workspaceLocation.current ?? location, compact, direction, !reading);
   const readers = useRef(new Map<string, typeof location>());
   const readerParams = new URLSearchParams(location.search);
   const readerKey = `${pathname}:${readerParams.get('server') ?? ''}:${readerParams.get('incognito') ?? ''}`;
@@ -74,6 +85,7 @@ export function App() {
     const stopErrorLogging = installErrorLogging();
     // 触屏没有 hover，`is-pressed` 就是"按下去"那一瞬间的反馈。
     const stopPressFeedback = installPressFeedback();
+    const stopDetailOrigins = installDetailOrigins();
     const suppressNativeMenu = (event: Event) => event.preventDefault();
     document.addEventListener('contextmenu', suppressNativeMenu);
     const updateLifecycle = () => {
@@ -89,6 +101,7 @@ export function App() {
       stopPreload();
       stopErrorLogging();
       stopPressFeedback();
+      stopDetailOrigins();
       document.removeEventListener('contextmenu', suppressNativeMenu);
       document.removeEventListener('visibilitychange', updateLifecycle);
       stopTagTranslationUpdates();
@@ -104,7 +117,7 @@ export function App() {
       <StartupRoute />
       <ToastProvider>
         {workspaceLocation.current && <RetainedPage active={!reading}>
-          <Routes location={workspaceLocation.current}><Route path="*" element={<AppShell><WorkspaceRoutes /></AppShell>} /></Routes>
+          <Routes location={workspaceTransition.location}><Route path="*" element={<AppShell returningHome={workspaceTransition.returning && pathname === '/'}><WorkspaceRoutes direction={direction} motion={workspaceTransition.motion} surfaceRef={workspaceTransition.surface} previewLocation={workspaceTransition.previewLocation} /></AppShell>} /></Routes>
         </RetainedPage>}
         {[...readers.current].map(([key, saved]) => <RetainedPage key={key} active={reading && readerKey === key}>
           <Routes location={saved}><Route path="*" element={<ReaderRoutes />} /></Routes>

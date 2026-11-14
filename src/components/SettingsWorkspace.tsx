@@ -1,18 +1,14 @@
+import { SvgIcon } from './SvgIcon';
 import { ContentSkeleton } from './ContentSkeleton';
 import { SecuritySettings } from './SecuritySettings';
 import '../styles/settings-heading.css';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { usePageActive } from '../app/RetainedPage';
-import { Languages, ArrowDownWideNarrow, 
-  ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy,
-  CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive,
-  HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Minus,
-  Paintbrush, Palette, PanelBottom, Pencil, Plus, Rocket, RotateCcw, Save, Settings2, Trash2, ShieldCheck, X, Check,
-  SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, Wand2, WandSparkles, BookOpenText, Waypoints, Gauge, ScrollText,
-} from 'lucide-react';
+import { useLoadingReveal } from '../lib/useLoadingReveal';
+import { Languages, ArrowDownWideNarrow, ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy, CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive, HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Paintbrush, Palette, PanelBottom, Rocket, RotateCcw, Settings2, Trash2, ShieldCheck, Check, SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, WandSparkles, BookOpenText, Gauge, ScrollText } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { writeClipboardText } from '../bridge/clipboard';
@@ -28,26 +24,19 @@ import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { availableModelUpdates } from '../lib/modelUpdates';
 import { CUGAN_VARIANTS, chooseUpscaleFamily, groupUpscaleOptions, upscaleFamily, upscaleModelLabel } from '../lib/upscaleParameters';
 import { useTimedConfirmation } from '../lib/useTimedConfirmation';
-import { OverlayLayer } from './OverlayLayer';
+
 import { ComputeCenterSettingsGroup } from './ComputeCenterSettingsGroup';
 import { DlssnrSettingsGroup } from './DlssnrSettingsGroup';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
-import { SettingsRow, SettingsRowBody } from './SettingsRow';
+import { SettingsRow } from './SettingsRow';
 import { SettingsChoice, SettingsMenu, SettingsNumber, SettingsOption, SettingsPanel } from './SettingsValueControls';
-import { StatusLine } from './StatusLine';
+
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { UpscaleIcon } from './UpscaleIcon';
 import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
 import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
-import {
-  DATA_EXPORT_CREDENTIAL_ITEMS,
-  DEFAULT_DATA_EXPORT_ITEMS,
-  DATA_EXPORT_RECORD_ITEMS,
-  isCredentialItem,
-  dataExportItemLabel,
-  type DataExportReport,
-} from '../domain/dataExport';
-import { DATA_EXPORT_KIND } from '../domain/dataExport';
+import { DATA_EXPORT_CREDENTIAL_ITEMS, DEFAULT_DATA_EXPORT_ITEMS, DATA_EXPORT_RECORD_ITEMS, isCredentialItem, dataExportItemLabel, type DataExportReport } from '../domain/dataExport';
+
 import { installedDllLabel } from '../domain/dlssnrVersion';
 
 import type { ServerRecord } from '../domain/library';
@@ -57,7 +46,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeLegacyRepository } from '../repositories/nativeLegacyRepository';
 import { NativeSettingsRepository } from '../repositories/nativeSettingsRepository';
 import { ServerSetupDialog } from './ServerSetupDialog';
-import { TextInputDialog } from './TextInputDialog';
+
 import { usePreferences } from '../app/preferences';
 import { parseMigrationExport } from '../lib/dataMigration';
 import { readoshiServerScope } from '../lib/readoshiScope';
@@ -102,6 +91,8 @@ function ErrorLogSetting() {
   </SettingsPanel>;
 }
 
+/** A setting edited through an arbitrary block of controls — text areas, file
+ * pickers, cache reports. */
 /** A setting edited through an arbitrary block of controls — text areas, file
  * pickers, cache reports. */
 import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepository';
@@ -290,6 +281,7 @@ export function SettingsWorkspace() {
   const [pendingModel, setPendingModel] = useState<{ id: string; label: string }>();
   const [modelDownload, setModelDownload] = useState<{ completed: number; total?: number | undefined }>();
   const pageRef = useRef<HTMLDivElement>(null);
+  useLoadingReveal(pageRef, preferenceState.loading);
   /** The E-Hentai row's current value: the active account, reported by the
    * workspace that owns the list. The workspace lives inside the row's menu, so
    * it only mounts when the menu opens — without a section-level fetch the
@@ -404,8 +396,11 @@ export function SettingsWorkspace() {
       setSelectedSettingsSection(`settings-${requested}` as (typeof settingsSections)[number]['id']);
       // A link that names a section means to show it, not to land on the list.
       setCompactDrilled(true);
+    } else if (pageActive) {
+      setSelectedSettingsSection('settings-general');
+      setCompactDrilled(false);
     }
-  }, [location.search]);
+  }, [location.key, location.search, pageActive]);
 
   useEffect(() => {
     let active = true;
@@ -444,6 +439,8 @@ export function SettingsWorkspace() {
     // Results go to the shared toast: an inline line inside the cache menu was
     // easy to miss and inconsistent with every other action in the app.
     if (result.ok) {
+      const { clearGalleryImageMemoryCache } = await import('./EhGalleryMedia');
+      clearGalleryImageMemoryCache();
       showToast(`已释放 ${formatCacheBytes(result.value.bytesFreed)}，保留 ${formatCacheBytes(result.value.protectedBytes)} 受保护缓存`, 'success');
       await refreshCacheStats();
     } else {
@@ -1639,12 +1636,12 @@ export function SettingsWorkspace() {
                   hint="导入超分模型或 DLSSNR DLL；DLL 验证仅覆盖本机测试尺寸"
                   control={
                     <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
-                      <svg className="model-import-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <SvgIcon className="model-import-glyph">
                         <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
                         <path d="M12 3v12" />
                         <path d="m7 8 5-5 5 5" />
                         <path d="M8 15h8" />
-                      </svg>
+                      </SvgIcon>
                       {dllValidating ? '正在验证 DLL…' : modelPending ? '导入中…' : '选择模型文件…'}
                     </button>
                   }
