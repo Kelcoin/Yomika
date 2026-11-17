@@ -68,10 +68,15 @@ export function usePageBackNavigation(): void {
   }, [location]);
   useLayoutEffect(() => {
     const back = (event: Event) => {
-      event.preventDefault();
-      if (closeTopOverlay()) return;
+      if (closeTopOverlay()) {
+        event.preventDefault();
+        return;
+      }
       const target = history.current.back();
-      if (target) navigate(target, { replace: true, state: { routeDirection: -1 } });
+      // Unhandled root Back lets Android's host move the task to the background.
+      if (!target) return;
+      event.preventDefault();
+      navigate(target, { replace: true, state: { routeDirection: -1 } });
     };
     window.addEventListener(MOBILE_BACK_EVENT, back);
     // WKWebView/browser gestures still deliver POP. Stop cross-tab browser

@@ -15,7 +15,7 @@ it('anonymizes private locations and identities in messages and structured detai
   expect(text).toContain('broken:');
   expect(text).toContain('[REDACTED]');
   expect(redactSensitive({ error: new Error(privateText) })).not.toEqual({ error: {} });
-  expect(redactSensitive({ name: 'Home library', server_id: 'host', file_path: 'book.zip' })).toEqual({ name: '[REDACTED]', server_id: '[REDACTED]', file_path: '[REDACTED]' });
+  expect(redactSensitive({ name: 'Home library', server_id: 'host', file_path: 'book.zip' })).toEqual({ name: 'Home library', server_id: '[REDACTED]', file_path: '[REDACTED]' });
 });
 
 it('silences only transport failures while retaining decoder and model diagnostics', () => {

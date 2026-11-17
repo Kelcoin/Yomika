@@ -61,7 +61,7 @@ it.each(['realcugan-2x-denoise3x', 'waifu2x-upconv7'])('opens adjustable weights
   expect(within(menu).queryByText('2×')).toBeNull();
   await user.click(within(menu).getByRole('button', { name: '保守' }));
   await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ upscaleModel: 'realcugan-2x-conservative', upscaleOutputScale: 0 }) }));
-  await user.click(screen.getByRole('button', { name: '返回模型列表' }));
+  await user.click(screen.getByRole('dialog', { name: 'Real-CUGAN 设置' }).closest('.settings-choice-overlay')!);
   expect(screen.getByRole('dialog', { name: '超分模型' })).toBeInTheDocument();
   await user.keyboard('{Escape}');
   expect(screen.queryByRole('button', { name: '降噪力度' })).toBeNull();
@@ -744,7 +744,7 @@ describe('settings workspace', () => {
 
     renderSettings('general');
     await userEvent.setup().click(await screen.findByRole('button', { name: '图片缓存上限' }));
-    expect(await within(screen.getByRole('dialog', { name: '图片缓存上限' })).findByRole('spinbutton', { name: '图片缓存上限' })).toHaveValue(4);
+    expect(await within(screen.getByRole('dialog', { name: '图片缓存上限' })).findByRole('slider', { name: '图片缓存上限' })).toHaveValue('4');
     expect(screen.queryByRole('radio', { name: '双页' })).not.toBeInTheDocument();
   });
 
@@ -798,16 +798,14 @@ describe('settings workspace', () => {
 
     renderSettings('reading');
     await user.click(await screen.findByRole('button', { name: '预加载页数' }));
-    const preload = await within(screen.getByRole('dialog', { name: '预加载页数' })).findByRole('spinbutton', { name: '预加载页数' });
+    const preload = await within(screen.getByRole('dialog', { name: '预加载页数' })).findByRole('slider', { name: '预加载页数' });
     // Ten pages, not five: a LAN page is a few hundred KB.
     expect(preload).toHaveAttribute('max', '10');
-    await user.clear(preload);
-    await user.type(preload, '8');
+    fireEvent.change(preload, { target: { value: '8' } });
     await user.keyboard('{Escape}');
     await user.click(screen.getByRole('button', { name: '封面并发请求' }));
-    const concurrency = within(screen.getByRole('dialog', { name: '封面并发请求' })).getByRole('spinbutton', { name: '封面并发请求' });
-    await user.clear(concurrency);
-    await user.type(concurrency, '2');
+    const concurrency = within(screen.getByRole('dialog', { name: '封面并发请求' })).getByRole('slider', { name: '封面并发请求' });
+    fireEvent.change(concurrency, { target: { value: '2' } });
     await user.keyboard('{Escape}');
     // One switch for the feature, and nothing that configures it until it is on.
     // The backend list used to carry 关闭 and the model list 未选择, so turning

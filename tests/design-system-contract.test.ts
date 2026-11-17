@@ -95,10 +95,10 @@ describe('design system contract', () => {
     // 换边时两块面板要同时可见：只有叠进同一个网格格子、再由外层裁掉滑出去的那半，
     // 舞台上才只留一个高度（矮的那块不会被高的那块撑出一段空白）。
     const stage = ruleBody(shell, '.archive-detail-panels.is-sliding');
-    expect(stage).toMatch(/display:\s*grid/);
+    expect(ruleBody(shell, '.archive-detail-panels')).toMatch(/display:\s*grid/);
     expect(stage).toMatch(/overflow:\s*visible/);
     expect(stage).toContain('clip-path: inset(-100vmax calc(-1 * var(--space-4)))');
-    expect(ruleBody(shell, ".archive-detail-panels.is-sliding > [role='tabpanel']")).toMatch(/grid-area:\s*1 \/ 1/);
+    expect(ruleBody(shell, ".archive-detail-panels > [role='tabpanel']")).toMatch(/grid-area:\s*1 \/ 1/);
     // 原来的纵向淡入必须让位：滑完再播一次上浮，看着像弹了两下。
     expect(shell).not.toContain('detail-panel-enter');
   });
@@ -106,9 +106,9 @@ describe('design system contract', () => {
   it('does not apply archive tag tracks to an unfinished download', () => {
     const shell = read('src/styles/shell.css');
     const copy = ruleBody(shell, '.local-archives-list .archive-row.is-downloading > .archive-row-copy');
-    expect(copy).toMatch(/height:\s*auto/);
-    expect(copy).toMatch(/grid-template-rows:\s*auto 4px auto/);
-    expect(copy).toMatch(/align-content:\s*center/);
+    expect(copy).toMatch(/height:\s*142px/);
+    expect(copy).toMatch(/grid-template-rows:\s*34px 4px minmax\(22px, 1fr\)/);
+    expect(copy).toMatch(/padding-bottom:\s*36px/);
   });
 
   it('keeps compact page flow free of duplicated viewport and tail reservations', () => {
@@ -993,6 +993,17 @@ describe('design system contract', () => {
       .toContain('re-measures the chips when a card that mounted unseen is laid out at last');
   });
 
+  it('does not let retained native active paint or shrink a navigation link', () => {
+    const shell = read('src/styles/shell.css');
+    const base = read('src/styles/base.css');
+    // Captured on Android: an inactive favorite link retained native :active
+    // for over two minutes, with no is-pressed or is-pointer-hovered class.
+    expect(base).toContain('a:active:not(.nav-link)');
+    expect(shell).not.toMatch(/\.nav-link[^\n{]*:active/);
+    expect(shell).not.toMatch(/:is\([^)]*\.nav-link[^)]*\):is\([^)]*:active/);
+    expect(shell).toContain('.nav-link.is-pressed');
+  });
+
   it('keeps hover rules free of geometry so a hover never resizes a control', () => {
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
     // A previous style merge fused the brand mark's 38px sizing into the chrome
@@ -1001,7 +1012,7 @@ describe('design system contract', () => {
     // tier carries colour only, and every hover selector list may only mix
     // members of one component family (e.g. a resting state and its hover).
     const chromeHover = shell.match(/\.titlebar-control:hover,\n[\s\S]*?\{[\s\S]*?\n\}/)?.[0] ?? '';
-    expect(chromeHover).toMatch(/\.nav-link:hover/);
+    expect(chromeHover).toMatch(/\.nav-link\.is-pointer-hovered/);
     expect(chromeHover).toMatch(/\.sidebar-toggle:hover/);
     expect(chromeHover).toMatch(/background:\s*var\(--surface-container-high\)/);
     expect(chromeHover).not.toMatch(/(^|\s)(width|height):/);
@@ -1416,7 +1427,8 @@ describe('design system contract', () => {
     // 真机读数：修前 `--reader-toolbar-height` 栏读到 160px、胶囊读到 80px，`shown` 那
     // 一帧胶囊与栏重叠 25px；修后两边都读 160px，每一帧重叠都是 0。
     expect(phone).toMatch(/\.reader-screen\s*\{[^}]*--reader-toolbar-height:\s*64px/);
-    expect(phone).not.toMatch(/\.reader-toolbar\s*\{[^}]*--reader-toolbar-height/);
+    expect(reader).not.toContain('--reader-bar-safe');
+    expect(phone).not.toMatch(/\.reader-toolbar\s*\{[^}]*--reader-toolbar-height\s*:/);
 
     // 栏退场的那 260ms 里它还在树上淡出：胶囊这时跟着一起淡出（`is-leaving` 就是这一档）。
     // 它不再有「落位」要推迟——胶囊在栏在/退场期间根本不移动，所以这里只断言淡出，并断言
@@ -1851,7 +1863,7 @@ describe('design system contract', () => {
     }
     // 而「压住画面」这件事只由那一层容器负责：它自己有 z-index，所以子元素各自往哪排
     // 都还在画面之上，不必每个装饰都去抬一层。
-    expect(ruleBody(reader, '.reader-chrome')).toMatch(/z-index:\s*calc\(var\(--z-reader-overview\)\s*\+\s*1\)/);
+    expect(ruleBody(reader, '.reader-chrome')).toMatch(/z-index:\s*var\(--z-reader-chrome\)/);
   });
 
   it('renders the library grid thumbnail with the shared card component', () => {

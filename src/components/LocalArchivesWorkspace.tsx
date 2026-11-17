@@ -4,15 +4,15 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useStableVirtualRows } from '../lib/useStableVirtualRows';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Check, Download, FileArchive, FolderOpen, MoreVertical, Pause, Play, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Download, FolderOpen, MoreVertical, Pause, Play, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
-import { ArchiveThumbMedia } from './ArchiveThumbnailCard';
+import { LocalArchiveCover, useLocalArchiveCover } from './LocalArchiveCover';
 import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './ArchiveContextMenu';
-import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailPageCount, useArchiveCover, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
+import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailPageCount, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
 import { useArchiveReadingProgress } from './useArchiveReadingProgress';
 import { useDetailListScroll } from '../lib/useDetailListScroll';
 import { EmptyState } from './EmptyState';
@@ -46,6 +46,10 @@ const SEARCH_PLACEHOLDER = '搜索本地档案…';
 /** 检索预设按 scope 存。本地档案不属于任何一台服务器，所以给它一个自己的
  * scope：存在同一张表里，但不会和档案库那些按服务器分的预设混在一起。 */
 const LOCAL_PRESET_SCOPE = 'local-archives';
+
+function archiveIdentity(archive: Pick<LocalArchiveRecord, 'archiveId' | 'serverId' | 'path'>): string {
+  return archive.archiveId ? `${archive.serverId ?? 'local'}:${archive.archiveId}` : archive.path;
+}
 
 /** 未完成的下载：还在这条路上跑的那些任务行。 */
 function isActiveDownload(task: TaskRecord): boolean {
@@ -132,13 +136,13 @@ function DownloadRow({ task, pending, onControl }: {
         <strong>{downloadTitle(task)}</strong>
         <progress aria-label={`${downloadTitle(task)}进度`} max="100" value={Math.round(task.progress * 100)} />
         <span className="archive-row-footer">
-          <small className={`status-chip ${taskStatusClass(task.status)}`}>{taskStatusLabel(task.status)}</small>
           {/* 失败那一条：右边这格本来写给进度，改成写原因——四行会撑破 142px
               的文案格，所以理由占进度的位置，完整文本留在 title 上。 */}
           <small className={`archive-row-stats${task.error ? ' is-error' : ''}`} title={task.error ?? undefined}>{task.error ?? downloadStats(task)}</small>
         </span>
       </span>
       <div className="local-row-actions">
+        <small className={`status-chip ${taskStatusClass(task.status)}`}>{taskStatusLabel(task.status)}</small>
         {task.status === 'running' && (
           <button type="button" className="icon-button" disabled={pending} aria-label={`暂停${downloadTitle(task)}`} title="暂停" onClick={() => onControl(task, 'pause')}><Pause aria-hidden="true" /></button>
         )}
@@ -179,9 +183,7 @@ function LocalArchiveRow({ archive, selectionMode, selected, active, onOpen, onT
       }}
       {...longPressHandlers((at) => onMenu(archive, at))}
     >
-      {archive.scopeId && archive.serverId && archive.archiveId
-        ? <ArchiveThumbMedia scopeId={archive.scopeId} serverId={archive.serverId} archiveId={archive.archiveId} />
-        : <div className="archive-thumb-card-media is-local-placeholder" aria-hidden="true"><FileArchive /></div>}
+      <LocalArchiveCover path={archive.path} revision={`${archive.fileSize}:${archive.addedAt}`} />
       <span className="archive-row-copy">
         <strong>{archive.title}</strong>
         <ArchiveCardTags tags={archive.tags} limit={CARD_TAG_LIMIT_WIDE} rowCount={3} className="archive-row-tags" />
@@ -298,10 +300,24 @@ export function LocalArchivesWorkspace() {
     if (pageActive && completed) void loadArchives();
   }, [pageActive, unfinished, loadArchives]);
 
-  const activeDownloads = useMemo(
-    () => tasks.filter(isActiveDownload).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
-    [tasks],
-  );
+  const uniqueArchives = useMemo(() => {
+    const unique = new Map<string, LocalArchiveRecord>();
+    for (const archive of archives) {
+      const key = archiveIdentity(archive);
+      const previous = unique.get(key);
+      if (!previous || archive.path === openPath || (previous.path !== openPath && archive.addedAt > previous.addedAt)) unique.set(key, archive);
+    }
+    return [...unique.values()];
+  }, [archives, openPath]);
+  const activeDownloads = useMemo(() => {
+    const seen = new Set(uniqueArchives.map(archiveIdentity));
+    return tasks.filter(isActiveDownload).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).filter(task => {
+      const key = task.archiveId ? `${task.serverId ?? 'local'}:${task.archiveId}` : task.localPath ?? task.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [tasks, uniqueArchives]);
 
   /** 分类下拉的取值域：从读回来的档案里现推（见 `localCategoryLabel`），排序按
    * 显示名。选项的值就是显示名本身——筛选拿它和 `localCategoryLabel` 直接比，
@@ -323,18 +339,18 @@ export function LocalArchivesWorkspace() {
   const visibleArchives = useMemo(() => {
     const needle = query.trim().toLowerCase();
     const byCategory = categoryFilter
-      ? archives.filter((archive) => {
+      ? uniqueArchives.filter((archive) => {
         const label = localCategoryLabel(archive);
         return categoryFilter === UNTAGGED_FILTER_ID ? label === '' : label === categoryFilter;
       })
-      : archives;
+      : uniqueArchives;
     const matched = needle
       ? byCategory.filter((archive) => `${archive.title} ${archive.path} ${archive.tags.join(' ')}`.toLowerCase().includes(needle))
       : byCategory;
     // `[...matched]`：`filter` 没筛掉东西时 returned 的就是 `archives` 本身，
     // 原地 sort 会改到 state 里的那个数组。
     return [...matched].sort((left, right) => compareLocalArchives(left, right, sortMode, sortOrder));
-  }, [archives, categoryFilter, query, sortMode, sortOrder]);
+  }, [uniqueArchives, categoryFilter, query, sortMode, sortOrder]);
 
   const openArchive = (archive: LocalArchiveRecord) => {
     const next = new URLSearchParams(searchParams);
@@ -373,14 +389,17 @@ export function LocalArchivesWorkspace() {
   }
 
   async function control(task: TaskRecord, action: 'pause' | 'resume' | 'cancel') {
-    setPendingTaskId(task.id);
+    // resumeDownload resolves when the entire transfer ends. Keep pause/cancel
+    // available during that promise, and reflect the dispatch immediately.
+    if (action !== 'resume') setPendingTaskId(task.id);
+    else setTasks((current) => current.map((item) => item.id === task.id ? { ...item, status: 'running' } : item));
     try {
       if (action === 'resume') {
         // 恢复会把剩下的字节收完，报的是和首次下载同一件事。
         const result = await repository.resumeDownload(task.id);
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         const completed = result.value.status === 'completed';
-        showToast(completed ? '下载完成' : '已暂停', completed ? 'success' : 'info');
+        if (completed) showToast('下载完成', 'success');
         if (completed) await loadArchives();
       } else {
         const result = action === 'pause'
@@ -389,10 +408,10 @@ export function LocalArchivesWorkspace() {
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         if (action === 'cancel') await loadArchives();
       }
+    } finally {
+      if (action !== 'resume') setPendingTaskId((current) => current === task.id ? undefined : current);
       const refreshed = await repository.listTasks();
       if (refreshed.ok) setTasks(refreshed.value);
-    } finally {
-      setPendingTaskId(undefined);
     }
   }
 
@@ -533,16 +552,14 @@ export function LocalArchivesWorkspace() {
       <div className={`archive-selection-slot${selectionMode ? ' is-open' : ''}`}>
         <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
           <span className="archive-selection-count" role="status" aria-live="polite">已选 {selected.size} 个</span>
-          {/* 与档案库那一条同形：纯图标 + 可访问名/提示，两个列表的多选栏是同一套。 */}
+          {/* 与档案库复用同一套响应式多选栏。 */}
           <button className="secondary-action has-action-label" type="button" aria-pressed={selectAll} aria-label={selectAll ? '取消全选' : '全选当前'} title={selectAll ? '取消全选' : '全选当前'} disabled={visibleArchives.length === 0} onClick={toggleAll}>
             <StateIcon name="select" selected={selectAll} />
           <span className="action-label">{selectAll ? '取消全选' : '全选当前'}</span></button>
           <button className="secondary-action is-danger has-action-label" type="button" aria-label="删除所选" title="删除所选" disabled={selected.size === 0 || busy} onClick={() => setDeletePaths([...selected])}>
             <Trash2 aria-hidden="true" />
           <span className="action-label">删除所选</span></button>
-          <button className="secondary-action has-action-label archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => { setSelectionMode(false); setSelected(new Set()); }}>
-            <Check aria-hidden="true" />
-          <span className="action-label">完成</span></button>
+
         </div>
       </div>
       {error && <div className="form-error" role="alert">{error}<button className="secondary-action" type="button" onClick={() => void loadArchives()}>重试读取本地档案</button></div>}
@@ -697,12 +714,7 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
   const serverCopy = archive.scopeId && archive.serverId && archive.archiveId
     ? { scopeId: archive.scopeId, serverId: archive.serverId, archiveId: archive.archiveId }
     : undefined;
-  const { cover, loading: coverLoading } = useArchiveCover({
-    scopeId: serverCopy?.scopeId,
-    serverId: serverCopy?.serverId,
-    archiveId: serverCopy?.archiveId,
-    enabled: Boolean(serverCopy),
-  });
+  const { cover, loading: coverLoading } = useLocalArchiveCover(archive.path, `${archive.fileSize}:${archive.addedAt}`);
   const titleRef = useSingleLineTitle(archive.title);
   const readingProgress = useArchiveReadingProgress(serverCopy?.scopeId, serverCopy?.archiveId);
   const facts = [
@@ -713,7 +725,7 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
   ];
 
   return (
-    <main className="archive-detail-route" aria-labelledby="local-archive-title">
+    <main className="archive-detail-route local-archive-detail" aria-labelledby="local-archive-title">
       <header className="archive-detail-route-header">
         <button type="button" className="reader-icon-button" aria-label="返回列表" title="返回" onClick={onClose}><ArrowLeft aria-hidden="true" /></button>
         <h1 id="local-archive-title" className="archive-detail-route-title" ref={titleRef}>{archive.title}</h1>

@@ -1,5 +1,5 @@
 import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Link, MemoryRouter } from 'react-router-dom';
 import { WorkspaceRoutes } from '../../src/app/routes';
@@ -16,6 +16,46 @@ afterEach(() => {
 });
 
 describe('shelf snapshots', () => {
+  it('offers three labelled history actions and exits with the selection toggle', async () => {
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [{ scopeId: 's', archiveId: 'a', pageIndex: 7, visitedAt: '2026-11-14T10:00:00Z', deviceId: 'd', revision: 1 }] };
+      if (command === 'list_archives_by_ids') return { ok: true, value: [{ serverId: 's', archiveId: 'a', title: 'History archive', pageCount: 8, updatedAt: 'now' }] };
+      return { ok: true, value: [] };
+    });
+    render(<MemoryRouter initialEntries={['/history']}><PreferencesProvider><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>);
+    await screen.findByText('History archive');
+    fireEvent.click(screen.getByRole('button', { name: '多选' }));
+    const toolbar = screen.getByRole('toolbar', { name: '多选操作' });
+    expect(within(toolbar).getAllByRole('button').map(button => button.textContent)).toEqual(['全选当前', '全选已读', '清理记录']);
+    expect(within(toolbar).queryByRole('button', { name: /收藏|完成/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '退出多选' }));
+    expect(screen.getByRole('button', { name: '多选' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('finishes a favorites refresh without waiting for unrelated categories or existence probes', async () => {
+    let ids = ['kept', 'removed'];
+    const adapter = vi.fn(async (command: string, args: unknown) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'read_favorites_category') return { ok: true, value: { id: 'SET_1785040778', archives: ids } };
+      if (command === 'list_categories' || command === 'verify_archives_exist') return new Promise(() => {});
+      if (command === 'list_archives_by_ids') return { ok: true, value: (args as { archiveIds: string[] }).archiveIds.map(archiveId => ({ serverId: 's', archiveId, title: archiveId === 'kept' ? '保留的收藏' : '移除的收藏', pageCount: 8, updatedAt: 'now' })) };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter initialEntries={['/watchlist']}><PreferencesProvider><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>);
+    await screen.findByText('保留的收藏');
+    expect(screen.getByText('移除的收藏')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '多选' }));
+    expect(screen.getByRole('button', { name: '移除收藏' })).toHaveTextContent('移除收藏');
+    ids = ['kept'];
+    act(() => invalidateRouteCache('state:'));
+    await waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'read_favorites_category').length).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(screen.queryByText('移除的收藏')).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText('正在刷新档案库…')).not.toBeInTheDocument());
+    expect(adapter.mock.calls.some(([command]) => command === 'verify_archives_exist')).toBe(false);
+  });
+
   it.each([['history', 'history'], ['to-read', 'toRead']])('rejects a valid-shaped A snapshot stored under the B key on %s', async (path, name) => {
     writeRouteCache(`state:${name}:B`, { serverId: 'A', scopeId: 'A', history: [], watchlist: [], archives: [], query: '' });
     const adapter = vi.fn(async command => {

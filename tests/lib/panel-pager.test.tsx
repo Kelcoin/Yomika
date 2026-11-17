@@ -22,6 +22,17 @@ afterEach(() => {
 });
 
 describe('panel gesture lifecycle', () => {
+  it('places both panels before starting a button transition', () => {
+    const origins: string[] = [];
+    Object.defineProperty(HTMLElement.prototype, 'animate', { configurable: true, value: function(this: HTMLElement) {
+      origins.push(this.style.transform);
+      return { cancel: vi.fn(), onfinish: null } as unknown as Animation;
+    } });
+    render(<Pager />);
+    fireEvent.click(screen.getByRole('button', { name: 'Comments' }));
+    expect(origins).toEqual(['translate3d(0px, 0, 0)', 'translate3d(calc(100% + 16px), 0, 0)']);
+  });
+
   it('repositions the scrollport after a long-to-short transition and restores the long panel on return', () => {
     render(<div data-testid="scrollport" style={{ overflowY: 'auto' }}><Pager /></div>);
     const host = screen.getByTestId('scrollport');

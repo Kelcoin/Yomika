@@ -5,7 +5,7 @@ import { RefreshIcon as RefreshCw } from './RefreshIcon';
 import { ArchiveCardTags } from './CardTagRows';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useStableVirtualRows } from '../lib/useStableVirtualRows';
-import { FolderHeart, ArrowDown, ArrowUp, BookOpen, Check, Pencil, Save, Grid2X2, Rows3, Trash2, X } from 'lucide-react';
+import { FolderHeart, ArrowDown, ArrowUp, BookOpen, Pencil, Save, Grid2X2, Rows3, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react';
 import { useLoadingReveal } from '../lib/useLoadingReveal';
 import { Link, useNavigate, useLocation, matchPath } from 'react-router-dom';
@@ -1234,19 +1234,16 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <div className={`archive-selection-slot${selectionMode ? ' is-open' : ''}`}>
           <div className="archive-selection-bar" role="toolbar" aria-label="多选操作">
             <span className="archive-selection-count" role="status" aria-live="polite">已选 {selectedIds.size} 个</span>
-            {/* Icon-only, like the reader's toolbar: the words live in the
-                accessible name and the tooltip, so a row of actions reads as one
-                row of symbols whatever the language. */}
+            {/* Labels appear when the panel has room; narrow layouts keep compact icons. */}
             <button className="secondary-action has-action-label" type="button" aria-pressed={allVisibleSelected} aria-label={allVisibleSelected ? '取消全选' : '全选当前'} title={allVisibleSelected ? '取消全选' : '全选当前'} onClick={toggleAllVisible} disabled={archives.length === 0}>
               <StateIcon name="select" selected={allVisibleSelected} />
             <span className="action-label">{allVisibleSelected ? '取消全选' : '全选当前'}</span></button>
             {finishedArchiveIds && (
               <button className="secondary-action has-action-label" type="button" aria-pressed={allFinishedSelected} aria-label={allFinishedSelected ? '取消全选已读完' : '全选已读完'} title={allFinishedSelected ? '取消全选已读完' : '全选已读完'} onClick={toggleAllFinished} disabled={finishedVisible.length === 0}>
                 <StateIcon name="finished" selected={allFinishedSelected} />
-              <span className="action-label">{allFinishedSelected ? '取消全选已读完' : '全选已读完'}</span></button>
+              <span className="action-label">{allFinishedSelected ? '取消已读' : '全选已读'}</span></button>
             )}
             {selectionActions}
-            <button className="secondary-action has-action-label archive-selection-done" type="button" aria-label="完成" title="完成" onClick={() => onSelectionModeChange?.(false)}><Check aria-hidden="true" /><span className="action-label">完成</span></button>
           </div>
         </div>
       )}

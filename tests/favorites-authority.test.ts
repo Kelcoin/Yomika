@@ -39,7 +39,7 @@ describe('remote favorites authority', () => {
   it('limits metadata requests to four at once', async () => {
     vi.spyOn(NativeLibraryRepository.prototype, 'listArchivesByIds').mockResolvedValue({ ok: true, value: [] });
     let active = 0, peak = 0;
-    vi.spyOn(NativeLibraryRepository.prototype, 'loadArchiveMetadata').mockImplementation(async (_server, id) => {
+    const metadata = vi.spyOn(NativeLibraryRepository.prototype, 'loadArchiveMetadata').mockImplementation(async (_server, id) => {
       active++; peak = Math.max(peak, active);
       await new Promise(resolve => setTimeout(resolve, 1));
       active--;
@@ -47,6 +47,8 @@ describe('remote favorites authority', () => {
     });
     expect(await loadFavoriteArchives('s', Array.from({ length: 10 }, (_, i) => String(i)))).toHaveLength(10);
     expect(peak).toBe(4);
+    expect(metadata).toHaveBeenCalledTimes(10);
+    expect(NativeLibraryRepository.prototype.listArchivesByIds).toHaveBeenCalledWith('s', expect.any(Array), { resolveMissing: false });
     vi.restoreAllMocks();
   });
   it('resolves remote-only metadata and excludes stale local favorites', async () => {

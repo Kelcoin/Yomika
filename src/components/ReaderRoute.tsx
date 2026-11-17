@@ -1,3 +1,4 @@
+import { ReaderTitle } from './ReaderTitle';
 import { usePageActive } from '../app/RetainedPage';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -173,7 +174,7 @@ function ReaderRouteChromeShell({ className, title, goBack, children }: { classN
       {topPresence.mounted && (
         <header className={`reader-error-bar${topPresence.leaving ? ' is-leaving' : ''}`} onClick={keepAlive} {...windowDrag}>
           <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
-          <strong>{title}</strong>
+          <ReaderTitle title={title} />
         </header>
       )}
       {children}
@@ -352,7 +353,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     setUpscaleWanted(false);
     setDlssnrWanted(false);
     upscaleChosenRef.current = false;
-  }, [archiveId]);
+  }, [archiveId, pageActive]);
   useEffect(() => { if (!upscaleConfigured) setUpscaleWanted(false); }, [upscaleConfigured]);
   useEffect(() => { if (!dlssnrAvailable) setDlssnrWanted(false); }, [dlssnrAvailable]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
@@ -400,7 +401,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // 体积那一半是「平均一页比阈值**小**才值得超分」，本来就大的页不该自己开起来。
   // 体积从 overview facts 里拿（字节），平均一页 = size / 页数。
   useEffect(() => {
-    if (!upscaleConfigured || upscaleChosenRef.current) return;
+    if (!pageActive || !upscaleConfigured || upscaleChosenRef.current) return;
     if (!preferences.upscaleAutoEnable) { setUpscaleWanted(false); return; }
     if (!info?.sizeBytes || !info.tags || pages.length === 0) return;
     setUpscaleWanted(shouldAutoEnableUpscale(info.tags, {
@@ -410,7 +411,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       whitelist: preferences.upscaleAutoWhitelist,
       blacklist: preferences.upscaleAutoBlacklist,
     }));
-  }, [upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoTagMode, preferences.upscaleAutoThresholdBytes, preferences.upscaleAutoWhitelist, preferences.upscaleAutoBlacklist, info?.sizeBytes, info?.tags, pages.length]);
+  }, [pageActive, upscaleConfigured, preferences.upscaleAutoEnable, preferences.upscaleAutoTagMode, preferences.upscaleAutoThresholdBytes, preferences.upscaleAutoWhitelist, preferences.upscaleAutoBlacklist, info?.sizeBytes, info?.tags, pages.length]);
   const coverHandleRef = useRef<ImageHandle>();
   const contextRef = useRef<ReaderContext>();
   const pageHandlesRef = useRef(new Map<number, ImageHandle>());

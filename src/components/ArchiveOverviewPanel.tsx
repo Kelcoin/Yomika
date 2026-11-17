@@ -41,9 +41,8 @@ const OVERVIEW_TITLE_SIZES = ['var(--text-heading)', '20px', '18px', '16px'] as 
 export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags, currentPage, thumbnailAt, registerTile, onRangeChange, onSelectPage, onClose, onPanelClick }: ArchiveOverviewPanelProps) {
   const titleRef = useSingleLineTitle(title, OVERVIEW_TITLE_SIZES);
   const grouped = categorizeSearchableTags(tags ?? []);
-  // The same two facts the detail page lists beside its cover, in the same shape
-  // and with the same glyphs: as a "3 页 · 143.2 MB" line of its own this was a
-  // second rendering of the same numbers, and the two drifted apart.
+  // Reuse the detail page's fact glyphs below the cover, leaving the right
+  // column entirely available for tags.
   const facts: DetailFact[] = [
     { kind: 'pages', label: '页数', value: `${pageCount} 页` },
     ...(sizeBytes ? [{ kind: 'size' as const, label: '体积', value: formatByteSize(sizeBytes) }] : []),
@@ -54,14 +53,21 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
       <button type="button" className="reader-icon-button" aria-label="关闭概览" onClick={onClose}><X aria-hidden="true" /></button>
     </header>
     <div className="reader-overview-summary">
-      {/* The cover and tags share the first row; compact facts span the row below. */}
+      {/* Cover and its centered facts stay together beside the tags. */}
       <div className="reader-overview-identity">
         {/* 封面装在一个裁切框里：SFW 的模糊与 1.12 倍放大都会画到元素盒子外面，
             没有 overflow: hidden 就会糊到旁边的页数、标签上。
             SFW 下这张封面在触屏上要"按住才看清"，而 pressFeedback 只标记可点元素：
             这个框自己不是可点元素，所以由它认领这次按压（data-press-surface）。 */}
         {cover && <span className="reader-overview-cover-frame" data-press-surface><img className="reader-overview-cover" src={cover} alt="" decoding="async" /></span>}
-
+        <dl className="reader-overview-stats" aria-label="档案信息">
+          {facts.map(({ kind, label, value }) => (
+            <div key={kind} data-fact={kind} title={label}>
+              <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
+              <dd>{value}</dd>
+            </div>
+          ))}
+        </dl>
       </div>
       <div className="reader-overview-facts">
         {grouped.length > 0 && (
@@ -77,14 +83,7 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
           </div>
         )}
       </div>
-      <dl className="reader-overview-stats" aria-label="档案信息">
-        {facts.map(({ kind, label, value }) => (
-          <div key={kind} data-fact={kind} title={label}>
-            <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
-            <dd>{value}</dd>
-          </div>
-        ))}
-      </dl>
+
     </div>
     <VirtualPageGrid count={Math.max(0, pageCount)} minWidth={80} className={`reader-overview-thumbnails${onSelectPage ? '' : ' is-preview'}`} onRangeChange={onRangeChange}>
       {(index) => {

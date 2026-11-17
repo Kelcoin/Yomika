@@ -1,4 +1,5 @@
 mod archive_publish;
+pub mod local_cover;
 pub mod eh;
 pub mod legacy;
 pub mod library;

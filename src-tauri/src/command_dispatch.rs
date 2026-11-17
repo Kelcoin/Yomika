@@ -32,6 +32,7 @@ mod tests {
         ("commands/eh.rs", include_str!("commands/eh.rs")),
         ("commands/legacy.rs", include_str!("commands/legacy.rs")),
         ("commands/library.rs", include_str!("commands/library.rs")),
+        ("commands/local_cover.rs", include_str!("commands/local_cover.rs")),
         ("commands/platform.rs", include_str!("commands/platform.rs")),
         ("commands/data_transfer.rs", include_str!("commands/data_transfer.rs")),
         // 重计算编排的命令层：只入队 / 只读小状态，一条都不等计算。登记在这里是因为它

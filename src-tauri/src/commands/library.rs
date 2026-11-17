@@ -645,24 +645,36 @@ async fn read_reader_page_body(
     api_key: &str,
     idle: std::time::Duration,
 ) -> Result<Vec<u8>, ReaderRequestError> {
-    let failure = || ReaderRequestError {
-        code: "NETWORK", message: "阅读图片传输中断，续传未完成".into(),
+    let failure = |reason: &str| ReaderRequestError {
+        code: "NETWORK", message: format!("阅读图片续传未完成：{reason}"),
     };
     let expected = response.content_length();
+    // A mobile reader starts with a bounded range. Content-Length then describes
+    // that segment, not the entire image; never cache it as a complete page.
+    let total = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+        let range = response.headers().get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("bytes 0-"))
+            .and_then(|v| v.split_once('/'))
+            .and_then(|(end, total)| Some((end.parse::<u64>().ok()?, total.parse::<u64>().ok()?)))
+            .filter(|(end, total)| *end < *total && end.checked_add(1) == expected)
+            .ok_or_else(|| failure("首段 Content-Range 或长度不一致"))?;
+        Some(range.1)
+    } else { expected };
     let validator = response.headers().get(reqwest::header::ETAG)
         .filter(|value| !value.as_bytes().starts_with(b"W/"))
         .or_else(|| response.headers().get(reqwest::header::LAST_MODIFIED)).cloned();
     let mut bytes = Vec::new();
-    if read_reader_segment(response, &mut bytes, expected, idle).await { return Ok(bytes); }
-    let total = expected.filter(|length| *length > bytes.len() as u64).ok_or_else(failure)?;
-    if bytes.is_empty() { return Err(failure()); }
+    let complete = read_reader_segment(response, &mut bytes, expected, idle).await;
+    if complete && total.is_none_or(|length| length == bytes.len() as u64) { return Ok(bytes); }
+    let total = total.filter(|length| *length > bytes.len() as u64).ok_or_else(|| failure("原始响应缺少可恢复的总长度"))?;
+    if bytes.is_empty() { return Err(failure("首段未收到数据")); }
     let client = lanraragi_client().map_err(ReaderRequestError::configuration)?;
     // Stay within the screen's request deadline, including range recovery.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
-    for _ in 0..64 {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(26);
+    for _ in 0..256 {
         let overlap = bytes.len().min(64 * 1024);
         let start = (bytes.len() - overlap) as u64;
-        let end = (start + 4 * 1024 * 1024 - 1).min(total - 1);
+        let end = (start + 2 * 1024 * 1024 - 1).min(total - 1);
         let mut request = client.get(url)
             .header(reqwest::header::AUTHORIZATION, authorization_value(api_key))
             .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
@@ -670,23 +682,24 @@ async fn read_reader_page_body(
             .timeout(std::time::Duration::from_secs(8));
         if let Some(value) = &validator { request = request.header(reqwest::header::IF_RANGE, value); }
         let response = tokio::time::timeout_at(deadline, request.send()).await
-            .map_err(|_| failure())?.map_err(ReaderRequestError::transport)?;
+            .map_err(|_| failure(&format!("等待分段响应超时，已收到 {}/{total} 字节", bytes.len())))?.map_err(ReaderRequestError::transport)?;
         if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
             || response.headers().get(reqwest::header::CONTENT_RANGE).and_then(|v| v.to_str().ok())
                 != Some(format!("bytes {start}-{end}/{total}").as_str()) {
-            return Err(failure());
+            return Err(failure(&format!("分段范围不一致（状态 {}，范围 {:?}，预期 {start}-{end}/{total}）", response.status(), response.headers().get(reqwest::header::CONTENT_RANGE))));
         }
         let mut segment = Vec::new();
         let _ = tokio::time::timeout_at(deadline,
-            read_reader_segment(response, &mut segment, Some(end - start + 1), idle)).await.map_err(|_| failure())?;
+            read_reader_segment(response, &mut segment, Some(end - start + 1), idle)).await
+            .map_err(|_| failure(&format!("读取分段超时，已收到 {}/{total} 字节", bytes.len())))?;
         if segment.len() <= overlap || segment.len() as u64 > end - start + 1
             || segment[..overlap] != bytes[bytes.len() - overlap..] {
-            return Err(failure());
+            return Err(failure(&format!("分段数据不完整或重叠校验失败（{start}-{end}，收到 {} 字节，重叠 {overlap} 字节）", segment.len())));
         }
         bytes.extend_from_slice(&segment[overlap..]);
         if bytes.len() as u64 == total { return Ok(bytes); }
     }
-    Err(failure())
+    Err(failure("超过分段数量上限"))
 }
 
 async fn reader_request(
@@ -703,15 +716,25 @@ pub(crate) async fn reader_request_with_timeout(
     api_key: String,
     timeout_seconds: u64,
 ) -> Result<reqwest::Response, ReaderRequestError> {
+    reader_request_with_headers(method, url, api_key, timeout_seconds, false).await
+}
+
+async fn reader_request_with_headers(
+    method: reqwest::Method, url: String, api_key: String, timeout_seconds: u64, bounded_page: bool,
+) -> Result<reqwest::Response, ReaderRequestError> {
     let client = lanraragi_client().map_err(ReaderRequestError::configuration)?;
     // Only replay safe reads. Plugin execution, uploads and mutations must never
     // run twice merely because the first response was lost.
     let safe = method == reqwest::Method::GET || method == reqwest::Method::HEAD;
     for attempt in 0..2 {
-        let response = client.request(method.clone(), &url)
+        let mut request = client.request(method.clone(), &url)
             .timeout(std::time::Duration::from_secs(timeout_seconds))
-            .header(reqwest::header::AUTHORIZATION, authorization_value(&api_key))
-            .send().await;
+            .header(reqwest::header::AUTHORIZATION, authorization_value(&api_key));
+        if bounded_page {
+            request = request.header(reqwest::header::RANGE, "bytes=0-1048575")
+                .header(reqwest::header::ACCEPT_ENCODING, "identity");
+        }
+        let response = request.send().await;
         let retry = safe && attempt == 0 && match &response {
             Ok(value) => matches!(value.status().as_u16(), 502 | 503 | 504),
             Err(error) => error.is_connect() || error.is_timeout() || error.is_request(),
@@ -1605,6 +1628,25 @@ pub async fn load_archive_metadata(
     }))
 }
 
+/// Resolve identity before opening a network stream. Task history is not a
+/// second local copy, and an externally removed file must be downloadable again.
+fn existing_archive_download(database: &Database, server_id: &str, archive_id: &str) -> Result<Option<DownloadResult>, String> {
+    let connection = database.connection.lock().map_err(|e| e.to_string())?;
+    let mut statement = connection.prepare("SELECT path FROM local_archives WHERE server_id=?1 AND archive_id=?2 ORDER BY added_at DESC").map_err(|e| e.to_string())?;
+    let paths = statement.query_map(params![server_id,archive_id], |row| row.get::<_,String>(0)).map_err(|e| e.to_string())?;
+    for path in paths {
+        let path = path.map_err(|e| e.to_string())?;
+        if std::path::Path::new(&path).is_file() {
+            let task_id = connection.query_row("SELECT id FROM tasks WHERE local_path=?1 AND status='completed' ORDER BY created_at DESC LIMIT 1", [&path], |row| row.get::<_,String>(0)).optional().map_err(|e| e.to_string())?
+                .unwrap_or_else(|| format!("local-{archive_id}"));
+            return Ok(Some(DownloadResult { status: "completed".into(), path, task_id }));
+        }
+    }
+    connection.query_row("SELECT id,local_path FROM tasks WHERE kind='download' AND server_id=?1 AND archive_id=?2 AND status IN ('running','queued','paused','failed') ORDER BY created_at DESC LIMIT 1",
+        params![server_id,archive_id], |row| Ok(DownloadResult { status: "existing".into(), task_id: row.get(0)?, path: row.get::<_,Option<String>>(1)?.unwrap_or_default() }))
+        .optional().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn download_archive(
     app: tauri::AppHandle,
@@ -1619,6 +1661,9 @@ pub async fn download_archive(
             false,
         ));
     }
+    if let Some(existing) = existing_archive_download(&database, &server_id, &archive_id)? {
+        return Ok(CommandResult::success(existing));
+    }
     let (base_url, scope_id, directory) = {
         let connection = database
             .connection
@@ -1629,6 +1674,15 @@ pub async fn download_archive(
         (base_url, scope_id, directory)
     };
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<DownloadResult, String> {
+        let database = app.state::<Database>();
+        let identity = format!("download:{server_id}:{archive_id}");
+        let lock = download_transfer_lock(&identity);
+        let _guard = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(DownloadResult { status: "existing".into(), path: String::new(), task_id: identity }),
+            Err(_) => return Err("Download worker lock failed".into()),
+        };
+        if let Some(existing) = existing_archive_download(&database, &server_id, &archive_id)? { return Ok(existing); }
         let api_key = SystemCredentialStore
             .get_server_api_key(&scope_id)
             .map_err(credential_read_error)?;
@@ -1771,6 +1825,11 @@ fn clear_download_signal(task_id: &str) {
     }
 }
 
+struct DownloadSignalCleanup(String);
+impl Drop for DownloadSignalCleanup {
+    fn drop(&mut self) { clear_download_signal(&self.0); }
+}
+
 fn read_download_signal(handle: &std::sync::Mutex<DownloadSignal>) -> DownloadSignal {
     // 锁坏了当作中止：下载这件事宁可停错，也不要卡在谁也动不了的状态里。
     handle.lock().map(|state| *state).unwrap_or(DownloadSignal::Aborted)
@@ -1810,10 +1869,101 @@ struct TaskTransfer {
     final_name: String,
 }
 
+fn download_transfer_lock(task_id: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    type Locks = std::collections::HashMap<String, std::sync::Weak<std::sync::Mutex<()>>>;
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<Locks>> = std::sync::OnceLock::new();
+    let mut locks = LOCKS.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(task_id).and_then(std::sync::Weak::upgrade) { return lock; }
+    let lock = std::sync::Arc::new(std::sync::Mutex::new(()));
+    locks.insert(task_id.to_owned(), std::sync::Arc::downgrade(&lock));
+    lock
+}
+
 fn transfer_archive(
     database: &Database,
     request: TransferRequest,
 ) -> Result<DownloadResult, String> {
+    // Retry broken response streams with the same task and the exact on-disk
+    // checkpoint. A reconnect must not create another download or append a 200.
+    let mut request = request;
+    // A resumed worker must wait for the old worker to acknowledge pause before
+    // resetting its signal or opening the same partial file.
+    let filename = request.task.as_ref().map(|task| task.final_name.clone())
+        .unwrap_or_else(|| archive_download_filename(&request.archive_id, &request.metadata));
+    let part_key = request.directory.join(format!("{filename}.part"));
+    let transfer_lock = download_transfer_lock(&part_key.to_string_lossy());
+    let _transfer_guard = transfer_lock.lock().map_err(|_| "Download worker lock failed".to_string())?;
+    if request.task.is_some() {
+        if let Some(existing) = existing_archive_download(database, &request.server_id, &request.archive_id)? {
+            if existing.status == "completed" { return Ok(existing); }
+        }
+    }
+    if let Some(task) = request.task.as_mut() {
+        let connection = database.connection.lock().map_err(|e| e.to_string())?;
+        let status: String = connection.query_row("SELECT status FROM tasks WHERE id=?1", [&task.id], |row| row.get(0)).map_err(|e| e.to_string())?;
+        if status == "cancelled" { return Ok(DownloadResult { status, path: String::new(), task_id: task.id.clone() }); }
+        task.received = std::fs::metadata(&task.part).map(|meta| meta.len()).unwrap_or(0);
+        clear_download_signal(&task.id);
+        connection.execute("UPDATE tasks SET status='running',error=NULL WHERE id=?1", [&task.id]).map_err(|e| e.to_string())?;
+    }
+    let mut failures_without_progress = 0;
+    let mut checkpoint = request.task.as_ref().map(|task| task.received).unwrap_or(0);
+    loop {
+        let result = transfer_archive_once(database, &request);
+        let Err(error) = &result else { return result; };
+        let transient = error.starts_with("Download transport:") || error.starts_with("Archive download stopped short:");
+        if !transient || failures_without_progress >= 3 {
+            if let Some(task) = &request.task {
+                if let Ok(connection) = database.connection.lock() {
+                    let _ = connection.execute("UPDATE tasks SET status='failed',error=?1 WHERE id=?2 AND status='running'", params![error, task.id]);
+                }
+            }
+            return result;
+        }
+        let filename = request.task.as_ref().map(|task| task.final_name.clone())
+            .unwrap_or_else(|| archive_download_filename(&request.archive_id, &request.metadata));
+        let part = request.directory.join(format!("{filename}.part"));
+        let recovered = {
+            let connection = database.connection.lock().map_err(|e| e.to_string())?;
+            connection.query_row(
+                "SELECT id,label,status,total_bytes FROM tasks WHERE local_path=?1 AND kind='download' ORDER BY created_at DESC LIMIT 1",
+                [part.to_string_lossy().as_ref()],
+                |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Option<u64>>(3)?)),
+            ).optional().map_err(|e| e.to_string())?
+        };
+        if let Some((id, label, status, total)) = recovered {
+            if status == "paused" || status == "cancelled" {
+                return Ok(DownloadResult { status, path: part.to_string_lossy().into_owned(), task_id: id });
+            }
+            let received = std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(0);
+            if received > checkpoint { failures_without_progress = 0; }
+            else { failures_without_progress += 1; }
+            checkpoint = received;
+            report_download_progress(database, &id, received, total, None);
+            if let Ok(connection) = database.connection.lock() {
+                let _ = connection.execute("UPDATE tasks SET status='running',error=NULL WHERE id=?1", [&id]);
+            }
+            request.task = Some(TaskTransfer { id, label, received, total, part, final_name: filename });
+        } else {
+            failures_without_progress += 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250 * (failures_without_progress + 1)));
+    }
+}
+
+fn download_transport_error(error: &dyn std::error::Error) -> String {
+    let mut message = format!("Download transport: {error}");
+    let mut source = error.source();
+    while let Some(cause) = source { message.push_str(&format!("; {cause}")); source = cause.source(); }
+    message
+}
+
+fn transfer_archive_once(database: &Database, request: &TransferRequest) -> Result<DownloadResult, String> {
+    let task = request.task.as_ref().map(|task| TaskTransfer {
+        id: task.id.clone(), label: task.label.clone(), received: task.received,
+        total: task.total, part: task.part.clone(), final_name: task.final_name.clone(),
+    });
     let TransferRequest {
         client,
         api_key,
@@ -1823,7 +1973,7 @@ fn transfer_archive(
         archive_id,
         directory,
         metadata,
-        task,
+        task: _,
     } = request;
     let resume_from = task.as_ref().map(|task| task.received).unwrap_or(0);
     let request_url = format!(
@@ -1841,7 +1991,7 @@ fn transfer_archive(
     let mut response = transfer
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| download_transport_error(&error))?;
     if response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -1936,30 +2086,21 @@ fn store_archive_response(
         None => create_download_task(database, &label, server_id, archive_id, &part, total)?,
     };
     let signal = download_signal(&task_id);
+    let _signal_cleanup = DownloadSignalCleanup(task_id.clone());
     let started = std::time::Instant::now();
     let mut last_report = started;
     let mut last_percent = None;
     let mut speed: Option<u64> = None;
-    // 速度要的是「这一段时间收了多少」：上一次的字节数和时刻都在这里。
-    let traffic = std::sync::Mutex::new((received, started));
+    let mut sample_bytes = received;
+    let mut sample_at = started;
     let outcome = stream_archive_to_file(source, &part, received, &signal, |now| {
-        let (previous, at) = match traffic.lock() {
-            Ok(mut traffic) => {
-                let state = (traffic.0, traffic.1);
-                traffic.0 = now;
-                traffic.1 = std::time::Instant::now();
-                state
-            }
-            Err(_) => (now, started),
-        };
-        let elapsed = at.elapsed();
-        if !elapsed.is_zero() && now > previous {
-            let instant = (now - previous) as f64 / elapsed.as_secs_f64();
-            speed = Some(match speed {
-                // 平滑一下：单块的瞬时速度抖得没法看。
-                Some(previous) => (previous as f64 * 0.6 + instant * 0.4) as u64,
-                None => instant as u64,
-            });
+        // Measure an entire time window, including waits for the network. A
+        // buffered read taking microseconds says nothing about download speed.
+        let elapsed = sample_at.elapsed();
+        if elapsed >= std::time::Duration::from_millis(500) {
+            speed = Some(((now - sample_bytes) as f64 / elapsed.as_secs_f64()) as u64);
+            sample_bytes = now;
+            sample_at = std::time::Instant::now();
         }
         let percent = total
             .filter(|total| *total > 0)
@@ -1973,7 +2114,11 @@ fn store_archive_response(
         last_report = std::time::Instant::now();
         report_download_progress(database, &task_id, now, total, speed);
     });
-    clear_download_signal(&task_id);
+    let outcome = match read_download_signal(&signal) {
+        DownloadSignal::Running => outcome,
+        DownloadSignal::Paused => Ok(DownloadOutcome::Paused { received: std::fs::metadata(&part).map(|meta| meta.len()).unwrap_or(received) }),
+        DownloadSignal::Aborted => Ok(DownloadOutcome::Aborted { received: 0 }),
+    };
     match outcome {
         Ok(DownloadOutcome::Finished { received }) => {
             // 已知总量时必须收满：短读（服务端提前断流、Range 给少了）不能当完成发布，
@@ -1987,17 +2132,24 @@ fn store_archive_response(
                     return Err(message);
                 }
             }
-            let path = publish_archive_download(&part, directory, &filename).map_err(|error| {
-                mark_task_failed(database, &task_id, &error);
-                error
-            })?;
-            finish_download_task(
+            let path = match publish_archive_download(&part, directory, &filename) {
+                Ok(path) => path,
+                Err(_) if read_download_signal(&signal) == DownloadSignal::Aborted => {
+                    cancel_download_task(database, &task_id);
+                    return Ok(DownloadResult { status: "cancelled".into(), path: String::new(), task_id });
+                }
+                Err(error) => { mark_task_failed(database, &task_id, &error); return Err(error); }
+            };
+            if !finish_download_task(
                 database,
                 &task_id,
                 std::path::Path::new(&path),
                 received,
                 total,
-            );
+            ) {
+                let _ = std::fs::remove_file(&path);
+                return Ok(DownloadResult { status: "cancelled".into(), path: String::new(), task_id });
+            }
             record_local_archive(
                 database,
                 std::path::Path::new(&path),
@@ -2155,9 +2307,14 @@ fn stream_archive_to_file(
             DownloadSignal::Paused => return Ok(DownloadOutcome::Paused { received }),
             DownloadSignal::Aborted => return Ok(DownloadOutcome::Aborted { received }),
         }
-        let read = source
-            .read(&mut buffer)
-            .map_err(|error| error.to_string())?;
+        let read = source.read(&mut buffer);
+        // Pause/cancel may arrive while the network read is blocked.
+        match read_download_signal(signal) {
+            DownloadSignal::Paused => return Ok(DownloadOutcome::Paused { received }),
+            DownloadSignal::Aborted => return Ok(DownloadOutcome::Aborted { received }),
+            DownloadSignal::Running => {}
+        }
+        let read = read.map_err(|error| download_transport_error(&error))?;
         if read == 0 {
             break;
         }
@@ -2262,20 +2419,21 @@ fn finish_download_task(
     path: &std::path::Path,
     received: u64,
     total: Option<u64>,
-) {
+) -> bool {
     if let Ok(connection) = database.connection.lock() {
-        let _ = connection.execute(
+        return connection.execute(
             "UPDATE tasks SET status = 'completed', progress = 1, error = NULL, received_bytes = ?1,
                     total_bytes = COALESCE(?2, ?1), bytes_per_second = NULL, local_path = ?3, updated_at = CURRENT_TIMESTAMP
-             WHERE id = ?4",
+             WHERE id = ?4 AND status != 'cancelled'",
             params![
                 received as i64,
                 total.map(|total| total as i64),
                 path.to_string_lossy(),
                 task_id
             ],
-        );
+        ).map(|changed| changed > 0).unwrap_or(false);
     }
+    false
 }
 
 fn pause_download_task(database: &Database, task_id: &str, received: u64) {
@@ -2291,7 +2449,7 @@ fn pause_download_task(database: &Database, task_id: &str, received: u64) {
 fn cancel_download_task(database: &Database, task_id: &str) {
     if let Ok(connection) = database.connection.lock() {
         let _ = connection.execute(
-            "UPDATE tasks SET status = 'cancelled', bytes_per_second = NULL, updated_at = CURRENT_TIMESTAMP
+            "UPDATE tasks SET status = 'cancelled', error = NULL, bytes_per_second = NULL, updated_at = CURRENT_TIMESTAMP
              WHERE id = ?1 AND status IN ('running', 'queued', 'paused', 'failed')",
             params![task_id],
         );
@@ -2386,6 +2544,84 @@ fn record_local_archive(
 #[cfg(test)]
 mod archive_download_tests {
     use super::*;
+
+    #[test]
+    fn late_completion_cannot_resurrect_a_cancelled_task() {
+        let database = Database::open_path(":memory:").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let part = directory.path().join("cancelled.zip.part");
+        let task = create_download_task(&database, "download", "scope-a", &"a".repeat(40), &part, Some(20)).unwrap();
+        cancel_download_task(&database, &task);
+        assert!(!finish_download_task(&database, &task, &part, 20, Some(20)));
+        assert_eq!(only_task(&database).status, "cancelled");
+    }
+
+    #[test]
+    fn cancelling_a_blocked_read_is_not_reported_as_a_network_failure() {
+        struct CancelOnRead<'a>(&'a Database);
+        impl Read for CancelOnRead<'_> {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                set_download_signal(&only_task(self.0).id, DownloadSignal::Aborted);
+                Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "closed while cancelling"))
+            }
+        }
+        let database = Database::open_path(":memory:").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let result = store(&database, directory.path(), &mut CancelOnRead(&database), Some(20)).unwrap();
+        assert_eq!(result.status, "cancelled");
+        assert_eq!(only_task(&database).status, "cancelled");
+    }
+
+    #[test]
+    fn downloaded_and_unfinished_archives_reuse_their_existing_identity() {
+        let database = Database::open_path(":memory:").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut body = std::io::Cursor::new(b"archive");
+        let finished = store(&database, directory.path(), &mut body, Some(7)).unwrap();
+        let found = existing_archive_download(&database, "scope-a", &"a".repeat(40)).unwrap().unwrap();
+        assert_eq!(found.status, "completed");
+        assert_eq!(found.path, finished.path);
+        std::fs::remove_file(&finished.path).unwrap();
+        assert!(existing_archive_download(&database, "scope-a", &"a".repeat(40)).unwrap().is_none());
+        let part = directory.path().join("book.zip.part");
+        let task = create_download_task(&database, "download", "scope-a", &"a".repeat(40), &part, Some(20)).unwrap();
+        let found = existing_archive_download(&database, "scope-a", &"a".repeat(40)).unwrap().unwrap();
+        assert_eq!(found.status, "existing");
+        assert_eq!(found.task_id, task);
+    }
+
+    #[tokio::test]
+    async fn reader_page_assembles_an_initial_partial_response_in_small_ranges() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/page", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let mut ranges = vec![];
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0]; stream.read_exact(&mut byte).unwrap(); request.push(byte[0]);
+                }
+                let request = String::from_utf8(request).unwrap().to_ascii_lowercase();
+                let range = request.lines().find_map(|line| line.strip_prefix("range: bytes=")).unwrap();
+                let (start, end) = range.split_once('-').unwrap();
+                let (start, end) = (start.parse::<usize>().unwrap(), end.parse::<usize>().unwrap());
+                assert!(end - start < 2 * 1024 * 1024, "each request stays below the device stall size");
+                let total = 4 * 1024 * 1024 + 17;
+                let end = end.min(total - 1);
+                write!(stream, "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {start}-{end}/{total}\r\nETag: \"book\"\r\nConnection: close\r\n\r\n", end - start + 1).unwrap();
+                stream.write_all(&vec![42; end - start + 1]).unwrap();
+                ranges.push((start, end));
+            }
+            ranges
+        });
+        let response = reqwest::Client::new().get(&url).header("Range", "bytes=0-1048575").send().await.unwrap();
+        let bytes = read_reader_page_body(response, &url, "test-key", std::time::Duration::from_secs(1)).await.unwrap();
+        assert_eq!(bytes, vec![42; 4 * 1024 * 1024 + 17]);
+        assert_eq!(server.join().unwrap().len(), 3);
+    }
 
     #[tokio::test]
     async fn reader_page_resumes_a_stalled_body_and_rejects_inconsistent_ranges() {
@@ -2836,12 +3072,12 @@ mod archive_download_tests {
         assert!(result.path.ends_with(".part"));
         let task = only_task(&database);
         assert_eq!(task.status, "paused");
-        assert_eq!(task.received_bytes, 2 * 64 * 1024);
+        assert_eq!(task.received_bytes, 64 * 1024);
         assert!(task.progress > 0.0 && task.progress < 1.0);
         // 半份文件留在原处：恢复就是从这里接着收。
         assert_eq!(
             std::fs::metadata(&result.path).unwrap().len(),
-            2 * 64 * 1024
+            64 * 1024
         );
         // 没发布成正式档案，本地档案页也就不该多出一条。
         let connection = database.connection.lock().unwrap();
@@ -2998,6 +3234,40 @@ mod archive_download_tests {
         (url, handle)
     }
 
+    #[test]
+    fn interrupted_download_reconnects_at_the_exact_saved_byte() {
+        let database = Database::open_path(":memory:").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for offset in 0..8 {
+                let body = &b"abcdefgh"[offset..offset+1];
+                let (mut socket, _) = listener.accept().unwrap();
+                socket.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                let mut request = [0; 4096];
+                let count = socket.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
+                if offset > 0 { assert!(request.contains(&format!("range: bytes={offset}-")), "{request}"); }
+                let head = if offset == 0 {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: 8\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    format!("HTTP/1.1 206 Partial Content\r\nContent-Type: application/zip\r\nContent-Length: {}\r\nContent-Range: bytes {offset}-7/8\r\nConnection: close\r\n\r\n",8-offset)
+                };
+                socket.write_all(head.as_bytes()).unwrap();
+                socket.write_all(body).unwrap();
+            }
+        });
+        let result = transfer_archive(&database, TransferRequest {
+            client: reqwest::blocking::Client::new(), api_key: "key".into(), base_url: url,
+            server_id: "scope-a".into(), scope_id: "scope-a".into(), archive_id: "a".repeat(40),
+            directory: directory.path().into(), metadata: download_metadata("测试档案"), task: None,
+        }).unwrap();
+        server.join().unwrap();
+        assert_eq!(std::fs::read(result.path).unwrap(), b"abcdefgh");
+        assert_eq!(only_task(&database).status, "completed");
+    }
+
     /// 一条「任务行已经在、要从 `checkpoint` 续」的下载请求。
     fn resume_request(
         url: String,
@@ -3123,8 +3393,8 @@ mod archive_download_tests {
         assert!(error.contains("206") || error.contains("resume"), "{error}");
         // 半份文件一字未动：用户还能再试一次。
         assert_eq!(std::fs::read(&part).unwrap(), b"abc");
-        // 这一趟在动任务行之前就退出了，任务还停在暂停态，没有登记成本地档案。
-        assert_eq!(only_task(&database).status, "paused");
+        // 拒绝错误的 Range 后任务可重试，文件保持原样。
+        assert_eq!(only_task(&database).status, "failed");
     }
 
     #[test]
@@ -4225,12 +4495,27 @@ pub async fn load_reader_page(
     archive_id: String,
     page_index: i64,
     path: String,
+    task_id: Option<String>,
     database: State<'_, Database>,
     app: tauri::AppHandle,
 ) -> Result<tauri::ipc::Response, String> {
-    load_reader_page_bytes(server_id, archive_id, page_index, path, database, app)
-        .await
-        .map(crate::domain::result::into_binary_response)
+    let task = crate::inference::cancel::begin(task_id.as_deref());
+    let request = load_reader_page_bytes(server_id, archive_id, page_index, path, database, app);
+    tokio::pin!(request);
+    let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(25));
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.tick() => {
+                if task.cancelled() {
+                    return Ok(crate::domain::result::into_binary_response(CommandResult::<Vec<u8>>::failure(
+                        "COMPUTE_CANCELLED", "阅读图片请求已取消", false,
+                    )));
+                }
+            }
+            result = &mut request => return result.map(crate::domain::result::into_binary_response),
+        }
+    }
 }
 
 async fn load_reader_page_bytes(
@@ -4302,7 +4587,8 @@ async fn load_reader_page_bytes(
         }
     };
     url.query_pairs_mut().append_pair("path", &path);
-    let response = match reader_request(reqwest::Method::GET, url.to_string(), api_key.clone()).await {
+    let response = match reader_request_with_headers(reqwest::Method::GET, url.to_string(), api_key.clone(), 30,
+        cfg!(any(target_os = "android", target_os = "ios"))).await {
         Ok(response) => response,
         Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
     };

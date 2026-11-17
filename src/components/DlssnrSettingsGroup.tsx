@@ -530,7 +530,6 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
         ),
       })}
         onBack={presetMenu || selectedLayer !== undefined ? backLayerMenu : undefined}
-        backLabel="返回层列表"
         onClose={backLayerMenu}
       >
       {helpOpen && selectedLayer !== undefined && helpAnchor && (

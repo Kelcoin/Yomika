@@ -68,6 +68,7 @@ use cache::{
 };
 use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, get_eh_gallery, get_eh_gallery_image, set_eh_gallery_favorite, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
+use commands::local_cover::load_local_archive_cover;
 use error_log::{error_log_append, error_log_append_batch, error_log_clear, error_log_export, error_log_read};
 use commands::library::{
     add_archive_to_category, cancel_download, check_server_status, create_task, delete_archive,
@@ -508,6 +509,7 @@ pub fn run() {
             resume_download,
             cancel_download,
             list_local_archives,
+            load_local_archive_cover,
             delete_local_archives,
             create_task,
             list_tasks,

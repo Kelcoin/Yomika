@@ -18,6 +18,17 @@ use windows_service::{
     service_manager::{ServiceManager, ServiceManagerAccess},
 };
 mod runtime;
+mod notifications;
+
+pub(crate) fn preferences_saved(data: PathBuf) {
+    // Do not block settings/UI or nest a runtime inside Tauri's async runtime.
+    // Persisted settings remain valid even when the service is stopped or busy.
+    std::thread::spawn(move || {
+        if let Err(error) = notifications::notify(&data) {
+            note(&format!("Windows 后处理服务设置通知失败：{error}"));
+        }
+    });
+}
 
 const NAME: &str = "YomikaRemoteProcessing";
 const SERVICE_ARG: &str = "--compute-service";
@@ -421,6 +432,7 @@ fn serve_until_stopped(
     started: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let data = root()?;
+    let listener = notifications::Listener::bind(&data).map_err(|e| e.to_string())?;
     let snapshot = read_preferences(&data)?;
     // Separate staging, input grants, artefacts and NGX contexts from the GUI worker.
     let workspace = data.join("windows-service");
@@ -473,19 +485,25 @@ fn serve_until_stopped(
         Ok(())
     };
     update(&snapshot)?;
-    started()?;
-    while matches!(
-        rx.recv_timeout(Duration::from_secs(1)),
-        Err(mpsc::RecvTimeoutError::Timeout)
-    ) {
-        if let Ok(snapshot) = read_preferences(&data) {
-            if let Err(error) = update(&snapshot) {
-                note(&error);
+    let result = std::thread::scope(|scope| {
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let data = &data;
+        let updates = scope.spawn(move || listener.run(stopped, || {
+            match read_preferences(&data).and_then(|snapshot| update(&snapshot)) {
+                Ok(()) => true,
+                Err(error) => { note(&error); false }
             }
-        }
-    }
+        }));
+        let result = started();
+        if result.is_ok() { let _ = rx.recv(); }
+        let _ = stop.send(());
+        let listener_result = updates.join()
+            .map_err(|_| "Windows 设置通知线程异常退出".to_string())?
+            .map_err(|e| e.to_string());
+        result.and(listener_result)
+    });
     center.stop();
     manager.shutdown();
     ngx_manager.shutdown();
-    Ok(())
+    result
 }

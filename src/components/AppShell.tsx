@@ -24,6 +24,20 @@ interface AppShellProps {
 
 function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
+  const [hovered, setHovered] = useState<string>();
+  useEffect(() => { setHovered(undefined); }, [location.pathname, hidden]);
+  useEffect(() => {
+    const clear = () => setHovered(undefined);
+    const clearOnTouch = (event: PointerEvent) => { if (event.pointerType !== 'mouse') clear(); };
+    document.addEventListener('pointerdown', clearOnTouch, true);
+    window.addEventListener('blur', clear);
+    document.addEventListener('visibilitychange', clear);
+    return () => {
+      document.removeEventListener('pointerdown', clearOnTouch, true);
+      window.removeEventListener('blur', clear);
+      document.removeEventListener('visibilitychange', clear);
+    };
+  }, []);
   const items = compact && bottomNavItems ? compactNavItems(bottomNavItems) : NAVIGATION_ENTRIES;
   return (
     <>
@@ -33,10 +47,16 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
       >
         {items.map(({ to, label, icon }) => (
           <NavLink
-            className={({ isActive }) => `nav-link${navEntryActive(to, isActive, location.pathname) ? ' is-active' : ''}`}
+            className={({ isActive }) => `nav-link${navEntryActive(to, isActive, location.pathname) ? ' is-active' : ''}${hovered === to ? ' is-pointer-hovered' : ''}`}
             end={to === '/'}
             key={to}
             to={to}
+            onPointerEnter={event => { if (event.pointerType === 'mouse') setHovered(to); }}
+            onPointerMove={event => { if (event.pointerType === 'mouse') setHovered(to); }}
+            onPointerLeave={() => setHovered(undefined)}
+            onPointerCancel={() => setHovered(undefined)}
+            onPointerDown={event => { if (event.pointerType !== 'mouse') setHovered(undefined); }}
+            onBlur={() => setHovered(undefined)}
             state={{ navigationTab: true }}
             title={label}
           >

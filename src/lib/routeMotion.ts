@@ -11,8 +11,8 @@ function detailIdentity(location: RouteAddress): string | undefined {
   return undefined;
 }
 
-/** Spatial tab order wins over PUSH/POP history order. Detail depth wins only
- * within the same workspace; selecting another tab must still move spatially. */
+/** Home shortcuts retain their page depth until closed. Ordinary tabs use
+ * spatial order; detail depth applies within the same workspace. */
 export function resolveRouteMotion(from: RouteAddress | undefined, to: RouteAddress, compact: boolean, historyDirection: RouteDirection = 1): RouteMotion {
   const axis = compact ? 'x' : 'y';
   const none: RouteMotion = { kind: 'none', axis, direction: historyDirection };
@@ -24,7 +24,7 @@ export function resolveRouteMotion(from: RouteAddress | undefined, to: RouteAddr
   // The same destination can be a bottom tab or a home shortcut. Only the
   // latter pushes a page above home; route order alone cannot distinguish it.
   if (from.pathname === '/' && to.state?.homeEntry && targetOwner !== '/') return { ...none, kind: 'page-open' };
-  if (to.pathname === '/' && from.state?.homeEntry && !to.state?.navigationTab) return { ...none, kind: 'page-close' };
+  if (from.state?.homeEntry && sourceOwner !== targetOwner && (to.pathname === '/' || to.state?.navigationTab)) return { ...none, kind: 'page-close' };
   if (targetDetail && (sourceOwner !== targetOwner || sourceDetail !== targetDetail)) return { ...none, kind: 'detail-open' };
   if (sourceOwner === targetOwner && sourceDetail && !targetDetail) return { ...none, kind: 'detail-close' };
   if (from.pathname === to.pathname) return none;

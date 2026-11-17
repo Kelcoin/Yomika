@@ -48,6 +48,31 @@ function renderPage() {
 }
 
 describe('local archives workspace', () => {
+  it('loads the cover from the local file without requesting the server thumbnail', async () => {
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile] };
+      if (command === 'load_local_archive_cover') return { ok: true, value: 'data:image/jpeg;base64,AA==' };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter><LocalArchivesWorkspace /></MemoryRouter>);
+    await screen.findByText(localFile.title);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('load_local_archive_cover', { path: localFile.path }));
+    expect(adapter.mock.calls.some(([command]) => command === 'load_archive_thumbnail')).toBe(false);
+    expect(document.querySelector('.archive-thumb-card-media img')).toHaveAttribute('src', 'data:image/jpeg;base64,AA==');
+  });
+  it('shows one card for a downloaded identity despite old duplicate files and tasks', async () => {
+    setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_local_archives') return { ok: true, value: [localFile, { ...localFile, path: 'duplicate.cbz', addedAt: localFile.addedAt - 1 }] };
+      if (command === 'list_tasks') return { ok: true, value: [runningTask, { ...runningTask, id: 'old-task', status: 'failed' }] };
+      return { ok: true, value: [] };
+    });
+    render(<MemoryRouter><LocalArchivesWorkspace /></MemoryRouter>);
+    await screen.findByText(localFile.title);
+    expect(screen.getAllByRole('listitem')).toHaveLength(1);
+    expect(screen.queryByText('demo.cbz')).not.toBeInTheDocument();
+  });
+
   it('does not navigate back to an old detail when deletion finishes after leaving', async () => {
     let finishDelete: ((value: unknown) => void) | undefined;
     let leave: (() => void) | undefined;
@@ -220,7 +245,7 @@ describe('local archives workspace', () => {
 
   it('sorts by name and flips the direction when the same option is picked again', async () => {
     const user = userEvent.setup();
-    const alpha = { ...localFile, path: 'E:\\Downloads\\alpha.cbz', title: 'Alpha', addedAt: 1_700_000_000_000, tags: [] };
+    const alpha = { ...localFile, archiveId: 'b'.repeat(40), path: 'E:\\Downloads\\alpha.cbz', title: 'Alpha', addedAt: 1_700_000_000_000, tags: [] };
     const beta = { ...localFile, path: 'E:\\Downloads\\beta.cbz', title: 'Beta', addedAt: 1_760_000_000_000, tags: [] };
     setInvokeAdapterForTests(async (command) => {
       if (command === 'list_local_archives') return { ok: true, value: [alpha, beta] };
@@ -405,6 +430,29 @@ describe('local archives workspace', () => {
     expect(adapter).toHaveBeenCalledWith('cancel_download', { taskId: 'task-1' });
     // 中止的任务不再占着列表：半份文件已经删掉了。
     await waitFor(() => expect(screen.queryByText('demo.cbz')).not.toBeInTheDocument());
+  });
+
+  it('allows pausing while the resumed transfer is still pending', async () => {
+    let status = 'paused';
+    let finish: ((value: unknown) => void) | undefined;
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_tasks') return { ok: true, value: [{ ...runningTask, status }] };
+      if (command === 'resume_download') {
+        status = 'running';
+        return new Promise((resolve) => { finish = resolve; });
+      }
+      if (command === 'pause_download') { status = 'paused'; return { ok: true, value: null }; }
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    render(<MemoryRouter><LocalArchivesWorkspace /></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: '恢复demo.cbz' }));
+    const pause = await screen.findByRole('button', { name: '暂停demo.cbz' });
+    expect(pause).toBeEnabled();
+    expect(screen.getByRole('button', { name: '中止demo.cbz' })).toBeEnabled();
+    fireEvent.click(pause);
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('pause_download', { taskId: 'task-1' }));
+    await act(async () => { finish!({ ok: true, value: { status: 'paused', path: '', taskId: 'task-1' } }); });
   });
 
   it('resumes an interrupted download and reports where it landed', async () => {

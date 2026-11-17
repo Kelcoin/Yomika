@@ -328,6 +328,9 @@ export class NativeLibraryRepository {
   listLocalArchives(): Promise<CommandResult<LocalArchiveRecord[]>> {
     return invokeCommand('list_local_archives', {}, z.array(LocalArchiveRecordSchema));
   }
+  loadLocalArchiveCover(path: string): Promise<CommandResult<string>> {
+    return invokeCommand('load_local_archive_cover', { path }, z.string());
+  }
   /** 删除本地文件，服务器上的那份档案不动。 */
   deleteLocalArchives(paths: string[]): Promise<CommandResult<number>> {
     return invokeCommand('delete_local_archives', { paths }, z.number().int().nonnegative());
@@ -399,8 +402,8 @@ export class NativeLibraryRepository {
     return invokeCommand('load_reader_manifest', { serverId, archiveId }, ReaderManifestSchema);
   }
 
-  async loadReaderPage(serverId: string, archiveId: string, pageIndex: number, path: string): Promise<CommandResult<ArrayBuffer>> {
-    const result = await invokeBinaryCommand('load_reader_page', { serverId, archiveId, pageIndex, path });
+  async loadReaderPage(serverId: string, archiveId: string, pageIndex: number, path: string, taskId?: string): Promise<CommandResult<ArrayBuffer>> {
+    const result = await invokeBinaryCommand('load_reader_page', { serverId, archiveId, pageIndex, path, ...(taskId ? { taskId } : {}) });
     if (result.ok) window.dispatchEvent(new Event('yomika:cache-changed'));
     return result;
   }
@@ -515,10 +518,10 @@ export class NativeLibraryRepository {
    * behind them — reading the whole library to resolve a dozen titles scaled
    * with the library instead of with the shelf. Answers in the requested id
    * order. Resolve missing metadata without pulling the entire index. */
-  async listArchivesByIds(serverId: string, archiveIds: string[]): Promise<CommandResult<ArchiveRecord[]>> {
+  async listArchivesByIds(serverId: string, archiveIds: string[], options: { resolveMissing?: boolean } = {}): Promise<CommandResult<ArchiveRecord[]>> {
     if (archiveIds.length === 0) return { ok: true, value: [] };
     const cached = await invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema));
-    if (!cached.ok) return cached;
+    if (!cached.ok || options.resolveMissing === false) return cached;
     const found = new Set(cached.value.map(archive => archive.archiveId));
     const missing = [...new Set(archiveIds)].filter(id => !found.has(id)).slice(0, 64);
     if (missing.length === 0) return cached;

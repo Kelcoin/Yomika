@@ -42,7 +42,7 @@ it('tracks natural menu growth and shrinkage without measuring the animated view
   expect(cancel).toHaveBeenLastCalledWith(1);
 });
 
-it('uses the same back control for nested controls and restores the parent without closing it', async () => {
+it('dismisses one nested control on outside click and restores the parent without closing it', async () => {
   const user = userEvent.setup();
   const close = vi.fn();
   render(<SettingsMenu title="模型设置" onClose={close}>
@@ -51,7 +51,8 @@ it('uses the same back control for nested controls and restores the parent witho
   await user.click(screen.getByRole('button', { name: '强度' }));
   expect(screen.getAllByRole('dialog')).toHaveLength(1);
   expect(screen.getByRole('dialog', { name: '强度' })).toBeInTheDocument();
-  await user.click(screen.getByRole('button', { name: '返回模型设置' }));
+  expect(screen.queryByRole('button', { name: '返回模型设置' })).toBeNull();
+  await user.click(screen.getByRole('dialog', { name: '强度' }).closest('.settings-choice-overlay')!);
   expect(screen.getByRole('dialog', { name: '模型设置' })).toBeInTheDocument();
   expect(close).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '强度' }));
@@ -60,7 +61,7 @@ it('uses the same back control for nested controls and restores the parent witho
   expect(close).not.toHaveBeenCalled();
 });
 
-it('returns one inline level on Escape and closes the menu on an outside click', async () => {
+it('returns one inline level on both Escape and an outside click', async () => {
   const user = userEvent.setup();
   const back = vi.fn();
   const close = vi.fn();
@@ -71,5 +72,6 @@ it('returns one inline level on Escape and closes the menu on an outside click',
   const overlay = screen.getByRole('dialog').closest('.settings-choice-overlay')!;
   fireEvent.pointerDown(overlay);
   fireEvent.click(overlay);
-  expect(close).toHaveBeenCalledOnce();
+  expect(back).toHaveBeenCalledTimes(2);
+  expect(close).not.toHaveBeenCalled();
 });

@@ -18,7 +18,7 @@ fn sensitive_key(key: &str) -> bool {
     let normalized = key.to_ascii_lowercase().replace(['_', '-'], "");
     SENSITIVE_KEYS.iter().any(|part| normalized.contains(&part.replace('_', ""))) || matches!(normalized.as_str(),
         "url" | "uri" | "baseurl" | "serverurl" | "host" | "hostname" | "address" | "path" | "filepath" |
-        "filename" | "directory" | "name" | "username" | "userid" | "email" | "identity" | "serverid" | "servername" | "scopeid" | "archiveid")
+        "filename" | "directory" | "username" | "userid" | "email" | "identity" | "serverid" | "servername" | "scopeid" | "archiveid")
 }
 
 pub fn redact_text(text: &str) -> String {
@@ -26,8 +26,13 @@ pub fn redact_text(text: &str) -> String {
         redact_value(&mut value);
         return value.to_string();
     }
+    static URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"(?i)\b(?:https?|wss?|ftp|file|content|tauri)://[^\s<>"'`),}]+"#).unwrap());
+    static DIAGNOSTIC_URL: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:(?:https?://tauri\.localhost|tauri://localhost)/assets/[\w.-]+\.(?:js|css)(?::\d+){0,2}|https://react\.dev/errors/\d+|https://reactjs\.org/docs/error-decoder\.html\?invariant=\d+)$").unwrap());
+    let text = URL.replace_all(text, |captures: &regex::Captures<'_>| {
+        let url = &captures[0];
+        if DIAGNOSTIC_URL.is_match(url) { url.to_string() } else { "[REDACTED]".to_string() }
+    });
     static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| [
-        r#"(?i)\b(?:https?|wss?|ftp|file|content)://[^\s<>"'`),}]+"#,
         r#"(?:\b[A-Za-z]:[\\/]|\\\\)[^\r\n\t"'<>|,;]+"#,
         r#"/(?:home|Users|data/user|storage|mnt|media|private|tmp|var/folders)/[^\s"'<>),;]+"#,
         r"\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b",
@@ -92,5 +97,23 @@ mod tests {
         assert!(text.contains("A-1"));
         assert!(!text.contains("Bearer secret"));
         assert!(!text.contains("ipb_pass_hash"));
+    }
+
+    #[test]
+    fn keeps_release_script_positions_and_error_names_without_leaking_credentials() {
+        let mut value = json!({
+            "name": "RangeError",
+            "stack": "at ReaderScreen (http://tauri.localhost/assets/ReaderRoute-Ab12.js:1:420)",
+            "message": "React #185 https://react.dev/errors/185",
+            "token": "private-token",
+        });
+        redact_value(&mut value);
+        assert_eq!(value["name"], "RangeError");
+        assert_eq!(value["stack"], "at ReaderScreen (http://tauri.localhost/assets/ReaderRoute-Ab12.js:1:420)");
+        assert_eq!(value["message"], "React #185 https://react.dev/errors/185");
+        assert_eq!(value["token"], "[REDACTED]");
+        for url in ["http://tauri.localhost/api?token=private", "https://tauri.localhost.evil.test/assets/main.js", "http://alice:secret@tauri.localhost/assets/main.js", "https://react.dev/errors/185?token=private"] {
+            assert_eq!(super::redact_text(url), "[REDACTED]");
+        }
     }
 }

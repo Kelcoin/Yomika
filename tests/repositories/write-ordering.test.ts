@@ -54,6 +54,14 @@ describe('repository write ordering', () => {
     expect(calls).toEqual(['set_reading_list', 'list_reading_list']);
   });
 
+  it('allows favorites to own metadata hydration without a duplicate repository pass', async () => {
+    const adapter = vi.fn(async () => ({ ok: true, value: [] }));
+    setInvokeAdapterForTests(adapter);
+    const result = await new NativeLibraryRepository().listArchivesByIds('s', ['missing'], { resolveMissing: false });
+    expect(result).toEqual({ ok: true, value: [] });
+    expect(adapter.mock.calls).toHaveLength(1);
+  });
+
   it('resolves missing shelf records through metadata and re-reads the local mirror', async () => {
     const calls: string[] = [];
     let reads = 0;

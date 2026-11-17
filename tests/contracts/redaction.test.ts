@@ -1,6 +1,22 @@
 import { redactSensitive } from '../../src/lib/redaction';
 
 describe('sensitive data redaction', () => {
+  it('preserves error identity, public React help and bundled script positions', () => {
+    const value = {
+      name: 'RangeError',
+      message: 'Minified React error #185; visit https://react.dev/errors/185',
+      stack: 'at ReaderScreen (http://tauri.localhost/assets/ReaderRoute-Ab12.js:1:420)\n at render (https://tauri.localhost/assets/main-Cd34.js:7:89)',
+      nested: { name: 'real-cugan', file: 'http://tauri.localhost/assets/main-Cd34.js', token: 'secret-value' },
+    };
+    expect(redactSensitive(value)).toEqual({ ...value, nested: { ...value.nested, token: '[REDACTED]' } });
+  });
+
+  it('does not trust arbitrary paths or credentials on an application-looking origin', () => {
+    const value = redactSensitive('http://tauri.localhost/api?token=private https://tauri.localhost.evil.test/assets/main.js http://alice:secret@tauri.localhost/assets/main.js https://react.dev/errors/185?token=private');
+    expect(value).not.toContain('private');
+    expect(value).not.toContain('secret');
+    expect(value).not.toContain('evil.test');
+  });
   it('redacts nested credentials without changing ordinary metadata', () => {
     const value = {
       title: 'Local archive',

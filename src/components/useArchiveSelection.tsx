@@ -27,6 +27,7 @@ export function useArchiveSelection(options: {
   /** 这一页的多选能不能就地删除档案。历史页要清的是「看过」这件事，不是档案
    * 本体，所以那一页不给「删除所选」（它的清理入口是「清理所选记录」）。 */
   allowDelete?: boolean | undefined;
+  allowFavorite?: boolean;
   /** Called with the ids the list must stop showing. */
   onRemoved: (archiveIds: string[]) => void;
 }): {
@@ -96,13 +97,11 @@ export function useArchiveSelection(options: {
     }
   }, [membership, onRemoved, scopeId, scopeOwner, selected, serverId, showToast]);
 
-  // Icon-only, like the list's own selection bar: the words are the accessible
-  // name and the tooltip, and the membership's label is the only thing that
-  // changes between the two directions.
-  const membershipLabel = membership ? (membership.present ? `移出${membership.label}` : `加入${membership.label}`) : '加入收藏';
+  // Labels describe the membership change; narrow layouts choose their presentation.
+  const membershipLabel = membership ? (membership.present ? (membership.list === 'favorites' ? '移除收藏' : `移出${membership.label}`) : `加入${membership.label}`) : '加入收藏';
   const actions = (
     <>
-      {membership ? (
+      {options.allowFavorite !== false && (membership ? (
         <button className="secondary-action has-action-label" type="button" aria-label={membershipLabel} title={membershipLabel} disabled={selected.length === 0 || busy} onClick={() => void changeMembership(!membership.present)}>
           {membership.present ? <BookmarkMinus aria-hidden="true" /> : <BookmarkPlus aria-hidden="true" />}
         <span className="action-label">{membershipLabel}</span></button>
@@ -110,7 +109,7 @@ export function useArchiveSelection(options: {
         <button className="secondary-action has-action-label" type="button" aria-label="加入收藏" title="加入收藏" disabled={selected.length === 0 || busy} onClick={() => void changeMembership(true)}>
           <BookmarkPlus aria-hidden="true" />
         <span className="action-label">加入收藏</span></button>
-      )}
+      ))}
       {/* 删除也用同一颗按钮的形状——危险只体现在色调上，底色加文字与其它
           动作一致，不再是一圈红描边。 */}
       {allowDelete && (

@@ -36,12 +36,15 @@ describe('spatial navigation and detail depth', () => {
     expect(resolveRouteMotion(route('/history/a'), route('/library'), false)).toMatchObject({ kind: 'slide', direction: -1, axis: 'y' });
     expect(resolveRouteMotion(route('/tools/upload'), route('/tools/dedup'), false, -1)).toMatchObject({ kind: 'slide', direction: -1, axis: 'x' });
   });
-  it('treats home shortcuts as pushed pages, while bottom tabs keep their spatial slide', () => {
+  it('closes a home shortcut with a zoom when leaving through a bottom tab', () => {
     for (const path of ['/history', '/watchlist', '/to-read', '/downloads', '/settings', '/more']) {
       const shortcut = { ...route(path), state: { homeEntry: true } };
       expect(resolveRouteMotion(route('/'), shortcut, true).kind).toBe('page-open');
       expect(resolveRouteMotion(shortcut, route('/'), true, -1).kind).toBe('page-close');
-      expect(resolveRouteMotion(shortcut, { ...route('/'), state: { navigationTab: true } }, true).kind).toBe('slide');
+      for (const target of ['/', '/library', '/history', '/watchlist', '/to-read']) {
+        if (target === path) continue;
+        expect(resolveRouteMotion(shortcut, { ...route(target), state: { navigationTab: true } }, true).kind).toBe('page-close');
+      }
     }
     expect(resolveRouteMotion(route('/'), route('/settings'), true).kind).toBe('slide');
     expect(resolveRouteMotion({ ...route('/history/a'), state: { homeEntry: true } }, route('/history'), true, -1).kind).toBe('detail-close');
@@ -145,7 +148,7 @@ describe('detail exit lifecycle', () => {
     expect(visits.length).toBeGreaterThan(0);
     expect(visits.every(([actual, displayed]) => actual === '/history' && displayed === actual)).toBe(true);
   });
-  it('keeps a shortcut page live while exposing its cached home underneath', () => {
+  it.each(['/', '/library', '/history'])('keeps a shortcut page live while exposing %s underneath', target => {
     vi.useFakeTimers();
     const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'animate');
     const animations: Animation[] = [];
@@ -156,7 +159,7 @@ describe('detail exit lifecycle', () => {
     function Shortcut() {
       const actual = useLocation(); const navigate = useNavigate();
       const transition = useWorkspaceRouteMotion(actual, true, -1, true);
-      return <><button onClick={() => navigate('/')}>Return home</button>
+      return <><button onClick={() => navigate(target, { state: { navigationTab: true } })}>Return home</button>
         <button onClick={() => navigate('/settings?changed=true', { replace: true })}>Change query</button>
         <section ref={transition.surface}>{transition.location.pathname}</section>
         <span data-testid="preview">{transition.previewLocation?.pathname}</span></>;
@@ -166,7 +169,7 @@ describe('detail exit lifecycle', () => {
       fireEvent.click(screen.getByText('Change query'));
       fireEvent.click(screen.getByText('Return home'));
       expect(screen.getByText('/settings')).toHaveAttribute('data-page-return');
-      expect(screen.getByTestId('preview')).toHaveTextContent('/');
+      expect(screen.getByTestId('preview')).toHaveTextContent(target);
       act(() => vi.advanceTimersByTime(20));
       act(() => animations.at(-1)?.onfinish?.(new Event('finish') as AnimationPlaybackEvent));
       expect(screen.queryByText('/settings')).not.toBeInTheDocument();

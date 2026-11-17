@@ -103,7 +103,7 @@ describe('error log panel', () => {
 
     expect(screen.getByText('错误详情')).toBeInTheDocument();
     // 明细里那个 JSON 被拆成两段：**在哪**是一行，栈按行展开。
-    expect(screen.getByText('[REDACTED]:8:12')).toBeInTheDocument();
+    expect(screen.getByText('http://tauri.localhost/assets/index.js:8:12')).toBeInTheDocument();
     expect(screen.getByText('堆栈跟踪')).toBeInTheDocument();
     expect(screen.getByText(/at Fo \(index\.js:6:1\)/)).toBeInTheDocument();
   });

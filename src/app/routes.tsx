@@ -621,7 +621,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
     if (snapshot && verifiedSnapshot.current && reloadToken === 0 && name !== 'watchlist') return;
     let active = true;
     if (name === 'watchlist') {
-      setLoading(true); setHasFavoriteSnapshot(false); setArchives([]); setWatchlist([]); setCategories(undefined); setError(undefined);
+      setError(undefined);
     }
     void (async () => {
       const servers = await shelfRead('servers', () => repository.listServers());
@@ -644,7 +644,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
         categoriesRef.current = undefined;
         setLoading(true);
       }
-      if (name === 'watchlist') {
+      if (name === 'watchlist' && changedServer) {
         const cached = readShelfSnapshot(`favorites:last:${server.id}`, Infinity)
           ?? readShelfSnapshot(favoriteFallbackKey, Infinity);
         const valid = cached?.favoritesSource === 'remote' && cached.serverId === server.id
@@ -658,13 +658,19 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       setServerId(server.id);
       setScopeId(server.scopeId);
       const needsCategories = showShelfToolbar && (changedServer || name === 'watchlist' || categoriesRef.current === undefined);
+      // Dynamic category searches must not block favorites membership refresh.
+      if (needsCategories && name === 'watchlist') {
+        void repository.listCategories(server.id).then(result => {
+          if (active) setCategories(result.ok ? result.value : []);
+        }).catch(() => { if (active) setCategories([]); });
+      }
       const [shelf, categoryResult] = await Promise.all([
         name === 'history'
           ? shelfRead(`history:${server.scopeId}`, () => repository.listHistory(server.scopeId))
           : name === 'toRead'
             ? shelfRead(`toRead:${server.scopeId}`, () => repository.listReadingList(server.scopeId))
             : shelfRead(`favorites:${server.id}`, () => repository.readFavoritesCategory(server.id)),
-        needsCategories ? repository.listCategories(server.id) : Promise.resolve(undefined),
+        needsCategories && name !== 'watchlist' ? repository.listCategories(server.id) : Promise.resolve(undefined),
       ] as const);
       if (!active) return;
       if (categoryResult) setCategories(categoryResult.ok ? categoryResult.value : []);
@@ -692,7 +698,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
             favoritesSource: 'remote', favoritesCategoryPresent, history: [],
             watchlist: favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })),
             archives: archiveResult.value, serverId: server.id, scopeId: server.scopeId, query: '',
-            categories: categoryResult?.ok ? categoryResult.value : [],
+            categories: categoryResult?.ok ? categoryResult.value : categoriesRef.current ?? [],
           };
           writeRouteCache(cacheKey, value, { persist: true });
           writeRouteCache(favoriteFallbackKey, value, { persist: true });
@@ -700,6 +706,12 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
         }
       }
       setLoading(false);
+      if (name === 'watchlist') {
+        // Fresh remote membership supersedes redundant per-archive probes.
+        verifiedSnapshot.current = true;
+        setVerificationPending(false);
+        return;
+      }
       // Same reason as the home rails: the mirror does not hear about deletions,
       // so a shelf would keep offering archives the server no longer has.
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
@@ -787,6 +799,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
     // 历史页的多选不给「删除所选」：那一页的清理入口是「清理所选记录」，
     // 误点删除会连带把档案本体从服务器上删掉。
     allowDelete: name !== 'history',
+    allowFavorite: name !== 'history',
     onRemoved: removeShelfArchives,
   });
   const progressByArchiveId = useMemo(
@@ -912,8 +925,8 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
             {/* 历史的清理入口在这里：多选之后清掉的是**记录**（启用服务器托管时影响共享数据），档案本体不动。设置里那条「立即清理」按年龄清，已经去掉——
                 要清哪几条，只有看着列表的人知道。 */}
             {name === 'history' && (
-              <button className="secondary-action is-icon" type="button" aria-label="清理所选记录" title="清理所选记录" disabled={selection.props.selectedArchiveIds.size === 0} onClick={() => setClearingHistory(true)}>
-                <Eraser aria-hidden="true" />
+              <button className="secondary-action has-action-label" type="button" aria-label="清理所选记录" title="清理所选记录" disabled={selection.props.selectedArchiveIds.size === 0} onClick={() => setClearingHistory(true)}>
+                <Eraser aria-hidden="true" /><span className="action-label">清理记录</span>
               </button>
             )}
           </>}

@@ -778,7 +778,7 @@ pub fn save_preferences(
         Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
     #[cfg(target_os = "windows")]
-    {
+    let notify_service = {
         let _ = &app;
         let previous = load_preferences_from(&connection).ok();
         if previous.as_ref().is_none_or(|value| value.start_with_windows != input.start_with_windows) {
@@ -787,11 +787,29 @@ pub fn save_preferences(
                 return CommandResult::failure("PLATFORM_UNAVAILABLE", error, false);
             }
         }
-    }
+        // Model/DLSSNR parameters are read per processing request. Only listener
+        // configuration needs a push, not every slider's debounced save.
+        previous.as_ref().is_none_or(|value|
+            value.compute_center_enabled != input.compute_center_enabled
+                || value.compute_center_port != input.compute_center_port
+                || value.compute_center_token != input.compute_center_token)
+    };
     #[cfg(not(target_os = "windows"))]
     let _ = app;
-    match save_preferences_to(&mut connection, input) {
-        Ok(value) => CommandResult::success(value),
+    #[cfg(target_os = "windows")]
+    let data = connection.path().and_then(|path| std::path::Path::new(path).parent()).map(std::path::Path::to_path_buf);
+    let saved = save_preferences_to(&mut connection, input);
+    // The service reads this same database before acknowledging the signal.
+    // Never wait for that acknowledgement while holding the writer's mutex.
+    drop(connection);
+    match saved {
+        Ok(value) => {
+            #[cfg(target_os = "windows")]
+            if notify_service {
+                if let Some(data) = data { crate::windows_compute_service::preferences_saved(data); }
+            }
+            CommandResult::success(value)
+        },
         Err(_) => {
             CommandResult::failure("INVALID_RESPONSE", "Preference snapshot is invalid", false)
         }

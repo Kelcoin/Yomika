@@ -449,8 +449,10 @@ a {
   transition: transform var(--motion-crisp);
 }
 
+/* Android WebView can retain native :active on a link after another tab opens.
+   Navigation uses the released-on-pointerup .is-pressed feedback instead. */
 button:active,
-a:active {
+a:active:not(.nav-link) {
   transform: translateY(1px) scale(0.98);
 }
 

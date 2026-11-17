@@ -23,6 +23,14 @@ function mount(element: React.ReactElement) {
 }
 
 describe('press feedback', () => {
+  it.each(['lostpointercapture', 'visibilitychange', 'blur'])('releases navigation feedback on %s', event => {
+    mount(<a href="#" data-testid="nav" className="nav-link">档案库</a>);
+    fireEvent.pointerDown(screen.getByTestId('nav'));
+    expect(screen.getByTestId('nav')).toHaveClass('is-pressed');
+    fireEvent(event === 'blur' ? window : document, new Event(event, { bubbles: true }));
+    expect(screen.getByTestId('nav')).not.toHaveClass('is-pressed');
+  });
+
   it('marks the pressable ancestor the finger landed in, until the finger lifts', () => {
     mount(<button type="button" data-testid="card"><span data-testid="cover" /></button>);
 

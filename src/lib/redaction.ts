@@ -1,11 +1,15 @@
 // `passphrase` 在里面：凭据导入导出收的就是它，而桥在命令失败时会把整个请求写进
 // 错误日志（文件日志是给人看的现场，也是报 bug 时会发出去的东西）。
 const SENSITIVE_NAME = 'api[_-]?key|token|password|passwd|passphrase|sync[_-]?secret|credential|secret|ipb_member_id|ipb_pass_hash';
-const SENSITIVE_KEY = new RegExp(`(?:${SENSITIVE_NAME}|authorization|cookie|(?:^|[_-])(?:url|uri|host|hostname|address|path|username|email)$|^(?:name|baseUrl|serverUrl|serverId|serverName|scopeId|archiveId|userId|userName|filePath|fileName|directory|identity)$)`, 'i');
+const SENSITIVE_KEY = new RegExp(`(?:${SENSITIVE_NAME}|authorization|cookie|(?:^|[_-])(?:url|uri|host|hostname|address|path|username|email)$|^(?:baseUrl|serverUrl|serverId|serverName|scopeId|archiveId|userId|userName|filePath|fileName|directory|identity)$)`, 'i');
 // Matches `name=value` / `name: value` anywhere in a string, not only in a query
 // string: E-Hentai auth travels as a raw `Cookie:` header value.
 const SENSITIVE_ASSIGNMENT = new RegExp(`\\b(${SENSITIVE_NAME}|authorization|cookie|username|user[_-]?id|server[_-]?id|scope[_-]?id)(\\s*[=:]\\s*)(?:"[^"]*"|'[^']*'|[^\\s,;&#]+)`, 'gi');
 const BEARER_VALUE = /((?:Bearer|Basic)\s+)[^\s,;]+/gi;
+
+// Only shipped code locations and fixed public error documentation are safe.
+// Keep line/column numbers so release crashes can be mapped back to source.
+const DIAGNOSTIC_URL = /^(?:(?:https?:\/\/tauri\.localhost|tauri:\/\/localhost)\/assets\/[\w.-]+\.(?:js|css)(?::\d+){0,2}|https:\/\/react\.dev\/errors\/\d+|https:\/\/reactjs\.org\/docs\/error-decoder\.html\?invariant=\d+)$/;
 
 /** Run before truncation: a clipped credential or URL can no longer be recognized. */
 export function redactLogText(text: string): string {
@@ -14,7 +18,7 @@ export function redactLogText(text: string): string {
     try { return JSON.stringify(redactSensitive(JSON.parse(text))); } catch { /* Free text or a partial JSON record. */ }
   }
   return text
-    .replace(/\b(?:https?|wss?|ftp|file|content):\/\/[^\s<>"'`),}]+/gi, '[REDACTED]')
+    .replace(/\b(?:https?|wss?|ftp|file|content|tauri):\/\/[^\s<>"'`),}]+/gi, (url) => DIAGNOSTIC_URL.test(url) ? url : '[REDACTED]')
     .replace(/(?:\b[A-Za-z]:[\\/]|\\\\)[^\r\n\t"'<>|,;]+/g, '[REDACTED]')
     .replace(/\/(?:home|Users|data\/user|storage|mnt|media|private|tmp|var\/folders)\/[^\s"'<>),;]+/g, '[REDACTED]')
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g, '[REDACTED]')

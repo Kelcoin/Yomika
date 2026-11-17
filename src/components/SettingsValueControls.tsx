@@ -1,13 +1,13 @@
-import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Dispatch, type SetStateAction, type ButtonHTMLAttributes, type KeyboardEventHandler } from 'react';
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction, type ButtonHTMLAttributes, type KeyboardEventHandler } from 'react';
 import { FocusScope } from '@radix-ui/react-focus-scope';
-import { ArrowLeft, Minus, Plus } from 'lucide-react';
+import { hapticFeedback } from '../lib/haptics';
 
 import { OverlayLayer } from './OverlayLayer';
 import { SettingsRow } from './SettingsRow';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { usePageActive } from '../app/RetainedPage';
 
-const SettingsMenuContext = createContext<{ title: string; setNestedCount: Dispatch<SetStateAction<number>> } | undefined>(undefined);
+const SettingsMenuContext = createContext<{ setNestedCount: Dispatch<SetStateAction<number>> } | undefined>(undefined);
 
 /** A centred choice with an independent trailing action slot and progress. */
 export function SettingsOption({ active, action, status, align = 'center', children, ...buttonProps }: Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'className'> & {
@@ -41,13 +41,13 @@ export function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, ch
   </>;
 }
 
-/** 设置行背后那套「一行 + 浮层菜单」的控件：选择、数字步进。
+/** 设置行背后那套「一行 + 浮层菜单」的控件：选择、数值滑条。
  *
  * 原先它们是设置页里的局部组件；DLSSNR 与远端处理两组也要用同一套，就挪出来
  * 导出——外观与行为一字未改。 */
 
 /** The floating menu a row opens. One masked sheet for every kind of control —
- * switches, steppers, option lists, text areas — so the second level always
+ * switches, sliders, option lists, text areas — so the second level always
  * reads as the same thing, wherever it was opened from. Escape belongs to the
  * menu wherever the focus is: it can be lost to the row behind it, and a menu
  * that only answers a focused Escape is a trap.
@@ -63,11 +63,11 @@ export function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, ch
  * `action` 是给「菜单自己的动作」留的口子（层参数说明的问号就是这样进来的）：
  * 它钉在标题行右端，因为标题行是这一屏里唯一一条横跨整个面板、又只属于菜单的
  * 条带。放进内容区就得为它单开一行，而那行会跟着内容一起滚走。 */
-export function SettingsMenu({ title, icon, action, onClose, onBack, backLabel, role = 'dialog', onKeyDown, children }: { title: string; icon?: ReactNode; action?: ReactNode; onClose: () => void; onBack?: (() => void) | undefined; backLabel?: string; role?: 'dialog' | 'menu'; onKeyDown?: KeyboardEventHandler<HTMLDivElement>; children: ReactNode }) {
+export function SettingsMenu({ title, icon, action, onClose, onBack, role = 'dialog', onKeyDown, children }: { title: string; icon?: ReactNode; action?: ReactNode; onClose: () => void; onBack?: (() => void) | undefined; role?: 'dialog' | 'menu'; onKeyDown?: KeyboardEventHandler<HTMLDivElement>; children: ReactNode }) {
   const pageActive = usePageActive();
   const parent = useContext(SettingsMenuContext);
   const [nestedCount, setNestedCount] = useState(0);
-  const context = useMemo(() => ({ title, setNestedCount }), [title]);
+  const context = useMemo(() => ({ setNestedCount }), []);
   const back = onBack ?? (parent ? onClose : undefined);
   const dismiss = back ?? onClose;
   const covered = nestedCount > 0;
@@ -126,7 +126,7 @@ export function SettingsMenu({ title, icon, action, onClose, onBack, backLabel, 
         aria-hidden={covered || undefined}
         role="presentation"
         onPointerDownCapture={(event) => { pressOutsideRef.current = event.target === event.currentTarget; }}
-        onClick={() => { if (pressOutsideRef.current) onClose(); }}
+        onClick={() => { if (pressOutsideRef.current) dismiss(); }}
       >
         <FocusScope asChild trapped={!covered} loop><div
           className="settings-choice-panel"
@@ -143,8 +143,7 @@ export function SettingsMenu({ title, icon, action, onClose, onBack, backLabel, 
           }}
         >
           <SettingsMenuContext.Provider value={context}>
-          <h2 className="settings-choice-title" data-has-navigation={Boolean(back || action) || undefined}>
-            {back && <button className="settings-choice-back icon-action" type="button" aria-label={backLabel ?? (parent ? `返回${parent.title}` : '返回上一级')} onClick={back}><ArrowLeft aria-hidden="true" /></button>}
+          <h2 className="settings-choice-title" data-has-navigation={Boolean(action) || undefined}>
             {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
             {title}
             {action && <span className="settings-choice-action">{action}</span>}
@@ -213,32 +212,14 @@ export function SettingsChoice({ icon, label, hint, ariaLabel, mark, value, opti
   );
 }
 
-/** 步进按钮的结果要不要吸掉浮点残渣：`1.1 + 0.05` 在 IEEE754 下是
- * `1.1500000000000001`，`1.1 + 0.1` 是 `1.2000000000000002`——用户按一下就真的在
- * 输入框里读到这一串。
- *
- * 位数取「参与运算的两个数里小数位更多的那个」，所以它只消残渣，不会把用户手敲的
- * 1.125 吸到 0.1 的网格上；12 位上限是给旧版本已经写坏的值留的后路
- * （`1.1500000000000001 + 0.1` 该收成 1.25，而不是继续带着尾巴走）。输入框本身仍然
- * 原样透传：半途的值归 autosave 判断，不归步进。 */
-function steppedValue(value: number, step: number, direction: 1 | -1): number {
-  const next = value + direction * step;
-  if (!Number.isFinite(next)) return next;
-  const decimals = Math.min(12, Math.max(decimalPlaces(value), decimalPlaces(step)));
-  return Number(next.toFixed(decimals));
+/** Snap relative to the minimum and remove binary floating-point residue. */
+function snapNumber(value: number, min: number, max: number, step: number): number {
+  const snapped = min + Math.round((value - min) / step) * step;
+  return Number(Math.min(max, Math.max(min, snapped)).toFixed(10));
 }
 
-/** 十进制写法里的小数位数。`1e-7` 这类指数写法落回 0 位：本应用的步进量级到不了
- * 那里，真到了也只是少吸一位。 */
-function decimalPlaces(value: number): number {
-  const text = String(value);
-  const dot = text.indexOf('.');
-  return dot < 0 ? 0 : text.length - dot - 1;
-}
-
-/** A numeric setting, edited with a stepper around the same input the old rows
- * used. Half-typed values still pass through untouched: autosave, not the
- * stepper, decides what is valid. */
+/** Shared numeric adjustment: native pointer/keyboard handling, discrete steps,
+ * bounded visual tick count and touch-only selection feedback. */
 export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, onChange, disabled }: {
   icon?: ReactNode;
   label: string;
@@ -252,33 +233,62 @@ export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, f
   disabled?: boolean | undefined;
 }) {
   const [open, setOpen] = useState(false);
-  const clamp = (next: number) => Math.min(max, Math.max(min, next));
-  return (
-    <>
-      {/* A locked number keeps its row but not its affordance: no chevron
-          behaviour to press, the value simply sits there until the switch
-          above it unlocks. */}
-      <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={disabled ? undefined : () => setOpen(true)} ariaLabel={label} expanded={open} disabled={disabled} />
-      {open && (
-        <SettingsMenu title={label} icon={icon} onClose={() => setOpen(false)}>
-          <div className="settings-menu-stepper">
-            <button className="icon-action" type="button" aria-label={`减小${label}`} disabled={value <= min} onClick={() => onChange(clamp(steppedValue(value, step, -1)))}><Minus aria-hidden="true" /></button>
-            <input
-              className="settings-number"
-              aria-label={label}
-              type="number"
-              min={min}
-              max={max}
-              step={step}
-              value={value}
-              onChange={(event) => onChange(Number(event.target.value))}
-            />
-            <button className="icon-action" type="button" aria-label={`增大${label}`} disabled={value >= max} onClick={() => onChange(clamp(steppedValue(value, step, 1)))}><Plus aria-hidden="true" /></button>
-          </div>
-        </SettingsMenu>
-      )}
-    </>
-  );
+  return <>
+    <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={disabled ? undefined : () => setOpen(true)} ariaLabel={label} expanded={open} disabled={disabled} />
+    {open && <SettingsMenu title={label} icon={icon} onClose={() => setOpen(false)}>
+      <SettingsNumberSlider label={label} value={value} min={min} max={max} step={step} format={format} onChange={onChange} />
+    </SettingsMenu>}
+  </>;
+}
+
+function SettingsNumberSlider({ label, value, min, max, step, format, onChange }: {
+  label: string; value: number; min: number; max: number; step: number;
+  format: ((value: number) => string) | undefined; onChange: (value: number) => void;
+}) {
+  // Optimistic local rendering keeps the thumb responsive even when the owner
+  // persists settings asynchronously. Existing owners debounce their saves.
+  const [preview, setPreview] = useState(() => snapNumber(value, min, max, step));
+  const lastValue = useRef(preview);
+  const touch = useRef(false);
+  const dragging = useRef(false);
+  const lastHaptic = useRef(-Infinity);
+  useEffect(() => {
+    if (dragging.current) return;
+    const next = snapNumber(value, min, max, step);
+    lastValue.current = next;
+    setPreview(next);
+  }, [value, min, max, step]);
+  const display = (number: number) => format ? format(number) : String(number);
+  const intervals = Math.max(1, Math.round((max - min) / step));
+  // Dense settings still snap on every real step; the ruler only shows major
+  // ticks to avoid crowding small screens with hundreds of marks.
+  const stride = Math.max(1, Math.ceil(intervals / 20));
+  const ticks = Array.from({ length: Math.floor(intervals / stride) + 1 }, (_, i) => Math.min(max, min + i * stride * step));
+  if (ticks[ticks.length - 1] !== max) ticks.push(max);
+  const progress = max > min ? (preview - min) / (max - min) * 100 : 0;
+  return <div className="settings-number-slider" style={{ '--slider-progress': `${progress}%` } as CSSProperties}>
+    <output className="settings-number-value" aria-live="off">{display(preview)}</output>
+    <div className="settings-number-track">
+      <input type="range" aria-label={label} aria-valuetext={display(preview)} min={min} max={max} step={step} value={preview}
+        onPointerDown={(event) => { dragging.current = true; touch.current = event.pointerType === 'touch'; lastHaptic.current = -Infinity; }}
+        onPointerUp={() => { dragging.current = false; touch.current = false; }}
+        onPointerCancel={() => { dragging.current = false; touch.current = false; }}
+        onBlur={() => { dragging.current = false; touch.current = false; }}
+        onChange={(event) => {
+          const next = snapNumber(Number(event.target.value), min, max, step);
+          if (next === lastValue.current) return;
+          lastValue.current = next;
+          setPreview(next);
+          if (touch.current && performance.now() - lastHaptic.current >= 50) {
+            lastHaptic.current = performance.now();
+            hapticFeedback('selection');
+          }
+          onChange(next);
+        }} />
+      <div className="settings-number-ticks" aria-hidden="true">{ticks.map((tick, index) => <i key={index} style={{ left: `${max > min ? (tick - min) / (max - min) * 100 : 0}%` }} />)}</div>
+    </div>
+    <div className="settings-number-limits" aria-hidden="true"><span>{display(min)}</span><span>{display(max)}</span></div>
+  </div>;
 }
 
 /** 关于页里的错误日志：和其他设置项同一套「一行 + 菜单」——行上显示记了几条，点开才读取

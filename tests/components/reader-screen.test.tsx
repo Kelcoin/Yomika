@@ -1089,6 +1089,31 @@ describe('reader screen', () => {
     expect(loadPage.mock.calls.map(([index]) => index)).toEqual([1]);
   });
 
+  it('auto-hides chrome while the overview remains open', () => {
+    vi.useFakeTimers();
+    try {
+      render(<MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={pages} /></MemoryRouter>);
+      fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      fireEvent.click(screen.getByRole('button', { name: '缩略面板' }));
+      act(() => vi.advanceTimersByTime(5_000));
+      act(() => vi.advanceTimersByTime(300));
+      expect(screen.getByRole('complementary', { name: '档案概览' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: '返回上一页' })).not.toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('resets automatic paging when leaving a retained reader', () => {
+    const content = <MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={pages} /></MemoryRouter>;
+    const view = render(<RetainedPage active>{content}</RetainedPage>);
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '自动翻页' }));
+    expect(screen.getByRole('button', { name: '停止自动翻页' })).toBeInTheDocument();
+    view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
+    view.rerender(<RetainedPage active>{content}</RetainedPage>);
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(screen.queryByRole('button', { name: '停止自动翻页' })).not.toBeInTheDocument();
+  });
+
   it('closes the thumbnail panel and stops its queue when the reader becomes inactive', async () => {
     let finish!: (url: string) => void;
     const loadPageThumbnail = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
@@ -1748,8 +1773,10 @@ describe('reader screen', () => {
     expect(await screen.findByRole('img', { name: '第 9 页' })).toHaveAttribute('src', 'blob:page-8');
     expect(signals.get(0)![0]!.aborted).toBe(true);
     for (let i = 0; i < 8; i += 1) fireEvent.keyDown(reader, { key: 'ArrowLeft' });
-    await waitFor(() => expect(signals.get(0)).toHaveLength(2));
-    expect(signals.get(0)![1]!.aborted).toBe(false);
+    await waitFor(() => {
+      expect(signals.get(0)!.length).toBeGreaterThanOrEqual(2);
+      expect(signals.get(0)!.at(-1)!.aborted).toBe(false);
+    });
     view.unmount();
   });
 

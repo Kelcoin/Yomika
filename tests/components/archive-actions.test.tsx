@@ -28,7 +28,8 @@ describe('archive actions', () => {
     });
     render(<MemoryRouter><Menu /></MemoryRouter>);
     fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
-    expect(await screen.findByRole('menuitem', { name: '阅读' })).toBeEnabled();
+    expect(await screen.findByRole('menuitem', { name: '无痕阅读' })).toBeEnabled();
+    expect(screen.queryByRole('menuitem', { name: '阅读' })).toBeNull();
     expect(screen.getByRole('menuitem', { name: '下载档案' })).toBeEnabled();
     expect(screen.queryByRole('menuitem', { name: '清除阅读进度' })).not.toBeInTheDocument();
   });

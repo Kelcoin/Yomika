@@ -6,6 +6,22 @@ import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 
 afterEach(() => { setImageDecoderForTests(undefined); vi.useRealTimers(); vi.restoreAllMocks(); });
 
+it('preempts slow prefetches still inside the window when an unloaded page becomes visible', async () => {
+  const attempts: { index: number; signal: AbortSignal | undefined }[] = [];
+  const loadPage = vi.fn((index: number, signal?: AbortSignal) => {
+    attempts.push({ index, signal });
+    return new Promise<string>(() => {});
+  });
+  render(<MemoryRouter><ReaderScreen archiveId="priority" title="Priority" pages={['blob:first', '', '', '', '']} layout="single" prefetchDistance={3} loadPage={loadPage} /></MemoryRouter>);
+  await waitFor(() => expect(attempts.some(a => a.index === 2)).toBe(true));
+  const neighbour = attempts.find(a => a.index === 1)!;
+  const prefetch = attempts.find(a => a.index === 2)!;
+  fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowRight' });
+  await waitFor(() => expect(prefetch.signal?.aborted).toBe(true));
+  expect(neighbour.signal?.aborted).toBe(false);
+  expect(attempts.filter(a => a.index === 2)).toHaveLength(2);
+});
+
 it('retries a page request that never settles and aborts its old consumer', async () => {
   vi.useFakeTimers();
   let firstSignal: AbortSignal | undefined;
@@ -14,6 +30,28 @@ it('retries a page request that never settles and aborts its old consumer', asyn
   await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
   expect(firstSignal?.aborted).toBe(true);
   expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:recovered');
+});
+
+it('bounds a stuck middle page and lets its retry replace the abandoned request', async () => {
+  vi.useFakeTimers();
+  vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(128);
+  let recover = false;
+  const signals: AbortSignal[] = [];
+  const loadPage = vi.fn((_index: number, signal?: AbortSignal) => {
+    if (signal) signals.push(signal);
+    return recover ? Promise.resolve('blob:recovered-middle') : new Promise<string>(() => {});
+  });
+  render(<MemoryRouter><ReaderScreen archiveId="middle" title="Middle" pages={['blob:first', '', 'blob:last']} initialPage={1} layout="single" loadPage={loadPage} /></MemoryRouter>);
+  for (let elapsed = 0; elapsed < 110_000; elapsed += 5_000) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  }
+  expect(loadPage).toHaveBeenCalledTimes(3);
+  expect(signals.every(signal => signal.aborted)).toBe(true);
+  expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument();
+  recover = true;
+  fireEvent.click(screen.getByRole('button', { name: '重试加载' }));
+  await act(async () => {});
+  expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:recovered-middle');
 });
 
 it('retries a rejected request instead of leaving it indefinitely loading', async () => {

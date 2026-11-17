@@ -167,7 +167,7 @@ body::-webkit-scrollbar,
      `transform: translateY(-1px)`，同一条栏里的邻居之间只有 8px 间距，抬起 1px
      就会压到隔壁那一格——判据「keeps hover to colour」抓到的就是它。 */
   .titlebar-control:hover,
-  .nav-link:hover,
+  .nav-link.is-pointer-hovered,
   .sidebar-toggle:hover,
   .icon-button:hover,
   .settings-nav a:hover {
@@ -1905,7 +1905,7 @@ body::-webkit-scrollbar,
 }
 
 .primary-action { padding: 0 var(--space-5); background: var(--primary); color: var(--on-primary); }
-.secondary-action { background: var(--secondary-container); color: var(--on-secondary-container); }
+.secondary-action { background: var(--secondary-container); color: var(--on-secondary-container); border-color: color-mix(in srgb, var(--on-secondary-container) 20%, transparent); }
 
 /* Three labels in a narrow panel need a smaller voice; the box is unchanged, so
    it still lines up with a full-size button beside it. */
@@ -2384,23 +2384,17 @@ body::-webkit-scrollbar,
 .archive-detail-panel-tabs button.is-active { background: var(--brand-vermilion); color: var(--ink-on-brand); }
 .archive-detail-panel-tabs svg { width: 16px; height: 16px; }
 .archive-detail-panel-tabs button:only-child { grid-column: 1 / -1; }
-.archive-detail-panels { min-height: 160px; }
-/* 两块面板一块舞台。换边期间它们叠进同一个网格格子：容器只保留一个高度
-   （否则矮的那块会被高的那块撑出一段空白），每块按手势写进去的位移平移，
-   于是「离开的那块」和「进来的那块」同时可见。静止时这条规则不生效，
-   面板照旧各占一行、高度跟着当前那块走。位移由 src/lib/usePanelPager.ts 写。 */
+.archive-detail-panels { display: grid; grid-template-columns: minmax(0, 1fr); align-items: start; min-height: 160px; }
+.archive-detail-panels > [role='tabpanel'] { grid-area: 1 / 1; min-width: 0; }
+/* 始终使用同一网格，避免开始/结束动画时子面板的外边距折叠规则变化。
+   静止时隐藏非当前面板；换边时高度和位移由 usePanelPager 控制。 */
 .archive-detail-panels.is-sliding {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: start;
   /* Keep horizontal page boundaries without making this an extra scrollport
      or cutting vertical bounce/shadows at the short panel's height. */
   overflow: visible;
   clip-path: inset(-100vmax calc(-1 * var(--space-4)));
 }
 .archive-detail-panels.is-sliding > [role='tabpanel'] {
-  grid-area: 1 / 1;
-  min-width: 0;
   backface-visibility: hidden;
 }
 /* 只在手指按着的时候提升：两块整幅面板常驻提升，等于白占两层合成。 */
@@ -3389,6 +3383,40 @@ body::-webkit-scrollbar,
   padding: var(--space-2) var(--space-1);
   border-radius: var(--radius-card);
   background: var(--surface-container-high);
+}
+
+/* Floating selection controls need a distinct boundary in both light and dark themes. */
+.archive-selection-bar > .secondary-action {
+  background: color-mix(in srgb, var(--primary) 16%, var(--surface-container-high));
+  color: var(--on-surface);
+  border: 1px solid color-mix(in srgb, var(--primary) 38%, var(--outline-variant));
+}
+.archive-selection-bar > .secondary-action.is-danger:not(:disabled) {
+  background: var(--error-container);
+  color: var(--on-error-container);
+  border-color: color-mix(in srgb, var(--error) 45%, var(--outline-variant));
+}
+.archive-selection-bar > .secondary-action:disabled {
+  background: var(--surface-container);
+  border-color: var(--outline-variant);
+  color: var(--on-surface-variant);
+}
+@media (hover: hover) {
+  .archive-selection-bar > .secondary-action:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--primary) 25%, var(--surface-container-high));
+  }
+  .archive-selection-bar > .secondary-action.is-danger:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--error) 18%, var(--error-container));
+  }
+}
+
+@media (hover: none) {
+  .archive-selection-bar > .secondary-action:is(.is-pressed, :active):not(:disabled) {
+    background: color-mix(in srgb, var(--primary) 25%, var(--surface-container-high));
+  }
+  .archive-selection-bar > .secondary-action.is-danger:is(.is-pressed, :active):not(:disabled) {
+    background: color-mix(in srgb, var(--error) 18%, var(--error-container));
+  }
 }
 
 .archive-selection-count {
@@ -5340,14 +5368,14 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
 @media (hover: hover) {
-    .compact-nav .nav-link:hover:not(.is-active) {
+    .compact-nav .nav-link.is-pointer-hovered:not(.is-active) {
         transform: none;
         background: var(--surface-container-high);
     }
 
     /* The active link keeps its own background; hover must not paint a second one
          over it, which read as two overlapping states on the same tab. */
-    .compact-nav .nav-link.is-active:hover {
+    .compact-nav .nav-link.is-active.is-pointer-hovered {
         background: var(--primary-container);
         color: var(--on-primary-container);
     }
@@ -5589,13 +5617,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   padding-inline: 40px;
 }
 
-.settings-choice-title > .settings-choice-back {
-  position: absolute;
-  inset-inline-start: 0;
-  inset-block: 0;
-  margin-block: auto;
-}
-
 .settings-choice-icon {
   display: grid;
   place-items: center;
@@ -5788,19 +5809,74 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   font-variant-numeric: tabular-nums;
 }
 
-.settings-menu-stepper {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
+.settings-number-slider {
+  padding: var(--space-2) var(--space-3);
 }
 
-.settings-menu-stepper .settings-number {
-  flex: 1 1 auto;
-  width: auto;
-  min-width: 96px;
+.settings-number-value {
+  display: block;
   text-align: center;
+  color: var(--primary);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
   font-variant-numeric: tabular-nums;
+  margin-bottom: var(--space-2);
 }
+
+.settings-number-track { position: relative; }
+
+.settings-number-track input {
+  display: block;
+  width: 100%;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  cursor: ew-resize;
+  touch-action: pan-y;
+}
+
+.settings-number-track input::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--primary) 0 var(--slider-progress), var(--surface-container-highest) var(--slider-progress) 100%);
+}
+
+.settings-number-track input::-moz-range-track {
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(to right, var(--primary) 0 var(--slider-progress), var(--surface-container-highest) var(--slider-progress) 100%);
+}
+
+.settings-number-track input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -7px;
+  border: 3px solid var(--surface);
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.settings-number-track input::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 3px solid var(--surface);
+  border-radius: 50%;
+  background: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.settings-number-track input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 8px; }
+.settings-number-ticks { position: absolute; inset: auto 11px 1px; height: 5px; pointer-events: none; }
+.settings-number-ticks i { position: absolute; width: 2px; height: 5px; border-radius: 1px; background: var(--outline); transform: translateX(-50%); }
+.settings-number-limits { display: flex; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-1); color: var(--on-surface-variant); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
 
 .settings-menu-actions {
   display: flex;
@@ -6753,7 +6829,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
   /* 悬停填一层容器色，文字转成正文色。 */
   .icon-button:is(.is-pressed, :active),
-  .nav-link:is(.is-pressed, :active),
+  .nav-link.is-pressed,
   .settings-nav a:is(.is-pressed, :active),
   .settings-nav button:is(.is-pressed, :active),
   .sidebar-toggle:is(.is-pressed, :active),
@@ -6763,11 +6839,11 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   /* 底栏那条胶囊自己有选中态：选中时按下去用选中色，别退回普通容器色。 */
-  .compact-nav .nav-link:is(.is-pressed, :active):not(.is-active) {
+  .compact-nav .nav-link.is-pressed:not(.is-active) {
     background: var(--surface-container-high);
   }
 
-  .compact-nav .nav-link.is-active:is(.is-pressed, :active) {
+  .compact-nav .nav-link.is-active.is-pressed {
     background: var(--primary-container);
     color: var(--on-primary-container);
   }
@@ -6951,18 +7027,20 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   height: 26px;
 }
 
-/* 下载行不是按钮：它是一张还在变的牌，点下去没有去处。多出来的第三列是动作按钮。 */
+/* 下载行沿用封面和文案两列，状态与控制按钮共用底部一行。 */
 .local-archives-list .archive-row.is-downloading {
-  grid-template-columns: 100px minmax(0, 1fr) auto;
+  grid-template-columns: 100px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   align-items: center;
   cursor: default;
 }
 .local-archives-list .archive-row.is-downloading > .archive-row-copy {
-  height: auto;
-  min-height: 92px;
-  grid-template-rows: auto 4px auto;
-  align-content: center;
-  gap: var(--space-3) !important;
+  height: 142px;
+  min-height: 0;
+  grid-template-rows: 34px 4px minmax(22px, 1fr);
+  align-content: start;
+  padding-bottom: 36px;
+  gap: var(--space-2) !important;
 }
 .local-archives-list .archive-row.is-downloading > .archive-row-copy > strong {
   align-self: start;
@@ -7006,28 +7084,36 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-detail-facts > div[data-fact='path'] dd { font-family: var(--font-utility); font-size: var(--text-xs); }
 
 .local-row-actions {
-  align-self: center;
+  position: absolute;
+  left: 120px;
+  right: var(--space-2);
+  bottom: var(--space-2);
   display: flex;
   align-items: center;
   gap: var(--space-2);
 }
 
+.local-row-actions > .status-chip { margin-right: auto; }
+
 .local-delete-dialog { max-width: 440px; }
+
+/* Content breathing room; workspace already reserves the floating navigation. */
+.local-archive-detail { padding-bottom: var(--space-6); }
 
 :where(:root[data-layout='compact']) {
   /* 手机上这一页跟着文档流滚。档案行照旧是档案库那套（封面 + 文案），只有下载行
      要多占一行：390px 里挤不下封面、文案和三个按钮。 */
   .local-archives { height: auto; min-height: 0; }
   .local-archives-list .archive-row.is-downloading {
-    grid-template-columns: 64px minmax(0, 1fr);
-    height: auto;
-    row-gap: var(--space-2);
+    grid-template-columns: 100px minmax(0, 1fr);
+    height: 158px;
   }
-  .local-archives-list .archive-row.is-downloading .archive-thumb-card-media { width: 64px; height: 92px; }
+  .local-archives-list .archive-row.is-downloading .archive-thumb-card-media { width: 100px; height: 142px; }
   /* 窄屏上「42% · 142.8 MB / 340.0 MB · 12.0 MB/s」一行放不下，让它换行而不是
      被省略号吃掉。 */
   .local-archives-list .archive-row.is-downloading .archive-row-footer { flex-wrap: wrap; }
-  .local-row-actions { grid-column: 1 / -1; margin-left: auto; }
+  .local-archives-list .archive-row.is-downloading .archive-row-footer { gap: var(--space-1); align-content: start; }
+  .local-archives-list .archive-row.is-downloading .archive-row-stats { min-width: 0; font-size: var(--text-xs); }
 }
 
 /* ---------------------------------------------------------------------------
@@ -7233,11 +7319,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   transition: background-color var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast), box-shadow var(--motion-fast), transform var(--motion-fast), scale var(--motion-fast);
   scale: 1;
 }
-:is(.icon-button, .primary-action, .secondary-action, .nav-link, .sidebar-toggle):is(.is-pressed, :active):not(:disabled) {
+:is(.icon-button, .primary-action, .secondary-action, .sidebar-toggle):is(.is-pressed, :active):not(:disabled),
+.nav-link.is-pressed {
   scale: .96;
 }
 @media (prefers-reduced-motion: reduce) {
-  :is(.icon-button, .primary-action, .secondary-action, .nav-link, .sidebar-toggle):is(.is-pressed, :active):not(:disabled) { scale: 1; }
+  :is(.icon-button, .primary-action, .secondary-action, .sidebar-toggle):is(.is-pressed, :active):not(:disabled),
+  .nav-link.is-pressed { scale: 1; }
 }
 
 /* Keep the revoke action alongside its device, including narrow settings menus. */
@@ -7284,15 +7372,28 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .dedup-help-steps p { margin: var(--space-1) 0 0; color: var(--ink-secondary); line-height: var(--leading-normal); }
 @container archive-actions (max-width: 850px) {
   .archive-selection-bar .action-label { display: none; }
-  .archive-selection-bar .has-action-label { width: 36px; min-width: 36px; padding-inline: 0; justify-content: center; }
+  .archive-selection-bar > .has-action-label { flex: 0 0 36px; width: 36px; min-width: 36px; padding-inline: 0; justify-content: center; }
 }
 @container dedup-actions (max-width: 760px) {
   .dedup-section-actions .action-label { display: none; }
   .dedup-workspace .dedup-section-actions > .has-action-label { flex: 0 0 36px; width: 36px; min-width: 36px; padding-inline: 0; justify-content: center; order: 0; }
 }
 :where(:root[data-layout='compact']) {
+  .archive-selection-bar { flex-wrap: nowrap; gap: var(--space-1); }
+  /* Count changes cannot resize the shared action buttons. */
+  .archive-selection-count { box-sizing: border-box; flex: 0 0 76px; width: 76px; min-width: 76px; max-width: 76px; text-align: center; margin-right: 0; padding-inline: var(--space-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }
+  .archive-selection-bar > .has-action-label { flex: 1 1 0; width: 0; min-width: 0; padding-inline: 2px; gap: var(--space-1); font-size: var(--text-xs); }
+  .archive-selection-bar .action-label { display: inline; }
+  .archive-selection-bar > .has-action-label svg { width: 16px; height: 16px; }
   .dedup-workspace .dedup-section-actions { width: 100%; flex-wrap: nowrap; }
   .dedup-workspace .dedup-section-actions > .has-action-label { flex: 1 1 0; width: 0; min-width: 0; order: 0; }
+}
+@container archive-actions (min-width: 520px) {
+  :where(:root[data-layout='compact']) .archive-selection-bar > .has-action-label { font-size: var(--text-sm); }
+  :where(:root[data-layout='compact']) .archive-selection-bar > .has-action-label svg { width: 18px; height: 18px; }
+}
+@container archive-actions (max-width: 399px) {
+  :where(:root[data-layout='compact']) .archive-selection-bar > .has-action-label svg { display: none; }
 }
 @media (max-width: 480px) {
   .dedup-workspace .date-picker-trigger { gap: 4px; padding-inline: 8px; font-size: clamp(12px, 3.2vw, 14px); white-space: nowrap; }

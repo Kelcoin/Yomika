@@ -1971,9 +1971,11 @@ describe('reader route', () => {
     // 回去（实测退出后仍有 4GB 落不下来）。离开这一本的那一刻要叫一次工作集清理。
     await waitFor(() => expect(commands).toContain('trim_process_memory'));
 
-    // 切回来要按需重算：尝试记录没被清掉的话，这里会一页都不算，屏幕上留着原图。
+    // Re-enter with processing disabled; an explicit new toggle may reuse the queue.
     const beforeReturn = derivedLoads().length;
     fireEvent.click(screen.getByRole('button', { name: '切回刚才那本' }));
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启 DLSSNR' }));
     await waitFor(() => expect(derivedLoads().length).toBeGreaterThan(beforeReturn), { timeout: 10_000 });
   });
 

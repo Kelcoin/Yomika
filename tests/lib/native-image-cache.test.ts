@@ -47,7 +47,33 @@ describe('NativeImageCacheAdapter', () => {
 
     await repository.fetch({ scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'reader-page', pageIndex: 2, sourcePath: 'chapter/02.gif' });
 
-    expect(adapter).toHaveBeenCalledWith('load_reader_page', { serverId: 'server-a', archiveId: 'archive-a', pageIndex: 2, path: 'chapter/02.gif' });
+    expect(adapter).toHaveBeenCalledWith('load_reader_page', { serverId: 'server-a', archiveId: 'archive-a', pageIndex: 2, path: 'chapter/02.gif', taskId: expect.stringMatching(/^reader-fetch:/) });
+  });
+
+  it('cancels the actual original download and gives a retry its own task ID', async () => {
+    let finish!: (value: unknown) => void;
+    const adapter = vi.fn((command: string): Promise<unknown> => {
+      if (command === 'load_reader_page') return new Promise(resolve => { finish = resolve; });
+      if (command === 'inference_cancel_page') return Promise.resolve({ ok: true, value: true });
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const repository = new NativeImageCacheAdapter();
+    const identity = { scopeId: 'scope-a', serverId: 'server-a', archiveId: 'archive-a', rendition: 'reader-page' as const, pageIndex: 2, sourcePath: '02.jpg' };
+    const controller = new AbortController();
+    const first = repository.fetch(identity, controller.signal);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('load_reader_page', expect.anything()));
+    const firstId = (adapter.mock.calls[0] as unknown as [string, { taskId: string }])[1].taskId;
+    controller.abort();
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('inference_cancel_page', { taskId: firstId }));
+    finish([0xff, 0xd8, 0xff]);
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    const second = repository.fetch(identity);
+    await vi.waitFor(() => expect(adapter.mock.calls.filter(([name]) => name === 'load_reader_page')).toHaveLength(2));
+    const secondId = (adapter.mock.calls.filter(([name]) => name === 'load_reader_page')[1] as unknown as [string, { taskId: string }])[1].taskId;
+    expect(secondId).not.toBe(firstId);
+    finish([0xff, 0xd8, 0xff]);
+    await second;
   });
 
   it('passes the selected local rendition to remote processing and separates device cache keys', async () => {

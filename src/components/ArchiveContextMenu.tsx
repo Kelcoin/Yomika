@@ -51,7 +51,6 @@ interface ArchiveContextMenuProps {
 export function ArchiveContextMenu({
   target,
   onClose,
-  onRead,
   onReadIncognito,
   onEditMetadata,
   onCopyId,
@@ -75,9 +74,6 @@ export function ArchiveContextMenu({
   const galleryUrl = archiveSourceUrl(archive.tags);
   return (
     <PositionedMenu at={target} label={`${archive.title} 操作`} onClose={onClose}>
-          {!hiddenActions.includes('read') && <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onRead(archive)}>
-            <BookOpen aria-hidden="true" />阅读
-          </DropdownMenu.Item>}
           <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onReadIncognito(archive)}>
             <EyeOff aria-hidden="true" />无痕阅读
           </DropdownMenu.Item>

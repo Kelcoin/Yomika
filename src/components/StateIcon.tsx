@@ -1,12 +1,16 @@
 import type { SVGProps } from 'react';
 import {
   Archive, Bookmark, CloudDownload, Cookie, FolderOpen, Globe, HardDrive,
-  Heart, History, Home, Image, LayoutGrid, Link2, ListChecks, CircleCheck,
+  Heart, Home, Image, LayoutGrid, Link2, ListChecks, CircleCheck,
   LogIn, MessageCircle, Pause, Play, Settings, Sparkles, SquareCheckBig, Star,
   ThumbsDown, ThumbsUp,
 } from 'lucide-react';
 
 import { SvgIcon } from './SvgIcon';
+
+function HistoryOutline(props: SVGProps<SVGSVGElement>) {
+  return <SvgIcon {...props}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v3M7 7h7M7 11h3" /><circle cx="16.5" cy="16.5" r="5" /><path d="M16.5 13.5v3l2 1.25" /></SvgIcon>;
+}
 
 // Filled variants are drawn explicitly. Applying fill to a Lucide icon fills
 // open paths and hides details, so it cannot express selected state reliably.
@@ -22,8 +26,8 @@ const icons = {
     filled: 'M 2.55 2.1 H 21.45 Q 22.9 2.1 22.9 3.55 V 5.85 Q 22.9 7.3 21.45 7.3 H 2.55 Q 1.1 7.3 1.1 5.85 V 3.55 Q 1.1 2.1 2.55 2.1 Z M 4.1 9.4 H 19.9 Q 21.7 9.4 21.7 11.2 V 20.1 Q 21.7 21.9 19.9 21.9 H 4.1 Q 2.3 21.9 2.3 20.1 V 11.2 Q 2.3 9.4 4.1 9.4 Z M 9.45 12.5 H 14.55 Q 15.6 12.5 15.6 13.55 V 13.55 Q 15.6 14.6 14.55 14.6 H 9.45 Q 8.4 14.6 8.4 13.55 V 13.55 Q 8.4 12.5 9.45 12.5 Z',
   },
   history: {
-    outline: History,
-    filled: 'M 12 2.1 A 9.9 9.9 0 1 1 2.1 12 H 5 Q 5 9.1 6.9 7.1 L 8.5 8.7 Q 9 9.2 8.3 9.2 H 2.9 Q 2.1 9.2 2.1 8.4 V 2.9 Q 2.1 2.1 2.7 2.7 L 4.6 4.6 Q 7.5 2.1 12 2.1 Z M 12 6.5 Q 13 6.5 13 7.5 V 11.4 L 15.9 13.1 Q 16.8 13.6 16.3 14.5 Q 15.8 15.4 14.9 14.9 L 11.5 12.9 Q 11 12.6 11 12 V 7.5 Q 11 6.5 12 6.5 Z',
+    outline: HistoryOutline,
+    filled: 'M5 2.125H16A2.875 2.875 0 0 1 18.875 5V9.05A7.875 7.875 0 0 0 8.625 16.5c0 2 .75 3.9 2.05 5.375H5A2.875 2.875 0 0 1 2.125 19V5A2.875 2.875 0 0 1 5 2.125Z M7 6.125a.875.875 0 0 0 0 1.75h7a.875.875 0 0 0 0-1.75H7Z M7 10.125a.875.875 0 0 0 0 1.75h3a.875.875 0 0 0 0-1.75H7Z M16.5 10.625a5.875 5.875 0 1 0 0 11.75 5.875 5.875 0 0 0 0-11.75Z M15.625 13.5a.875.875 0 0 1 1.75 0v2.515l1.589.993a.875.875 0 0 1-.928 1.484l-2-1.25a.875.875 0 0 1-.411-.742v-3Z',
   },
   star: {
     outline: Star,

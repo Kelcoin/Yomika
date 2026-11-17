@@ -63,6 +63,11 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
   }
 
   async fetch(identity: ImageCacheIdentity, signal?: AbortSignal): Promise<CachedImageData> {
+    // Original downloads need native cancellation just like inference. Each
+    // attempt has its own ID so a late cancel cannot stop a replacement request.
+    if (identity.rendition === 'reader-page' && !identity.taskId) {
+      identity = { ...identity, taskId: `reader-fetch:${crypto.randomUUID()}` };
+    }
     // 取消要传到原生那侧：前端丢掉结果不等于它停手，而一页 4K 在 CPU 上要十几秒，
     // 全局又只允许一件重活——不叫停的话，用户真正要看的那一页排在旧任务后面。
     const cancelNative = () => {
@@ -164,7 +169,7 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       : identity.rendition === 'page-thumbnail'
         ? await this.library.loadArchivePageThumbnail(identity.serverId, identity.archiveId, identity.pageIndex + 1)
         : identity.rendition === 'reader-page' && identity.sourcePath
-          ? await this.library.loadReaderPage(identity.serverId, identity.archiveId, identity.pageIndex, identity.sourcePath)
+          ? await this.library.loadReaderPage(identity.serverId, identity.archiveId, identity.pageIndex, identity.sourcePath, identity.taskId)
           : undefined;
     if (!result) throw new Error('Unsupported image request');
     if (!result.ok) throw new RenditionError(result.error.code, result.error.message);

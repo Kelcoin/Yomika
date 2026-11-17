@@ -409,7 +409,7 @@
 .reader-chrome {
   position: absolute;
   inset: 0;
-  z-index: calc(var(--z-reader-overview) + 1);
+  z-index: var(--z-reader-chrome);
   pointer-events: none;
 }
 
@@ -930,7 +930,7 @@
   gap: var(--space-3);
 }
 
-/* Cover stays beside tags; page count and size share a compact row below. */
+/* Cover and its stacked, centered facts stay beside the tags. */
 .reader-overview-identity {
   display: grid;
   align-content: start;
@@ -990,8 +990,8 @@
 /* 封面自己的两个数字：与详情页封面右侧那份事实网格同一套结构、同一套图标、同一套
    字色（值继承面板正文，标签与图标走 on-surface-variant）。以前这里是一行
    "3 页 · 143.2 MB"，同一份数据两处各画一遍，两边迟早不一样。 */
-.reader-overview-stats { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--space-4); margin: 0; }
-.reader-overview-stats > div { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.reader-overview-stats { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); margin: 0; min-width: 0; }
+.reader-overview-stats > div { display: flex; justify-content: center; align-items: center; gap: 6px; min-width: 0; }
 .reader-overview-stats dt { display: flex; flex: 0 0 16px; color: var(--on-surface-variant); }
 .reader-overview-stats dt svg { width: 16px; height: 16px; }
 .reader-overview-stats dd { margin: 0; white-space: nowrap; font-family: var(--font-utility); font-size: var(--text-xs); }
@@ -1078,6 +1078,8 @@
 /* Keep the same three groups on one row, including narrow phones. Wrapping the
    page counter created an oversized second bar and separated it from its controls. */
 @media (max-width: 610px) {
+  /* Each edge reserves only its own system inset. The status bar changes
+     --safe-top when the top chrome opens; it must never resize the bottom bar. */
   .reader-screen { --reader-toolbar-height: 64px; }
   .reader-toolbar {
     display: grid;

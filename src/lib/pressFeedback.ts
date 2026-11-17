@@ -76,6 +76,9 @@ export function installPressFeedback(): () => void {
   document.addEventListener('pointermove', onPointerMove, true);
   document.addEventListener('pointerup', release, true);
   document.addEventListener('pointercancel', release, true);
+  document.addEventListener('lostpointercapture', release, true);
+  document.addEventListener('visibilitychange', release);
+  window.addEventListener('blur', release);
   document.addEventListener('scroll', onScroll, true);
   return () => {
     release();
@@ -83,6 +86,9 @@ export function installPressFeedback(): () => void {
     document.removeEventListener('pointermove', onPointerMove, true);
     document.removeEventListener('pointerup', release, true);
     document.removeEventListener('pointercancel', release, true);
+    document.removeEventListener('lostpointercapture', release, true);
+    document.removeEventListener('visibilitychange', release);
+    window.removeEventListener('blur', release);
     document.removeEventListener('scroll', onScroll, true);
   };
 }

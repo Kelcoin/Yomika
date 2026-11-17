@@ -305,7 +305,8 @@ describe('application shell', () => {
     fireEvent.contextMenu(within(rail).getByRole('link', { name: /最近阅读档案/ }), { clientX: 40, clientY: 60 });
 
     const menu = await screen.findByRole('menu');
-    expect(within(menu).getByRole('menuitem', { name: '阅读' })).toBeInTheDocument();
+    expect(within(menu).getByRole('menuitem', { name: '无痕阅读' })).toBeInTheDocument();
+    expect(within(menu).queryByRole('menuitem', { name: '阅读' })).not.toBeInTheDocument();
     expect(within(menu).getByRole('menuitem', { name: '编辑元数据' })).toBeInTheDocument();
   });
 

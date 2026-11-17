@@ -1557,7 +1557,6 @@ export function SettingsWorkspace() {
                   icon={upscaleMenu === 'models' ? <ImageUpscale /> : <Settings2 />}
                   onClose={closeUpscaleMenu}
                   onBack={upscaleMenu !== 'models' ? () => setUpscaleMenu('models') : undefined}
-                  backLabel="返回模型列表"
                 >
                   {upscaleMenu === 'models' ? <div className="settings-choice-list">
                     {upscaleModelOptions.map((option) => {

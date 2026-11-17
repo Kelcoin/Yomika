@@ -89,7 +89,7 @@ describe('reader auto turn', () => {
     expect(view.progress).toHaveBeenLastCalledWith(3, expect.anything());
   });
 
-  it('cancels its timer while the reader is cached behind another page', () => {
+  it('cancels its timer and requires enabling it again after leaving the reader', () => {
     const progress = vi.fn();
     const content = (active: boolean) => <MemoryRouter><RetainedPage active={active}><ReaderScreen archiveId="cached-auto" title="Auto" pages={pages} layout="single" onProgress={progress} /></RetainedPage></MemoryRouter>;
     const view = render(content(true));
@@ -101,6 +101,10 @@ describe('reader auto turn', () => {
     act(() => vi.advanceTimersByTime(10_000));
     expect(progress).toHaveBeenLastCalledWith(0, expect.anything());
     view.rerender(content(true));
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(progress).toHaveBeenLastCalledWith(0, expect.anything());
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '自动翻页' }));
     act(() => vi.advanceTimersByTime(5_000));
     expect(progress).toHaveBeenLastCalledWith(1, expect.anything());
   });

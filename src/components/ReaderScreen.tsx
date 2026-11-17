@@ -1,3 +1,4 @@
+import { ReaderTitle } from './ReaderTitle';
 import { StateIcon } from './StateIcon';
 import { usePageActive } from '../app/RetainedPage';
 import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, ChevronLeft, ChevronRight, Copy, EyeOff, GalleryVertical, LogOut, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
@@ -27,7 +28,7 @@ import { useReaderImageHandover } from '../lib/useReaderImageHandover';
  * over a spread without a refetch, and costs a handful of blob URLs. */
 const PAGE_RETENTION_MARGIN = 3;
 /** Attempts before a page is left alone. */
-const MAX_PAGE_LOAD_ATTEMPTS = 8;
+const MAX_PAGE_LOAD_ATTEMPTS = 3;
 const PAGE_LOAD_TIMEOUT_MS = 30_000;
 const AUTO_TURN_INTERVAL_MS = 5_000;
 /** Height of the bands at the top and bottom of the canvas that summon the
@@ -590,8 +591,10 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       panStart.current = undefined;
       setPanning(false);
       settleZoomNow();
+      setAutoPlay(false);
+      setAutoTurnReadyKey(undefined);
       setThumbnailPanelOpen(false);
-      setThumbnails(new Map());
+      setThumbnails((current) => current.size === 0 ? current : new Map());
     }
   }, [pageActive, setZoom, settleZoomNow]);
   // 缩略面板是阅读器里的一层：返回手势先收掉它，而不是直接把阅读页带走
@@ -604,7 +607,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     rootRef,
     visible: state.phase === 'chrome-visible',
     active: pageActive,
-    suspended: thumbnailPanelOpen,
     // 手指（`COARSE_POINTER_QUERY`，即 `(hover: none), (pointer: coarse)`）点哪条感应带
     // 就只亮哪条：触屏没有悬停，两条栏本来只能一起亮一起灭。鼠标留着旧行为——桌面用
     // 悬停选边，点一下两条都出来也无所谓。
@@ -619,6 +621,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const failedPagesRef = useRef(new Map<number, { attempts: number; nextAt: number }>());
   const [retryTick, setRetryTick] = useState(0);
   const retryTimerRef = useRef<number>();
+  const fetchAnchorRef = useRef('');
 
   /** Slot height for one continuous-scroll page. Unmeasured pages get an estimate
    * so the scroller has a length from the start; a measured height replaces it
@@ -842,8 +845,14 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
 
     // Retire stale demand before submitting the new current page. Cancellation
     // is not a failure and must not leave a backoff/exhausted entry behind.
+    const anchor = `${effectiveLayout}:${visibleIndexes.join(',')}`;
+    const needsForeground = fetchAnchorRef.current !== anchor && visibleIndexes.some(index => !loadedPages[index]);
+    fetchAnchorRef.current = anchor;
     for (const [index, controller] of loadingPagesRef.current) {
-      if (fetchSet.has(index)) continue;
+      // A slow prefetch may still belong to the new window, but it must not
+      // occupy every native download slot while the new visible page queues.
+      // Requeue it behind the visible pages with a fresh cancellation ID.
+      if (fetchSet.has(index) && (!needsForeground || visibleIndexes.includes(index))) continue;
       loadingPagesRef.current.delete(index);
       controller.abort();
       releasePage?.(index);
@@ -888,12 +897,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       const controller = new AbortController();
       loadingPagesRef.current.set(index, controller);
       const generation = pageRequestGeneration.current;
+      const startedAt = Date.now();
+      let timedOut = false;
+      let failureMessage: string | undefined;
       let timeout: number | undefined;
       const aborted = new Promise<undefined>((resolve) => {
         controller.signal.addEventListener('abort', () => resolve(undefined), { once: true });
-        timeout = window.setTimeout(() => controller.abort(), PAGE_LOAD_TIMEOUT_MS);
+        timeout = window.setTimeout(() => { timedOut = true; controller.abort(); }, PAGE_LOAD_TIMEOUT_MS);
       });
-      void Promise.race([Promise.resolve().then(() => loadPage(index, controller.signal)).catch(() => undefined), aborted]).then((page) => {
+      void Promise.race([Promise.resolve().then(() => loadPage(index, controller.signal)).catch((error: unknown) => {
+        failureMessage = error instanceof Error ? error.message : String(error);
+        return undefined;
+      }), aborted]).then((page) => {
         if (generation !== pageRequestGeneration.current || loadingPagesRef.current.get(index) !== controller) return;
         // Retire ownership BEFORE notifying React. Otherwise a retry render can
         // see the settled request as still loading, skip its backoff timer and
@@ -909,6 +924,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         // it makes it worse.
         const attempts = (failedPagesRef.current.get(index)?.attempts ?? 0) + 1;
         const delay = (2 ** attempts + Math.random() * 2) * 1000;
+        logError('reader/page-load', timedOut ? '阅读页请求超时' : '阅读页请求未取得图片', {
+          page: index + 1, attempts, elapsedMs: Date.now() - startedAt,
+          retryInMs: attempts < MAX_PAGE_LOAD_ATTEMPTS ? delay : null,
+          ...(failureMessage ? { reason: failureMessage } : {}),
+        }, 'warn');
         failedPagesRef.current.set(index, { attempts, nextAt: Date.now() + delay });
         if (attempts < MAX_PAGE_LOAD_ATTEMPTS) setRetryTick((value) => value + 1);
         // Only now is the page a failure rather than a page still on its way.
@@ -926,6 +946,9 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive]);
 
   const retryPage = useCallback((index: number) => {
+    const pending = loadingPagesRef.current.get(index);
+    loadingPagesRef.current.delete(index);
+    pending?.abort();
     releasePage?.(index);
     setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? '' : value));
     failedPagesRef.current.delete(index);
@@ -1085,12 +1108,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   // Like Readoshi, count time spent reading a loaded page, not time waiting for
   // its image. A neighbour/derived-image measurement must not reset the clock.
   const autoTurnPageKey = `${effectiveLayout}:${visibleIndexes.join(',')}`;
-  useLayoutEffect(() => {
-    if (!pageActive || !autoPlay) { setAutoTurnReadyKey(undefined); return; }
+  useEffect(() => {
+    if (!pageActive || !autoPlay) {
+      if (autoTurnReadyKey !== undefined) setAutoTurnReadyKey(undefined);
+      return;
+    }
     const image = effectiveLayout === 'webtoon' ? webtoonRef.current?.querySelector<HTMLImageElement>(`img.reader-page:not(.is-candidate)[alt="第 ${state.pageIndex + 1} 页"]`) : undefined;
     const ready = effectiveLayout === 'webtoon' ? !!image?.complete && image.naturalWidth > 0 : canZoomCurrentImage();
-    setAutoTurnReadyKey(ready ? autoTurnPageKey : undefined);
-  }, [autoPlay, pageActive, effectiveLayout, autoTurnPageKey, state.pageIndex, pageMeasurement, loadedPages, exhaustedPages, canZoomCurrentImage]);
+    const next = ready ? autoTurnPageKey : undefined;
+    if (autoTurnReadyKey !== next) setAutoTurnReadyKey(next);
+  }, [autoPlay, autoTurnReadyKey, pageActive, effectiveLayout, autoTurnPageKey, state.pageIndex, pageMeasurement, loadedPages, exhaustedPages, canZoomCurrentImage]);
   useEffect(() => {
     if (!autoPlay || !pageActive) return;
     const update = () => setAutoTurnForeground(document.visibilityState !== 'hidden');
@@ -1946,7 +1973,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
               <button className="reader-icon-button" type="button" onClick={goBack} aria-label="返回上一页"><ArrowLeft aria-hidden="true" /></button>
             {/* 标题是这条栏的**直接**子项，才落得进中间那条轨道（相对整条栏居中，
                 而不是相对返回按钮之后的剩余空间）。尾部控件自己一格。 */}
-            <strong>{title}</strong>
+            <ReaderTitle title={title} />
             <div className="reader-chrome-actions">
               {incognito && <span className="reader-incognito-badge" title="无痕阅读：不记录进度与历史"><EyeOff aria-hidden="true" />无痕</span>}
               {renderWindowMaximize()}

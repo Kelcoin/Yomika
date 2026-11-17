@@ -165,7 +165,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   }, [enabled, panel, viewportBounds]);
 
   const clearTransforms = useCallback(() => {
-    for (const node of nodes.current.values()) node.style.transform = '';
+    for (const node of nodes.current.values()) { node.style.transform = ''; node.style.clipPath = ''; }
   }, []);
 
   const paint = useCallback((from: T, dx: number) => {
@@ -228,7 +228,15 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       }
       mapped.current = true;
     }
-    if (!current.settling) { paint(current.from, travelRef.current); return; }
+    // Commit base positions before WAAPI samples its first frame. Button
+    // switches otherwise expose both newly visible panels at the same origin.
+    paint(current.from, travelRef.current);
+    for (const [id, node] of nodes.current) {
+      const y = verticalOffsets.current.get(id) ?? 0;
+      const height = node.scrollHeight || node.getBoundingClientRect().height;
+      node.style.clipPath = `inset(${Math.max(0, -y)}px 0 ${Math.max(0, height + y - stageHeight.current)}px 0)`;
+    }
+    if (!current.settling) return;
     if (animatedFor.current === current) return;
     animatedFor.current = current;
     const ids = orderRef.current;

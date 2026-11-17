@@ -12,7 +12,7 @@ it('fits the overview title within bounded sizes and groups page/size facts toge
     expect(screen.getByText('很长的档案标题')).toHaveStyle({ fontSize: '18px' });
     const stats = screen.getByLabelText('档案信息');
     expect(stats.querySelectorAll('[data-fact]')).toHaveLength(2);
-    expect(stats.parentElement).toHaveClass('reader-overview-summary');
+    expect(stats.parentElement).toHaveClass('reader-overview-identity');
     view.rerender(<ArchiveOverviewPanel title="新标题" pageCount={245} thumbnailAt={() => undefined} onClose={() => {}} />);
     expect(screen.getByText('新标题')).toHaveStyle({ fontSize: '18px' });
     scroll.mockReturnValue(300);

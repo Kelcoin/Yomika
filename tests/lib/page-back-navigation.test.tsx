@@ -62,9 +62,26 @@ function Navigation() {
   const direction = useRouteDirection();
   return <><output data-testid="direction">{direction}</output><p data-testid="route">{location.pathname}</p><Link to="/home/a">detail</Link><Link to="/library">library</Link><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></>;
 }
-function back() { act(() => { window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true })); }); }
+function back() {
+  let unhandled = false;
+  act(() => { unhandled = window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true })); });
+  return unhandled;
+}
 
 afterEach(() => { delete document.documentElement.dataset.nativeMobile; });
+
+it.each(['/', '/library', '/history', '/watchlist', '/to-read', '/downloads', '/settings'])('leaves root Back on %s to the native host', path => {
+  render(<MemoryRouter initialEntries={[path]}><Navigation /></MemoryRouter>);
+  expect(back()).toBe(true);
+  expect(screen.getByTestId('route')).toHaveTextContent(path);
+});
+
+it('consumes a detail return, then hands the next root gesture to the host', () => {
+  render(<MemoryRouter initialEntries={['/home/a']}><Navigation /></MemoryRouter>);
+  expect(back()).toBe(false);
+  expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+  expect(back()).toBe(true);
+});
 
 it('handles Android Back without traversing global Router history', () => {
   render(<MemoryRouter><Navigation /></MemoryRouter>);
@@ -101,12 +118,13 @@ it('closes a native overlay first and returns the route on the following gesture
     return open ? <p>open menu</p> : null;
   }
   render(<MemoryRouter initialEntries={['/home/a']}><Navigation /><Overlay /></MemoryRouter>);
-  back();
+  expect(back()).toBe(false);
   expect(screen.queryByText('open menu')).toBeNull();
   expect(screen.getByTestId('route')).toHaveTextContent('/home/a');
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-  back();
+  expect(back()).toBe(false);
   expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+  expect(back()).toBe(true);
 });
 
 

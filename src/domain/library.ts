@@ -114,7 +114,7 @@ export const TaskRecordSchema = z.object({
 export type TaskRecord = z.infer<typeof TaskRecordSchema>;
 
 export const DownloadResultSchema = z.object({
-  status: z.enum(['completed', 'paused', 'cancelled', 'failed']),
+  status: z.enum(['completed', 'paused', 'cancelled', 'failed', 'existing']),
   /** 落盘路径；暂停时是半份文件，中止时是空串。 */
   path: z.string(),
   taskId: z.string().min(1),

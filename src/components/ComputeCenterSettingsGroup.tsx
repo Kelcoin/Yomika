@@ -431,7 +431,6 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
         </SettingsMenu>}
         {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />}
           onBack={pairFromDevices ? () => { if (pairPending.current) return; setPairMenu(false); setPairFromDevices(false); setDeviceMenu(true); setRequestId(''); setCode(''); } : undefined}
-          backLabel="返回已配对设备"
           onClose={() => { if (pairPending.current) return; setPairMenu(false); setPairFromDevices(false); setRequestId(''); setCode(''); }}>
           <div className="settings-choice-list">
             {unpairedDevices.map((device) => <SettingsOption key={device.address} align="start" active={address === device.address} disabled={pairBusy}

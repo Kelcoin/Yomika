@@ -4,6 +4,7 @@ import type { DownloadResult } from '../domain/library';
  * 路径，暂停指向本地档案页，中止说文件已经删掉。 */
 export function downloadResultMessage(result: DownloadResult): string {
   if (result.status === 'completed') return `下载完成：${result.path}`;
+  if (result.status === 'existing') return '该档案已有下载任务，可在本地档案页查看';
   if (result.status === 'paused') return '已暂停，可在本地档案页继续';
   if (result.status === 'cancelled') return '已中止下载';
   return '下载失败';
