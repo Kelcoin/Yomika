@@ -486,6 +486,7 @@
        chrome and follows the layering order of the shell. Arbitrary values
        are banned. ------------------------------------------------------ */
     --z-raised: 2;
+    --z-route-transition: 5;
     --z-sticky: 10;
     --z-compact-nav: 20;
     --z-menu: 30;

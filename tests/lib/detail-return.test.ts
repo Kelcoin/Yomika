@@ -41,6 +41,7 @@ it('freezes only the visible slice of a tall live detail and restores its exact 
   const restore = prepareDetailReturn(panel, detail);
   expect(detail.style.clipPath).toBe('inset(1050px 0 2250px 0)');
   expect(detail.style.position).toBe('fixed');
+  expect(detail.style.zIndex).toBe('var(--z-route-transition)');
   expect(detail.textContent).toBe('Live contents');
   expect(panel.hasAttribute('inert')).toBe(true);
   restore();
@@ -57,6 +58,7 @@ it('includes the full viewport canvas around a short shortcut page without movin
   const restore = prepareDetailReturn(page, page, true);
   expect(page.style.left).toBe('0px'); expect(page.style.top).toBe('0px');
   expect(page.style.width).toBe('576px'); expect(page.style.height).toBe('850px');
+  expect(page.style.zIndex).toBe('var(--z-route-transition)');
   expect(page.style.paddingLeft).toBe('16px'); expect(page.style.paddingRight).toBe('16px');
   expect(page.style.paddingTop).toBe('32px'); expect(page.hasAttribute('data-page-return')).toBe(true);
   restore();

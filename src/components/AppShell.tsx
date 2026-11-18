@@ -2,7 +2,7 @@ import { StateIcon } from './StateIcon';
 import { useEdgeBounce } from '../lib/useEdgeBounce';
 import { PanelLeftClose, PanelLeftOpen, Settings, ArrowUp } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Link, NavLink, useLocation } from 'react-router-dom';
+import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 
 import { getPlatformCapabilities } from '../bridge/platform';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
@@ -11,7 +11,8 @@ import { StatusBar } from './StatusBar';
 import { TitleBar } from './TitleBar';
 import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
-import { NAVIGATION_ENTRIES, compactNavItems, compactNavHiddenItems, navEntryActive } from '../lib/navigationOrder';
+import { NAVIGATION_ENTRIES, compactNavItems, compactNavHiddenItems, navEntryActive, navigationOwner } from '../lib/navigationOrder';
+import { useNavigationDrag } from '../lib/useNavigationDrag';
 
 /** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
  * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
@@ -24,7 +25,11 @@ interface AppShellProps {
 
 function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
+  const navigate = useNavigate();
+  const navRef = useRef<HTMLElement>(null);
   const [hovered, setHovered] = useState<string>();
+  useNavigationDrag(navRef, { enabled: compact, hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
+    onSelect: to => { setHovered(undefined); void navigate(to, { state: { navigationTab: true } }); } });
   useEffect(() => { setHovered(undefined); }, [location.pathname, hidden]);
   useEffect(() => {
     const clear = () => setHovered(undefined);
@@ -42,15 +47,18 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
   return (
     <>
       <nav
+        ref={navRef}
         className={compact ? `compact-nav${floating ? ' is-floating' : ''}${hidden ? ' is-hidden' : ''}` : 'side-nav'}
         aria-label={compact ? '移动导航' : '主导航'}
       >
+        {compact && <span className="nav-drag-indicator" data-nav-indicator aria-hidden="true" />}
         {items.map(({ to, label, icon }) => (
           <NavLink
             className={({ isActive }) => `nav-link${navEntryActive(to, isActive, location.pathname) ? ' is-active' : ''}${hovered === to ? ' is-pointer-hovered' : ''}`}
             end={to === '/'}
             key={to}
             to={to}
+            data-nav-route={to}
             onPointerEnter={event => { if (event.pointerType === 'mouse') setHovered(to); }}
             onPointerMove={event => { if (event.pointerType === 'mouse') setHovered(to); }}
             onPointerLeave={() => setHovered(undefined)}
@@ -60,7 +68,10 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
             state={{ navigationTab: true }}
             title={label}
           >
-            {({ isActive }) => <><StateIcon name={icon} selected={navEntryActive(to, isActive, location.pathname)} /><span>{label}</span></>}
+            {({ isActive }) => <>{compact ? <span className="nav-icon-pair" aria-hidden="true">
+              <StateIcon name={icon} className="nav-icon-outline" />
+              <StateIcon name={icon} selected className="nav-icon-filled" />
+            </span> : <StateIcon name={icon} selected={navEntryActive(to, isActive, location.pathname)} />}<span>{label}</span></>}
           </NavLink>
         ))}
 

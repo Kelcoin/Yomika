@@ -70,7 +70,9 @@ export function prepareDetailReturn(panel: HTMLElement, detail: HTMLElement, who
     position: 'fixed', left: `${left}px`, top: `${top}px`,
     width: `${right - left}px`, height: `${bottom - top}px`, boxSizing: 'border-box',
     ...insets, maxWidth: 'none',
-    margin: '0', maxHeight: 'none', overflow: 'hidden', zIndex: '30',
+    // A live page transition sits above content, below persistent navigation.
+    // Menu-level stacking made the shrinking canvas briefly cover the dock.
+    margin: '0', maxHeight: 'none', overflow: 'hidden', zIndex: 'var(--z-route-transition)',
     clipPath: `inset(${Math.max(0, (viewport?.top ?? 0) - top)}px 0 ${Math.max(0, bottom - (viewport?.bottom ?? window.innerHeight))}px 0)`,
   });
   const attribute = wholePage ? 'data-page-return' : 'data-detail-return';

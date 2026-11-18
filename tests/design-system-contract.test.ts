@@ -433,9 +433,12 @@ describe('design system contract', () => {
     expect(ruleBody(shell, '.workspace')).toMatch(/animation:\s*workspace-in\s+var\(--motion-standard\)\s+backwards/);
     expect(ruleBody(shell, '.workspace')).not.toMatch(/animation:[^;]*\bboth\b/);
 
-    // 层序本身也是合同：底栏 < 菜单 < 遮罩 < 模态。
+    // 页面转场 < 固定导航 < 菜单 < 遮罩 < 模态。
     const tokens = cssVariables(ruleBody(read('src/styles/tokens.css'), ':root'));
     const z = (name: string) => Number(tokens.get(name));
+    expect(z('--z-raised')).toBeLessThan(z('--z-route-transition'));
+    expect(z('--z-route-transition')).toBeLessThan(z('--z-compact-nav'));
+    expect(ruleBody(shell, '.sidebar')).toContain('z-index: var(--z-compact-nav)');
     expect(z('--z-compact-nav')).toBeLessThan(z('--z-menu'));
     expect(z('--z-menu')).toBeLessThan(z('--z-overlay'));
     expect(z('--z-overlay')).toBeLessThan(z('--z-modal'));
@@ -1094,7 +1097,7 @@ describe('design system contract', () => {
 
     const missing: string[] = [];
     let checked = 0;
-    for (const path of ['src/styles/base.css', 'src/styles/shell.css', 'src/styles/reader.css']) {
+    for (const path of ['src/styles/base.css', 'src/styles/shell.css', 'src/styles/reader.css', 'src/styles/detail-pager.css']) {
       const sheet = read(path);
       const stripped = sheet.replace(/\/\*[\s\S]*?\*\//g, '');
 

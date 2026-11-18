@@ -76,7 +76,7 @@ export function EhGalleryDetail({ accountId, galleryId, token, onClose }: { acco
       if (!result.ok) { showToast(presentEhError(result.error.code, result.error.message), 'error'); return; }
       setGallery(current => current ? { ...current, favoriteCategory: remove ? null : category, favoriteNote: remove ? '' : note } : current);
       setFavoriteOpen(false);
-      showToast(remove ? '已取消 EH 收藏' : '已保存 EH 收藏', 'success');
+      showToast(remove ? '已删除收藏' : gallery?.favoriteCategory != null ? '已修改收藏' : '已添加收藏', 'success');
     } finally { pending.current = false; setBusy(false); }
   };
   return <OverlayLayer><FocusScope asChild trapped={!favoriteOpen} loop>

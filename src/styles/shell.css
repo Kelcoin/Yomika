@@ -124,6 +124,7 @@ body::-webkit-scrollbar,
 .sidebar {
   grid-area: sidebar;
   position: sticky;
+  z-index: var(--z-compact-nav);
   top: 0;
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -7328,6 +7329,61 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .nav-link.is-pressed { scale: 1; }
 }
 
+/* A single bottom-bar capsule previews a drag and settles on release. Pointer
+   positions update only its transform; labels never scale or shift between tabs. */
+.compact-nav { isolation: isolate; touch-action: pan-y; }
+.nav-drag-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: var(--nav-indicator-width, 0px);
+  height: var(--nav-indicator-height, 0px);
+  transform: translate3d(var(--nav-indicator-x, 0px), var(--nav-indicator-y, 0px), 0);
+  border-radius: var(--radius-pill);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast);
+  z-index: -1;
+}
+.nav-drag-indicator::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--primary-container);
+  scale: var(--nav-indicator-scale-x, 1) var(--nav-indicator-scale-y, 1);
+}
+.compact-nav[data-nav-indicator-ready] .nav-drag-indicator { opacity: 1; }
+.nav-icon-pair { position: relative; display: block; flex: none; width: 19px; height: 19px; }
+.nav-icon-pair > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.nav-icon-pair .nav-icon-filled { visibility: hidden; }
+.is-active .nav-icon-pair .nav-icon-outline { visibility: hidden; }
+.is-active .nav-icon-pair .nav-icon-filled { visibility: visible; }
+/* Both paths stay at identical coordinates. The capsule reveals the filled
+   path only where it actually covers the glyph, including partial overlap. */
+.compact-nav[data-nav-indicator-ready] .nav-icon-pair .nav-icon-outline {
+  visibility: visible;
+  color: var(--ink-secondary);
+  -webkit-mask-image: linear-gradient(to right, var(--on-surface) 0 var(--nav-icon-start, 0%), transparent var(--nav-icon-start, 0%) var(--nav-icon-end, 0%), var(--on-surface) var(--nav-icon-end, 0%) 100%);
+  mask-image: linear-gradient(to right, var(--on-surface) 0 var(--nav-icon-start, 0%), transparent var(--nav-icon-start, 0%) var(--nav-icon-end, 0%), var(--on-surface) var(--nav-icon-end, 0%) 100%);
+}
+.compact-nav[data-nav-indicator-ready] .nav-icon-pair .nav-icon-filled {
+  visibility: visible;
+  color: var(--on-primary-container);
+  clip-path: inset(0 calc(100% - var(--nav-icon-end, 0%)) 0 var(--nav-icon-start, 0%));
+}
+.compact-nav[data-nav-dragging] .nav-drag-indicator { transition: none; will-change: transform; }
+.compact-nav[data-nav-indicator-ready] .nav-link:is(.is-active, .is-pressed),
+.compact-nav[data-nav-dragging] .nav-link.is-pointer-hovered { background: transparent; }
+.compact-nav[data-nav-indicator-ready] .nav-link::before { display: none; }
+.compact-nav[data-nav-indicator-ready] .nav-link.is-pressed { scale: 1; }
+.compact-nav[data-nav-dragging] .nav-link { cursor: grabbing; }
+.compact-nav[data-nav-dragging] .nav-link.is-active { color: var(--ink-secondary); }
+.compact-nav[data-nav-dragging] .nav-link[data-nav-preview] { color: var(--on-primary-container); }
+@media (prefers-reduced-motion: reduce) {
+  .nav-drag-indicator, .nav-drag-indicator::before { transition: none; }
+  .compact-nav[data-nav-pressing] .nav-drag-indicator::before { scale: 1; }
+}
 /* Keep the revoke action alongside its device, including narrow settings menus. */
 .settings-paired-client { flex-wrap: nowrap; gap: var(--space-2); padding-block: var(--space-2); }
 .settings-paired-client .settings-device-option { grid-template-columns: auto minmax(0, 1fr); }
