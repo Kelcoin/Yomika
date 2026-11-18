@@ -2259,6 +2259,60 @@ describe('reader route', () => {
     await waitFor(() => expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0'));
   });
 
+  it('uses foreground priority for local fallback when a prefetched page becomes visible', async () => {
+    installHost();
+    let rejectPrefetch!: (value: unknown) => void;
+    const pending = new Promise(resolve => { rejectPrefetch = resolve; });
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false }, localModel: 'local-model', pageCount: 2, prefetchPages: 1,
+      process: args => (args?.input as { pageIndex: number }).pageIndex === 1 ? pending : [0x89, 0x50, 0x4e, 0x47],
+    });
+    const reader = await screen.findByRole('main', { name: '漫画阅读器' });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(reader);
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(calls).toContainEqual(['remote_compute_process', expect.objectContaining({
+      input: expect.objectContaining({ pageIndex: 1, priority: 'background' }),
+    })]));
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    await screen.findByRole('img', { name: '第 2 页' });
+    await act(async () => { rejectPrefetch({ ok: false, error: {
+      code: 'COMPUTE_UNAVAILABLE', message: 'remote worker is over budget', retryable: true,
+    } }); });
+    await waitFor(() => expect(calls).toContainEqual(['compute_submit_reader_page', expect.objectContaining({
+      payload: expect.objectContaining({ pageIndex: 1, priority: 'foreground' }),
+    })]));
+    await waitFor(() => expect(screen.getByRole('img', { name: '第 2 页' })).toHaveAttribute('src', 'blob:enhanced-1'));
+  });
+
+  it('keeps the original visible and retries after both workers reject the page for pressure', async () => {
+    installHost({ failCode: 'COMPUTE_UNAVAILABLE' });
+    let remoteAttempts = 0;
+    const { calls } = remoteReader({ ready: { upscale: true, dlssnr: false }, localModel: 'local-model',
+      process: () => {
+        remoteAttempts += 1;
+        return { ok: false, error: { code: 'COMPUTE_UNAVAILABLE', message: 'worker pressure', retryable: true } };
+      },
+    });
+    const image = await screen.findByRole('img', { name: '第 1 页' });
+    const original = image.getAttribute('src');
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    const toggle = await screen.findByRole('button', { name: '开启超分' });
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(toggle);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(calls.filter(([name]) => name === 'compute_submit_reader_page')).toHaveLength(1);
+      expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', original);
+      installHost();
+      await act(async () => { await vi.advanceTimersByTimeAsync(31_500); });
+      expect(remoteAttempts).toBeGreaterThanOrEqual(2);
+      expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:enhanced-0');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls back locally after a remote transport failure without retrying forever', async () => {
     installHost();
     let requests = 0;

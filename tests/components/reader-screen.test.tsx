@@ -769,8 +769,12 @@ describe('reader screen', () => {
     turnForward();
     expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
 
-    // 缺陷形态：这一甩被 `commit` 挡掉，页还是第 3 页，阅读器还在。
-    turnForward();
+    // A short final-page flick bounces back. A longer deliberate pull exits.
+    fireEvent.touchStart(reader, { touches: [{ clientX: direction === 'ltr' ? 200 : 135, clientY: 100 }] });
+    fireEvent.touchEnd(reader, { changedTouches: [{ clientX: direction === 'ltr' ? 135 : 200, clientY: 100 }] });
+    expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
+    fireEvent.touchStart(reader, { touches: [{ clientX: direction === 'ltr' ? 360 : 40, clientY: 100 }] });
+    fireEvent.touchEnd(reader, { changedTouches: [{ clientX: direction === 'ltr' ? 40 : 360, clientY: 100 }] });
 
     expect(screen.queryByRole('main', { name: '漫画阅读器' })).not.toBeInTheDocument();
     expect(screen.getByText('library list')).toBeInTheDocument();
@@ -788,8 +792,8 @@ describe('reader screen', () => {
         </Routes>
       </MemoryRouter>);
       const reader = screen.getByRole('main', { name: '漫画阅读器' });
-      const startX = direction === 'ltr' ? 240 : 80;
-      const endX = direction === 'ltr' ? 80 : 240;
+      const startX = direction === 'ltr' ? 360 : 40;
+      const endX = direction === 'ltr' ? 40 : 360;
       fireEvent.touchStart(reader, { touches: [{ clientX: startX, clientY: 300 }] });
       fireEvent.touchMove(reader, { touches: [{ clientX: endX, clientY: 300 }] });
       const hint = document.querySelector('.reader-exit-hint');

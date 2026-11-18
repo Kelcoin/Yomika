@@ -115,14 +115,18 @@ export function useHorizontalScroller() {
     restoreSnap();
   }, [restoreSnap]);
   const settleToNearest = useCallback((element: HTMLElement) => {
-    const cards = [...element.querySelectorAll<HTMLElement>('.archive-rail-item')];
+    const cards = [...element.querySelectorAll<HTMLElement>('.archive-rail-item:not(.is-leaving)')];
     if (!cards.length || !element.isConnected || element.closest('[hidden]')) { restoreSnap(); return; }
     if (coastRef.current !== undefined) window.cancelAnimationFrame(coastRef.current);
     coastRef.current = undefined;
     const padding = parseFloat(getComputedStyle(element).scrollPaddingInlineStart) || 0;
-    const railLeft = element.getBoundingClientRect().left;
-    const offsets = cards.map(card => element.scrollLeft + card.getBoundingClientRect().left - railLeft);
-    const target = getNearestRailSnap(element.scrollLeft, offsets, element.scrollWidth - element.clientWidth, padding);
+    const track = element.querySelector<HTMLElement>(':scope > [data-horizontal-content]');
+    // Layout offsets ignore both the track's spring translation and card entrance animations.
+    const offsets = track?.offsetParent === element && cards.every(card => card.offsetParent === track)
+      ? cards.map(card => track.offsetLeft + card.offsetLeft)
+      : cards.map(card => element.scrollLeft + card.getBoundingClientRect().left - element.getBoundingClientRect().left);
+    const maximum = edgeRef.current?.maxScroll() ?? element.scrollWidth - element.clientWidth;
+    const target = getNearestRailSnap(element.scrollLeft, offsets, maximum, padding);
     const start = element.scrollLeft;
     const distance = target - start;
     if (Math.abs(distance) < 1 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { element.scrollLeft = target; restoreSnap(); return; }

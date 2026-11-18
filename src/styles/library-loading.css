@@ -9,20 +9,14 @@
   pointer-events: none;
 }
 
-/* 容器的内边距和行距照抄真列表：`.archive-list` 是 8px（缩略图档位 12px），行距来自
-   `.archive-row` 自己的 4px margin-block，不是容器的格间距。骨架的内边距必须跟着真列表
-   走，否则落地那一拍整列会横跳几个像素。 */
-.archive-list-skeleton-layer .archive-list-skeleton { padding: 8px; }
-.archive-list-skeleton-layer .archive-list-skeleton.is-thumbnail { padding: var(--space-3); }
-.archive-list-skeleton-layer .archive-list-skeleton.is-wide { gap: 0; }
-.archive-list-skeleton-layer .archive-list-skeleton.is-wide .archive-row-skeleton { margin-block: 4px; }
+/* The containing archive list already supplies the exact loaded-card gutter. */
+.archive-list-skeleton.is-wide .archive-row-skeleton { margin-block: 4px; }
 
 /* 时间轴那一栏属于行本身：真行是 `82px minmax(0, 1fr)` 的网格，时间在左列、卡片在右列。
    骨架行让出同样的 82px，占位卡才落在真卡片的位置上；原来这 82px 走的是容器的
    `padding-left: 104px`，占位卡于是比真卡片右移 18px。轨线由列表背景画，这里不再重复
    画一根；节点和日期按真行的位置摆（真节点圆心距列表左边缘 77px、距行顶 12px，真日期
    右端在 58px 处）。 */
-.archive-list-skeleton-layer .archive-list-skeleton.has-timeline { padding-left: 8px; }
 .archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-row-skeleton { margin-left: 82px; }
 
 .archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton {

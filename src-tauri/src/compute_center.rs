@@ -2255,7 +2255,15 @@ impl RemoteFailure {
 
     fn response(status: u16, body: &str) -> Self {
         // A received server error can be an engine/protocol defect, not a link failure.
+        let payload = serde_json::from_str::<serde_json::Value>(body).ok();
+        let worker_busy = payload.as_ref().and_then(|value| value.get("error")).is_some_and(|error| {
+            error["code"].as_str() == Some("COMPUTE_UNAVAILABLE")
+                // Older hosts expose the worker code only as a final suffix.
+                || (status == 500 && error["code"].as_str() == Some("INFERENCE_UNAVAILABLE")
+                    && error["message"].as_str().is_some_and(|message| message.ends_with("（COMPUTE_UNAVAILABLE）")))
+        });
         let code = match status {
+            500 | 503 if worker_busy => "COMPUTE_UNAVAILABLE",
             500 => "INFERENCE_UNAVAILABLE",
             429 => "REMOTE_RATE_LIMIT",
             _ => "REMOTE_UNAVAILABLE",
@@ -2946,6 +2954,18 @@ mod tests {
         assert_eq!(error.code, "INFERENCE_UNAVAILABLE");
         assert!(error.message.contains("broken engine"));
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn remote_worker_pressure_preserves_retryable_compute_code() {
+        for (status, code, message) in [
+            (500, "INFERENCE_UNAVAILABLE", "upscale：worker budget（COMPUTE_UNAVAILABLE）"),
+            (503, "COMPUTE_UNAVAILABLE", "upscale：worker budget"),
+        ] {
+            let error = RemoteFailure::response(status, &error_body(code, message));
+            assert_eq!(error.code, "COMPUTE_UNAVAILABLE");
+            assert!(error.retryable);
+        }
     }
 
     #[test]

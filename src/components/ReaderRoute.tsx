@@ -1056,13 +1056,15 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           }
           if (!derived) {
             if (job.upscaleModel) setDerivingStage('upscale');
+            // The page may have entered the viewport while awaiting the remote worker.
+            const localPriority = visiblePagesRef.current.has(pageIndex) ? 'foreground' : priority;
             const enhancedFromPageIdentity: ImageCacheIdentity = {
               ...identity,
               rendition: 'enhanced',
               modelId: job.upscaleModel,
               outputScale,
               source: 'reader-page',
-              priority,
+              priority: localPriority,
               taskId: `${taskBase}:enhanced`,
             };
             const renditions = await loadLocalRenditions({
@@ -1073,7 +1075,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               archiveId: context.archiveId,
               pageIndex,
               generation: job.generation,
-              priority,
+              priority: localPriority,
               upscaleModel: job.upscaleModel || undefined,
               enhancedFromPageIdentity,
               onEngine: (model, engine) => noticeEngineFallback(model, engine),
@@ -1382,7 +1384,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       .map((job) => {
         if (job.tier === 'background' && !wanted.includes(job.pageIndex)) return job;
         const tier: DerivedTier = visible.has(job.pageIndex) ? 'visible' : 'neighbour';
-        return tier === job.tier ? job : { ...job, tier };
+        return tier === job.tier ? job : { ...job, tier, ...(tier === 'visible' ? { retryAt: 0 } : {}) };
       });
     for (const [index, controller] of derivedAbortsRef.current) {
       if (wanted.includes(index)) continue;

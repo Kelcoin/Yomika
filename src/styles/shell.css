@@ -2903,17 +2903,13 @@ body::-webkit-scrollbar,
 
 .archive-list.is-thumbnail { padding: var(--space-3); }
 
-.archive-list-skeleton { padding: var(--space-2); }
-.archive-list-skeleton.is-wide { display: grid; gap: var(--card-gap); }
+.archive-list-skeleton.is-wide { display: grid; }
 .archive-list-skeleton.is-thumbnail { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--card-gap); }
 .archive-row-skeleton { display: grid; grid-template-columns: 100px minmax(0, 1fr); gap: var(--space-3); box-sizing: border-box; height: 158px; min-height: 158px; padding: var(--space-2); border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); }
-.archive-list-skeleton.is-thumbnail .archive-thumb-card.is-skeleton { flex: 0 0 180px; width: 180px; min-width: 180px; height: 350px; grid-template-rows: 220px 1fr; }
-.archive-list-skeleton.is-thumbnail .archive-thumb-card.is-skeleton .archive-thumb-card-media { height: 220px; }
 .archive-row-skeleton-cover { width: 100%; height: 100%; min-height: 0; border-radius: var(--radius-control); }
 .archive-row-skeleton-copy { display: grid; align-content: center; gap: var(--space-3); }
 .archive-row-skeleton-copy .skeleton-line:nth-child(2) { width: 72%; }
 .archive-row-skeleton-copy .skeleton-line:nth-child(3) { width: 46%; }
-.archive-list-skeleton.has-timeline { padding-left: 104px; }
 .archive-row-skeleton { position: relative; }
 .archive-timeline-skeleton { position: absolute; top: 0; left: -76px; bottom: -12px; width: 56px; border-right: 2px solid var(--outline-variant); }
 .archive-timeline-skeleton::before { position: absolute; top: 22px; right: -6px; width: 10px; height: 10px; border-radius: 50%; background: var(--outline-variant); content: ''; }
@@ -3136,6 +3132,7 @@ body::-webkit-scrollbar,
    with the same media / body / title / tags / meta children. Only the geometry
    differs — a fixed 350px cell the virtualizer can place. */
 .archive-list.is-thumbnail .archive-thumb-card {
+  min-width: 0;
   position: relative;
   box-sizing: border-box;
   width: 100%;
@@ -4533,8 +4530,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    返回手势。逐设备的取值由 `src/lib/horizontalScroller.ts` 的
    `getTouchScrollStyle()` / `getMouseScrollStyle()` 以行内样式落上去（行内赢过这里），
    这一条是首帧与没有脚本时的兜底，两边必须一致。 */
-.archive-rail-grid { width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: none; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: none; touch-action: auto; }
-.archive-rail-track { display: flex; align-items: flex-start; gap: var(--space-3); width: max-content; min-width: 100%; }
+.archive-rail-grid { position: relative; width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-x: none; overscroll-behavior-y: auto; padding: 6px 6px var(--space-2); scroll-padding-inline: 6px; scroll-snap-type: none; touch-action: auto; }
+.archive-rail-track { position: relative; display: flex; align-items: flex-start; gap: var(--space-3); width: max-content; min-width: 100%; }
 /* Snap uses an untransformed wrapper: pressing the first card must not
    move its snap area and scroll the entire rail sideways. */
 .archive-rail-item { flex: 0 0 auto; scroll-snap-align: start; }
@@ -4573,7 +4570,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .archive-thumb-card:hover:not([aria-current='page']) { background: var(--surface-container-highest); }
 }
 
-.archive-thumb-card.is-skeleton { flex-basis: 150px; width: 150px; min-width: 150px; pointer-events: none; border-color: var(--outline-variant); }
+.archive-thumb-card.is-skeleton { pointer-events: none; }
 
 /* 这里原先还有一条 `.archive-thumb-card.is-skeleton:hover { transform: none;
    box-shadow: none; }`：骨架卡本来就不是指针目标，它唯一的作用是撤销上面那条被
@@ -7444,7 +7441,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .metadata-skeleton-input { height: 44px; border-radius: var(--radius-control); }
 .metadata-skeleton-tags { height: 80px; border-radius: var(--radius-control); }
 .metadata-skeleton-summary { height: 184px; border-radius: var(--radius-control); }
-.local-archives-list > .archive-list-skeleton-layer .archive-list-skeleton { padding: 0; }
 
 .route-search-skeleton { display: block; width: 100%; height: 44px; border-radius: var(--radius-pill); }
 

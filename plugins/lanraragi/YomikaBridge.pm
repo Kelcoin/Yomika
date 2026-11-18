@@ -13,7 +13,12 @@ my $JSON = JSON::PP->new->canonical->ascii->allow_nonref;
 
 sub plugin_info {
     return (name => 'Yomika Bridge', type => 'script', namespace => 'yomikabridge',
-        author => 'Yomika', version => '1.1.0', parameters => {},
+        author => 'Yomika', version => '1.2.0', parameters => {
+            import_external_history => {
+                type => 'bool', default_value => 0,
+                desc => 'Include reading recorded by LANraragi or other clients in Yomika history',
+            },
+        },
         description => 'Versioned shared reading state, search presets and nonduplicate marks. No archive changes.',
         oneshot_arg => 'Protocol v1 JSON request');
 }
@@ -82,12 +87,18 @@ sub transition {
             : ($state->{progress} ? $state->{progress}{coverAlone} : undef);
         $next->{progress}{updatedAt} = $now;
         $next->{historyAt} = $now;
+        delete $next->{historyPageIndex};
         $next->{watchlistAt} = undef if ($p->{pageIndex} + 1) / $p->{pageCount} > 0.9;
     } elsif ($kind eq 'watchlist_add') { $next->{watchlistAt} //= $now;
     } elsif ($kind eq 'watchlist_remove') { $next->{watchlistAt} = undef;
-    } elsif ($kind eq 'history_delete') { $next->{historyAt} = undef;
     } else {
-        $next->{progress} = undef; $next->{historyAt} = undef; $next->{generation}++;
+        $next->{historyAt} = undef;
+        $next->{historyRemovedAt} = $now;
+        delete $next->{historyPageIndex};
+        if ($kind eq 'progress_clear') {
+            $next->{progress} = undef;
+            $next->{generation}++;
+        }
     }
     return undef if $state->{version} != $op->{expectedVersion} || $state->{generation} != $op->{generation};
     $next->{version}++;
@@ -152,7 +163,7 @@ if action=='reconcile' then
  for _,observed in ipairs(req.states) do
   local s=state(observed.archiveId)
   if s.version==observed.version and (s.progress~=cjson.null or s.historyAt~=cjson.null or s.watchlistAt~=cjson.null) then
-   s.progress=cjson.null; s.historyAt=cjson.null; s.watchlistAt=cjson.null; s.generation=s.generation+1; s.version=s.version+1
+   s.progress=cjson.null; s.historyAt=cjson.null; s.watchlistAt=cjson.null; s.historyPageIndex=nil; s.historyRemovedAt=req.now; s.generation=s.generation+1; s.version=s.version+1
    redis.call('HSET',p..'states',s.archiveId,cjson.encode(s))
    redis.call('ZREM',p..'history',s.archiveId); redis.call('ZREM',p..'watchlist',s.archiveId)
    redis.call('ZADD',p..'records',redis.call('HINCRBY',p..'meta','version',1),s.archiveId)
@@ -166,6 +177,31 @@ if action=='reconcile' then
    redis.call('HINCRBY',p..'meta','version',1)
   end
  end
+ return cjson.encode(envelope({}))
+end
+if action=='import_native_history' then
+ local meta=p..'meta'
+ if (redis.call('HGET',meta,'nativeHistoryCursor') or '0')~=req.fromCursor
+     or (redis.call('HGET',meta,'nativeHistoryRevision') or '0')~=req.scanRevision then
+  return cjson.encode(envelope({}))
+ end
+ for _,visit in ipairs(req.visits) do
+  local s=state(visit.id)
+  local previous=s.historyAt~=cjson.null and s.historyAt or (s.historyRemovedAt or '')
+  if s.progress~=cjson.null and s.progress.updatedAt>previous then previous=s.progress.updatedAt end
+  if visit.at>previous then
+   s.historyAt=visit.at
+   s.historyPageIndex=visit.pageIndex
+   s.version=s.version+1
+   redis.call('HSET',p..'states',visit.id,cjson.encode(s))
+   local version=redis.call('HINCRBY',meta,'version',1)
+   redis.call('ZADD',p..'history',version,visit.id)
+   redis.call('ZADD',p..'records',0,visit.id)
+  end
+ end
+ redis.call('HSET',meta,'nativeHistoryCursor',req.cursor)
+ redis.call('HINCRBY',meta,'nativeHistoryRevision',1)
+ if req.cursor=='0' then redis.call('HSET',meta,'nativeHistoryCompletedAt',req.now) end
  return cjson.encode(envelope({}))
 end
 if action=='hello' then return cjson.encode(envelope({capabilities={states=true,history=true,watchlist=true,workspace=true,collections=true,export=true,coverStatus=false,push=false},limits={requestBytes=6000,states=50,page=100,workspaceBytes=1800,collectionPage=50,collectionValueBytes=4000}})) end
@@ -237,8 +273,51 @@ redis.call('HSET',p..'operations',req.operationId,cjson.encode({digest=req.diges
 return result
 LUA
 
+# LANraragi writes native progress and lastreadtime to the archive database.
+# Work in bounded batches so opening History doesn't run KEYS or lock Redis for a full scan.
+our $NATIVE_HISTORY_SCAN = <<'LUA';
+local cursor=ARGV[1]
+local result={}
+for batch=1,8 do
+ local scan=redis.call('SCAN',cursor,'MATCH',string.rep('[0-9a-f]',40),'COUNT',500)
+ cursor=scan[1]
+ for _,id in ipairs(scan[2]) do
+  if redis.call('TYPE',id).ok=='hash' then
+   local fields=redis.call('HMGET',id,'file','lastreadtime','progress','pagecount')
+   local at=tonumber(fields[2])
+   local page=tonumber(fields[3])
+   local count=tonumber(fields[4])
+   if fields[1] and at and at>0 and at<=tonumber(ARGV[2]) and at==math.floor(at)
+       and page and page>=1 and page==math.floor(page) and count and count>=page and count<=1000000 then
+    result[#result+1]={id=id,ts=at,pageIndex=page-1}
+   end
+  end
+ end
+ if cursor=='0' then break end
+end
+return cjson.encode({cursor=cursor,visits=result})
+LUA
+
+sub import_native_history {
+    my ($redis, $archives, $execute) = @_;
+    my $meta = $PREFIX . 'meta';
+    my $revision = $redis->hget($meta, 'nativeHistoryRevision') // '0';
+    my $cursor = $redis->hget($meta, 'nativeHistoryCursor') // '0';
+    my $now = time;
+    my $completed = $redis->hget($meta, 'nativeHistoryCompletedAt') // 0;
+    return if $cursor eq '0' && $now - $completed < 10;
+    my $scan = $JSON->decode($archives->eval($NATIVE_HISTORY_SCAN, 0, $cursor, $now));
+    my @visits = sort {$a->{ts} <=> $b->{ts} || $a->{id} cmp $b->{id}}
+        @{ref($scan->{visits}) eq 'ARRAY' ? $scan->{visits} : []};
+    for my $visit (@visits) {
+        $visit->{at} = strftime('%Y-%m-%dT%H:%M:%S.000Z', gmtime(delete $visit->{ts}));
+    }
+    $execute->({action => 'import_native_history', fromCursor => "$cursor", cursor => "$scan->{cursor}",
+        scanRevision => "$revision", now => $now, visits => \@visits});
+}
+
 sub dispatch {
-    my ($redis, $archives, $req) = @_;
+    my ($redis, $archives, $req, $import_external_history) = @_;
     fail('BRIDGE_INVALID_REQUEST') unless ref($req) eq 'HASH' && integer($req->{protocol}) && $req->{protocol} == 1;
     my $action = $req->{action} // '';
     fail('BRIDGE_INVALID_REQUEST') unless !ref($action) && $action =~ /\A(?:hello|states|list|export|apply|workspace_get|workspace_put|collection_list|collection_get|collection_apply)\z/;
@@ -302,6 +381,9 @@ sub dispatch {
     # IDs are persisted using HSETNX inside the same script, including concurrent first callers.
     my $entropy = join(':', time, $$, rand(), rand(), {});
     my $execute = sub {$JSON->decode($redis->eval($LUA, 1, $PREFIX, $JSON->encode($_[0]), sha256_hex($entropy), sha256_hex('epoch:' . $entropy)))};
+    if ($import_external_history && $action eq 'list' && $req->{kind} eq 'history' && !$req->{offset}) {
+        import_native_history($redis, $archives, $execute);
+    }
     my $result = $execute->(\%arg);
     if ($action =~ /\A(?:hello|states|list|export|collection_list|collection_get)\z/) {
         my $candidates = $action eq 'hello' ? $execute->({action => 'reconcile_candidates'}) : $result;
@@ -344,7 +426,7 @@ sub dispatch {
 }
 
 sub run_script {
-    my ($class, $info) = @_;
+    my ($class, $info, $settings) = @_;
     my ($redis, $archives, $result);
     my $ok = eval {
         my $raw = $info->{oneshot_param} // '';
@@ -356,7 +438,9 @@ sub run_script {
         require LANraragi::Model::Config;
         $redis = LANraragi::Model::Config->get_redis_config;
         $archives = LANraragi::Model::Config->get_redis;
-        $result = dispatch($redis, $archives, $req);
+        my $flag = ref($settings) eq 'HASH' ? $settings->{import_external_history} : undef;
+        my $import_external_history = defined($flag) && $flag =~ /\A(?:1|true|on)\z/i;
+        $result = dispatch($redis, $archives, $req, $import_external_history);
         1;
     };
     my $error = $@;

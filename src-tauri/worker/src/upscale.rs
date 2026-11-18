@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use yomika_compute_core::anime4k::{self, Anime4kEngine};
 use yomika_compute_core::engine::ValidationVerdict;
+use yomika_compute_core::error::ComputeError;
 use yomika_compute_core::fit;
 use yomika_compute_core::inputs;
 use yomika_compute_core::onnx::{validate_runtime_cached, OnnxEngine};
@@ -393,97 +394,122 @@ impl Engine for UpscaleEngine {
         //
         //    * 模型那条：同一个输入根、同一套复核。宿主声明的 hash/长度对不上就不算。
         //    * 内置链那条：没有文件，核的是身份（名字、版本、倍率），见 `open_builtin`。
-        let (engine, engine_id, engine_version, device, fallback): (
+        let open_engine = |policy| -> Result<(
             Arc<dyn UpscaleEngineTrait>,
             &'static str,
             String,
             String,
             Option<EngineFallback>,
-        ) = if let Some(chain) = builtin {
-            let opened = self.open_builtin(chain, stage.engine_policy, scale)?;
-            (
-                opened.engine,
-                ANIME4K_ENGINE_ID,
-                format!("{}/{}", chain.chain_id, chain.version),
-                opened.device,
-                opened.fallback,
-            )
-        } else {
-            let grant = model.expect("上面已经判过：两栏不会都空");
-            let model_path = inputs::resolve_granted(&self.input_root, &grant.relative_path)
-                .map_err(|error| StageError::failed(error.code(), error.message()))?;
-            inputs::verify_file(&model_path, &grant.content_hash, grant.byte_length)
-                .map_err(|error| StageError::failed(error.code(), error.message()))?;
-            let accelerator_path = stage.accelerator.as_ref().map(|companion| {
-                let path = inputs::resolve_granted(&self.input_root, &companion.relative_path)
+        ), StageError> {
+            Ok(if let Some(chain) = builtin {
+                let opened = self.open_builtin(chain, policy, scale)?;
+                (
+                    opened.engine,
+                    ANIME4K_ENGINE_ID,
+                    format!("{}/{}", chain.chain_id, chain.version),
+                    opened.device,
+                    opened.fallback,
+                )
+            } else {
+                let grant = model.expect("上面已经判过：两栏不会都空");
+                let model_path = inputs::resolve_granted(&self.input_root, &grant.relative_path)
                     .map_err(|error| StageError::failed(error.code(), error.message()))?;
-                inputs::verify_file(&path, &companion.content_hash, companion.byte_length)
+                inputs::verify_file(&model_path, &grant.content_hash, grant.byte_length)
                     .map_err(|error| StageError::failed(error.code(), error.message()))?;
-                Ok::<_,StageError>(path)
-            }).transpose()?;
-            let (onnx, device, engine_id, version, fallback) = self.open_for(
-                &model_path,
-                stage.engine_policy,
-                scale,
-                max_pixels,
-                min_input_edge,
-                &grant.relative_path,
-                accelerator_path.as_deref(),
-                request.cancel,
-                request.progress,
-            )?;
-            (
-                onnx as Arc<dyn UpscaleEngineTrait>,
-                engine_id,
-                version,
-                device,
-                fallback,
-            )
+                let accelerator_path = stage.accelerator.as_ref().map(|companion| {
+                    let path = inputs::resolve_granted(&self.input_root, &companion.relative_path)
+                        .map_err(|error| StageError::failed(error.code(), error.message()))?;
+                    inputs::verify_file(&path, &companion.content_hash, companion.byte_length)
+                        .map_err(|error| StageError::failed(error.code(), error.message()))?;
+                    Ok::<_,StageError>(path)
+                }).transpose()?;
+                let (onnx, device, engine_id, version, fallback) = self.open_for(
+                    &model_path,
+                    policy,
+                    scale,
+                    max_pixels,
+                    min_input_edge,
+                    &grant.relative_path,
+                    accelerator_path.as_deref(),
+                    request.cancel,
+                    request.progress,
+                )?;
+                (
+                    onnx as Arc<dyn UpscaleEngineTrait>,
+                    engine_id,
+                    version,
+                    device,
+                    fallback,
+                )
+            })
         };
         check_cancelled(request.cancel)?;
-        (request.progress)(30);
 
         // 3. 算。分块规划、预算（按输出像素）、每块前看取消牌都在核心的 `upscale` 里。
-        let tile = stage.tile.unwrap_or(0);
-        let gpu_memory = if engine_id == ENGINE_ID && device == "gpu:0" {
-            #[cfg(windows)]
-            { yomika_compute_core::dlssnr::gpu::video_memory_for_device_index(0).map(|m| resources::GpuMemory { budget_bytes: m.budget_bytes, used_bytes: m.used_bytes }) }
-            #[cfg(not(windows))]
-            { None }
-        } else if engine_id == ANIME4K_ENGINE_ID && device != RuntimeId::Cpu.as_str() {
-            anime4k::gpu::video_memory()
-        } else { None };
-        let fixed = engine.fixed_input_size();
-        let padding = upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
-        let adaptive = resources::auto_tile_size(gpu_memory, scale, padding, min_input_edge, fixed);
-        // Non-local models use an area budget for one coherent frame. Do not
-        // apply the ordinary 1024px tile ceiling to a GPU with ample headroom.
-        let adaptive = if engine.requires_whole_frame() && fixed.is_none() {
-            let available = if device == RuntimeId::Cpu.as_str() {
-                resources::system_memory().map(|m| m.available_commit_bytes / 4)
-                    .unwrap_or(256 << 20)
-            } else { resources::gpu_available_bytes(gpu_memory) };
-            ((available / (256 * u64::from(scale).pow(2))) as f64).sqrt()
-                .min(f64::from(width.max(height))) as u32
-        } else { adaptive }.max(min_input_edge);
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        let adaptive = adaptive.min(resources::mobile_tile_edge_for_pixel_budget(request.run.budgets.max_pixels)).max(min_input_edge);
-        #[cfg(any(target_os = "android", target_os = "ios"))]
-        let tile = tile.min(adaptive);
-        let options = UpscaleOptions {
-            // Run native-scale tiles, then downsample while assembling the 2x
-            // display frame, avoiding a full-frame 4x allocation and transfer.
-            output_scale: Some(delivery_scale),
-            tile_size: if tile == 0 { adaptive } else { fixed.map(|_| tile.min(adaptive)).unwrap_or(tile) },
-            tile_sleep_ms: 0,
-            tile_padding: padding,
-            max_pixels,
-            cancel: Some(request.cancel.clone()),
-            ..UpscaleOptions::default()
+        let run = |engine: &dyn UpscaleEngineTrait, engine_id: &str, device: &str| {
+            let tile = stage.tile.unwrap_or(0);
+            let gpu_memory = if engine_id == ENGINE_ID && device == "gpu:0" {
+                #[cfg(windows)]
+                { yomika_compute_core::dlssnr::gpu::video_memory_for_device_index(0).map(|m| resources::GpuMemory { budget_bytes: m.budget_bytes, used_bytes: m.used_bytes }) }
+                #[cfg(not(windows))]
+                { None }
+            } else if engine_id == ANIME4K_ENGINE_ID && device != RuntimeId::Cpu.as_str() {
+                anime4k::gpu::video_memory()
+            } else { None };
+            let fixed = engine.fixed_input_size();
+            let padding = upscale::DEFAULT_TILE_PADDING.max(engine.tile_padding());
+            let adaptive = resources::auto_tile_size(gpu_memory, scale, padding, min_input_edge, fixed);
+            // Non-local models use an area budget for one coherent frame. Do not
+            // apply the ordinary 1024px tile ceiling to a GPU with ample headroom.
+            let adaptive = if engine.requires_whole_frame() && fixed.is_none() {
+                let available = if device == RuntimeId::Cpu.as_str() {
+                    resources::system_memory().map(|m| m.available_commit_bytes / 4)
+                        .unwrap_or(256 << 20)
+                } else { resources::gpu_available_bytes(gpu_memory) };
+                ((available / (256 * u64::from(scale).pow(2))) as f64).sqrt()
+                    .min(f64::from(width.max(height))) as u32
+            } else { adaptive }.max(min_input_edge);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let adaptive = adaptive.min(resources::mobile_tile_edge_for_pixel_budget(request.run.budgets.max_pixels)).max(min_input_edge);
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            let tile = tile.min(adaptive);
+            let options = UpscaleOptions {
+                // Run native-scale tiles, then downsample while assembling the 2x
+                // display frame, avoiding a full-frame 4x allocation and transfer.
+                output_scale: Some(delivery_scale),
+                tile_size: if tile == 0 { adaptive } else { fixed.map(|_| tile.min(adaptive)).unwrap_or(tile) },
+                tile_sleep_ms: 0,
+                tile_padding: padding,
+                max_pixels,
+                cancel: Some(request.cancel.clone()),
+                ..UpscaleOptions::default()
+            };
+            upscale::upscale_rgba_with_recovery_progress(engine, rgba.as_raw(), width, height, options, min_input_edge,
+                &|completed, total| (request.progress)(30 + (completed * 54 / total.max(1)) as u32))
         };
-        let upscaled = upscale::upscale_rgba_with_recovery_progress(engine.as_ref(), rgba.as_raw(), width, height, options, min_input_edge,
-            &|completed, total| (request.progress)(30 + (completed * 54 / total.max(1)) as u32))
-            .map_err(to_stage_error)?;
+        let (mut engine, mut engine_id, mut engine_version, mut device, mut fallback) =
+            open_engine(stage.engine_policy)?;
+        (request.progress)(30);
+        let upscaled = match run(engine.as_ref(), engine_id, &device) {
+            Err(error @ ComputeError::InvalidInput(_))
+                if stage.engine_policy == EnginePolicy::Auto && device != RuntimeId::Cpu.as_str() =>
+            {
+                check_cancelled(request.cancel)?;
+                // A session can open successfully and still fail on real pixels.
+                // Drop it before allocating the CPU session for the same model.
+                drop(engine);
+                self.release_cached_session();
+                let failed_device = device;
+                (engine, engine_id, engine_version, device, _) = open_engine(EnginePolicy::Cpu)?;
+                fallback = Some(EngineFallback {
+                    requested: failed_device,
+                    used: device.clone(),
+                    reason: error.to_string(),
+                });
+                run(engine.as_ref(), engine_id, &device).map_err(to_stage_error)?
+            }
+            result => result.map_err(to_stage_error)?,
+        };
         check_cancelled(request.cancel)?;
         (request.progress)(85);
 
@@ -611,6 +637,34 @@ mod tests {
         assert_eq!(output.engine.id, ANIME4K_ENGINE_ID);
         let decoded = image::open(root.join(&output.relative_name)).unwrap();
         assert_eq!((decoded.width(), decoded.height()), (20, 10));
+        struct FailingAccelerator;
+        impl UpscaleEngineTrait for FailingAccelerator {
+            fn scale(&self) -> u32 { 2 }
+            fn upscale_tile(&self, _: &[u8], _: u32, _: u32) -> Result<Vec<u8>, ComputeError> {
+                Err(ComputeError::InvalidInput("accelerator failed on real pixels".into()))
+            }
+        }
+        for policy in [EnginePolicy::Auto, EnginePolicy::Gpu] {
+            let mut accelerated = stage.clone();
+            accelerated.stage_id = format!("accelerated-{}", policy.as_str());
+            accelerated.engine_policy = policy;
+            *engine.builtin.lock().unwrap() = Some(CachedBuiltin {
+                key: format!("{}:{}:2:{}", preset.id, preset.version, policy.as_str()),
+                engine: Arc::new(FailingAccelerator),
+                device: "fake-accelerator".into(),
+                fallback: None,
+            });
+            let result = engine.execute(StageRequest { run: &run, stage: &accelerated, input: Some(&input), cancel: &cancel, sink: &sink, progress: &|_| {} });
+            if policy == EnginePolicy::Auto {
+                let report = result.unwrap().engine;
+                assert_eq!(report.device_id, "cpu");
+                let fallback = report.fallback.unwrap();
+                assert_eq!(fallback.requested, "fake-accelerator");
+                assert!(fallback.reason.contains("failed on real pixels"));
+            } else {
+                assert!(result.is_err(), "forced GPU must not fall back to CPU");
+            }
+        }
         // The UI's output multiplier caps delivery, never the model's graph.
         let mut original_size = stage.clone();
         original_size.stage_id = "original-size".into();

@@ -75,6 +75,35 @@ describe('horizontal scroller', () => {
     expect(getNearestRailSnap(40, [6, 170, 334, 498], 356, 6)).toBe(0);
     expect(getNearestRailSnap(999, [6, 170, 334, 498], 356, 6)).toBe(356);
   });
+  it('snaps using card layout while the edge track is still translated', () => {
+    vi.useFakeTimers();
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = vi.fn().mockReturnValue({ matches: true, addEventListener() {}, removeEventListener() {} });
+    try {
+      render(<HorizontalScrollerHarness onOuterWheel={vi.fn()} />);
+      const rail = screen.getByTestId('rail');
+      setOverflow(rail, 650, 300);
+      rail.style.scrollPaddingInlineStart = '6px';
+      const track = document.createElement('div');
+      track.setAttribute('data-horizontal-content', '');
+      Object.defineProperties(track, { offsetParent: { value: rail }, offsetLeft: { value: 6 } });
+      const card = document.createElement('div');
+      card.className = 'archive-rail-item';
+      Object.defineProperties(card, { offsetParent: { value: track }, offsetLeft: { value: 324 } });
+      vi.spyOn(card, 'getBoundingClientRect').mockReturnValue({ left: -54 } as DOMRect);
+      track.append(card);
+      rail.append(track);
+      rail.scrollLeft = 340;
+      fireEvent.touchStart(rail);
+      fireEvent.touchEnd(rail);
+      fireEvent(rail, new Event('scrollend'));
+      expect(rail.scrollLeft).toBe(324);
+    } finally {
+      window.matchMedia = previousMatchMedia;
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps native touch inertia unsnapped until scrolling has actually stopped', () => {
     vi.useFakeTimers();
     try {

@@ -272,6 +272,11 @@ fn validate_state(s: &Value) -> Result<(), String> {
             return Err("Invalid bridge state timestamp".into());
         }
     }
+    if let Some(page) = s.get("historyPageIndex") {
+        if page.as_i64().is_none_or(|v| !(0..1_000_000).contains(&v)) || s["historyAt"].is_null() {
+            return Err("Invalid bridge history page".into());
+        }
+    }
     let p = s.get("progress").ok_or("Invalid bridge state progress")?;
     if !p.is_null() {
         let page = p["pageIndex"].as_i64().ok_or("Invalid bridge page")?;
@@ -308,7 +313,7 @@ fn mirror(c: &Connection, scope: &str, s: &Value) -> Result<(), String> {
         c.execute("INSERT INTO reading_progress(scope_id,archive_id,page_index,page_count,layout,direction,cover_alone,updated_at,revision,hidden_from_history) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![scope,id,p.get("pageIndex").and_then(Value::as_i64).unwrap_or(0),p.get("pageCount").and_then(Value::as_i64).unwrap_or(0),p.get("layout").and_then(Value::as_str).unwrap_or("paged"),p.get("direction").and_then(Value::as_str).unwrap_or("ltr"),p.get("coverAlone").and_then(Value::as_bool),p.get("updatedAt").and_then(Value::as_str).unwrap_or("1970-01-01"),s["version"].as_i64().unwrap_or(0).max(1),s["historyAt"].is_null()]).map_err(|e|e.to_string())?;
     }
     if let Some(at) = s["historyAt"].as_str() {
-        c.execute("INSERT INTO reading_history(scope_id,archive_id,page_index,visited_at,device_id) VALUES(?1,?2,?3,?4,'lrr-bridge')",params![scope,id,s["progress"]["pageIndex"].as_i64().unwrap_or(0),at]).map_err(|e|e.to_string())?;
+        c.execute("INSERT INTO reading_history(scope_id,archive_id,page_index,visited_at,device_id) VALUES(?1,?2,?3,?4,'lrr-bridge')",params![scope,id,s["historyPageIndex"].as_i64().or_else(|| s["progress"]["pageIndex"].as_i64()).unwrap_or(0),at]).map_err(|e|e.to_string())?;
     }
     if let Some(at) = s["watchlistAt"].as_str() {
         c.execute("INSERT INTO reading_list(scope_id,archive_id,added_at,updated_at,device_id) VALUES(?1,?2,?3,?3,'lrr-bridge')",params![scope,id,at]).map_err(|e|e.to_string())?;
@@ -471,6 +476,7 @@ fn queue(c: &mut Connection, scope: &str, mut operation: Value) -> Result<Value,
             }
             s["progress"] = p.clone();
             s["historyAt"] = json!(now);
+            s.as_object_mut().unwrap().remove("historyPageIndex");
             if count > 0 && (page + 1) as f64 / count as f64 > 0.9 {
                 s["watchlistAt"] = Value::Null;
             }
@@ -481,10 +487,14 @@ fn queue(c: &mut Connection, scope: &str, mut operation: Value) -> Result<Value,
             }
         }
         "watchlist_remove" => s["watchlistAt"] = Value::Null,
-        "history_delete" => s["historyAt"] = Value::Null,
+        "history_delete" => {
+            s["historyAt"] = Value::Null;
+            s.as_object_mut().unwrap().remove("historyPageIndex");
+        }
         _ => {
             s["progress"] = Value::Null;
             s["historyAt"] = Value::Null;
+            s.as_object_mut().unwrap().remove("historyPageIndex");
             s["generation"] = json!(s["generation"].as_i64().unwrap_or(0) + 1);
         }
     }

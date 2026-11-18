@@ -33,7 +33,7 @@ like($@,qr/BRIDGE_INVALID_REQUEST/,'invalid count rejected');
 
 # Optional real Redis integration: independent instance only, never a LANraragi server.
 SKIP: {
-    skip 'Set YOMIKA_TEST_REDIS_PORT for real Redis Lua integration', 85 unless $ENV{YOMIKA_TEST_REDIS_PORT};
+    skip 'Set YOMIKA_TEST_REDIS_PORT for real Redis Lua integration', 95 unless $ENV{YOMIKA_TEST_REDIS_PORT};
     require IO::Socket::INET;
     {
         package TestRedis;
@@ -68,6 +68,31 @@ SKIP: {
     is($added->{state}{version},1,'Lua applies version');
     is($added->{version},1,'Lua advances global version');
     is($call->(action=>'list',kind=>'watchlist',offset=>0,limit=>1)->{total},1,'indexed list');
+    {
+        local $LANraragi::Plugin::Scripts::YomikaBridge::PREFIX = $LANraragi::Plugin::Scripts::YomikaBridge::PREFIX . 'native:';
+        my $native = 'e' x 40;
+        my $now = time;
+        my $req = {protocol=>1, action=>'list', kind=>'history', offset=>0, limit=>10};
+        $r->command('HSET',$native,'file','test.cbz','lastreadtime',$now-20,'progress',8,'pagecount',10);
+        is($dispatch->($r,$r,$req,0)->{total},0,'switch off skips external reading');
+        is($dispatch->($r,$r,{%$req,offset=>1},1)->{total},0,'pagination does not rescan');
+        my $imported = $dispatch->($r,$r,$req,1);
+        is($imported->{total},1,'external LANraragi visit enters history');
+        is($imported->{states}[0]{historyPageIndex},7,'native page converted to zero-based index');
+        ok(!defined($imported->{states}[0]{progress}),'import does not replace shared reader settings');
+        is($dispatch->($r,$r,$req,1)->{version},$imported->{version},'repeat reads are idempotent');
+        my $remove = {id=>'native-delete',archiveId=>$native,kind=>'history_delete',expectedVersion=>1,generation=>0};
+        my $deleted = $call->(action=>'apply',operation=>$remove);
+        ok(!defined($deleted->{state}{historyAt}),'externally sourced history can be deleted');
+        ok(!exists($deleted->{state}{historyPageIndex}),'delete clears external page metadata');
+        my $meta = $LANraragi::Plugin::Scripts::YomikaBridge::PREFIX . 'meta';
+        $r->command('HDEL',$meta,'nativeHistoryCompletedAt');
+        is($dispatch->($r,$r,$req,1)->{total},0,'old native visit does not resurrect deleted history');
+        $r->command('HSET',$native,'lastreadtime',$now-1);
+        $r->command('HDEL',$meta,'nativeHistoryCompletedAt');
+        is($dispatch->($r,$r,$req,1)->{total},0,'any native visit before deletion stays deleted');
+        $r->command('DEL',$native);
+    }
     my $conflict=$call->(action=>'apply',operation=>{%$operation,id=>'stale'});
     is($conflict->{errorCode},'BRIDGE_CONFLICT','Lua rejects stale concurrent writer');
     is($conflict->{state}{version},1,'conflict current state');

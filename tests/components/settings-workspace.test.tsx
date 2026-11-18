@@ -297,6 +297,8 @@ describe('settings workspace', () => {
     expect(confirmation()).toBeNull();
     await user.click(toggle);
     expect(confirmation()).toHaveAttribute('aria-checked', 'false');
+    // The adapter is shared. Drain the queued write before the next test installs its adapter.
+    await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'save_preferences')).toHaveLength(2));
   });
 
   it('reveals only the settings for the selected automatic upscale mode', async () => {

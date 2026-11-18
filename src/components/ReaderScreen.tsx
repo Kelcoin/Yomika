@@ -71,6 +71,10 @@ function measureReaderRoot(element: HTMLElement | null): ReaderRootBox {
   };
 }
 
+function lastPageExitDistance(width: number): number {
+  return Math.min(250, Math.max(96, width * 0.27));
+}
+
 /** 共享件里的指针事件只用到坐标、`target` 和「别冒泡」，所以按最宽的 `Element` 收：
  * 这样同一份处理器也能交给 `ArchiveOverviewPanel`（它的 `onPanelClick` 就是这个类型），
  * 不必为每一层各自包一层。 */
@@ -1229,14 +1233,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const current = readerStateRef.current;
     const sample = dragSample.current;
     const velocity = sample ? (elapsed - sample.elapsed < 100 ? sample.velocity : 0) : undefined;
-    // 在末页往下一页方向划，也是一次「往下一页方向翻页」（用户报 13）。它原来被
-    // `pageIndex !== current.pageIndex` 挡在门外，手指划到头只会弹回去；现在把这一档
-    // 也算进 `commit`，由 `move()` 决定那一下是翻页还是退出（`move` 自己认边界）。
-    // 条漫档到不了这里：`trackDrag` 在 `webtoon` 上提前返回。
     const boundary = advanceReader(current, intent).pageIndex === current.pageIndex;
     const crossedLastPage = boundary && intent === (current.direction === 'rtl' ? 'previous' : 'next') && layoutRef.current !== 'webtoon';
-    const commit = shouldCommitPageTurn(dx, elapsed, width, velocity)
-      && (crossedLastPage || advanceReader(current, intent).pageIndex !== current.pageIndex);
+    // Fast flicks still turn pages, but exiting needs a deliberate pull.
+    const commit = crossedLastPage ? Math.abs(dx) >= lastPageExitDistance(width)
+      : !boundary && shouldCommitPageTurn(dx, elapsed, width, velocity);
     // Only uncommitted boundary drags spring back. A committed final-page
     // gesture exits on pointer-up instead of waiting for the spring to finish.
     const target = commit && !boundary ? (dx < 0 ? -width : width) : 0;
@@ -1298,12 +1299,13 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const current = readerStateRef.current;
     const boundary = advanceReader(current, dx < 0 ? 'next' : 'previous').pageIndex === current.pageIndex;
     const exits = boundary && (dx < 0 ? 'next' : 'previous') === (current.direction === 'rtl' ? 'previous' : 'next');
+    const exitDistance = lastPageExitDistance(width);
     exitHintDrag.current = exits ? {
-      progress: Math.min(1, Math.abs(dx) / Math.min(180, width * 0.2)),
-      ready: shouldCommitPageTurn(dx, elapsed, width, dragSample.current.velocity),
+      progress: Math.min(1, Math.abs(dx) / exitDistance),
+      ready: Math.abs(dx) >= exitDistance,
       side: dx < 0 ? 'right' : 'left',
     } : undefined;
-    dragOffset.current = boundary ? rubberBand(dx, Math.min(64, width * 0.16)) : Math.max(-width, Math.min(width, dx));
+    dragOffset.current = boundary ? rubberBand(dx, exits ? Math.min(360, width * 0.82) : Math.min(64, width * 0.16)) : Math.max(-width, Math.min(width, dx));
     setDrag((currentDrag) => currentDrag ?? { dx: 0, commits: false });
     if (dragFrame.current === undefined) dragFrame.current = requestAnimationFrame(() => {
       dragFrame.current = undefined;
@@ -1317,6 +1319,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
           hint.dataset.ready = String(cue.ready);
           hint.dataset.side = cue.side;
           hint.style.setProperty('--reader-exit-progress', String(cue.progress));
+          hint.style.setProperty('--reader-exit-midpoint', `${Math.abs(dragOffset.current) / 2}px`);
           if (exitHintTextRef.current) exitHintTextRef.current.textContent = cue.ready ? '松手退出阅读' : '继续拖动退出';
         }
       }
@@ -1937,9 +1940,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       )}
 
       {effectiveLayout !== 'webtoon' && <div ref={exitHintRef} className="reader-exit-hint" data-visible="false" data-ready="false" data-side="right" role="status" aria-hidden="true">
-        <span className="reader-exit-hint-icon"><LogOut aria-hidden="true" />
-          <svg className="reader-exit-hint-progress" viewBox="0 0 48 48" aria-hidden="true"><circle cx="24" cy="24" r="21" pathLength="100" /></svg>
-        </span>
+        <LogOut className="reader-exit-hint-icon" aria-hidden="true" />
         <span ref={exitHintTextRef}>继续拖动退出</span>
       </div>}
 

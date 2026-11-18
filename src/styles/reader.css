@@ -53,52 +53,43 @@
    progress is painted with the page drag, without re-rendering the page tree. */
 .reader-exit-hint {
   --reader-exit-progress: 0;
+  --reader-exit-midpoint: 0px;
   position: absolute;
   z-index: 2;
   top: 50%;
-  right: max(16px, var(--safe-right));
+  right: max(calc(28px + var(--safe-right)), var(--reader-exit-midpoint));
   display: grid;
   justify-items: center;
-  gap: var(--space-2);
-  max-width: 112px;
+  gap: var(--space-1);
+  width: 56px;
+  padding: var(--space-3) var(--space-2);
+  border-radius: var(--radius-pill);
   pointer-events: none;
+  background: var(--reader-surface-raised);
   color: var(--reader-ink);
   font-size: var(--text-xs);
-  text-shadow: 0 1px 6px var(--reader-canvas);
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+  text-align: center;
+  border: 1px solid var(--reader-border);
   opacity: 0;
   visibility: hidden;
-  transform: translateY(-50%);
+  transform: translate(50%, -50%);
   transition: opacity var(--motion-fast), visibility 0s var(--duration-fast);
 }
-.reader-exit-hint[data-side='left'] { right: auto; left: max(16px, var(--safe-left)); }
+.reader-exit-hint[data-side='left'] {
+  right: auto;
+  left: max(calc(28px + var(--safe-left)), var(--reader-exit-midpoint));
+  transform: translate(-50%, -50%);
+}
 .reader-exit-hint[data-visible='true'] {
-  opacity: clamp(0, var(--reader-exit-progress), 1);
+  opacity: clamp(0, calc(var(--reader-exit-progress) * 2), 1);
   visibility: visible;
-  transition: visibility 0s;
+  transition: background-color var(--motion-fast), color var(--motion-fast);
 }
-.reader-exit-hint-icon {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  background: var(--reader-surface-raised);
-  box-shadow: 0 2px 12px color-mix(in srgb, var(--reader-canvas) 55%, transparent);
-  transition: color var(--motion-fast), transform var(--motion-fast);
-}
-.reader-exit-hint-icon > svg { width: 22px; height: 22px; }
-.reader-exit-hint-icon > .reader-exit-hint-progress { position: absolute; inset: 0; width: 48px; height: 48px; transform: rotate(-90deg); }
-.reader-exit-hint-progress circle {
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-dasharray: 100;
-  stroke-dashoffset: calc(100 - var(--reader-exit-progress) * 100);
-}
-.reader-exit-hint[data-ready='true'] .reader-exit-hint-icon { color: var(--reader-primary); transform: scale(1.06); }
-.reader-exit-hint[data-side='left'] .reader-exit-hint-icon > svg:not(.reader-exit-hint-progress) { transform: scaleX(-1); }
+.reader-exit-hint[data-ready='true'] { background: var(--reader-primary); color: var(--reader-canvas); }
+.reader-exit-hint-icon { width: 20px; height: 20px; }
+.reader-exit-hint[data-side='left'] .reader-exit-hint-icon { transform: scaleX(-1); }
 
 /* Every rendition of a page draws at the size the *first* one measured.
    An enhanced page is the same picture at up to twice the pixels, and an image

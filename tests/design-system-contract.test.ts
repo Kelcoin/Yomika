@@ -2086,17 +2086,15 @@ describe('design system contract', () => {
     // 就是「第一次切页闪一下」；那层不透明底色还会盖上列表背景画的时间轴轨线。
     expect(shell).toMatch(/\.archive-list\s*\{[\s\S]{0,400}?background:\s*var\(--surface-panel\)/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer')).not.toMatch(/background/);
-    // 内边距和行距照抄真列表：8px 内边距（缩略图档位 12px）加行自己的 4px margin-block，
-    // 步距仍旧是 158 + 8，占位卡和落地后的卡片落在同一格上。
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton')).toMatch(/padding:\s*8px/);
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-thumbnail')).toMatch(/padding:\s*var\(--space-3\)/);
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-wide')).toMatch(/gap:\s*0/);
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.is-wide .archive-row-skeleton')).toMatch(/margin-block:\s*4px/);
+    // Both states use the outer list's gutter and the thumbnail row wrapper.
+    expect(`${loading}
+${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
+    expect(read('src/components/ArchiveListSkeleton.tsx')).toContain('className="archive-row-wrap"');
+    expect(ruleBody(loading, '.archive-list-skeleton.is-wide .archive-row-skeleton')).toMatch(/margin-block:\s*4px/);
     expect(shell).toMatch(/\.archive-row-skeleton\s*\{[^}]*height:\s*158px/);
     expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[^}]*margin-block:\s*4px;[^}]*height:\s*158px/);
     // 时间轴那一栏是行的第一列：真行是 82px 的网格列，骨架行也让出同样的 82px（而不是
     // 靠容器的 padding-left），轨线由列表背景画，占位层不再重复画一根。
-    expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline')).toMatch(/padding-left:\s*8px/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-row-skeleton')).toMatch(/margin-left:\s*82px/);
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-timeline-skeleton')).toMatch(/border-right:\s*0/);
     // 节点和日期跟着真行摆：真节点圆心在列表左边缘 77px、真日期右端在 58px（= 列宽 82px

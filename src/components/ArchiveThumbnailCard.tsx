@@ -292,7 +292,7 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       <div className="archive-rail-track" data-horizontal-content="">
       {items.length === 0 && loading
-        ? Array.from({ length: visibleSkeletonCount }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
+        ? Array.from({ length: visibleSkeletonCount }, (_, index) => <div className="archive-rail-item" key={index} aria-hidden="true"><ArchiveThumbnailCardSkeleton /></div>)
         : items.map(({ archive, phase }) => <div
           className={`archive-rail-item${phase === 'entering' ? ' is-entering' : phase === 'leaving' ? ' is-leaving' : ''}`}
           key={JSON.stringify([scopeId, serverId, archive.archiveId])} aria-hidden={phase === 'leaving' || undefined}

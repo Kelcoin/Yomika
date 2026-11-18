@@ -1327,7 +1327,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
                   branch, so arriving at the library flashed 暂无档案库 before the
                   first page landed. */}
               {filteredArchives.length === 0 && !listLoading && (emptyContent && !searchQuery && !categoryFilter ? emptyContent : <EmptyState icon={FolderHeart} title={searchQuery || categoryFilter ? '没有匹配的档案' : '暂无档案库'} description={searchQuery || categoryFilter ? '调整搜索或分类条件后重试。' : '连接服务器后，档案会显示在这里。'} />)}
-              {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} timeline={Boolean(timelineByArchiveId)} exiting={!listLoading} /></div>}
+              {skeletonVisible && <div className={`archive-list-skeleton-layer${listLoading ? '' : ' is-exiting'}`}><ArchiveListSkeleton mode={displayMode} timeline={displayMode === 'wide' && !compact && Boolean(timelineByArchiveId)} exiting={!listLoading} /></div>}
               {displayMode === 'thumbnail' ? (
                 <div className="archive-list-inner" style={{ height: shownThumbnailRows.totalSize }}>
                   {shownThumbnailRows.items.map((virtualRow) => (

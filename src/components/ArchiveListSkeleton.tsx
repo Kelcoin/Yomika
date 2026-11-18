@@ -1,3 +1,4 @@
+import { ARCHIVE_GRID_GAP, ARCHIVE_GRID_ROW_HEIGHT, ARCHIVE_LIST_ROW_STRIDE } from '../lib/archiveGridLayout';
 import { ArchiveThumbnailCardSkeleton } from './ArchiveThumbnailCard';
 
 export function ArchiveListSkeleton({ mode, timeline = false, exiting = false, label = '正在读取档案' }: { mode: 'thumbnail' | 'wide'; timeline?: boolean; exiting?: boolean; label?: string }) {
@@ -9,14 +10,14 @@ export function ArchiveListSkeleton({ mode, timeline = false, exiting = false, l
     const minimum = mode === 'thumbnail' ? 8 : 5;
     if (typeof window === 'undefined') return minimum;
     const available = window.innerHeight - 240;
-    const rowHeight = mode === 'thumbnail' ? 350 + 12 : 158 + 12;
+    const rowHeight = mode === 'thumbnail' ? ARCHIVE_GRID_ROW_HEIGHT + ARCHIVE_GRID_GAP : ARCHIVE_LIST_ROW_STRIDE;
     if (available <= 0) return minimum;
     return Math.max(minimum, Math.ceil(available / rowHeight));
   })();
   return (
     <div className={`archive-list-skeleton is-${mode}${timeline ? ' has-timeline' : ''}${exiting ? ' is-exiting' : ''}`} role={exiting ? undefined : 'status'} aria-label={exiting ? undefined : label} aria-hidden={exiting || undefined}>
       {mode === 'thumbnail'
-        ? Array.from({ length: count }, (_, index) => <ArchiveThumbnailCardSkeleton key={index} />)
+        ? Array.from({ length: count }, (_, index) => <div className="archive-row-wrap" key={index}><ArchiveThumbnailCardSkeleton /></div>)
         : Array.from({ length: count }, (_, index) => (
           <div className="archive-row-skeleton" key={index}>
             <span className="skeleton-block archive-row-skeleton-cover" />
