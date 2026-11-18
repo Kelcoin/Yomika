@@ -29,6 +29,7 @@ import { ComputeCenterSettingsGroup } from './ComputeCenterSettingsGroup';
 import { DlssnrSettingsGroup } from './DlssnrSettingsGroup';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
 import { SettingsRow } from './SettingsRow';
+import { SettingsDisclosure } from './SettingsDisclosure';
 import { SettingsChoice, SettingsMenu, SettingsNumber, SettingsOption, SettingsPanel } from './SettingsValueControls';
 
 import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
@@ -1247,14 +1248,16 @@ export function SettingsWorkspace() {
                 onToggle={() => editPreferences({ floatingNav: !preferenceDraft.floatingNav })}
               />
             )}
-            {selectedSettingsSection === 'settings-appearance' && preferenceDraft.floatingNav && (
-              <SettingsSwitch
-                icon={<PanelBottom />}
-                label="向下滚动时自动收起"
-                hint="向上滚动或回到顶部时重新显示底栏"
-                checked={preferenceDraft.floatingNavAutoHide}
-                onToggle={() => editPreferences({ floatingNavAutoHide: !preferenceDraft.floatingNavAutoHide })}
-              />
+            {selectedSettingsSection === 'settings-appearance' && (
+              <SettingsDisclosure open={preferenceDraft.floatingNav}>
+                <SettingsSwitch
+                  icon={<PanelBottom />}
+                  label="向下滚动时自动收起"
+                  hint="向上滚动或回到顶部时重新显示底栏"
+                  checked={preferenceDraft.floatingNavAutoHide}
+                  onToggle={() => editPreferences({ floatingNavAutoHide: !preferenceDraft.floatingNavAutoHide })}
+                />
+              </SettingsDisclosure>
             )}
             {selectedSettingsSection === 'settings-appearance' && (
               <SettingsPanel
@@ -1368,14 +1371,15 @@ export function SettingsWorkspace() {
                   disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
                   onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
                 />
-                <SettingsSwitch
-                  icon={<ShieldCheck />}
-                  label="默认开启收藏同步删除"
-                  hint="删除弹窗里的那个开关"
-                  checked={preferenceDraft.confirmEhFavoriteDelete}
-                  disabled={!preferenceDraft.ehFavoriteDeleteSync}
-                  onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
-                />
+                <SettingsDisclosure open={preferenceDraft.ehFavoriteDeleteSync}>
+                  <SettingsSwitch
+                    icon={<ShieldCheck />}
+                    label="默认开启收藏同步删除"
+                    hint="删除弹窗里的那个开关"
+                    checked={preferenceDraft.confirmEhFavoriteDelete}
+                    onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
+                  />
+                </SettingsDisclosure>
               </div>
             )}
             {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
@@ -1612,25 +1616,29 @@ export function SettingsWorkspace() {
                   options={[{ value: 'off', label: '关闭' }, { value: 'whitelist', label: '仅白名单' }, { value: 'blacklist', label: '排除黑名单' }]}
                   onChange={(value) => editPreferences({ upscaleAutoEnable: value !== 'off', upscaleAutoTagMode: value === 'blacklist' ? 'blacklist' : 'whitelist' })}
                 />
-                <SettingsNumber
-                  icon={<Gauge />}
-                  label="超分开启阈值"
-                  hint="平均每页体积，单位 KB"
-                  value={Math.round(preferenceDraft.upscaleAutoThresholdBytes / 1024)}
-                  min={64}
-                  max={8192}
-                  step={64}
-                  format={(value) => `${value} KB`}
-                  disabled={!preferenceDraft.upscaleAutoEnable}
-                  onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
-                />
-                {preferenceDraft.upscaleAutoEnable && (preferenceDraft.upscaleAutoTagMode === 'whitelist'
-                  ? <SettingsPanel icon={<Tags />} label="自动超分白名单" hint="每行一个标签；仅匹配的档案会自动开启" value={preferenceDraft.upscaleAutoWhitelist.trim() ? '已设置' : '无'}>
-                    <AutoTextarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
-                  </SettingsPanel>
-                  : <SettingsPanel icon={<EyeOff />} label="自动超分黑名单" hint="每行一个标签；匹配的档案不会自动开启" value={preferenceDraft.upscaleAutoBlacklist.trim() ? '已设置' : '无'}>
-                    <AutoTextarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
-                  </SettingsPanel>)}
+                <SettingsDisclosure open={preferenceDraft.upscaleAutoEnable}>
+                  <SettingsNumber
+                    icon={<Gauge />}
+                    label="超分开启阈值"
+                    hint="平均每页体积，单位 KB"
+                    value={Math.round(preferenceDraft.upscaleAutoThresholdBytes / 1024)}
+                    min={64}
+                    max={8192}
+                    step={64}
+                    format={(value) => `${value} KB`}
+                    onChange={(value) => editPreferences({ upscaleAutoThresholdBytes: Math.round(value * 1024) })}
+                  />
+                  <SettingsDisclosure open={preferenceDraft.upscaleAutoTagMode === 'whitelist'}>
+                    <SettingsPanel icon={<Tags />} label="自动超分白名单" hint="每行一个标签；仅匹配的档案会自动开启" value={preferenceDraft.upscaleAutoWhitelist.trim() ? '已设置' : '无'}>
+                      <AutoTextarea className="settings-rule-list" aria-label="自动超分白名单" value={preferenceDraft.upscaleAutoWhitelist} onChange={(event) => editPreferences({ upscaleAutoWhitelist: event.target.value })} spellCheck={false} rows={5} />
+                    </SettingsPanel>
+                  </SettingsDisclosure>
+                  <SettingsDisclosure open={preferenceDraft.upscaleAutoTagMode === 'blacklist'}>
+                    <SettingsPanel icon={<EyeOff />} label="自动超分黑名单" hint="每行一个标签；匹配的档案不会自动开启" value={preferenceDraft.upscaleAutoBlacklist.trim() ? '已设置' : '无'}>
+                      <AutoTextarea className="settings-rule-list" aria-label="自动超分黑名单" value={preferenceDraft.upscaleAutoBlacklist} onChange={(event) => editPreferences({ upscaleAutoBlacklist: event.target.value })} spellCheck={false} rows={5} />
+                    </SettingsPanel>
+                  </SettingsDisclosure>
+                </SettingsDisclosure>
               </div>
             )}
             {selectedSettingsSection === 'settings-advanced' && (

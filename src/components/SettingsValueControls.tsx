@@ -4,6 +4,7 @@ import { hapticFeedback } from '../lib/haptics';
 
 import { OverlayLayer } from './OverlayLayer';
 import { SettingsRow } from './SettingsRow';
+import { useDisclosedSettingsMenu } from './SettingsDisclosure';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { usePageActive } from '../app/RetainedPage';
 
@@ -33,7 +34,7 @@ export function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, ch
   onClose?: (() => void) | undefined;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosedSettingsMenu();
   const close = () => { setOpen(false); onClose?.(); };
   return <>
     <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} />
@@ -232,7 +233,7 @@ export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, f
   onChange: (value: number) => void;
   disabled?: boolean | undefined;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosedSettingsMenu(!disabled);
   return <>
     <SettingsRow icon={icon} label={label} hint={hint} value={format ? format(value) : String(value)} onClick={disabled ? undefined : () => setOpen(true)} ariaLabel={label} expanded={open} disabled={disabled} />
     {open && <SettingsMenu title={label} icon={icon} onClose={() => setOpen(false)}>

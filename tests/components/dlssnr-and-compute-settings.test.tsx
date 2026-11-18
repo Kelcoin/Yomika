@@ -152,12 +152,12 @@ describe('local DLL import verification', () => {
 });
 
 describe('DLSS5 settings group', () => {
-  it.each(['page', 'group'] as const)('retires nested layer editing when the %s hides', async (kind) => {
+  it.each(['page', 'group', 'switch'] as const)('retires nested layer editing when the %s hides', async (kind) => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
     function Owner({ shown }: { shown: boolean }) {
       return <RetainedPage active={kind === 'page' ? shown : true}><ToastProvider>
-        <DlssnrSettingsGroup visible={kind === 'group' ? shown : true} preferences={DEFAULT_PREFERENCES} editPreferences={vi.fn()} />
+        <DlssnrSettingsGroup visible={kind === 'group' ? shown : true} preferences={{ ...DEFAULT_PREFERENCES, dlssnrEnabled: kind !== 'switch' || shown }} editPreferences={vi.fn()} />
       </ToastProvider></RetainedPage>;
     }
     const view = render(<Owner shown />);
@@ -664,7 +664,7 @@ describe('DLSS5 settings group', () => {
     });
     setInvokeAdapterForTests(adapter);
     const edits: Array<Partial<PreferenceSnapshot>> = [];
-    renderDlssnr({ editPreferences: (patch) => edits.push(patch) });
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true }, editPreferences: (patch) => edits.push(patch) });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -686,7 +686,7 @@ describe('DLSS5 settings group', () => {
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
     // 层数是写回偏好的：用一个带状态的壳子，菜单画的是偏好里那一份而不是组件内的草稿。
     function Harness() {
-      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES });
+      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES, dlssnrEnabled: true });
       return <ToastProvider><DlssnrSettingsGroup preferences={preferences} editPreferences={(patch) => setPreferences((current) => ({ ...current, ...patch }))} visible /></ToastProvider>;
     }
     render(<Harness />);
@@ -724,7 +724,7 @@ describe('DLSS5 settings group', () => {
     ]);
     let latest = initial;
     function Harness() {
-      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES, dlssnrPasses: initial });
+      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES, dlssnrEnabled: true, dlssnrPasses: initial });
       return <ToastProvider><DlssnrSettingsGroup preferences={preferences} editPreferences={(patch) => setPreferences((current) => {
         const next = { ...current, ...patch };
         latest = next.dlssnrPasses;
@@ -743,7 +743,7 @@ describe('DLSS5 settings group', () => {
   it('steps every layer parameter by a tenth', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -763,7 +763,7 @@ describe('DLSS5 settings group', () => {
   it('caps the strength where the network stops caring', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -788,7 +788,7 @@ describe('DLSS5 settings group', () => {
 
   it('keeps one overlay while entering and leaving a layer editor', async () => {
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
     const user = userEvent.setup();
     await user.click(within(await screen.findByRole('region', { name: 'DLSSNR' })).getByRole('button', { name: '层数' }));
     await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: '第 1 层' }));
@@ -800,7 +800,7 @@ describe('DLSS5 settings group', () => {
   it('names a layer once: the menu title, not a repeated sub-heading inside the editor', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -817,7 +817,7 @@ describe('DLSS5 settings group', () => {
   it('draws an icon in each layer editor action button', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -832,7 +832,7 @@ describe('DLSS5 settings group', () => {
   it('explains every layer parameter, on hover for a glance and pinned for a read', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -875,7 +875,7 @@ describe('DLSS5 settings group', () => {
   it('sizes the help bubble to the menu panel it explains', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(adapterFor({ dlssnr_status: () => ({ ok: true, value: dlssnrStatus() }) }));
-    renderDlssnr();
+    renderDlssnr({ preferences: { ...DEFAULT_PREFERENCES, dlssnrEnabled: true } });
 
     const group = await screen.findByRole('region', { name: 'DLSSNR' });
     await user.click(within(group).getByRole('button', { name: '层数' }));
@@ -921,7 +921,7 @@ describe('DLSS5 settings group', () => {
     // 层数与参数都是写回偏好的：用带状态的壳子，菜单画的才是选完之后的这一份。
     let latest = DEFAULT_PREFERENCES.dlssnrPasses;
     function Harness() {
-      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES });
+      const [preferences, setPreferences] = useState({ ...DEFAULT_PREFERENCES, dlssnrEnabled: true });
       return <ToastProvider><DlssnrSettingsGroup preferences={preferences} editPreferences={(patch) => setPreferences((current) => {
         const next = { ...current, ...patch };
         latest = next.dlssnrPasses;
@@ -988,9 +988,9 @@ describe('compute center settings group', () => {
     renderAdvanced();
 
     const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
-    expect(within(group).queryByText(/192\.168\.1\.5:47653/)).toBeNull();
+    expect(within(group).queryByRole('button', { name: '端口' })).toBeNull();
     await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
-    await waitFor(() => expect(within(group).getByText(/192\.168\.1\.5:47653/)).toBeTruthy());
+    expect(await within(group).findByRole('button', { name: '端口' })).toHaveTextContent(/192\.168\.1\.5:47653/);
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('compute_center_configure', expect.objectContaining({ enabled: true, port: 47_653 })));
     await waitFor(() => expect(screen.queryByRole('region', { name: '远程后处理服务' })).toBeNull());
     expect(within(group).getByRole('button', { name: '端口' })).toBeEnabled();
@@ -1017,16 +1017,21 @@ describe('compute center settings group', () => {
 
   it('shows server details only while running and revokes one paired client', async () => {
     const clients = [{ id: 'client-1', name: 'Phone', address: '192.168.1.9' }, { id: 'client-2', name: 'Tablet', address: '192.168.1.10' }];
+    let running = false;
     const adapter = adapterFor({
-      compute_center_status: () => ({ ok: true, value: computeStatus({ pairedClients: clients }) }),
-      compute_center_configure: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients }) }),
+      compute_center_status: () => ({ ok: true, value: computeStatus({ running, pairedClients: clients }) }),
+      compute_center_configure: (args) => {
+        running = args?.enabled === true;
+        return { ok: true, value: computeStatus({ running, pairedClients: clients }) };
+      },
       compute_center_revoke_pairing: () => ({ ok: true, value: computeStatus({ running: true, pairedClients: clients.slice(1) }) }),
     });
     setInvokeAdapterForTests(adapter);
     renderAdvanced();
     const user = userEvent.setup();
     const group = await screen.findByRole('region', { name: '本机远程后处理服务' });
-    expect(within(group).queryByText('端口')).toBeNull();
+    expect(within(group).queryByRole('button', { name: '端口' })).toBeNull();
+    expect(within(group).queryByRole('button', { name: '管理已有配对' })).toBeNull();
     await user.click(within(group).getByRole('switch', { name: '开启本机远程后处理服务' }));
     await user.click(within(group).getByRole('button', { name: '管理已有配对' }));
     // 撤销现在长在设备行自己身上：第一下只是举着「确认撤销」，第二下才真撤销

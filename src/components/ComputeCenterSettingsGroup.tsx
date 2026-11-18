@@ -5,6 +5,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Link2, Monitor, MonitorSmartphone, Plus, Save, Server, Smartphone, Tablet, Unlink, Wand2 } from 'lucide-react';
 
 import { SettingsSwitch } from './SettingsControls';
+import { SettingsDisclosure, useDisclosedSettingsMenu } from './SettingsDisclosure';
 import { SettingsMenu, SettingsOption } from './SettingsValueControls';
 import { SettingsRow } from './SettingsRow';
 import { useToast } from './Toast';
@@ -105,12 +106,10 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   const [code, setCode] = useState('');
   const [pairBusy, setPairBusy] = useState(false);
   const pairPending = useRef(false);
-  const [localPairMenu, setLocalPairMenu] = useState(false);
   const [confirmRevoke, setConfirmRevoke] = useState<string>();
   const [revoking, setRevoking] = useState(false);
   const revokePending = useRef(false);
   useTimedConfirmation(confirmRevoke, setConfirmRevoke, revoking);
-  const [portMenu, setPortMenu] = useState(false);
   const [portDraft, setPortDraft] = useState(preferences.computeCenterPort);
   const [verified, setVerified] = useState(false);
   const [statusError, setStatusError] = useState<string>();
@@ -129,6 +128,11 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
    *  开着，不要每次都从关闭再变成开的」。偏好是用户自己的意图，先按它画；`refresh()` 回来
    *  之后以 status 为准（真关了也就跟着画成关）。 */
   const serving = verified ? status?.running ?? preferences.computeCenterEnabled : preferences.computeCenterEnabled;
+  const [portMenu, setPortMenu] = useDisclosedSettingsMenu(showLocalServing && serving);
+  const [localPairMenu, setLocalPairMenu] = useDisclosedSettingsMenu(showLocalServing && serving);
+  useEffect(() => {
+    if (!localPairMenu) setConfirmRevoke(undefined);
+  }, [localPairMenu]);
   // Initial visibility follows persisted intent, never the timing of the IPC.
   const showRemote = mobile || !serving;
   const servingPort = verified ? status?.port ?? preferences.computeCenterPort : preferences.computeCenterPort;
@@ -344,25 +348,30 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
           checked={serving}
           onToggle={() => void toggleServing(!serving)}
         />
-        {(serving || preferences.computeCenterEnabled) && status?.windowsServiceSupported && <SettingsSwitch
-          icon={<Server />}
-          label="注册为 Windows 服务"
-          hint="登录 Windows 后自动运行，无需打开客户端；更改需要管理员授权，请勿移动数据目录"
-          checked={status.windowsServiceInstalled}
-          disabled={busy}
-          onToggle={() => void toggleWindowsService()}
-        />}
-        {serving && <SettingsRow
-          icon={<Server />}
-          label="端口"
-          hint={
-            status && status.addresses.length > 0
-              ? `移动端填：${status.addresses[0]}:${servingPort}`
-              : '没有找到局域网地址，请连接 Wi-Fi 或网线'
-          }
-          value={String(servingPort)}
-          onClick={() => { setPortDraft(servingPort); setPortMenu(true); }}
-        />}
+        <SettingsDisclosure open={(serving || preferences.computeCenterEnabled) && Boolean(status?.windowsServiceSupported)}>
+          <SettingsSwitch
+            icon={<Server />}
+            label="注册为 Windows 服务"
+            hint="登录 Windows 后自动运行，无需打开客户端；更改需要管理员授权，请勿移动数据目录"
+            checked={Boolean(status?.windowsServiceInstalled)}
+            disabled={busy}
+            onToggle={() => void toggleWindowsService()}
+          />
+        </SettingsDisclosure>
+        <SettingsDisclosure open={serving}>
+          <SettingsRow
+            icon={<Server />}
+            label="端口"
+            hint={
+              status && status.addresses.length > 0
+                ? `移动端填：${status.addresses[0]}:${servingPort}`
+                : '没有找到局域网地址，请连接 Wi-Fi 或网线'
+            }
+            value={String(servingPort)}
+            onClick={() => { setPortDraft(servingPort); setPortMenu(true); }}
+          />
+          <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status?.pairedClients?.length ?? 0} 台设备`} onClick={() => { setLocalPairMenu(true); void refresh(); }} />
+        </SettingsDisclosure>
         {portMenu && <SettingsMenu title="端口" icon={<Server />} onClose={() => setPortMenu(false)}>
           <label className="settings-menu-field">
             <span className="settings-menu-field-label">远程后处理服务端口</span>
@@ -372,11 +381,10 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             <button className="primary-action" type="button" disabled={busy || !Number.isInteger(portDraft) || portDraft < 1024 || portDraft > 65535} onClick={() => void savePort()}><Save aria-hidden="true" />保存</button>
           </div>
         </SettingsMenu>}
-        {serving && <SettingsRow icon={<Link2 />} label="管理已有配对" value={`${status?.pairedClients?.length ?? 0} 台设备`} onClick={() => { setLocalPairMenu(true); void refresh(); }} />}
         {localPairMenu && <SettingsMenu
           title="管理已有配对"
           icon={<Link2 />}
-          onClose={() => { setConfirmRevoke(undefined); setLocalPairMenu(false); }}
+          onClose={() => setLocalPairMenu(false)}
         >
           <div className="settings-choice-list">
             {status?.pairedClients?.map((client) => <div className="settings-choice-option settings-paired-client" key={client.id}>

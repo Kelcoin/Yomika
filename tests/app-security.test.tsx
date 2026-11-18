@@ -315,6 +315,21 @@ it('offers shared timeout choices, persists the chosen delay and removes manual 
   expect(screen.getByRole('button', { name: '15 分钟' })).toHaveAttribute('aria-pressed', 'true');
 });
 
+it('hides automatic locking and closes its menu when both protections are off', async () => {
+  Object.assign(window, { __TAURI_INTERNALS__: {} });
+  const unprotected = { ...status, locked: false, passwordEnabled: false, biometricEnabled: false };
+  setInvokeAdapterForTests(async (name) => ({ ok: true, value: name === 'app_security_ready' ? null : unprotected }));
+  render(<AppSecurityGate><SecuritySettings /></AppSecurityGate>);
+  await screen.findByRole('button', { name: '手势密码' });
+  expect(screen.queryByRole('button', { name: '后台自动锁定' })).toBeNull();
+  await act(async () => emitTauriEvent('app-security-changed', { ...unprotected, biometricEnabled: true }));
+  fireEvent.click(screen.getByRole('button', { name: '后台自动锁定' }));
+  expect(screen.getByRole('dialog', { name: '后台自动锁定' })).toBeInTheDocument();
+  await act(async () => emitTauriEvent('app-security-changed', unprotected));
+  expect(screen.queryByRole('button', { name: '后台自动锁定' })).toBeNull();
+  expect(screen.queryByRole('dialog', { name: '后台自动锁定' })).toBeNull();
+});
+
 it('does not flash a checking screen or lock a delayed short background return', async () => {
   Object.assign(window, { __TAURI_INTERNALS__: {} });
   const plain = { ...status, locked: false, backgroundLockSeconds: 300 };

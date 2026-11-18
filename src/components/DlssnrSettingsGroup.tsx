@@ -5,6 +5,7 @@ import { CircleHelp, Download, Layers, Loader2, Plus, Save, Trash2, Wand } from 
 
 import { SettingsSwitch } from './SettingsControls';
 import { SettingsChoice, SettingsMenu, SettingsNumber, SettingsOption } from './SettingsValueControls';
+import { SettingsDisclosure } from './SettingsDisclosure';
 import { SettingsRow } from './SettingsRow';
 import { OverlayLayer } from './OverlayLayer';
 import { ModelDownloadButton, ModelDownloadSlot } from './ModelDownloadControls';
@@ -201,18 +202,18 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
   const [helpAnchor, setHelpAnchor] = useState<HelpAnchor>();
   const helpTimer = useRef<number | undefined>(undefined);
   useLayoutEffect(() => {
-    if (!pageActive || !visible) {
+    if (!pageActive || !visible) setVariantMenu(false);
+    if (!pageActive || !visible || !preferences.dlssnrEnabled) {
       window.clearTimeout(helpTimer.current);
       setLayerMenu(false);
       setPresetMenu(false);
-      setVariantMenu(false);
       setSelectedLayer(undefined);
       setDraftPass(undefined);
       setHelpPinned(false);
       setHelpHover(false);
       setHelpAnchor(undefined);
     }
-  }, [pageActive, visible]);
+  }, [pageActive, visible, preferences.dlssnrEnabled]);
   const holdHelp = useCallback(() => {
     window.clearTimeout(helpTimer.current);
     setHelpHover(true);
@@ -509,8 +510,10 @@ export function DlssnrSettingsGroup({ preferences, editPreferences, visible }: P
       </SettingsMenu>}
 
       {/* 层数：同一张图串行跑几个 pass（1–5 层，往上收益很小，耗时线性涨）。 */}
-      <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
-      {layerMenu && <SettingsMenu
+      <SettingsDisclosure open={preferences.dlssnrEnabled}>
+        <SettingsRow icon={<Layers />} label="层数" value={`${layerCount} 层`} onClick={() => setLayerMenu(true)} />
+      </SettingsDisclosure>
+      {preferences.dlssnrEnabled && layerMenu && <SettingsMenu
         title={presetMenu ? 'DLSSNR 预设' : selectedLayer === undefined ? 'DLSSNR 层数' : `第 ${selectedLayer + 1} 层`}
         icon={presetMenu ? <Wand /> : <Layers />}
         {...(selectedLayer === undefined ? {} : {

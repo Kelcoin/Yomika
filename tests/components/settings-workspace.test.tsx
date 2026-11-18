@@ -286,11 +286,46 @@ describe('settings workspace', () => {
     // 纯开关不再有二级菜单：绘制的开关就在行的右侧，翻转即保存。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     expect(toggle).toHaveClass('switch-control');
-    const confirmation = screen.getByRole('switch', { name: '默认开启收藏同步删除' });
-    expect(confirmation).toBeDisabled();
+    const confirmation = () => screen.queryByRole('switch', { name: '默认开启收藏同步删除' });
+    expect(confirmation()).toBeNull();
     await user.click(toggle);
-    await user.click(confirmation);
+    const enabledConfirmation = screen.getByRole('switch', { name: '默认开启收藏同步删除' });
+    expect(enabledConfirmation).toBeEnabled();
+    await user.click(enabledConfirmation);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, ehFavoriteDeleteSync: true, confirmEhFavoriteDelete: false } }));
+    await user.click(toggle);
+    expect(confirmation()).toBeNull();
+    await user.click(toggle);
+    expect(confirmation()).toHaveAttribute('aria-checked', 'false');
+  });
+
+  it('reveals only the settings for the selected automatic upscale mode', async () => {
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'save_preferences') return { ok: true, value: args?.input };
+      return { ok: true, value: [] };
+    });
+    renderSettings('advanced');
+    const auto = await screen.findByRole('button', { name: '自动开启超分' });
+    const threshold = () => screen.queryByRole('button', { name: '超分开启阈值' });
+    const whitelist = () => screen.queryByRole('button', { name: '自动超分白名单' });
+    const blacklist = () => screen.queryByRole('button', { name: '自动超分黑名单' });
+    const choose = async (name: string) => {
+      await user.click(auto);
+      await user.click(within(screen.getByRole('dialog', { name: '自动开启超分' })).getByRole('button', { name }));
+    };
+    expect(threshold()).toBeNull();
+    await choose('仅白名单');
+    expect(threshold()).toBeEnabled();
+    expect(whitelist()).toBeEnabled();
+    expect(blacklist()).toBeNull();
+    await choose('排除黑名单');
+    expect(whitelist()).toBeNull();
+    expect(blacklist()).toBeEnabled();
+    await choose('关闭');
+    expect(threshold()).toBeNull();
+    expect(blacklist()).toBeNull();
   });
 
   it('refuses to turn on favorite sync deletion while no E-Hentai account is signed in', async () => {
@@ -308,7 +343,7 @@ describe('settings workspace', () => {
     await waitFor(() => expect(toggle).toBeDisabled());
     expect(screen.getByText('登录 E-Hentai 后才能启用')).toBeInTheDocument();
     await user.click(toggle);
-    expect(adapter.mock.calls.some(([command]) => command === 'save_preferences')).toBe(false);
+    expect(adapter).not.toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ ehFavoriteDeleteSync: true }) });
   });
 
   it('persists the feature switches in general, appearance and eh sections', async () => {

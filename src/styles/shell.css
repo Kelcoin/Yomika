@@ -1265,6 +1265,34 @@ body::-webkit-scrollbar,
    空壳一律不画。 */
 .preferences-form > .settings-group:empty { display: none; }
 
+.settings-disclosure {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--motion-standard),
+    opacity var(--motion-standard),
+    visibility 0s linear var(--duration-standard);
+}
+
+.settings-disclosure[data-open="true"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.settings-disclosure-content {
+  min-height: 0;
+  min-width: 0;
+  overflow: clip;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-disclosure { transition: none; }
+}
+
 .settings-item {
   min-width: 0;
 }

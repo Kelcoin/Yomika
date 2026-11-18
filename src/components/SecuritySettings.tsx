@@ -4,6 +4,7 @@ import { useAppSecurity } from './AppSecurityGate';
 import { PatternLock } from './PatternLock';
 import { SettingsRow } from './SettingsRow';
 import { SettingsSwitch } from './SettingsControls';
+import { SettingsDisclosure, useDisclosedSettingsMenu } from './SettingsDisclosure';
 import { SettingsMenu, SettingsOption } from './SettingsValueControls';
 import { ContentSkeleton } from './ContentSkeleton';
 import { type AppSecurityConfig } from '../repositories/nativeAppSecurityRepository';
@@ -16,7 +17,8 @@ const LOCK_DELAYS = [{ seconds: -1, label: '不锁定' }, { seconds: 0, label: '
 export function SecuritySettings() {
   const { status, supported, loadError, update, refresh, configure } = useAppSecurity();
   const [action, setAction] = useState<Action>();
-  const [timeoutMenu, setTimeoutMenu] = useState(false);
+  const protectionEnabled = Boolean(status?.passwordEnabled || status?.biometricEnabled);
+  const [timeoutMenu, setTimeoutMenu] = useDisclosedSettingsMenu(protectionEnabled);
   const [pendingTimeout, setPendingTimeout] = useState(-1);
   const [currentPassword, setCurrentPassword] = useState('');
   const [password, setPassword] = useState('');
@@ -71,9 +73,13 @@ export function SecuritySettings() {
   return <>
     <div className="settings-group">
       <SettingsRow icon={<LockKeyhole />} label="手势密码" hint={status.passwordEnabled && status.credentialKind === 'password' ? '已设置旧密码，可验证后更换为手势' : '连接至少 4 个点，启动时认证'} value={status.passwordEnabled ? '已设置' : '未设置'} onClick={() => open('password')} />
-      {status.passwordEnabled && <SettingsRow icon={<ShieldCheck />} label="关闭密码保护" hint="需要验证当前凭据" onClick={() => open('disable')} />}
+      <SettingsDisclosure open={status.passwordEnabled}>
+        <SettingsRow icon={<ShieldCheck />} label="关闭密码保护" hint="需要验证当前凭据" onClick={() => open('disable')} />
+      </SettingsDisclosure>
       <SettingsSwitch icon={<Fingerprint />} label={authenticationLabel} hint={status.biometricAvailable ? '由系统选择符合要求的人脸、指纹或锁屏密码' : '当前平台或设备没有可用的系统认证'} checked={status.biometricEnabled} disabled={busy || !status.biometricAvailable} onToggle={() => { if (status.passwordEnabled) open('biometricEnabled'); else void apply({ biometricEnabled: !status.biometricEnabled }); }} />
-      <SettingsRow icon={<Timer />} label="后台自动锁定" hint="离开应用达到指定时间后锁定" value={LOCK_DELAYS.find(value => value.seconds === lockDelay)?.label ?? '不锁定'} disabled={!status.passwordEnabled && !status.biometricEnabled} onClick={() => setTimeoutMenu(true)} />
+      <SettingsDisclosure open={protectionEnabled}>
+        <SettingsRow icon={<Timer />} label="后台自动锁定" hint="离开应用达到指定时间后锁定" value={LOCK_DELAYS.find(value => value.seconds === lockDelay)?.label ?? '不锁定'} onClick={() => setTimeoutMenu(true)} />
+      </SettingsDisclosure>
       <SettingsSwitch icon={<EyeOff />} label="隐藏任务预览" hint={status.previewProtectionAvailable ? '隐藏系统任务切换器中的内容预览' : '当前平台不支持系统预览保护'} checked={status.hidePreview} disabled={busy || !status.previewProtectionAvailable} onToggle={() => { if (status.passwordEnabled) open('hidePreview'); else void apply({ hidePreview: !status.hidePreview }); }} />
     </div>
     {!action && (error || loadError) && <p className="form-error" role="alert">{error || loadError}</p>}
