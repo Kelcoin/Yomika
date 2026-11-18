@@ -7511,22 +7511,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .app-main.has-home-topbar .workspace-home > .archive-rail { margin-block: 0; }
 .app-main.has-home-topbar .workspace-home > .first-run-page { padding-block-start: 0; }
 
-/* Put the bar lens on its own layer so the interactive lens can sample the
-   contents beneath it. Layout and hit targets remain on the parent nav. */
+/* The optical filter combines both lens silhouettes before reading the backdrop.
+   Tabs and the pointer highlight are drawn above that single sample. */
 .nav-optics { position: absolute; pointer-events: none; }
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) {
-    --nav-glass-sample: blur(10px) saturate(1.4);
-    --nav-glass-tint: 58%;
-    --nav-lens-fill: color-mix(in srgb, var(--primary-container) 54%, transparent);
-    --nav-lens-sheen: radial-gradient(ellipse at var(--nav-lens-light, 25%) 0%, color-mix(in srgb, white 46%, transparent), transparent 60%),
-      linear-gradient(156deg, color-mix(in srgb, white 18%, transparent), transparent 48%, color-mix(in srgb, white 11%, transparent));
-    --nav-lens-edge: inset 0 1px 1px color-mix(in srgb, white 66%, transparent),
-      inset 0 -1px 1px color-mix(in srgb, white 32%, transparent),
-      inset 1px 0 2px color-mix(in srgb, white 25%, transparent),
-      inset -1px -2px 4px color-mix(in srgb, black 24%, transparent),
-      0 2px 6px color-mix(in srgb, black 22%, transparent);
+    --nav-glass-sample: blur(2px);
+    --nav-glass-tint: 67%;
     background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     border-color: transparent;
     box-shadow: none;
   }
@@ -7537,65 +7531,86 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     inset: -1px;
     z-index: -2;
     pointer-events: none;
-    border: 1px solid color-mix(in srgb, white 28%, transparent);
+    border: 1px solid color-mix(in srgb, white 22%, transparent);
     border-radius: inherit;
-    background: linear-gradient(166deg, color-mix(in srgb, white 15%, transparent), transparent 44%, color-mix(in srgb, black 15%, transparent)),
-      color-mix(in srgb, var(--surface-container) var(--nav-glass-tint), transparent);
-    -webkit-backdrop-filter: var(--nav-accessible-filter, var(--nav-bar-refraction, var(--nav-glass-sample)));
-    backdrop-filter: var(--nav-accessible-filter, var(--nav-bar-refraction, var(--nav-glass-sample)));
-    box-shadow: inset 0 1px 1px color-mix(in srgb, white 52%, transparent),
-      inset 0 -1px 2px color-mix(in srgb, black 32%, transparent), var(--shadow-menu);
+    background: color-mix(in srgb, var(--nav-glass-tone) var(--nav-glass-tint), transparent);
+    -webkit-backdrop-filter: var(--nav-glass-sample);
+    backdrop-filter: var(--nav-glass-sample);
+    box-shadow: var(--shadow-menu);
   }
 
-  .compact-nav.is-floating[data-nav-glass="android"]:not(.is-hidden) {
-    --nav-glass-sample: blur(7px) saturate(1.55);
-    --nav-glass-tint: 44%;
+  .compact-nav.is-floating[data-nav-refraction]:not(.is-hidden)::before {
+    inset: calc(-1px - var(--nav-refraction-padding));
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: var(--nav-refraction);
   }
 
   .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-drag-indicator::before {
-    background: var(--nav-lens-sheen), var(--nav-lens-fill);
-    backdrop-filter: var(--nav-accessible-filter, var(--nav-tab-refraction, none));
-    box-shadow: var(--nav-lens-edge);
+    background: var(--nav-glass-selected-fill);
+    box-shadow: inset 0 0 0 1px var(--nav-glass-selected-rim);
   }
 
-  .compact-nav.is-floating[data-nav-glass][data-nav-pressing]:not(.is-hidden) {
-    --nav-lens-fill: color-mix(in srgb, var(--primary-container) 40%, transparent);
-    --nav-lens-sheen: radial-gradient(ellipse at var(--nav-lens-light, 25%) 0%, color-mix(in srgb, white 70%, transparent), transparent 62%),
-      radial-gradient(ellipse at 78% 100%, color-mix(in srgb, white 34%, transparent), transparent 65%);
-    --nav-lens-edge: inset 0 1px 2px color-mix(in srgb, white 80%, transparent),
-      inset 0 -1px 2px color-mix(in srgb, white 52%, transparent),
-      inset 0 -5px 9px color-mix(in srgb, black 22%, transparent),
-      0 4px 10px color-mix(in srgb, black 32%, transparent);
+  .nav-optics-tone { flood-color: var(--nav-glass-tone); }
+
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-link,
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-icon-pair > svg {
+    color: var(--nav-glass-ink);
   }
 
-  @media (hover: hover) {
-    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered:not(.is-active) {
-      background: var(--nav-lens-sheen), color-mix(in srgb, var(--surface-container-high) 38%, transparent);
-      backdrop-filter: var(--nav-accessible-filter, var(--nav-tab-refraction, none));
-      box-shadow: var(--nav-lens-edge);
-    }
-    .compact-nav.is-floating[data-nav-glass][data-nav-indicator-ready]:not(.is-hidden) .nav-link.is-active.is-pointer-hovered {
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-link:is(.is-active, [data-nav-preview]) {
+    font-weight: var(--weight-semibold);
+  }
+
+  .compact-nav.is-floating[data-nav-glass][data-nav-dragging]:not(.is-hidden) .nav-link.is-active:not([data-nav-preview]) {
+    font-weight: inherit;
+  }
+
+  .compact-nav.is-floating[data-nav-glass][data-nav-pressing]:not(.is-hidden) .nav-drag-indicator::before {
+    background: radial-gradient(ellipse at var(--nav-lens-light, 25%) 0%, var(--nav-glass-press-light), transparent 52%);
+    box-shadow: inset 0 0 0 1px var(--nav-glass-press-rim);
+  }
+
+  @media (hover: hover), (any-hover: hover) {
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered {
+      position: relative;
       background: transparent;
     }
-    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]):has(.nav-link.is-active.is-pointer-hovered) {
-      --nav-lens-sheen: radial-gradient(ellipse at 25% 0%, color-mix(in srgb, white 62%, transparent), transparent 64%),
-        linear-gradient(156deg, color-mix(in srgb, white 22%, transparent), transparent 50%, color-mix(in srgb, white 17%, transparent));
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      border: 1px solid var(--nav-glass-rim);
+      box-shadow: inset 0 0 1px 1px var(--nav-glass-hover-reflection);
+      mask-image: radial-gradient(ellipse at var(--nav-hover-light-x, 50%) var(--nav-hover-light-y, 30%),
+        black 16%, var(--nav-glass-hover-mask-middle) 58%, transparent 100%);
     }
   }
 
   @media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
-    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden),
-    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden):is([data-nav-pressing], :has(.nav-link.is-active.is-pointer-hovered)) {
-      --nav-glass-sample: none;
-      --nav-accessible-filter: none;
-      --nav-lens-fill: var(--primary-container);
-      --nav-lens-sheen: linear-gradient(transparent, transparent);
-      --nav-lens-edge: none;
+    .compact-nav.is-floating:is([data-nav-glass], [data-nav-refraction]):not(.is-hidden)::before {
+      inset: -1px;
+      border: 1px solid var(--outline);
+      border-radius: inherit;
       background: var(--surface-container);
-      border-color: var(--outline);
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
     }
-    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered:not(.is-active) {
-      background: var(--surface-container-high);
+    .compact-nav.is-floating:is([data-nav-glass], [data-nav-refraction]):not(.is-hidden) .nav-drag-indicator::before {
+      background: var(--primary-container);
+      box-shadow: none;
+    }
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) {
+      --nav-glass-ink: var(--on-surface);
+    }
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered::after {
+      border-color: var(--outline);
+      box-shadow: none;
+      mask-image: none;
     }
   }
 }

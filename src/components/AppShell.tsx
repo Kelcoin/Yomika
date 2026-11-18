@@ -35,7 +35,7 @@ function Navigation({ compact = false, floating = false, glass, hidden = false, 
   }, []);
   const refraction = useNavigationRefraction(navNode, Boolean(compact && floating && glass));
   const [hovered, setHovered] = useState<string>();
-  useNavigationDrag(navRef, { enabled: compact, elastic: !glass, glass: Boolean(glass), hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
+  useNavigationDrag(navRef, { enabled: compact, elastic: !glass, glass: Boolean(glass), refracting: Boolean(refraction), hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
     onSelect: to => { setHovered(undefined); void navigate(to, { state: { navigationTab: true } }); } });
   useEffect(() => { setHovered(undefined); }, [location.pathname, hidden]);
   useEffect(() => {
@@ -57,9 +57,10 @@ function Navigation({ compact = false, floating = false, glass, hidden = false, 
         ref={assignNav}
         className={compact ? `compact-nav${floating ? ' is-floating' : ''}${hidden ? ' is-hidden' : ''}` : 'side-nav'}
         data-nav-glass={compact && floating ? glass : undefined}
+        data-nav-refraction={refraction ? '' : undefined}
         style={refraction ? {
-          '--nav-bar-refraction': refraction.barFilter,
-          '--nav-tab-refraction': refraction.tabFilter,
+          '--nav-refraction': refraction.filter,
+          '--nav-refraction-padding': refraction.padding,
         } as CSSProperties : undefined}
         aria-label={compact ? '移动导航' : '主导航'}
       >
