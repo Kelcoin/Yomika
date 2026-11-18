@@ -1,6 +1,7 @@
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 
 import { ToastProvider, useToast } from '../../src/components/Toast';
 
@@ -89,5 +90,41 @@ describe('toast marks', () => {
     // 同色不同文、同文不同色的都不算重复。
     await user.click(screen.getByRole('button', { name: 'variants' }));
     expect(screen.getAllByText('已连上 DESKTOP-PC')).toHaveLength(2);
+  });
+});
+
+const message = '已保存';
+function Trigger({ action }: { action?: () => void }) {
+  const { showToast } = useToast();
+  return <button onClick={() => showToast(message, 'success', undefined,
+    action ? { action: { label: '撤销', run: action } } : undefined)}>提交</button>;
+}
+
+afterEach(() => {
+  resetInvokeAdapterForTests();
+  vi.unstubAllGlobals();
+});
+
+describe('system Toast', () => {
+  it.each([true, false])('only renders the fallback if native presentation returns %s = false', async (shown) => {
+    vi.stubGlobal('__TAURI_INTERNALS__', {});
+    const adapter = vi.fn(async () => ({ ok: true, value: shown }));
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><Trigger /></ToastProvider>);
+    await act(async () => { fireEvent.click(screen.getByText('提交')); });
+    expect(adapter).toHaveBeenCalledWith('show_system_toast', { text: message });
+    expect(Boolean(screen.queryByText(message))).toBe(!shown);
+  });
+
+  it('keeps actionable messages in the app', () => {
+    vi.stubGlobal('__TAURI_INTERNALS__', {});
+    const adapter = vi.fn();
+    setInvokeAdapterForTests(adapter);
+    const action = vi.fn();
+    render(<ToastProvider><Trigger action={action} /></ToastProvider>);
+    fireEvent.click(screen.getByText('提交'));
+    fireEvent.click(screen.getByText('撤销'));
+    expect(action).toHaveBeenCalledOnce();
+    expect(adapter).not.toHaveBeenCalled();
   });
 });

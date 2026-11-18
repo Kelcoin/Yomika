@@ -7510,3 +7510,76 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .app-main.has-home-topbar .workspace-home { display: grid; gap: var(--space-6); }
 .app-main.has-home-topbar .workspace-home > .archive-rail { margin-block: 0; }
 .app-main.has-home-topbar .workspace-home > .first-run-page { padding-block-start: 0; }
+
+/* One backdrop sample for the entire bar. The capsule and hover reflection
+   share a translucent lens surface over it, leaving the glyphs unscaled. */
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) {
+    --nav-glass-sample: blur(10px) saturate(1.4);
+    --nav-glass-tint: 58%;
+    --nav-lens-fill: color-mix(in srgb, var(--primary-container) 54%, transparent);
+    --nav-lens-sheen: radial-gradient(ellipse at var(--nav-lens-light, 25%) 0%, color-mix(in srgb, white 46%, transparent), transparent 60%),
+      linear-gradient(156deg, color-mix(in srgb, white 18%, transparent), transparent 48%, color-mix(in srgb, white 11%, transparent));
+    --nav-lens-edge: inset 0 1px 1px color-mix(in srgb, white 66%, transparent),
+      inset 0 -1px 1px color-mix(in srgb, white 32%, transparent),
+      inset 1px 0 2px color-mix(in srgb, white 25%, transparent),
+      inset -1px -2px 4px color-mix(in srgb, black 24%, transparent),
+      0 2px 6px color-mix(in srgb, black 22%, transparent);
+    background: linear-gradient(166deg, color-mix(in srgb, white 15%, transparent), transparent 44%, color-mix(in srgb, black 15%, transparent)),
+      color-mix(in srgb, var(--surface-container) var(--nav-glass-tint), transparent);
+    border-color: color-mix(in srgb, white 28%, transparent);
+    -webkit-backdrop-filter: var(--nav-glass-sample);
+    backdrop-filter: var(--nav-glass-sample);
+    box-shadow: inset 0 1px 1px color-mix(in srgb, white 52%, transparent),
+      inset 0 -1px 2px color-mix(in srgb, black 32%, transparent), var(--shadow-menu);
+  }
+
+  .compact-nav.is-floating[data-nav-glass="android"]:not(.is-hidden) {
+    --nav-glass-sample: blur(7px) saturate(1.55);
+    --nav-glass-tint: 55%;
+  }
+
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-drag-indicator::before {
+    background: var(--nav-lens-sheen), var(--nav-lens-fill);
+    box-shadow: var(--nav-lens-edge);
+  }
+
+  .compact-nav.is-floating[data-nav-glass][data-nav-pressing]:not(.is-hidden) {
+    --nav-lens-fill: color-mix(in srgb, var(--primary-container) 40%, transparent);
+    --nav-lens-sheen: radial-gradient(ellipse at var(--nav-lens-light, 25%) 0%, color-mix(in srgb, white 70%, transparent), transparent 62%),
+      radial-gradient(ellipse at 78% 100%, color-mix(in srgb, white 34%, transparent), transparent 65%);
+    --nav-lens-edge: inset 0 1px 2px color-mix(in srgb, white 80%, transparent),
+      inset 0 -1px 2px color-mix(in srgb, white 52%, transparent),
+      inset 0 -5px 9px color-mix(in srgb, black 22%, transparent),
+      0 4px 10px color-mix(in srgb, black 32%, transparent);
+  }
+
+  @media (hover: hover) {
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered:not(.is-active) {
+      background: var(--nav-lens-sheen), color-mix(in srgb, var(--surface-container-high) 38%, transparent);
+      box-shadow: var(--nav-lens-edge);
+    }
+    .compact-nav.is-floating[data-nav-glass][data-nav-indicator-ready]:not(.is-hidden) .nav-link.is-active.is-pointer-hovered {
+      background: transparent;
+    }
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]):has(.nav-link.is-active.is-pointer-hovered) {
+      --nav-lens-sheen: radial-gradient(ellipse at 25% 0%, color-mix(in srgb, white 62%, transparent), transparent 64%),
+        linear-gradient(156deg, color-mix(in srgb, white 22%, transparent), transparent 50%, color-mix(in srgb, white 17%, transparent));
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce), (prefers-contrast: more), (forced-colors: active) {
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden),
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden):is([data-nav-pressing], :has(.nav-link.is-active.is-pointer-hovered)) {
+      --nav-glass-sample: none;
+      --nav-lens-fill: var(--primary-container);
+      --nav-lens-sheen: linear-gradient(transparent, transparent);
+      --nav-lens-edge: none;
+      background: var(--surface-container);
+      border-color: var(--outline);
+    }
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered:not(.is-active) {
+      background: var(--surface-container-high);
+    }
+  }
+}

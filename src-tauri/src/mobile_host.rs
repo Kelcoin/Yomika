@@ -121,6 +121,16 @@ pub async fn write_text_file(app: &AppHandle, path: &str, contents: &str) -> Res
     .map(|_| ())
 }
 
+pub async fn show_toast(app: &AppHandle, text: &str) -> Result<bool, String> {
+    #[derive(serde::Deserialize)]
+    struct ToastResult {
+        shown: bool,
+    }
+    call::<ToastResult>(app, "showToast", json!({ "text": text }))
+        .await
+        .map(|result| result.shown)
+}
+
 pub async fn write_clipboard_text(app: &AppHandle, text: &str) -> Result<(), String> {
     call::<serde_json::Value>(app, "writeClipboardText", json!({ "text": text }))
         .await.map(|_| ())

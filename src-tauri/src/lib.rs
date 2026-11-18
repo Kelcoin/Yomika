@@ -92,7 +92,7 @@ use commands::library::{
 };
 use commands::platform::{
     app_build_info, frontend_ready, haptic_feedback, open_external_url, platform_capabilities,
-    read_text_file, reveal_in_file_manager, save_text_file, set_system_bar_style, system_insets,
+    read_text_file, reveal_in_file_manager, save_text_file, set_system_bar_style, show_system_toast, system_insets,
     write_clipboard_text,
 };
 #[cfg(target_os = "windows")]
@@ -466,6 +466,7 @@ pub fn run() {
             reveal_in_file_manager,
             open_external_url,
             write_clipboard_text,
+            show_system_toast,
             save_text_file,
             read_text_file,
             system_insets,

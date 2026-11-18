@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import { ok, type CommandResult } from '../domain/result';
 import {
   PlatformCapabilitiesSchema,
@@ -46,4 +48,9 @@ export async function setStatusBarVisible(visible: boolean): Promise<CommandResu
  * 调用方应当按平台先藏掉入口。 */
 export function revealInFileManager(path: string): Promise<CommandResult<void>> {
   return invokeCommand('reveal_in_file_manager', { path }, VoidResponseSchema);
+}
+
+export async function showSystemToast(text: string): Promise<boolean> {
+  const result = await invokeCommand('show_system_toast', { text }, z.boolean());
+  return result.ok && result.value;
 }

@@ -23,12 +23,12 @@ interface AppShellProps {
   returningHome?: boolean;
 }
 
-function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
+function Navigation({ compact = false, floating = false, glass, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; glass?: 'ios' | 'android' | undefined; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
   const navigate = useNavigate();
   const navRef = useRef<HTMLElement>(null);
   const [hovered, setHovered] = useState<string>();
-  useNavigationDrag(navRef, { enabled: compact, hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
+  useNavigationDrag(navRef, { enabled: compact, elastic: !glass, glass: Boolean(glass), hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
     onSelect: to => { setHovered(undefined); void navigate(to, { state: { navigationTab: true } }); } });
   useEffect(() => { setHovered(undefined); }, [location.pathname, hidden]);
   useEffect(() => {
@@ -49,6 +49,7 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
       <nav
         ref={navRef}
         className={compact ? `compact-nav${floating ? ' is-floating' : ''}${hidden ? ' is-hidden' : ''}` : 'side-nav'}
+        data-nav-glass={compact && floating ? glass : undefined}
         aria-label={compact ? '移动导航' : '主导航'}
       >
         {compact && <span className="nav-drag-indicator" data-nav-indicator aria-hidden="true" />}
@@ -103,6 +104,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
   const homeTopbar = compact && (pathname === '/' || returningHome);
   const { preferences } = usePreferences();
   const floatingNav = preferences.floatingNav;
+  const [navPlatform, setNavPlatform] = useState<'ios' | 'android'>(() => /iPad|iPhone|iPod/i.test(navigator.userAgent) ? 'ios' : 'android');
   // The rail's collapsed state is a preference, not session state: it used to
   // snap back to expanded on every launch.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -135,6 +137,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
     void getPlatformCapabilities().then((result) => {
       if (!result.ok) return;
       setShowTitleBar(result.value.platform === 'windows');
+      setNavPlatform(result.value.platform === 'ios' ? 'ios' : 'android');
       setShowSkipLink(result.value.platform !== 'android' && result.value.platform !== 'ios');
     });
   }, []);
@@ -383,7 +386,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
         <StatusBar />
       </div>
 
-          <Navigation compact floating={floatingNav} hidden={compactNavHidden} bottomNavItems={preferences.bottomNavItems} />
+          <Navigation compact floating={floatingNav} glass={preferences.liquidGlassNav && floatingNav ? navPlatform : undefined} hidden={compactNavHidden} bottomNavItems={preferences.bottomNavItems} />
     </div>
   );
 }

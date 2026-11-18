@@ -69,6 +69,7 @@ export const PreferenceSnapshotSchema = z.object({
   /** Compact bottom navigation drawn as a floating capsule that hides on
    * scroll-down and returns on scroll-up. */
   floatingNav: z.boolean().default(false),
+  liquidGlassNav: z.boolean().default(false),
   /** Which entries the compact bottom bar shows, in the app's canonical order.
    * Home and library are pinned; settings lives in the mobile home header. */
   bottomNavItems: z
@@ -144,6 +145,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   detailDateKind: 'published',
   customCss: '',
   floatingNav: false,
+  liquidGlassNav: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist'],
   startWithWindows: false,
   closeToTray: false,

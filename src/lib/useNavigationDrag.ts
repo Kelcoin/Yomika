@@ -8,8 +8,8 @@ const DRAG_SLOP = 6;
 /** BakaSU-style bottom-bar interaction: continuous preview, commit on release.
  * One decorative layer moves; page contents do not render or load until release.
  * Geometry is cached per gesture/resize, with no layout reads on pointermove. */
-export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, hidden, active, layoutKey = '', onSelect }: {
-  enabled: boolean; hidden: boolean; active: string; layoutKey?: string; onSelect: (route: string) => void;
+export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elastic = false, glass = false, hidden, active, layoutKey = '', onSelect }: {
+  enabled: boolean; elastic?: boolean; glass?: boolean; hidden: boolean; active: string; layoutKey?: string; onSelect: (route: string) => void;
 }) {
   const select = useRef(onSelect);
   const suppressClick = useRef(false);
@@ -45,12 +45,27 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, hidden
     const nearest = (center: number) => tabs.reduce<Tab | undefined>((best, tab) =>
       !best || Math.abs(tab.x + tab.width / 2 - center) < Math.abs(best.x + best.width / 2 - center) ? tab : best, undefined);
     const stretchTarget = () => {
-      const speed = Math.min(1, Math.abs(spring.current?.velocity ?? 0) / 1200);
+      const speed = Math.min(1, Math.abs(spring.current?.velocity ?? 0) / (elastic ? 950 : 1200));
       const pressing = Boolean(gesture);
+      if (glass && pressing && !reducedMotion) {
+        return { x: 1.28 + speed * 0.16, y: 1.26 - speed * 0.12 };
+      }
+      if (elastic && !reducedMotion) {
+        return { x: 1 + (pressing ? 0.14 : 0) + speed * 0.19, y: 1 + (pressing ? 0.10 : 0) - speed * 0.13 };
+      }
       return { x: reducedMotion ? 1 : 1 + (pressing ? 0.12 : 0) + speed * 0.12,
         y: reducedMotion ? 1 : 1 + (pressing ? 0.08 : 0) - speed * 0.06 };
     };
+    let lastLight = 25;
     const render = (tab: Tab, x: number) => {
+      if (glass && !reducedMotion) {
+        const velocity = spring.current?.velocity ?? 0;
+        const light = 25 + Math.round(Math.max(-25, Math.min(50, velocity / 22)) / 5) * 5;
+        if (light !== lastLight) {
+          lastLight = light;
+          nav.style.setProperty('--nav-lens-light', `${light}%`);
+        }
+      }
       const scaleX = stretch.current.x.position;
       const scaleY = stretch.current.y.position;
       nav.style.setProperty('--nav-indicator-scale-x', String(scaleX));
@@ -79,13 +94,13 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, hidden
       if (!target || !spring.current) return;
       const dt = lastTime === undefined ? 1 / 60 : (time - lastTime) / 1000;
       lastTime = time;
-      spring.current = advanceNavigationSpring(spring.current, targetX, dt, Boolean(gesture));
+      spring.current = advanceNavigationSpring(spring.current, targetX, dt, Boolean(gesture), elastic);
       const positionMoving = Math.abs(spring.current.position - targetX) > 0.05 || Math.abs(spring.current.velocity) > 0.5;
       if (!positionMoving) spring.current = { position: targetX, velocity: 0 };
       const shape = stretchTarget();
       let stretching = false;
       for (const axis of ['x', 'y'] as const) {
-        const state = advanceNavigationSpring(stretch.current[axis], shape[axis], dt, false);
+        const state = advanceNavigationSpring(stretch.current[axis], shape[axis], dt, false, elastic);
         const moving = Math.abs(state.position - shape[axis]) > 0.0005 || Math.abs(state.velocity) > 0.005;
         stretch.current[axis] = moving ? state : { position: shape[axis], velocity: 0 };
         stretching ||= moving;
@@ -253,6 +268,7 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, hidden
       nav.removeAttribute('data-nav-pressing');
       nav.removeAttribute('data-nav-dragging');
       nav.removeAttribute('data-nav-indicator-ready');
+      nav.style.removeProperty('--nav-lens-light');
     };
-  }, [ref, enabled, hidden, active, layoutKey]);
+  }, [ref, enabled, elastic, glass, hidden, active, layoutKey]);
 }

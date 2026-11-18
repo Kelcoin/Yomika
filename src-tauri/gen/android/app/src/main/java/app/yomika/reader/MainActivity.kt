@@ -126,6 +126,8 @@ class MainActivity : TauriActivity() {
     }
   }
 
+  private val pageInsets = PageInsetsBridge()
+
   private fun applyInsets(view: View, windowInsets: WindowInsetsCompat): WindowInsetsCompat {
     val bars = windowInsets.getInsets(
       WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
@@ -139,14 +141,14 @@ class MainActivity : TauriActivity() {
     val density = resources.displayMetrics.density
     val top = Math.round(bars.top / density)
     val bottom = Math.round(bars.bottom / density)
-    view.setPadding(0, 0, 0, ime.bottom)
+    if (view.paddingBottom != ime.bottom) view.setPadding(0, 0, 0, ime.bottom)
     SystemBars.top = top
     SystemBars.bottom = bottom
     val overlayBars = windowInsets.getInsetsIgnoringVisibility(
       WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.displayCutout()
     )
     val overlayTop = Math.round(overlayBars.top / density)
-    pushInsetsToPage(appWebView(view), top, bottom, overlayTop)
+    pageInsets.update(appWebView(view), top, bottom, overlayTop)
     // 键盘那一份已经被内边距吃掉了，别再让 WebView 按它缩一次——两次叠加的结果是页面比
     // 可见区域还短一截。
     return WindowInsetsCompat.Builder(windowInsets)

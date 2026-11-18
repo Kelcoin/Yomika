@@ -25,6 +25,19 @@ pub fn platform_capabilities() -> CommandResult<PlatformCapabilities> {
     })
 }
 
+/// Returns false when the host cannot display a transient system Toast.
+#[tauri::command]
+pub async fn show_system_toast(app: tauri::AppHandle, text: String) -> CommandResult<bool> {
+    #[cfg(target_os = "android")]
+    let shown = crate::mobile_host::show_toast(&app, &text).await.unwrap_or(false);
+    #[cfg(not(target_os = "android"))]
+    let shown = {
+        let _ = (app, text);
+        false
+    };
+    CommandResult::success(shown)
+}
+
 /** The webview's own clipboard API makes WebView2 ask the user for clipboard
  * permission on every write; the native side writes without any prompt, so
  * text exports (cookies, archive ids, migration JSON) go through here. */

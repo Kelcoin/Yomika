@@ -249,7 +249,7 @@ describe('design system contract', () => {
     expect(mainActivity, '状态栏高度要换算成 CSS 像素再交给页面').toMatch(/val top = Math\.round\(bars\.top \/ density\)/);
     expect(mainActivity, '手势条高度要换算成 CSS 像素再交给页面').toMatch(/val bottom = Math\.round\(bars\.bottom \/ density\)/);
     // 换算后的那两个值才是给页面与 `insets` 命令的那一份，`bars` 原文不再外流。
-    expect(mainActivity).toMatch(/pushInsetsToPage\(appWebView\(view\), top, bottom, overlayTop\)/);
+    expect(mainActivity).toMatch(/pageInsets\.update\(appWebView\(view\), top, bottom, overlayTop\)/);
     expect(mainActivity).toMatch(/SystemBars\.top = top/);
     expect(mainActivity).toMatch(/SystemBars\.bottom = bottom/);
   });

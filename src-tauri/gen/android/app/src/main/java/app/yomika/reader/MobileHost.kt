@@ -21,6 +21,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.Toast
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
@@ -52,6 +53,11 @@ class WriteTextFileArgs {
 
 @InvokeArg
 class ClipboardTextArgs {
+  lateinit var text: String
+}
+
+@InvokeArg
+class ToastArgs {
   lateinit var text: String
 }
 
@@ -99,34 +105,28 @@ object SystemBars {
   var bottom: Int = 0
 }
 
-private var insetScript: String? = null
+/** Keep one current document-start script per WebView and skip duplicate inset dispatches. */
+class PageInsetsBridge {
+  private var target: java.lang.ref.WeakReference<WebView>? = null
+  private var lastValues: String? = null
+  private var script: androidx.webkit.ScriptHandler? = null
 
-/**
- * 把系统栏高度交给页面：`--safe-top` / `--safe-bottom` 是页面自己的语言（`tokens.css` 里
- * 那两条先由 `env(safe-area-inset-*)` 兜底，而 Android 上那边是 0——WebView 只把刘海交给
- * `env()`，状态栏与手势条的高度从来不暴露给 CSS）。
- *
- * 两件事一起做：
- * - 写进**当前文档**：旋转、手势条切换这类运行时变化靠它；
- * - 登记一条 **document-start 脚本**：每次新文档一开始就写好，所以重新加载也不会先画错
- *   位置（脚本自己等 `DOMContentLoaded`，那时 `documentElement` 才一定在）。
- *
- * 同一种高度只登记一次：这一版 androidx.webkit（1.14.0）**没有**移除 document-start 脚本
- * 的 API，而高度一共就那么几种（竖屏/横屏 × 手势条开关），按值去重之后不会越攒越多。
- * 页面启动时还会通过 `system_insets` 命令再问一次（见 `lib/safeArea`），所以即使这里的值
- * 落后一格也会被纠正回来。
- */
-fun pushInsetsToPage(web: WebView?, top: Int, bottom: Int, overlayTop: Int = top) {
-  val target = web ?: return
-  val values = "document.documentElement.style.setProperty('--safe-top','${top}px');" +
-    "document.documentElement.style.setProperty('--safe-bottom','${bottom}px');" +
-    "document.documentElement.style.setProperty('--safe-overlay-top','${overlayTop}px');"
-  target.evaluateJavascript(values, null)
-  if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
-  val script = "window.addEventListener('DOMContentLoaded',function(){$values});"
-  if (script == insetScript) return
-  insetScript = script
-  runCatching { WebViewCompat.addDocumentStartJavaScript(target, script, setOf("*")) }
+  fun update(web: WebView?, top: Int, bottom: Int, overlayTop: Int) {
+    if (web == null) return
+    val values = "document.documentElement.style.setProperty('--safe-top','${top}px');" +
+      "document.documentElement.style.setProperty('--safe-bottom','${bottom}px');" +
+      "document.documentElement.style.setProperty('--safe-overlay-top','${overlayTop}px');"
+    if (target?.get() === web && lastValues == values) return
+    target = java.lang.ref.WeakReference(web)
+    lastValues = values
+    web.evaluateJavascript(values, null)
+    if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) return
+    script?.remove()
+    script = runCatching {
+      WebViewCompat.addDocumentStartJavaScript(web,
+        "window.addEventListener('DOMContentLoaded',function(){$values},{once:true});", setOf("*"))
+    }.getOrNull()
+  }
 }
 
 /**
@@ -174,6 +174,29 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
   fun securityAuthenticate(invoke: Invoke) { NativeAppSecurity.authenticate(hostActivity, invoke) }
   @Command
   fun securityReady(invoke: Invoke) { NativeAppSecurity.ready(); invoke.resolve() }
+
+  private var lastToastText: String? = null
+  private var lastToastAt = 0L
+
+  @Command
+  fun showToast(invoke: Invoke) {
+    val shown = runCatching {
+      val text = invoke.parseArgs(ToastArgs::class.java).text.trim()
+      if (text.isEmpty() || text.length > 48 || text.contains('\n') || text.contains('\r') ||
+        hostActivity.isFinishing || hostActivity.isDestroyed || !hostActivity.hasWindowFocus()) {
+        false
+      } else {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (text != lastToastText || now - lastToastAt > 2000) {
+          Toast.makeText(hostActivity.applicationContext, text, Toast.LENGTH_LONG).show()
+          lastToastText = text
+          lastToastAt = now
+        }
+        true
+      }
+    }.getOrDefault(false)
+    invoke.resolve(JSObject().apply { put("shown", shown) })
+  }
 
   @Command
   fun setStatusBarVisible(invoke: Invoke) {

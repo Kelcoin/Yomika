@@ -1247,6 +1247,15 @@ export function SettingsWorkspace() {
                 onToggle={() => editPreferences({ floatingNav: !preferenceDraft.floatingNav })}
               />
             )}
+            {selectedSettingsSection === 'settings-appearance' && preferenceDraft.floatingNav && (
+              <SettingsSwitch
+                icon={<PanelBottom />}
+                label="液态玻璃"
+                hint="让底栏透出滚动内容，叠加模糊与边缘高光"
+                checked={preferenceDraft.liquidGlassNav}
+                onToggle={() => editPreferences({ liquidGlassNav: !preferenceDraft.liquidGlassNav })}
+              />
+            )}
             {selectedSettingsSection === 'settings-appearance' && (
               <SettingsPanel
                 icon={<ListChecks />}

@@ -2,6 +2,7 @@ import { SvgIcon } from './SvgIcon';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 
+import { showSystemToast } from '../bridge/platform';
 import { OverlayLayer } from './OverlayLayer';
 
 type ToastType = 'info' | 'success' | 'error';
@@ -42,6 +43,7 @@ const fallbackToastContext: ToastContextValue = { showToast: () => undefined, cl
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(0);
+  const pendingSystemToasts = useRef(new Map<string, { type: ToastType }>());
   const timers = useRef(new Map<number, number>());
   /** 最新一帧的栈。`showToast` 要能看出「这句话是不是已经挂在上面」，而它读不到同一个
    * tick 里刚排进去的那一张（`setItems` 的更新还没落到 state）——所以照 render 的现值记一份。 */
@@ -58,9 +60,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       setItems((current) => current.filter((item) => item.id !== id));
     }, 280));
   }, []);
-  const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600, meta?: ToastMeta) => {
-    const message = String(text ?? '').trim();
-    if (!message) return;
+  const showInApp = useCallback((message: string, type: ToastType, duration: number, meta?: ToastMeta) => {
     // 同一句话、同一种颜色已经挂在屏幕上时不叠第二张：它们说的是同一件事（「已连上 X」
     // 会在打开菜单、选中那一行、按「刷新服务」时各说一遍），叠起来像连了两次。重复的这
     // 一次改成把原来那张的计时重新起算，等于「刚刚又确认了一遍」。
@@ -78,13 +78,44 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setItems((current) => [...current, item].slice(-4));
     timers.current.set(id, window.setTimeout(() => closeToast(id), duration));
   }, [closeToast]);
+  const showToast = useCallback((text: string, type: ToastType = 'info', duration = type === 'error' ? 7000 : 3600, meta?: ToastMeta) => {
+    const message = String(text ?? '').trim();
+    if (!message) return;
+    // Android owns the timing and may truncate at two lines. Preserve long,
+    // actionable, measured and explicitly timed messages in the app.
+    if (type === 'error' || meta || duration !== 3600 || message.length > 48 || /[\r\n]/.test(message)
+      || !('__TAURI_INTERNALS__' in window)) {
+      showInApp(message, type, duration, meta);
+      return;
+    }
+    const pending = pendingSystemToasts.current;
+    const key = `${type}:${message}`;
+    if (pending.has(key)) return;
+    const request = { type };
+    pending.set(key, request);
+    void showSystemToast(message).then((shown) => {
+      if (pending.get(key) !== request) return;
+      pending.delete(key);
+      if (!shown) showInApp(message, type, duration);
+    });
+  }, [showInApp]);
   const clearToasts = useCallback((type?: ToastType) => {
+    for (const [key, request] of pendingSystemToasts.current) {
+      if (!type || type === request.type) pendingSystemToasts.current.delete(key);
+    }
     const removed = itemsRef.current.filter((item) => !item.closing && (!type || item.type === type));
     // Mark synchronously so a same-tick retry creates a fresh, visible toast.
     itemsRef.current = itemsRef.current.map(item => removed.includes(item) ? { ...item, closing: true } : item);
     for (const item of removed) closeToast(item.id);
   }, [closeToast]);
-  useEffect(() => () => timers.current.forEach((timer) => window.clearTimeout(timer)), []);
+  useEffect(() => {
+    const pending = pendingSystemToasts.current;
+    const activeTimers = timers.current;
+    return () => {
+      pending.clear();
+      activeTimers.forEach((timer) => window.clearTimeout(timer));
+    };
+  }, []);
   const value = useMemo(() => ({ showToast, clearToasts }), [clearToasts, showToast]);
   // 挂到 body（`OverlayLayer`）：留在页面容器里，容器自己的层叠上下文（`.workspace` 的
   // 入场 transform、列表的 z-index…）会把这个栈关在里面，二级菜单那道 `position: fixed`
