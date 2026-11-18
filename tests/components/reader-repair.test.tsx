@@ -32,6 +32,24 @@ it('retries a page request that never settles and aborts its old consumer', asyn
   expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:recovered');
 });
 
+it('keeps the next frame available but coalesces distant prefetch across rapid turns', async () => {
+  vi.useFakeTimers();
+  const loadPage = vi.fn(async (_index: number) => 'blob:prefetched');
+  render(<MemoryRouter><ReaderScreen archiveId="burst" title="Burst" pages={['blob:1', 'blob:2', 'blob:3', 'blob:4', '', '', '', '', '']} layout="single" prefetchDistance={3} loadPage={loadPage} /></MemoryRouter>);
+  const reader = screen.getByRole('main', { name: '漫画阅读器' });
+  fireEvent.keyDown(reader, { key: 'ArrowRight' });
+  await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+  expect(loadPage).not.toHaveBeenCalled();
+  fireEvent.keyDown(reader, { key: 'ArrowRight' });
+  await act(async () => { await vi.advanceTimersByTimeAsync(40); });
+  expect(loadPage).not.toHaveBeenCalled();
+  fireEvent.keyDown(reader, { key: 'ArrowRight' });
+  await act(async () => {});
+  expect(loadPage.mock.calls.map(([index]) => index)).toEqual([4]);
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  expect(loadPage.mock.calls.map(([index]) => index)).toEqual([4, 5, 6]);
+});
+
 it('bounds a stuck middle page and lets its retry replace the abandoned request', async () => {
   vi.useFakeTimers();
   vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(128);
@@ -83,6 +101,18 @@ it('remeasures indicator overlap when a displayed page loads again without chang
 it('offers a retry if the displayed image never emits load or error', async () => {
   vi.useFakeTimers();
   render(<MemoryRouter><ReaderScreen archiveId="image-timeout" title="Image timeout" pages={['blob:never-loads']} layout="single" /></MemoryRouter>);
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+  expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument();
+});
+
+it('times out a partially loaded neighbour after it becomes the current page', async () => {
+  vi.useFakeTimers();
+  render(<MemoryRouter><ReaderScreen archiveId="partial-image" title="Partial image" pages={['blob:first', 'blob:partial']} layout="single" /></MemoryRouter>);
+  const reader = screen.getByRole('main', { name: '漫画阅读器' });
+  const image = reader.querySelector<HTMLImageElement>('img[src="blob:partial"]')!;
+  Object.defineProperties(image, { naturalWidth: { value: 6000 }, complete: { value: false } });
+  fireEvent.keyDown(reader, { key: 'ArrowRight' });
+  expect(screen.getByRole('img', { name: '第 2 页' })).toBe(image);
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   expect(screen.getByRole('button', { name: '重试加载' })).toBeInTheDocument();
 });

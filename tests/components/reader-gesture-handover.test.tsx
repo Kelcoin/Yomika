@@ -89,7 +89,11 @@ it('coalesces wheel transforms without reconciling the reader for each wheel eve
   await act(async () => { await new Promise(requestAnimationFrame); });
   commits = 0;
   const reader = screen.getByRole('main', { name: '漫画阅读器' });
+  const frame = reader.querySelector('.reader-single')!;
+  const readinessChecks = vi.spyOn(frame, 'querySelectorAll');
   for (let i = 0; i < 40; i++) fireEvent.wheel(reader, { deltaY: -2, clientX: 200, clientY: 300 });
+  expect(readinessChecks.mock.calls.filter(([selector]) => selector === 'img.reader-page:not(.is-candidate)')).toHaveLength(1);
+  readinessChecks.mockRestore();
   await act(async () => { await new Promise(requestAnimationFrame); });
   expect(commits).toBeLessThanOrEqual(3);
   const transform = (screen.getByRole('img', { name: '第 1 页' }).closest('.reader-single') as HTMLElement).style.transform;

@@ -30,6 +30,7 @@ const PAGE_RETENTION_MARGIN = 3;
 /** Attempts before a page is left alone. */
 const MAX_PAGE_LOAD_ATTEMPTS = 3;
 const PAGE_LOAD_TIMEOUT_MS = 30_000;
+const DISTANT_PREFETCH_IDLE_MS = 120;
 const AUTO_TURN_INTERVAL_MS = 5_000;
 /** Height of the bands at the top and bottom of the canvas that summon the
  * chrome. A tap anywhere used to raise the bars over what was being read; the
@@ -292,10 +293,11 @@ interface ReaderScreenProps {
  * 包在 `memo` 里：翻一页只该动那一页的图。三个帧（上一页 / 这一页 / 下一页）都在同一个
  * 树里，不拦一下就是每次翻页把三张图的元素与内联样式重新算一遍。
  */
-const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote }: {
+const ReaderPageImage = memo(function ReaderPageImage({ index, source, fitWidth, fitHeight, onMeasured, onDisplayed, onFailed, handoverPaused, canPromote }: {
   index: number;
   source: string;
-  size: { width: number; height: number } | undefined;
+  fitWidth?: number | undefined;
+  fitHeight?: number | undefined;
   onMeasured: (index: number, image: HTMLImageElement) => void;
   onDisplayed?: ((index: number, url: string) => void) | undefined;
   onFailed: (index: number, url: string) => void;
@@ -307,18 +309,21 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
   // Keep this same full-resolution image through gestures. Switching to a
   // reduced canvas changes halftone sampling even before the zoom moves.
   const displayedRef = useRef<HTMLImageElement>(null);
+  const displayTimeout = useRef<number>();
   const loadedUrl = useRef<string>();
   const displayedFailed = useRef(false);
   const handover = useRef<{ url: string; image: HTMLImageElement }>();
   const callbacks = useRef({ onMeasured, onDisplayed, onFailed });
   callbacks.current = { onMeasured, onDisplayed, onFailed };
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      if (loadedUrl.current === shown || (displayedRef.current?.naturalWidth ?? 0) > 0) return;
+    const image = displayedRef.current;
+    if (loadedUrl.current === shown || (image?.complete && image.naturalWidth > 0)) return;
+    displayTimeout.current = window.setTimeout(() => {
+      if (loadedUrl.current === shown || (image?.complete && image.naturalWidth > 0)) return;
       displayedFailed.current = true;
       callbacks.current.onFailed(index, shown);
     }, PAGE_LOAD_TIMEOUT_MS);
-    return () => window.clearTimeout(timer);
+    return () => window.clearTimeout(displayTimeout.current);
   }, [shown, index]);
   useEffect(() => {
     const candidate = candidateRef.current;
@@ -365,15 +370,17 @@ const ReaderPageImage = memo(function ReaderPageImage({ index, source, size, onM
       alt={candidate ? '' : `第 ${index + 1} 页`}
       src={url}
       decoding="async"
-      style={size ? { '--reader-page-fit-width': `${size.width}px`, '--reader-page-fit-height': `${size.height}px` } as CSSProperties : undefined}
+      style={fitWidth !== undefined && fitHeight !== undefined ? { '--reader-page-fit-width': `${fitWidth}px`, '--reader-page-fit-height': `${fitHeight}px` } as CSSProperties : undefined}
       onLoad={(event) => {
         if (candidate) return;
+        window.clearTimeout(displayTimeout.current);
         loadedUrl.current = url;
         onMeasured(index, event.currentTarget);
         onDisplayed?.(index, url);
       }}
       onError={(event) => {
         if (candidate) return;
+        window.clearTimeout(displayTimeout.current);
         displayedFailed.current = true;
         const image = event.currentTarget;
         logError('reader/page-image', '阅读器的图片没加载出来', { page: index + 1, url, naturalWidth: image.naturalWidth, complete: image.complete });
@@ -436,7 +443,11 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   readerStateRef.current = state;
   // `state.layout` is the preference (which may be `auto`); this is what renders.
   const effectiveLayout = effectiveReaderLayout(state);
-  const [loadedPages, setLoadedPages] = useState(pages);
+  const [loadedPages, setLoadedPages] = useState(() => {
+    const loaded = new Map<number, string>();
+    pages.forEach((url, index) => { if (url) loaded.set(index, url); });
+    return loaded;
+  });
   const [zoom, setZoomState] = useState<ZoomState>(createZoomState);
   const zoomRef = useRef(zoom);
   const zoomScaleRef = useRef(1);
@@ -620,8 +631,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
    * window moved past it, never. */
   const failedPagesRef = useRef(new Map<number, { attempts: number; nextAt: number }>());
   const [retryTick, setRetryTick] = useState(0);
-  const retryTimerRef = useRef<number>();
   const fetchAnchorRef = useRef('');
+  const distantPrefetchAt = useRef(0);
 
   /** Slot height for one continuous-scroll page. Unmeasured pages get an estimate
    * so the scroller has a length from the start; a measured height replaces it
@@ -684,7 +695,6 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   useEffect(() => { heightsRef.current = heights; }, [heights]);
   useEffect(() => { anchorRef.current = webtoonAnchor; }, [webtoonAnchor]);
   useEffect(() => () => {
-    if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
     for (const controller of loadingPagesRef.current.values()) controller.abort();
     loadingPagesRef.current.clear();
   }, []);
@@ -792,27 +802,16 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     setRetryTick((value) => value + 1);
     failedPagesRef.current.clear();
     setExhaustedPages((current) => current.size === 0 ? current : new Set());
-    setLoadedPages((current) => {
-      const next = current.slice();
-      let changed = false;
-      for (let index = 0; index < next.length; index += 1) {
-        if (!next[index]) continue;
-        releasePage?.(index);
-        next[index] = '';
-        changed = true;
-      }
-      return changed ? next : current;
-    });
-  }, [releasePage, reloadToken]);
+    for (const index of loadedPages.keys()) releasePage?.(index);
+    setLoadedPages((current) => current.size ? new Map() : current);
+  }, [loadedPages, releasePage, reloadToken]);
 
   useEffect(() => {
-    if (!pageActive) {
-      if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
-      return;
-    }
-    const pageCount = loadedPages.length;
+    if (!pageActive) return;
+    const pageCount = pages.length;
     const fetchSet = new Set<number>();
     const retainSet = new Set<number>();
+    const immediate = new Set<number>();
     const add = (set: Set<number>, index: number) => { if (index >= 0 && index < pageCount) set.add(index); };
     if (effectiveLayout === 'webtoon') {
       // Continuous mode used to call every page of the archive visible, so opening
@@ -831,6 +830,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       // fetched as slots — a spread advances by two pages, which a symmetric
       // distance of one would miss.
       for (const index of [...visibleIndexes, ...neighbourIndexes.previous, ...neighbourIndexes.next]) {
+        add(immediate, index);
         add(fetchSet, index);
         add(retainSet, index);
       }
@@ -846,7 +846,12 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     // Retire stale demand before submitting the new current page. Cancellation
     // is not a failure and must not leave a backoff/exhausted entry behind.
     const anchor = `${effectiveLayout}:${visibleIndexes.join(',')}`;
-    const needsForeground = fetchAnchorRef.current !== anchor && visibleIndexes.some(index => !loadedPages[index]);
+    const now = Date.now();
+    const changedWindow = fetchAnchorRef.current !== anchor;
+    const needsForeground = changedWindow && visibleIndexes.some(index => !loadedPages.has(index));
+    if (changedWindow && fetchAnchorRef.current && effectiveLayout !== 'webtoon') {
+      distantPrefetchAt.current = now + DISTANT_PREFETCH_IDLE_MS;
+    }
     fetchAnchorRef.current = anchor;
     for (const [index, controller] of loadingPagesRef.current) {
       // A slow prefetch may still belong to the new window, but it must not
@@ -859,40 +864,32 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     }
 
     if (releasePage) {
-      // 一次扫描收两件事：释放窗口外的页，以及「有东西真的被放掉」时那份新数组。
-      // 先前无论有没有要放掉的页都会 `current.slice()`（上千页的档案每翻一页复制
-      // 一次整本）——快速连续翻页的卡顿里有它一份。
       const released: number[] = [];
-      for (let index = 0; index < loadedPages.length; index += 1) {
-        if (!retainSet.has(index) && loadedPages[index]) released.push(index);
+      for (const index of loadedPages.keys()) {
+        if (!retainSet.has(index)) released.push(index);
       }
       if (released.length > 0) {
         for (const index of released) releasePage(index);
         setLoadedPages((current) => {
-          let changed = false;
-          const next = current.slice();
-          for (const index of released) {
-            if (next[index]) {
-              next[index] = '';
-              changed = true;
-            }
-          }
-          return changed ? next : current;
+          const next = new Map(current);
+          for (const index of released) next.delete(index);
+          return next;
         });
       }
     }
     if (!loadPage) return;
-    const now = Date.now();
     let soonest = Infinity;
     for (const index of fetchSet) {
-      if (loadedPages[index] || loadingPagesRef.current.has(index)) continue;
+      if (loadedPages.has(index) || loadingPagesRef.current.has(index)) continue;
       const failure = failedPagesRef.current.get(index);
-      if (failure) {
-        if (failure.attempts >= MAX_PAGE_LOAD_ATTEMPTS) continue;
-        if (failure.nextAt > now) {
-          soonest = Math.min(soonest, failure.nextAt);
-          continue;
-        }
+      if (failure && failure.attempts >= MAX_PAGE_LOAD_ATTEMPTS) continue;
+      // The visible frame and its swipe neighbours never wait for this quiet
+      // period. Only the rest of the configured look-ahead is coalesced.
+      const speculative = effectiveLayout !== 'webtoon' && !immediate.has(index);
+      const nextAt = Math.max(failure?.nextAt ?? 0, speculative ? distantPrefetchAt.current : 0);
+      if (nextAt > now) {
+        soonest = Math.min(soonest, nextAt);
+        continue;
       }
       const controller = new AbortController();
       loadingPagesRef.current.set(index, controller);
@@ -916,7 +913,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
         loadingPagesRef.current.delete(index);
         if (page) {
           failedPagesRef.current.delete(index);
-          setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? page : value));
+          setLoadedPages((current) => current.get(index) === page ? current : new Map(current).set(index, page));
           return;
         }
         // Exponential backoff with jitter: a server that just refused is
@@ -940,17 +937,22 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       });
     }
     if (soonest !== Infinity) {
-      if (retryTimerRef.current !== undefined) window.clearTimeout(retryTimerRef.current);
-      retryTimerRef.current = window.setTimeout(() => setRetryTick((value) => value + 1), Math.max(50, soonest - now));
+      const timer = window.setTimeout(() => setRetryTick((value) => value + 1), Math.max(1, soonest - Date.now()));
+      return () => window.clearTimeout(timer);
     }
-  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive]);
+  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, pages.length, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive]);
 
   const retryPage = useCallback((index: number) => {
     const pending = loadingPagesRef.current.get(index);
     loadingPagesRef.current.delete(index);
     pending?.abort();
     releasePage?.(index);
-    setLoadedPages((current) => current.map((value, pageIndex) => pageIndex === index ? '' : value));
+    setLoadedPages((current) => {
+      if (!current.has(index)) return current;
+      const next = new Map(current);
+      next.delete(index);
+      return next;
+    });
     failedPagesRef.current.delete(index);
     setExhaustedPages((current) => {
       if (!current.has(index)) return current;
@@ -965,7 +967,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
   const failPage = useCallback((index: number, url: string) => {
     // The displayed rendition may be a predecessor of the newest derived
     // candidate while that candidate is still decoding.
-    if (loadedPages[index] !== url) {
+    if (loadedPages.get(index) !== url) {
       setRejectedDerived((current) => new Map(current).set(index, url));
       return;
     }
@@ -1037,6 +1039,8 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     const element = rootRef.current;
     if (!element) return undefined;
     let settleTimer: number | undefined;
+    let checkedFrame: number | undefined;
+    let checkedElement: HTMLDivElement | null;
     const onWheel = (event: globalThis.WheelEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       const inControl = target?.closest('input, textarea, select, [contenteditable="true"], .reader-comments, .horizontal-scroller, .reader-overview') !== null;
@@ -1048,12 +1052,18 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
       if (layoutRef.current === 'webtoon' || inControl) return;
       if (event.deltaY === 0) return;
       if (event.cancelable) event.preventDefault();
-      if (sliding.current || panStart.current || pinchStart.current || !canZoomCurrentImage()) return;
-      pauseHandover();
-      resumeHandover(380);
+      if (sliding.current || panStart.current || pinchStart.current) return;
+      const currentElement = zoomElementRef.current;
+      const alreadyChecked = checkedFrame !== undefined && checkedFrame === zoomFrameRef.current && checkedElement === currentElement;
+      if (!alreadyChecked && !canZoomCurrentImage()) return;
       const point = viewportPoint(event.clientX, event.clientY);
       const delta = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? window.innerHeight : 1);
       followZoom(zoomAtPoint(zoomRef.current, zoomByWheel(zoomRef.current, delta).scale, point.x, point.y));
+      if (alreadyChecked) return;
+      checkedFrame = zoomFrameRef.current;
+      checkedElement = currentElement;
+      pauseHandover();
+      resumeHandover(380);
       // Springs an overshoot back once the wheel goes quiet, so the limits feel
       // elastic instead of hard-stopping mid-gesture.
       window.clearTimeout(settleTimer);
@@ -1763,48 +1773,26 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
     transform: 'translate3d(0,0,0)',
   } as const;
 
-  /** 每页的显示尺寸：自然尺寸 contain 进它所在的那一格。
-   *
-   * 两张表按「这一格站几页」分：单页那一格的宽度是整个视口，双页那一格是半个。
-   * 表本身 memo 过，所以翻页时尺寸对象只有真的换了才换——`ReaderPageImage` 是
-   * `memo` 的，靠这一点把每次翻页的重渲染收在真正变了的那一两页上。 */
-  const fitSizes = useMemo(() => {
-    const single = new Map<number, { width: number; height: number }>();
-    const pair = new Map<number, { width: number; height: number }>();
-    const webtoon = effectiveLayout === 'webtoon';
-    // 连续滚动里高度不设限：宽度贴满那一列，高度由比例定，槽位高度用的也是这个式子。
-    const singleBox = webtoon
-      ? { width: webtoonSlotWidth, height: Number.POSITIVE_INFINITY }
-      : { width: viewport.width, height: viewport.height };
-    const pairBox = { width: viewport.width / 2, height: viewport.height };
-    // 只遍历量过的页：没量到的页没有可算的尺寸，遍历整本只是白走一遍。
-    for (const [index, natural] of pageSizes) {
-      const one = fitPageSize(natural, singleBox);
-      if (one) single.set(index, one);
-      if (webtoon) continue;
-      const two = fitPageSize(natural, pairBox);
-      if (two) pair.set(index, two);
-    }
-    return { single, pair };
-  }, [effectiveLayout, pageSizes, viewport.height, viewport.width, webtoonSlotWidth]);
-
   /** One page: the image, or why it is not there yet. Always a slot, even when
    * empty — a spread whose halves appeared one at a time used to re-centre when
    * the second arrived, shifting the page under the reader's eyes. */
   const renderSlot = (index: number, pagesInSlot = 1) => {
     const derived = derivedPages?.get(index);
-    const source = derived && rejectedDerived.get(index) !== derived ? derived : loadedPages[index];
+    const source = derived && rejectedDerived.get(index) !== derived ? derived : loadedPages.get(index);
     // Whatever rendition is on screen, the page draws at the size its first
     // measurement established: an enhanced page must not be drawn larger than the
     // plain one it replaced (see `.reader-page` in reader.css).
-    const size = (pagesInSlot > 1 ? fitSizes.pair : fitSizes.single).get(index);
+    const natural = pageSizes.get(index);
+    const size = natural && fitPageSize(natural, effectiveLayout === 'webtoon'
+      ? { width: webtoonSlotWidth, height: Number.POSITIVE_INFINITY }
+      : { width: viewport.width / pagesInSlot, height: viewport.height });
     // `decoding="async"` 与「先解码再换」都在 ReaderPageImage 里：默认的 `auto` 允许"下一
     // 帧就要画它"时在主线程上同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈
     // ——它就是主线程画的。
     return (
       <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
         {source && !exhaustedPages.has(index)
-          ? <ReaderPageImage index={index} source={source} size={size} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} />
+          ? <ReaderPageImage index={index} source={source} fitWidth={size?.width} fitHeight={size?.height} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onFailed={failPage} handoverPaused={handoverPaused} canPromote={canPromote} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -2059,7 +2047,7 @@ export function ReaderScreen({ archiveId, title, pages, initialPage = 0, directi
             sizeBytes={info?.sizeBytes}
             tags={info?.tags}
             currentPage={state.pageIndex}
-            thumbnailAt={(index) => thumbnails.get(index) ?? loadedPages[index]}
+            thumbnailAt={(index) => thumbnails.get(index) ?? loadedPages.get(index)}
             onRangeChange={onThumbnailRange}
             onSelectPage={(index) => { jumpToPage(index); setThumbnailPanelOpen(false); }}
             onClose={() => setThumbnailPanelOpen(false)}
