@@ -14,7 +14,11 @@ function capsuleMap(width: number, height: number, displacement: number, density
 
   const image = context.createImageData(pixelWidth, pixelHeight);
   const radius = Math.min(width, height) / 2;
-  const band = Math.min(radius * 0.55, 14);
+  const band = Math.min(radius * 0.66, 17);
+  // Keep the sampling position monotonic along the normal. The quadratic
+  // bevel has its steepest slope at the rim (2 * displacement / band). A
+  // steeper field folds the backdrop and repeats or mirrors text at the rim.
+  const inset = Math.min(displacement, band * 0.43);
   const straightX = width / 2 - radius;
   const straightY = height / 2 - radius;
   const pixelSize = Math.max(width / pixelWidth, height / pixelHeight);
@@ -30,7 +34,7 @@ function capsuleMap(width: number, height: number, displacement: number, density
       // Sampling inwards at the bevel compresses backdrop detail near the rim.
       // The center is neutral and keeps text and artwork underneath recognizable.
       const strength = len > 0 && depth > -pixelSize / 2 && depth < band
-        ? -displacement * (1 - Math.max(0, depth) / band) ** 2 / len : 0;
+        ? -inset * (1 - Math.max(0, depth) / band) ** 2 / len : 0;
       image.data[index] = 255 * (0.5 + dx * strength / displacementScale);
       image.data[index + 1] = 255 * (0.5 + dy * strength / displacementScale);
       // Encode the bevel highlight in B and the antialiased silhouette in A.
@@ -57,8 +61,8 @@ export function useNavigationRefraction(nav: HTMLElement | null, enabled: boolea
       const size = `${nav.offsetWidth}:${nav.offsetHeight}:${tab.offsetWidth}:${tab.offsetHeight}`;
       if (size === lastSize) return;
       lastSize = size;
-      const bar = capsuleMap(nav.offsetWidth, nav.offsetHeight, 18, density);
-      const tabMap = capsuleMap(tab.offsetWidth, tab.offsetHeight, 22, density);
+      const bar = capsuleMap(nav.offsetWidth, nav.offsetHeight, 6, density);
+      const tabMap = capsuleMap(tab.offsetWidth, tab.offsetHeight, 7, density);
       if (bar && tabMap) setMaps({ bar, tab: tabMap, width: nav.offsetWidth, height: nav.offsetHeight });
     };
     update();
@@ -82,13 +86,16 @@ export function useNavigationRefraction(nav: HTMLElement | null, enabled: boolea
               show through as two horizontal reflections inside the tab. */}
           <feComposite in="tab" in2="bar" operator="over" result="field" />
           {(['R', 'G', 'B'] as const).map((channel, index) => <ChannelRefraction key={channel}
-            channel={channel} strength={displacementScale + (index - 1) * 2} />)}
+            channel={channel} strength={displacementScale + (index - 1) * 1.5} />)}
           <feBlend in="refractedR" in2="refractedG" mode="screen" result="refractedRG" />
           <feBlend in="refractedRG" in2="refractedB" mode="screen" result="refraction" />
           {/* Apply the same contrast floor across both shapes, before clipping.
               The theme scrim preserves the displaced detail and the rim remains clear. */}
           <feFlood className="nav-optics-tone" floodOpacity="0.57" result="tone" />
-          <feComposite in="tone" in2="refraction" operator="over" result="toned" />
+          {/* Resample subpixel detail after displacement, without filtering
+              the silhouette, rim light, or foreground controls. */}
+          <feGaussianBlur in="refraction" stdDeviation="0.38" result="sample" />
+          <feComposite in="tone" in2="sample" operator="over" result="toned" />
           <feComposite in="toned" in2="field" operator="in" result="glass" />
           <feColorMatrix in="field" values="0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 .52 0 0" result="light" />
           <feComposite in="light" in2="field" operator="in" result="rim" />
