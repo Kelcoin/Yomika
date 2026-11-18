@@ -89,9 +89,9 @@ export function useNavigationRefraction(nav: HTMLElement | null, enabled: boolea
             channel={channel} strength={displacementScale + (index - 1) * 1.5} />)}
           <feBlend in="refractedR" in2="refractedG" mode="screen" result="refractedRG" />
           <feBlend in="refractedRG" in2="refractedB" mode="screen" result="refraction" />
-          {/* Apply the same contrast floor across both shapes, before clipping.
-              The theme scrim preserves the displaced detail and the rim remains clear. */}
-          <feFlood className="nav-optics-tone" floodOpacity="0.57" result="tone" />
+          {/* Keep the material tint subtle so the refracted backdrop retains
+              its own color. Foreground contrast is handled by the controls. */}
+          <feFlood className="nav-optics-tone" floodOpacity="0.12" result="tone" />
           {/* Resample subpixel detail after displacement, without filtering
               the silhouette, rim light, or foreground controls. */}
           <feGaussianBlur in="refraction" stdDeviation="0.38" result="sample" />

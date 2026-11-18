@@ -7517,7 +7517,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) {
     --nav-glass-sample: blur(2px);
-    --nav-glass-tint: 67%;
+    --nav-glass-tint: 22%;
     background: transparent;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
@@ -7558,6 +7558,18 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-link,
   .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-icon-pair > svg {
     color: var(--nav-glass-ink);
+  }
+
+  /* Protect the glyph edges locally so bright or busy artwork can remain
+     visible through the rest of the glass. The halo sits behind the fill. */
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-link > span:not(.nav-icon-pair) {
+    paint-order: stroke fill;
+    -webkit-text-stroke: .18em var(--nav-glass-halo);
+    text-shadow: 0 1px 3px var(--nav-glass-halo);
+  }
+
+  .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-icon-pair {
+    filter: drop-shadow(0 0 1px var(--nav-glass-halo)) drop-shadow(0 1px 1px var(--nav-glass-halo));
   }
 
   .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-link:is(.is-active, [data-nav-preview]) {
@@ -7606,6 +7618,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     }
     .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) {
       --nav-glass-ink: var(--on-surface);
+    }
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-link > span:not(.nav-icon-pair) {
+      -webkit-text-stroke: 0;
+      text-shadow: none;
+    }
+    .compact-nav.is-floating[data-nav-glass]:not(.is-hidden) .nav-icon-pair {
+      filter: none;
     }
     .compact-nav.is-floating[data-nav-glass]:not(.is-hidden, [data-nav-pressing]) .nav-link.is-pointer-hovered::after {
       border-color: var(--outline);
