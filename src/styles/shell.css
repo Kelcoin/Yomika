@@ -5306,6 +5306,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     height: 100%;
   }
 
+  .compact-nav.is-floating,
+  .app-shell.is-floating-nav .scroll-to-top {
+    background: var(--surface-container);
+    border-color: var(--outline-variant);
+    backdrop-filter: none;
+  }
+
   .compact-nav.is-floating {
     right: auto;
     /* 悬浮底栏不避让软键盘（用户 2026-10-18）：布局视口被键盘缩短了多少
@@ -5321,7 +5328,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     gap: var(--space-1);
     min-height: 64px;
     padding: var(--space-1);
-    border: 1px solid var(--outline-variant);
+    border-width: 1px;
+    border-style: solid;
     border-radius: var(--radius-pill);
     box-shadow: var(--shadow-menu);
   }
