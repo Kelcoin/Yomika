@@ -1,7 +1,7 @@
 import { StateIcon } from './StateIcon';
 import { useEdgeBounce } from '../lib/useEdgeBounce';
 import { PanelLeftClose, PanelLeftOpen, Settings, ArrowUp } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 
 import { getPlatformCapabilities } from '../bridge/platform';
@@ -13,6 +13,7 @@ import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
 import { NAVIGATION_ENTRIES, compactNavItems, compactNavHiddenItems, navEntryActive, navigationOwner } from '../lib/navigationOrder';
 import { useNavigationDrag } from '../lib/useNavigationDrag';
+import { useNavigationRefraction } from './NavigationRefraction';
 
 /** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
  * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
@@ -26,7 +27,13 @@ interface AppShellProps {
 function Navigation({ compact = false, floating = false, glass, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; glass?: 'ios' | 'android' | undefined; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const navRef = useRef<HTMLElement>(null);
+  const navRef = useRef<HTMLElement | null>(null);
+  const [navNode, setNavNode] = useState<HTMLElement | null>(null);
+  const assignNav = useCallback((node: HTMLElement | null) => {
+    navRef.current = node;
+    setNavNode(node);
+  }, []);
+  const refraction = useNavigationRefraction(navNode, Boolean(compact && floating && glass));
   const [hovered, setHovered] = useState<string>();
   useNavigationDrag(navRef, { enabled: compact, elastic: !glass, glass: Boolean(glass), hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
     onSelect: to => { setHovered(undefined); void navigate(to, { state: { navigationTab: true } }); } });
@@ -47,11 +54,16 @@ function Navigation({ compact = false, floating = false, glass, hidden = false, 
   return (
     <>
       <nav
-        ref={navRef}
+        ref={assignNav}
         className={compact ? `compact-nav${floating ? ' is-floating' : ''}${hidden ? ' is-hidden' : ''}` : 'side-nav'}
         data-nav-glass={compact && floating ? glass : undefined}
+        style={refraction ? {
+          '--nav-bar-refraction': refraction.barFilter,
+          '--nav-tab-refraction': refraction.tabFilter,
+        } as CSSProperties : undefined}
         aria-label={compact ? '移动导航' : '主导航'}
       >
+        {refraction?.definitions}
         {compact && <span className="nav-drag-indicator" data-nav-indicator aria-hidden="true" />}
         {items.map(({ to, label, icon }) => (
           <NavLink
