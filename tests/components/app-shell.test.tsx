@@ -554,7 +554,7 @@ describe('application shell', () => {
     }
   });
 
-  it('parks the compact bar out of the way only while it floats', async () => {
+  it('parks the compact bar only when floating and auto-hide are enabled', async () => {
     const original = window.matchMedia;
     window.matchMedia = ((query: string) => ({
       matches: query === COMPACT_WIDTH_QUERY,
@@ -567,15 +567,19 @@ describe('application shell', () => {
       dispatchEvent: () => false,
     })) as unknown as typeof window.matchMedia;
     try {
-      const mountWith = async (floatingNav: boolean) => {
+      const mountWith = async (floatingNav: boolean, floatingNavAutoHide = true) => {
         setInvokeAdapterForTests(async (command) => {
-          if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, floatingNav } };
+          if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, floatingNav, floatingNavAutoHide } };
           if (command === 'list_servers') return { ok: true, value: [] };
           throw new Error(`Unexpected command: ${command}`);
         });
         renderAt('/');
         const bar = await screen.findByRole('navigation', { name: '移动导航' });
         const workspace = document.getElementById('main-content')!;
+        Object.defineProperties(workspace, {
+          clientHeight: { configurable: true, value: 600 },
+          scrollHeight: { configurable: true, value: 2000 },
+        });
         const scrollTo = (top: number) => {
           workspace.scrollTop = top;
           fireEvent.scroll(workspace);
@@ -583,20 +587,17 @@ describe('application shell', () => {
         return { bar, scrollTo };
       };
 
-      // 没开悬浮：底栏占一行、不盖内容，滚动不该把它收走。
-      const docked = await mountWith(false);
-      docked.scrollTo(200);
-      docked.scrollTo(400);
-      expect(docked.bar).not.toHaveClass('is-hidden');
-      cleanup();
+      for (const [floatingNav, autoHide] of [[false, true], [true, false]] as const) {
+        const pinned = await mountWith(floatingNav, autoHide);
+        pinned.scrollTo(200);
+        pinned.scrollTo(400);
+        expect(pinned.bar).not.toHaveClass('is-hidden');
+        expect(document.querySelector('.app-shell')).not.toHaveAttribute('data-compact-nav-hidden');
+        cleanup();
+      }
 
-      // 开了悬浮：向下滚把它送出屏幕，向上滚再回来。
+      // 开了悬浮和自动收起：向下滚把它送出屏幕，向上滚再回来。
       const floating = await mountWith(true);
-      const workspace = document.getElementById('main-content')!;
-      Object.defineProperties(workspace, {
-        clientHeight: { configurable: true, value: 600 },
-        scrollHeight: { configurable: true, value: 2000 },
-      });
       floating.scrollTo(200);
       floating.scrollTo(400);
       expect(floating.bar).toHaveClass('is-hidden');

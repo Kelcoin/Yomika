@@ -4,10 +4,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useNavigationDrag } from '../../src/lib/useNavigationDrag';
 
 const navigate = vi.fn();
-function Harness({ active = '/', enabled = true, hidden = false, glass = false }: { active?: string; enabled?: boolean; hidden?: boolean; glass?: boolean }) {
+function Harness({ active = '/', enabled = true, hidden = false }: { active?: string; enabled?: boolean; hidden?: boolean }) {
   const ref = useRef<HTMLElement>(null);
-  useNavigationDrag(ref, { enabled, hidden, active, glass, refracting: glass, onSelect: navigate });
-  return <nav ref={ref} aria-label="test"><span data-nav-indicator />{glass && <svg><filter><feImage data-nav-optical-lens /></filter></svg>}<a href="#home" data-nav-route="/">首页</a><a href="#library" data-nav-route="/library">档案库</a><a href="#history" data-nav-route="/history">历史</a></nav>;
+  useNavigationDrag(ref, { enabled, hidden, active, onSelect: navigate });
+  return <nav ref={ref} aria-label="test"><span data-nav-indicator /><a href="#home" data-nav-route="/">首页</a><a href="#library" data-nav-route="/library">档案库</a><a href="#history" data-nav-route="/history">历史</a></nav>;
 }
 let frame: FrameRequestCallback | undefined;
 let time = 0;
@@ -250,23 +250,4 @@ it('returns the pressed shape through a spring rather than snapping its size on 
   expect(parseFloat(nav.style.getPropertyValue('--nav-indicator-scale-x'))).toBeGreaterThan(1);
   settle();
   expect(nav.style.getPropertyValue('--nav-indicator-scale-x')).toBe('1');
-});
-
-
-it('moves the hover highlight and optical geometry without navigating', () => {
-  render(<Harness glass />);
-  const nav = screen.getByRole('navigation');
-  const link = screen.getByRole('link', { name: '档案库' });
-  const lens = nav.querySelector('[data-nav-optical-lens]');
-  const hover = new Event('pointermove', { bubbles: true });
-  Object.assign(hover, { pointerType: 'mouse', clientX: 151, clientY: 31 });
-  fireEvent(link, hover);
-  expect(link.style.getPropertyValue('--nav-hover-light-x')).toBe('50%');
-  expect(link.style.getPropertyValue('--nav-hover-light-y')).toBe('50%');
-  expect(lens).toHaveAttribute('x', '117');
-  expect(lens).toHaveAttribute('width', '100');
-  fireEvent(nav, new Event('pointerleave'));
-  settle();
-  expect(lens).toHaveAttribute('x', '17');
-  expect(navigate).not.toHaveBeenCalled();
 });

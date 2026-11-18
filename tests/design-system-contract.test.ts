@@ -332,8 +332,8 @@ describe('design system contract', () => {
     // 底栏之上那一大块「遮挡」。
     const [padded] = shell.split('padding-bottom: calc(var(--safe-bottom) + 80px)');
     expect(padded!.trimEnd()).toMatch(/\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{$/);
-    // 收不收底栏由悬浮开关决定：没开悬浮时它有自己的行，不该被滚动带走。
-    expect(app).toMatch(/if \(floatingNav\) \{\s*setCompactNavHidden/);
+    // 收不收底栏由悬浮和自动收起两个开关决定：没开悬浮时它有自己的行，不该被滚动带走。
+    expect(app).toMatch(/if \(autoHideFloatingNav\) \{\s*setCompactNavHidden/);
     // 触屏没有 Tab 键，跳过链接用不上；它在 WebKit 里会被点按命中 :focus-visible，
     // 常驻成状态栏那一角的胶囊。CSS 按媒体特性挡一层，AppShell 再按平台挡一层。
     expect(shell).toMatch(/@media \(hover: none\) and \(pointer: coarse\) \{\s*\.skip-link \{ display: none; \}/);

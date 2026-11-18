@@ -1523,13 +1523,17 @@ describe('settings workspace', () => {
 
     // 悬浮底栏是样式分区里的一行开关；翻开关即保存。
     const floatingBar = await screen.findByRole('switch', { name: '悬浮底栏' });
-    expect(screen.queryByRole('switch', { name: '液态玻璃' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: '向下滚动时自动收起' })).not.toBeInTheDocument();
     await user.click(floatingBar);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, floatingNav: true } }));
-    await user.click(await screen.findByRole('switch', { name: '液态玻璃' }));
-    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, floatingNav: true, liquidGlassNav: true } }));
+    const autoHide = await screen.findByRole('switch', { name: '向下滚动时自动收起' });
+    expect(autoHide).toBeChecked();
+    await user.click(autoHide);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, floatingNav: true, floatingNavAutoHide: false } }));
     await user.click(floatingBar);
-    expect(screen.queryByRole('switch', { name: '液态玻璃' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: '向下滚动时自动收起' })).not.toBeInTheDocument();
+    await user.click(floatingBar);
+    expect(await screen.findByRole('switch', { name: '向下滚动时自动收起' })).not.toBeChecked();
   });
 
   it('customizes bottom bar items with only 档案库 pinned', async () => {

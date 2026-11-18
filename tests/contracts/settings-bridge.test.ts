@@ -35,7 +35,7 @@ const preferences = {
   detailDateKind: 'published' as 'added' | 'published',
   customCss: '',
   floatingNav: false,
-  liquidGlassNav: true,
+  floatingNavAutoHide: false,
   bottomNavItems: ['home', 'library', 'history', 'watchlist'] as Array<'home' | 'library' | 'history' | 'watchlist' | 'to-read' | 'downloads'>,
   startWithWindows: false,
   closeToTray: false,
@@ -60,11 +60,11 @@ describe('native settings bridge', () => {
     expect(adapter).toHaveBeenCalledWith('load_preferences', {});
   });
 
-  it('defaults liquid glass off for older native snapshots', async () => {
-    const { liquidGlassNav: _missing, ...legacy } = preferences;
+  it('defaults floating navigation auto-hide on for older native snapshots', async () => {
+    const { floatingNavAutoHide: _missing, ...legacy } = preferences;
     setInvokeAdapterForTests(async () => ({ ok: true, value: legacy }));
     await expect(new NativeSettingsRepository().load()).resolves.toEqual({
-      ok: true, value: { ...legacy, liquidGlassNav: false },
+      ok: true, value: { ...legacy, floatingNavAutoHide: true },
     });
   });
 

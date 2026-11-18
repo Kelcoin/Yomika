@@ -1,7 +1,7 @@
 import { StateIcon } from './StateIcon';
 import { useEdgeBounce } from '../lib/useEdgeBounce';
 import { PanelLeftClose, PanelLeftOpen, Settings, ArrowUp } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 
 import { getPlatformCapabilities } from '../bridge/platform';
@@ -13,7 +13,6 @@ import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
 import { NAVIGATION_ENTRIES, compactNavItems, compactNavHiddenItems, navEntryActive, navigationOwner } from '../lib/navigationOrder';
 import { useNavigationDrag } from '../lib/useNavigationDrag';
-import { useNavigationRefraction } from './NavigationRefraction';
 
 /** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
  * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
@@ -24,18 +23,12 @@ interface AppShellProps {
   returningHome?: boolean;
 }
 
-function Navigation({ compact = false, floating = false, glass, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; glass?: 'ios' | 'android' | undefined; hidden?: boolean; bottomNavItems?: readonly string[] }) {
+function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
   const location = useLocation();
   const navigate = useNavigate();
   const navRef = useRef<HTMLElement | null>(null);
-  const [navNode, setNavNode] = useState<HTMLElement | null>(null);
-  const assignNav = useCallback((node: HTMLElement | null) => {
-    navRef.current = node;
-    setNavNode(node);
-  }, []);
-  const refraction = useNavigationRefraction(navNode, Boolean(compact && floating && glass));
   const [hovered, setHovered] = useState<string>();
-  useNavigationDrag(navRef, { enabled: compact, elastic: !glass, glass: Boolean(glass), refracting: Boolean(refraction), hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
+  useNavigationDrag(navRef, { enabled: compact, elastic: true, hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
     onSelect: to => { setHovered(undefined); void navigate(to, { state: { navigationTab: true } }); } });
   useEffect(() => { setHovered(undefined); }, [location.pathname, hidden]);
   useEffect(() => {
@@ -54,17 +47,10 @@ function Navigation({ compact = false, floating = false, glass, hidden = false, 
   return (
     <>
       <nav
-        ref={assignNav}
+        ref={navRef}
         className={compact ? `compact-nav${floating ? ' is-floating' : ''}${hidden ? ' is-hidden' : ''}` : 'side-nav'}
-        data-nav-glass={compact && floating ? glass : undefined}
-        data-nav-refraction={refraction ? '' : undefined}
-        style={refraction ? {
-          '--nav-refraction': refraction.filter,
-          '--nav-refraction-padding': refraction.padding,
-        } as CSSProperties : undefined}
         aria-label={compact ? '移动导航' : '主导航'}
       >
-        {refraction?.definitions}
         {compact && <span className="nav-drag-indicator" data-nav-indicator aria-hidden="true" />}
         {items.map(({ to, label, icon }) => (
           <NavLink
@@ -117,7 +103,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
   const homeTopbar = compact && (pathname === '/' || returningHome);
   const { preferences } = usePreferences();
   const floatingNav = preferences.floatingNav;
-  const [navPlatform, setNavPlatform] = useState<'ios' | 'android'>(() => /iPad|iPhone|iPod/i.test(navigator.userAgent) ? 'ios' : 'android');
+  const autoHideFloatingNav = floatingNav && preferences.floatingNavAutoHide;
   // The rail's collapsed state is a preference, not session state: it used to
   // snap back to expanded on every launch.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -137,7 +123,8 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
   // The floating compact bar answers scrolling the way the scroll-to-top disc
   // does: scrolling down parks it out of the way, scrolling up — or reaching the
   // top — brings it back.
-  const [compactNavHidden, setCompactNavHidden] = useState(false);
+  const [navHiddenByScroll, setCompactNavHidden] = useState(false);
+  const compactNavHidden = autoHideFloatingNav && navHiddenByScroll;
   /** 自绘标题栏是 Windows 专属：Windows 关了原生装饰、由应用自己画；macOS 有
    * 自己的红绿灯，iOS/Android 根本没有窗口按钮可点。平台探测是异步命令，先用
    * UA 判断一次，免得手机上一进应用先闪一条没有用的栏。 */
@@ -150,7 +137,6 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
     void getPlatformCapabilities().then((result) => {
       if (!result.ok) return;
       setShowTitleBar(result.value.platform === 'windows');
-      setNavPlatform(result.value.platform === 'ios' ? 'ios' : 'android');
       setShowSkipLink(result.value.platform !== 'android' && result.value.platform !== 'ios');
     });
   }, []);
@@ -190,7 +176,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
       // Scroll direction drives the floating bar: down past the top hides it,
       // up — or back at the top — restores it. Only the floating bar answers
       // scrolling; the docked bar has its own row and stays put.
-      if (floatingNav) {
+      if (autoHideFloatingNav) {
         setCompactNavHidden((hidden) => {
           // A short page cannot lose a whole bar's clearance without clamping
           // its scroll position. Keep it docked instead of a hide/clamp/show loop.
@@ -209,11 +195,11 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
     // Capture scroll events so dynamically mounted library/detail regions are
     // covered without needing a second effect or a fragile mount ordering.
     document.addEventListener('scroll', handleScroll, { capture: true, passive: true });
-    // Turning the floating bar off mid-session must not leave it parked.
-    if (!floatingNav) setCompactNavHidden(false);
+    // Turning either switch off resets the last scroll decision.
+    if (!autoHideFloatingNav) setCompactNavHidden(false);
     setShowScrollTop(false);
     return () => document.removeEventListener('scroll', handleScroll, true);
-  }, [pathname, floatingNav]);
+  }, [pathname, autoHideFloatingNav]);
 
   useEffect(() => {
     const nav = document.querySelector<HTMLElement>('.compact-nav');
@@ -399,7 +385,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
         <StatusBar />
       </div>
 
-          <Navigation compact floating={floatingNav} glass={preferences.liquidGlassNav && floatingNav ? navPlatform : undefined} hidden={compactNavHidden} bottomNavItems={preferences.bottomNavItems} />
+          <Navigation compact floating={floatingNav} hidden={compactNavHidden} bottomNavItems={preferences.bottomNavItems} />
     </div>
   );
 }

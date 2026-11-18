@@ -42,7 +42,7 @@ const DETAIL_ACTIONS_KEY: &str = "preferences.detail_actions";
 const SFW_MODE_KEY: &str = "preferences.sfw_mode";
 const DETAIL_DATE_KIND_KEY: &str = "preferences.detail_date_kind";
 const FLOATING_NAV_KEY: &str = "preferences.floating_nav";
-const LIQUID_GLASS_NAV_KEY: &str = "preferences.liquid_glass_nav";
+const FLOATING_NAV_AUTO_HIDE_KEY: &str = "preferences.floating_nav_auto_hide";
 const BOTTOM_NAV_ITEMS_KEY: &str = "preferences.bottom_nav_items";
 const START_WITH_WINDOWS_KEY: &str = "preferences.start_with_windows";
 const CLOSE_TO_TRAY_KEY: &str = "preferences.close_to_tray";
@@ -190,12 +190,12 @@ pub struct PreferenceSnapshot {
     /// more thing to keep in step once this existed.
     #[serde(default)]
     pub custom_css: String,
-    /// Compact bottom navigation drawn as a floating capsule that hides on
-    /// scroll-down and returns on scroll-up. Off keeps the full-width bar.
+    /// Compact bottom navigation drawn as a floating capsule above content.
     #[serde(default)]
     pub floating_nav: bool,
-    #[serde(default)]
-    pub liquid_glass_nav: bool,
+    /// Hide the floating bar on scroll-down and restore it on scroll-up.
+    #[serde(default = "default_true")]
+    pub floating_nav_auto_hide: bool,
     /// Which entries the compact bottom bar shows, in the app's canonical
     /// order. 档案库 and 设置 are enforced by the UI and re-added here so a
     /// hand-edited row cannot leave the bar without them.
@@ -337,7 +337,7 @@ impl Default for PreferenceSnapshot {
             detail_actions: default_detail_actions(),
             custom_css: String::new(),
             floating_nav: false,
-            liquid_glass_nav: false,
+            floating_nav_auto_hide: true,
             bottom_nav_items: default_bottom_nav_items(),
             start_with_windows: false,
             close_to_tray: false,
@@ -521,7 +521,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         detail_actions: map_value(&stored, DETAIL_ACTIONS_KEY, defaults.detail_actions)?,
         custom_css: map_value(&stored, CUSTOM_CSS_KEY, defaults.custom_css)?,
         floating_nav: map_value(&stored, FLOATING_NAV_KEY, defaults.floating_nav)?,
-        liquid_glass_nav: map_value(&stored, LIQUID_GLASS_NAV_KEY, defaults.liquid_glass_nav)?,
+        floating_nav_auto_hide: map_value(&stored, FLOATING_NAV_AUTO_HIDE_KEY, defaults.floating_nav_auto_hide)?,
         bottom_nav_items: map_value(&stored, BOTTOM_NAV_ITEMS_KEY, defaults.bottom_nav_items)?,
         start_with_windows: map_value(&stored, START_WITH_WINDOWS_KEY, defaults.start_with_windows)?,
         close_to_tray: map_value(&stored, CLOSE_TO_TRAY_KEY, defaults.close_to_tray)?,
@@ -641,7 +641,7 @@ pub(crate) fn write_preference_keys(
         (DETAIL_ACTIONS_KEY, serde_json::to_string(&value.detail_actions)),
         (CUSTOM_CSS_KEY, serde_json::to_string(&value.custom_css)),
         (FLOATING_NAV_KEY, serde_json::to_string(&value.floating_nav)),
-        (LIQUID_GLASS_NAV_KEY, serde_json::to_string(&value.liquid_glass_nav)),
+        (FLOATING_NAV_AUTO_HIDE_KEY, serde_json::to_string(&value.floating_nav_auto_hide)),
         (
             BOTTOM_NAV_ITEMS_KEY,
             serde_json::to_string(&value.bottom_nav_items),
@@ -1012,7 +1012,7 @@ mod tests {
             sfw_mode: true,
             detail_actions: vec!["read".into(), "download".into()],
             floating_nav: true,
-            liquid_glass_nav: true,
+            floating_nav_auto_hide: false,
             bottom_nav_items: vec![
                 "home".into(),
                 "library".into(),

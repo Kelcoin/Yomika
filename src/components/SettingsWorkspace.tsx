@@ -1242,7 +1242,7 @@ export function SettingsWorkspace() {
               <SettingsSwitch
                 icon={<PanelBottom />}
                 label="悬浮底栏"
-                hint="底栏变成悬浮胶囊，滚动时自动收起"
+                hint="将底栏悬浮在内容上方"
                 checked={preferenceDraft.floatingNav}
                 onToggle={() => editPreferences({ floatingNav: !preferenceDraft.floatingNav })}
               />
@@ -1250,10 +1250,10 @@ export function SettingsWorkspace() {
             {selectedSettingsSection === 'settings-appearance' && preferenceDraft.floatingNav && (
               <SettingsSwitch
                 icon={<PanelBottom />}
-                label="液态玻璃"
-                hint="让底栏透出滚动内容，叠加模糊与边缘高光"
-                checked={preferenceDraft.liquidGlassNav}
-                onToggle={() => editPreferences({ liquidGlassNav: !preferenceDraft.liquidGlassNav })}
+                label="向下滚动时自动收起"
+                hint="向上滚动或回到顶部时重新显示底栏"
+                checked={preferenceDraft.floatingNavAutoHide}
+                onToggle={() => editPreferences({ floatingNavAutoHide: !preferenceDraft.floatingNavAutoHide })}
               />
             )}
             {selectedSettingsSection === 'settings-appearance' && (

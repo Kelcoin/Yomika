@@ -79,13 +79,13 @@ function applyPreferences(preferences: PreferenceSnapshot) {
  * 存的是**形态**不是整份偏好：读回来的值只用来画第一帧，真正的偏一到就整份替换。 */
 const LAST_NAV_KEY = 'yomika.last-nav';
 
-type NavMirror = Pick<PreferenceSnapshot, 'floatingNav' | 'liquidGlassNav' | 'bottomNavItems' | 'computeCenterEnabled'>;
+type NavMirror = Pick<PreferenceSnapshot, 'floatingNav' | 'floatingNavAutoHide' | 'bottomNavItems' | 'computeCenterEnabled'>;
 
 function writeNavMirror(preferences: PreferenceSnapshot) {
   try {
     window.localStorage.setItem(LAST_NAV_KEY, JSON.stringify({
       floatingNav: preferences.floatingNav,
-      liquidGlassNav: preferences.liquidGlassNav,
+      floatingNavAutoHide: preferences.floatingNavAutoHide,
       computeCenterEnabled: preferences.computeCenterEnabled,
       bottomNavItems: preferences.bottomNavItems,
     }));
@@ -100,11 +100,11 @@ function readNavMirror(): Partial<NavMirror> {
     if (!raw) return {};
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return {};
-    const value = parsed as { floatingNav?: unknown; liquidGlassNav?: unknown; bottomNavItems?: unknown; computeCenterEnabled?: unknown };
+    const value = parsed as { floatingNav?: unknown; floatingNavAutoHide?: unknown; bottomNavItems?: unknown; computeCenterEnabled?: unknown };
     return {
       ...(typeof value.computeCenterEnabled === 'boolean' ? { computeCenterEnabled: value.computeCenterEnabled } : {}),
       ...(typeof value.floatingNav === 'boolean' ? { floatingNav: value.floatingNav } : {}),
-      ...(typeof value.liquidGlassNav === 'boolean' ? { liquidGlassNav: value.liquidGlassNav } : {}),
+      ...(typeof value.floatingNavAutoHide === 'boolean' ? { floatingNavAutoHide: value.floatingNavAutoHide } : {}),
       // Match native normalization before first paint: settings moved to the
       // home header, and home/library must stay reachable even in old mirrors.
       ...(Array.isArray(value.bottomNavItems)

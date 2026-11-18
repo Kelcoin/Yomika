@@ -1,5 +1,4 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react';
-import { positionNavigationLens } from '../components/NavigationRefraction';
 import { advanceNavigationSpring } from './navigationSpring';
 
 type Tab = { node: HTMLAnchorElement; route: string; x: number; y: number; width: number; height: number; iconX: number; iconWidth: number };
@@ -9,8 +8,8 @@ const DRAG_SLOP = 6;
 /** BakaSU-style bottom-bar interaction: continuous preview, commit on release.
  * One decorative layer moves; page contents do not render or load until release.
  * Geometry is cached per gesture/resize, with no layout reads on pointermove. */
-export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elastic = false, glass = false, refracting = false, hidden, active, layoutKey = '', onSelect }: {
-  enabled: boolean; elastic?: boolean; glass?: boolean; refracting?: boolean; hidden: boolean; active: string; layoutKey?: string; onSelect: (route: string) => void;
+export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elastic = false, hidden, active, layoutKey = '', onSelect }: {
+  enabled: boolean; elastic?: boolean; hidden: boolean; active: string; layoutKey?: string; onSelect: (route: string) => void;
 }) {
   const select = useRef(onSelect);
   const suppressClick = useRef(false);
@@ -33,7 +32,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     const clearTapRestore = () => { clearTimeout(tapRestore); tapRestore = undefined; };
     const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
     let bounds = nav.getBoundingClientRect();
-    let hoverTab: Tab | undefined;
     const measure = () => {
       bounds = nav.getBoundingClientRect();
       tabs = Array.from(nav.querySelectorAll<HTMLAnchorElement>('[data-nav-route]')).map(node => {
@@ -50,25 +48,13 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     const stretchTarget = () => {
       const speed = Math.min(1, Math.abs(spring.current?.velocity ?? 0) / (elastic ? 950 : 1200));
       const pressing = Boolean(gesture);
-      if (glass && pressing && !reducedMotion) {
-        return { x: 1.28 + speed * 0.16, y: 1.26 - speed * 0.12 };
-      }
       if (elastic && !reducedMotion) {
         return { x: 1 + (pressing ? 0.14 : 0) + speed * 0.19, y: 1 + (pressing ? 0.10 : 0) - speed * 0.13 };
       }
       return { x: reducedMotion ? 1 : 1 + (pressing ? 0.12 : 0) + speed * 0.12,
         y: reducedMotion ? 1 : 1 + (pressing ? 0.08 : 0) - speed * 0.06 };
     };
-    let lastLight = 25;
     const render = (tab: Tab, x: number) => {
-      if (glass && !reducedMotion) {
-        const velocity = spring.current?.velocity ?? 0;
-        const light = 25 + Math.round(Math.max(-25, Math.min(50, velocity / 22)) / 5) * 5;
-        if (light !== lastLight) {
-          lastLight = light;
-          nav.style.setProperty('--nav-lens-light', `${light}%`);
-        }
-      }
       const scaleX = stretch.current.x.position;
       const scaleY = stretch.current.y.position;
       nav.style.setProperty('--nav-indicator-scale-x', String(scaleX));
@@ -77,14 +63,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
       const last = tabs[tabs.length - 1];
       const displayedX = Math.max((first?.x ?? x) - 6, Math.min((last?.x ?? x) + 6, x));
       nav.style.setProperty('--nav-indicator-x', `${displayedX}px`);
-      if (refracting && (!hoverTab || gesture)) {
-        positionNavigationLens(nav, {
-          x: displayedX - (scaleX - 1) * tab.width / 2,
-          y: tab.y - (scaleY - 1) * tab.height / 2,
-          width: tab.width * scaleX,
-          height: tab.height * scaleY,
-        });
-      }
       const left = displayedX - (scaleX - 1) * tab.width / 2;
       const right = displayedX + tab.width + (scaleX - 1) * tab.width / 2;
       for (const item of tabs) {
@@ -123,7 +101,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     const paint = (tab: Tab | undefined, x = tab?.x ?? 0, immediate = false) => {
       if (!tab || tab.width <= 0) {
         target = undefined;
-        if (refracting && !hoverTab) positionNavigationLens(nav);
         clearFrame();
         nav.removeAttribute('data-nav-indicator-ready');
         return;
@@ -181,7 +158,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
       if (event.isPrimary === false || event.button !== 0) return;
       suppressClick.current = false;
       measure();
-      hoverTab = undefined;
       const localX = event.clientX - bounds.left - nav.clientLeft;
       const tab = nearest(localX);
       if (!tab) return;
@@ -190,28 +166,8 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
       nav.setAttribute('data-nav-pressing', '');
       paint(tab);
     };
-    const endHover = () => {
-      if (!hoverTab) return;
-      hoverTab = undefined;
-      if (!gesture) paint(activeTab());
-    };
     const move = (event: PointerEvent) => {
-      if (!gesture) {
-        if (!glass || event.pointerType !== 'mouse') return;
-        const link = event.target instanceof Element ? event.target.closest('[data-nav-route]') : null;
-        const tab = tabs.find(item => item.node === link);
-        if (!tab) { endHover(); return; }
-        if (hoverTab !== tab) {
-          bounds = nav.getBoundingClientRect();
-          hoverTab = tab;
-          if (refracting) positionNavigationLens(nav, tab);
-        }
-        const localX = event.clientX - bounds.left - 1 - tab.x;
-        const localY = event.clientY - bounds.top - 1 - tab.y;
-        tab.node.style.setProperty('--nav-hover-light-x', `${Math.round(localX / tab.width * 20) * 5}%`);
-        tab.node.style.setProperty('--nav-hover-light-y', `${Math.round(localY / tab.height * 20) * 5}%`);
-        return;
-      }
+      if (!gesture) return;
       if (gesture.id !== event.pointerId) return;
       const dx = Math.abs(event.clientX - gesture.x);
       const dy = Math.abs(event.clientY - gesture.y);
@@ -263,7 +219,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
       suppressClick.current = false;
     };
     const resize = () => {
-      hoverTab = undefined;
       cancel();
       measure();
       paint(activeTab(), activeTab()?.x, true);
@@ -273,7 +228,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     paint(activeTab());
     nav.addEventListener('pointerdown', down);
     nav.addEventListener('pointermove', move);
-    nav.addEventListener('pointerleave', endHover);
     nav.addEventListener('pointerup', up);
     nav.addEventListener('pointercancel', cancel);
     nav.addEventListener('lostpointercapture', lostCapture);
@@ -286,7 +240,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     return () => {
       nav.removeEventListener('pointerdown', down);
       nav.removeEventListener('pointermove', move);
-      nav.removeEventListener('pointerleave', endHover);
       nav.removeEventListener('pointerup', up);
       nav.removeEventListener('pointercancel', cancel);
       nav.removeEventListener('lostpointercapture', lostCapture);
@@ -304,7 +257,6 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
       nav.removeAttribute('data-nav-pressing');
       nav.removeAttribute('data-nav-dragging');
       nav.removeAttribute('data-nav-indicator-ready');
-      nav.style.removeProperty('--nav-lens-light');
     };
-  }, [ref, enabled, elastic, glass, refracting, hidden, active, layoutKey]);
+  }, [ref, enabled, elastic, hidden, active, layoutKey]);
 }
