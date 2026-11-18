@@ -63,6 +63,23 @@ def convert(model_id, source, converter, output):
         converted = Path(temporary) / 'legacy.onnx'
         onnx.save(model, converted)
         subprocess.run([str(converter), str(converted), str(output / f'{model_id}.param'), str(output / f'{model_id}.bin')], check=True)
+    if model_id.startswith('realcugan'):
+        # The runtime reproduces the dynamic ONNX border and final crop. The
+        # converter uses an even 128px example only to lower internal operators.
+        param = output / f'{model_id}.param'
+        lines = param.read_text(encoding='utf-8').splitlines()
+        if (lines[1] != '86 94'
+            or lines[3].split()[:6] != ['Padding', 'node_pad', '1', '1', 'input', 'pad']
+            or lines[4].split()[4:6] != ['pad', 'conv2d']
+            or lines[-2].split()[:6] != ['Crop', 'Slice_0', '1', '1', 'add_375', '_v_204']
+            or lines[-1].split()[4:6] != ['_v_204', 'output']):
+            raise ValueError('Unexpected converted CUGAN graph boundaries')
+        lines[1] = '84 92'
+        lines[4] = lines[4].replace(' pad conv2d', ' input conv2d', 1)
+        lines[-1] = lines[-1].replace(' _v_204 output', ' add_375 output', 1)
+        del lines[-2]
+        del lines[3]
+        param.write_text('\n'.join(lines) + '\n', encoding='utf-8', newline='\n')
     for key, extension in [('paramSha256', 'param'), ('weightsSha256', 'bin')]:
         actual = hashlib.sha256((output / f'{model_id}.{extension}').read_bytes()).hexdigest()
         if actual != record[key]:

@@ -1,7 +1,4 @@
-//! Content-addressed Android Vulkan variants of the **bundled** ONNX model.
-//! Only a model that already ships inside the app gets a conversion: converting an
-//! online model would put a second 5 MB copy of its weights in every APK (docs/221).
-//! Never select a different model merely because its display name matches.
+//! Verified Android Vulkan conversions selected by exact ONNX digest and scale.
 use serde::Deserialize;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,16 +20,6 @@ pub fn matching_model(digest: &str, scale: u32) -> Option<Model> {
         .find(|m| m.onnx_sha256 == digest && m.scale == scale)
 }
 
-/// 随包分发的 Vulkan 变体白名单：只有**本来就在安装包里**的模型才配有这一份。
-///
-/// 这不是「谁转换过就带谁」：ncnn 权重是嵌进原生库的第二份字节（Real-CUGAN 每档
-/// 5,138,512 B），把在线下载的大模型也编进来等于让每个 APK 替用户预付一份多数人
-/// 从没用过的权重。在线模型在 Android 上照旧走 ORT（NNAPI/CPU），`NcnnEngine::open`
-/// 认不出指纹就返回 `Ok(None)`（`worker/src/upscale.rs`）。
-///
-/// 改这张表要同时改 `models.json`、`resources/ncnn/` 下的 `.param`/`.bin` 与
-/// `bundled_vulkan_payload_stays_under_budget` 的预算——三条判据会一起转红。
-pub const BUNDLED_VARIANTS: &[&str] = &["waifu2x-upconv7"];
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,31 +37,25 @@ mod tests {
     fn sha256_hex(bytes: &[u8]) -> String {
         format!("{:x}", Sha256::digest(bytes))
     }
-    /// 随包只带一份变体：id 与 `BUNDLED_VARIANTS` 同序，指纹就是内置的那张图。
-    /// 往回加一档 Real-CUGAN（`.bin` 5,138,512 B）会立刻转红——它只该由用户下载后
-    /// 走 ORT，不该替每个 APK 预付一份从没用过的权重（`docs/221`）。
     #[test]
-    fn vulkan_variants_are_limited_to_the_bundled_model() {
+    fn release_cugan_weights_have_whole_frame_vulkan_variants() {
         let builtin = sha256_hex(include_bytes!(
             "../../../resources/models/waifu2x-upconv7/model.onnx"
         ));
-        let all = models();
-        let ids: Vec<&str> = all.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(
-            ids.as_slice(),
-            BUNDLED_VARIANTS,
-            "随包变体与白名单不一致：{ids:?}"
-        );
-        for model in &all {
-            assert_eq!(
-                model.onnx_sha256, builtin,
-                "{} 的变体不是随包模型转出来的：编进 APK 等于替用户多背一份在线权重",
-                model.id
-            );
+        assert_eq!(matching_model(&builtin, 2).unwrap().edge, 128);
+        let releases: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/models/upscale-manifest.json"
+        ))
+        .unwrap();
+        for model in releases["models"].as_array().unwrap() {
+            let id = model["id"].as_str().unwrap();
+            let digest = model["files"][0]["sha256"].as_str().unwrap();
+            let variant = matching_model(digest, 2)
+                .unwrap_or_else(|| panic!("missing Vulkan weights for {id}"));
+            assert_eq!(variant.id, id);
+            assert_eq!(variant.edge, 0, "{id} must keep the whole frame");
         }
     }
-    /// 编译期真的会进二进制的那份字节总量（`.param` + `.bin`）：现役只有 waifu2x 的
-    /// 2,209,960 + 1,477 B，上限 3 MiB。再加一档 Real-CUGAN（5.1 MB）就超。
     #[test]
     fn bundled_vulkan_payload_stays_under_budget() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/ncnn");
@@ -87,7 +68,7 @@ mod tests {
                     .len();
             }
         }
-        const BUDGET: u64 = 3 * 1024 * 1024;
+        const BUDGET: u64 = 13 * 1024 * 1024;
         assert!(
             total <= BUDGET,
             "随包 Vulkan 权重 {total} B 超过预算 {BUDGET} B"
@@ -116,7 +97,7 @@ mod tests {
 }
 
 pub const ENGINE_ID: &str = "ncnn-vulkan";
-pub const VERSION: &str = "ncnn-20260113-rgb128-v1";
+pub const VERSION: &str = "ncnn-20260113-rgb-v2";
 
 #[cfg(all(target_os = "android", feature = "ncnn-vulkan"))]
 mod native {
@@ -134,7 +115,14 @@ mod native {
         fn yomika_ncnn_error() -> *const c_char;
         fn yomika_ncnn_device() -> *const c_char;
         fn yomika_ncnn_open(param: *const c_char, weights: *const u8) -> *mut c_void;
-        fn yomika_ncnn_run(handle: *mut c_void, input: *const f32, output: *mut f32) -> i32;
+        fn yomika_ncnn_run(
+            handle: *mut c_void,
+            input: *const f32,
+            output: *mut f32,
+            width: i32,
+            height: i32,
+            whole_frame: i32,
+        ) -> i32;
         fn yomika_ncnn_close(handle: *mut c_void);
     }
     struct Handle(*mut c_void);
@@ -149,6 +137,7 @@ mod native {
         handle: Mutex<Handle>,
         pub device: String,
         max_pixels: usize,
+        edge: u32,
     }
     fn error() -> ComputeError {
         ComputeError::InvalidInput(
@@ -209,8 +198,8 @@ mod native {
             };
             let (param, weights) = match m.id.as_str() {
                 "waifu2x-upconv7" => assets!("waifu2x-upconv7"),
-                // 不在 `BUNDLED_VARIANTS` 里的模型没有编译期资源；`models.json` 与白名单
-                // 由 `vulkan_variants_are_limited_to_the_bundled_model` 钉住。
+                "realcugan-2x-conservative" => assets!("realcugan-2x-conservative"),
+                "realcugan-2x-denoise3x" => assets!("realcugan-2x-denoise3x"),
                 _ => return Ok(None),
             };
             let device = device_description()
@@ -227,6 +216,7 @@ mod native {
                 handle: Mutex::new(Handle(handle)),
                 device,
                 max_pixels,
+                edge: m.edge,
             }))
         }
     }
@@ -235,27 +225,50 @@ mod native {
             2
         }
         fn fixed_input_size(&self) -> Option<(u32, u32)> {
-            Some((128, 128))
+            (self.edge > 0).then_some((self.edge, self.edge))
+        }
+        fn requires_whole_frame(&self) -> bool {
+            self.edge == 0
         }
         fn upscale_tile(&self, rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, ComputeError> {
-            if w == 0 || h == 0 || w > 128 || h > 128 || rgba.len() != w as usize * h as usize * 4 {
+            if w == 0
+                || h == 0
+                || rgba.len() != w as usize * h as usize * 4
+                || (self.edge > 0 && (w > self.edge || h > self.edge))
+            {
                 return Err(ComputeError::InvalidInput(
-                    "invalid Vulkan tile shape".into(),
+                    "invalid Vulkan input shape".into(),
                 ));
             }
             let mut out = crate::cpu_scale::cpu_scale_rgba(rgba, w, h, 2, self.max_pixels)?.rgba;
-            let grown = pad_rgba_edges(rgba, w, h, 128, 128);
-            let input = rgba_to_nchw(&grown, 128, 128);
-            let mut output = vec![0f32; 3 * 256 * 256];
+            // Reflection needs a minimum edge. Extend tiny images before inference.
+            let (iw, ih) = if self.requires_whole_frame() {
+                (w.max(20), h.max(20))
+            } else {
+                (self.edge, self.edge)
+            };
+            let grown = (iw != w || ih != h).then(|| pad_rgba_edges(rgba, w, h, iw, ih));
+            let input = rgba_to_nchw(grown.as_deref().unwrap_or(rgba), iw, ih);
+            let mut output = vec![0f32; iw as usize * ih as usize * 12];
             let handle = self.handle.lock().map_err(|_| ComputeError::CacheBusy)?;
-            if unsafe { yomika_ncnn_run(handle.0, input.as_ptr(), output.as_mut_ptr()) } != 0 {
+            if unsafe {
+                yomika_ncnn_run(
+                    handle.0,
+                    input.as_ptr(),
+                    output.as_mut_ptr(),
+                    iw as i32,
+                    ih as i32,
+                    self.requires_whole_frame() as i32,
+                )
+            } != 0
+            {
                 return Err(error());
             }
             drop(handle);
             nchw_over_rgba(
                 &output,
-                256,
-                256,
+                (iw * 2) as usize,
+                (ih * 2) as usize,
                 (w * 2) as usize,
                 (h * 2) as usize,
                 &mut out,

@@ -49,24 +49,44 @@ void* yomika_ncnn_open(const char* param, const unsigned char* weights) {
         return s.release();
     } catch (const std::exception& e) { last_error = e.what(); return nullptr; }
 }
-int yomika_ncnn_run(void* handle, const float* input, float* output) {
+int yomika_ncnn_run(void* handle, const float* input, float* output,
+                    int width, int height, int whole_frame) {
     try {
         auto* s = static_cast<Session*>(handle);
-        ncnn::Mat in(128, 128, 3);
-        for (int c = 0; c < 3; ++c) std::memcpy(in.channel(c), input + c*128*128, 128*128*sizeof(float));
+        ncnn::Mat in(width, height, 3);
+        if (in.empty()) { last_error = "ncnn could not allocate RGB input"; return -1; }
+        size_t pixels = size_t(width) * height;
+        for (int c = 0; c < 3; ++c)
+            std::memcpy(in.channel(c), input + c * pixels, pixels * sizeof(float));
+        if (whole_frame) {
+            // Match the ONNX graph: reflect by 18 and round the padded extent up to even.
+            ncnn::Mat padded;
+            ncnn::copy_make_border(in, padded, 18, 18 + height % 2, 18, 18 + width % 2,
+                                   ncnn::BORDER_REFLECT, 0.f);
+            if (padded.empty()) { last_error = "ncnn could not pad RGB input"; return -1; }
+            in = padded;
+        }
         auto ex = s->net.create_extractor();
         ncnn::Mat out;
         if (ex.input("input", in) != 0 || ex.extract("output", out) != 0) {
             last_error = "ncnn Vulkan inference failed"; return -1;
         }
-        if (out.w != 256 || out.h != 256 || out.c != 3 || out.elempack != 1 || out.elemsize != 4) {
+        const int ow = width * 2, oh = height * 2;
+        if (out.w != ow + (whole_frame ? 2 * (width % 2) : 0) ||
+            out.h != oh + (whole_frame ? 2 * (height % 2) : 0) ||
+            out.c != 3 || out.elempack != 1 || out.elemsize != 4) {
             last_error = "ncnn returned unexpected RGB output shape"; return -1;
         }
+        // Match the dynamic ONNX output crop for odd dimensions.
         for (int c = 0; c < 3; ++c) {
             const float* plane = out.channel(c);
-            for (int i = 0; i < 256*256; ++i) {
-                if (!std::isfinite(plane[i])) { last_error = "Non-finite ncnn output"; return -1; }
-                output[c*256*256+i] = plane[i];
+            float* destination = output + size_t(c) * ow * oh;
+            for (int y = 0; y < oh; ++y) {
+                const float* row = plane + size_t(y) * out.w;
+                for (int x = 0; x < ow; ++x) {
+                    if (!std::isfinite(row[x])) { last_error = "Non-finite ncnn output"; return -1; }
+                    destination[size_t(y) * ow + x] = row[x];
+                }
             }
         }
         return 0;

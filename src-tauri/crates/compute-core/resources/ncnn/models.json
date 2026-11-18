@@ -8,5 +8,25 @@
     "output": "output",
     "edge": 128,
     "scale": 2
+  },
+  {
+    "id": "realcugan-2x-denoise3x",
+    "onnxSha256": "931c20fa7e701e118e67602157bfa9fa97f8da0f9a74222ab2e16ea71172a833",
+    "paramSha256": "79c6f5205c16f7da04ba0ecc9292237427d98c622f522835319b25543374848f",
+    "weightsSha256": "f5bdaa4c3507337ad497aea3d5c054199dd738400c98adc31b85c5a85826c3fe",
+    "input": "input",
+    "output": "output",
+    "edge": 0,
+    "scale": 2
+  },
+  {
+    "id": "realcugan-2x-conservative",
+    "onnxSha256": "727f94a02e30bfbeffb9033e9cf8703ebc73757c87ed006095ca2769746e8a5f",
+    "paramSha256": "79c6f5205c16f7da04ba0ecc9292237427d98c622f522835319b25543374848f",
+    "weightsSha256": "101183c204661dbaf728fe47a8c55051aa2573657ed31a71d1dc05bc8514a723",
+    "input": "input",
+    "output": "output",
+    "edge": 0,
+    "scale": 2
   }
 ]

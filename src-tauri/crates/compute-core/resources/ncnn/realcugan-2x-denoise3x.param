@@ -1,0 +1,86 @@
+7767517
+84 92
+Input            input                    0 1 input
+Convolution      node_conv2d              1 1 input conv2d 0=32 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=864
+ReLU             node_leaky_relu          1 1 conv2d leaky_relu 0=1.000000e-01
+Convolution      node_conv2d_1            1 1 leaky_relu conv2d_1 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=18432
+ReLU             node_leaky_relu_1        1 1 conv2d_1 leaky_relu_1 0=1.000000e-01
+Split            splitncnn_0              1 2 leaky_relu_1 leaky_relu_1_splitncnn_0 leaky_relu_1_splitncnn_1
+Convolution      node_conv2d_2            1 1 leaky_relu_1_splitncnn_1 conv2d_2 0=64 1=2 11=2 2=1 12=1 3=2 13=2 4=0 14=0 15=0 16=0 5=1 6=16384
+Crop             node_pad_1               1 1 leaky_relu_1_splitncnn_0 pad_1 -23309=3,0,4,4 -23310=3,2147483647,-4,-4 -23311=3,0,1,2
+ReLU             node_leaky_relu_2        1 1 conv2d_2 leaky_relu_2 0=1.000000e-01
+Convolution      node_conv2d_3            1 1 leaky_relu_2 conv2d_3 0=128 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=73728
+ReLU             node_leaky_relu_3        1 1 conv2d_3 leaky_relu_3 0=1.000000e-01
+Convolution      node_conv2d_4            1 1 leaky_relu_3 conv2d_4 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=73728
+ReLU             node_leaky_relu_4        1 1 conv2d_4 leaky_relu_4 0=1.000000e-01
+Split            splitncnn_1              1 2 leaky_relu_4 leaky_relu_4_splitncnn_0 leaky_relu_4_splitncnn_1
+Reduction        node_mean                1 1 leaky_relu_4_splitncnn_1 mean 0=3 1=0 -23303=2,1,2 4=1 5=1
+Convolution      node_conv2d_5            1 1 mean conv2d_5 0=8 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=512
+ReLU             node_relu                1 1 conv2d_5 relu
+Convolution      node_conv2d_6            1 1 relu conv2d_6 0=64 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=512
+Sigmoid          node_sigmoid             1 1 conv2d_6 sigmoid
+BinaryOp         node_mul_290             2 1 leaky_relu_4_splitncnn_0 sigmoid mul_290 0=2
+Deconvolution    node_convolution         1 1 mul_290 convolution 0=64 1=2 11=2 2=1 12=1 3=2 13=2 4=0 14=0 15=0 16=0 18=0 19=0 5=1 6=16384
+ReLU             node_leaky_relu_5        1 1 convolution leaky_relu_5 0=1.000000e-01
+BinaryOp         node_add_110             2 1 pad_1 leaky_relu_5 add_110 0=0
+Convolution      node_conv2d_7            1 1 add_110 conv2d_7 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=36864
+ReLU             node_leaky_relu_6        1 1 conv2d_7 leaky_relu_6 0=1.000000e-01
+Deconvolution    node_convolution_1       1 1 leaky_relu_6 convolution_1 0=3 1=4 11=4 2=1 12=1 3=2 13=2 4=3 14=3 15=3 16=3 18=0 19=0 5=1 6=3072
+Split            splitncnn_2              1 2 convolution_1 convolution_1_splitncnn_0 convolution_1_splitncnn_1
+Convolution      node_conv2d_8            1 1 convolution_1_splitncnn_1 conv2d_8 0=32 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=864
+ReLU             node_leaky_relu_7        1 1 conv2d_8 leaky_relu_7 0=1.000000e-01
+Convolution      node_conv2d_9            1 1 leaky_relu_7 conv2d_9 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=18432
+ReLU             node_leaky_relu_8        1 1 conv2d_9 leaky_relu_8 0=1.000000e-01
+Split            splitncnn_3              1 2 leaky_relu_8 leaky_relu_8_splitncnn_0 leaky_relu_8_splitncnn_1
+Convolution      node_conv2d_10           1 1 leaky_relu_8_splitncnn_1 conv2d_10 0=64 1=2 11=2 2=1 12=1 3=2 13=2 4=0 14=0 15=0 16=0 5=1 6=16384
+Crop             node_pad_2               1 1 leaky_relu_8_splitncnn_0 pad_2 -23309=3,0,16,16 -23310=3,2147483647,-16,-16 -23311=3,0,1,2
+ReLU             node_leaky_relu_9        1 1 conv2d_10 leaky_relu_9 0=1.000000e-01
+Convolution      node_conv2d_11           1 1 leaky_relu_9 conv2d_11 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=36864
+ReLU             node_leaky_relu_10       1 1 conv2d_11 leaky_relu_10 0=1.000000e-01
+Convolution      node_conv2d_12           1 1 leaky_relu_10 conv2d_12 0=128 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=73728
+ReLU             node_leaky_relu_11       1 1 conv2d_12 leaky_relu_11 0=1.000000e-01
+Split            splitncnn_4              1 2 leaky_relu_11 leaky_relu_11_splitncnn_0 leaky_relu_11_splitncnn_1
+Reduction        node_mean_1              1 1 leaky_relu_11_splitncnn_1 mean_1 0=3 1=0 -23303=2,1,2 4=1 5=1
+Convolution      node_conv2d_13           1 1 mean_1 conv2d_13 0=16 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=2048
+ReLU             node_relu_1              1 1 conv2d_13 relu_1
+Convolution      node_conv2d_14           1 1 relu_1 conv2d_14 0=128 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=2048
+Sigmoid          node_sigmoid_1           1 1 conv2d_14 sigmoid_1
+BinaryOp         node_mul_699             2 1 leaky_relu_11_splitncnn_0 sigmoid_1 mul_699 0=2
+Split            splitncnn_5              1 2 mul_699 mul_699_splitncnn_0 mul_699_splitncnn_1
+Convolution      node_conv2d_15           1 1 mul_699_splitncnn_1 conv2d_15 0=128 1=2 11=2 2=1 12=1 3=2 13=2 4=0 14=0 15=0 16=0 5=1 6=65536
+Crop             node_pad_3               1 1 mul_699_splitncnn_0 pad_3 -23309=3,0,4,4 -23310=3,2147483647,-4,-4 -23311=3,0,1,2
+ReLU             node_leaky_relu_12       1 1 conv2d_15 leaky_relu_12 0=1.000000e-01
+Convolution      node_conv2d_16           1 1 leaky_relu_12 conv2d_16 0=256 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=294912
+ReLU             node_leaky_relu_13       1 1 conv2d_16 leaky_relu_13 0=1.000000e-01
+Convolution      node_conv2d_17           1 1 leaky_relu_13 conv2d_17 0=128 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=294912
+ReLU             node_leaky_relu_14       1 1 conv2d_17 leaky_relu_14 0=1.000000e-01
+Split            splitncnn_6              1 2 leaky_relu_14 leaky_relu_14_splitncnn_0 leaky_relu_14_splitncnn_1
+Reduction        node_mean_2              1 1 leaky_relu_14_splitncnn_1 mean_2 0=3 1=0 -23303=2,1,2 4=1 5=1
+Convolution      node_conv2d_18           1 1 mean_2 conv2d_18 0=16 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=2048
+ReLU             node_relu_2              1 1 conv2d_18 relu_2
+Convolution      node_conv2d_19           1 1 relu_2 conv2d_19 0=128 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=2048
+Sigmoid          node_sigmoid_2           1 1 conv2d_19 sigmoid_2
+BinaryOp         node_mul_876             2 1 leaky_relu_14_splitncnn_0 sigmoid_2 mul_876 0=2
+Deconvolution    node_convolution_2       1 1 mul_876 convolution_2 0=128 1=2 11=2 2=1 12=1 3=2 13=2 4=0 14=0 15=0 16=0 18=0 19=0 5=1 6=65536
+ReLU             node_leaky_relu_15       1 1 convolution_2 leaky_relu_15 0=1.000000e-01
+BinaryOp         node_add_285             2 1 pad_3 leaky_relu_15 add_285 0=0
+Convolution      node_conv2d_20           1 1 add_285 conv2d_20 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=73728
+ReLU             node_leaky_relu_16       1 1 conv2d_20 leaky_relu_16 0=1.000000e-01
+Convolution      node_conv2d_21           1 1 leaky_relu_16 conv2d_21 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=36864
+ReLU             node_leaky_relu_17       1 1 conv2d_21 leaky_relu_17 0=1.000000e-01
+Split            splitncnn_7              1 2 leaky_relu_17 leaky_relu_17_splitncnn_0 leaky_relu_17_splitncnn_1
+Reduction        node_mean_3              1 1 leaky_relu_17_splitncnn_1 mean_3 0=3 1=0 -23303=2,1,2 4=1 5=1
+Convolution      node_conv2d_22           1 1 mean_3 conv2d_22 0=8 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=512
+ReLU             node_relu_3              1 1 conv2d_22 relu_3
+Convolution      node_conv2d_23           1 1 relu_3 conv2d_23 0=64 1=1 11=1 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=512
+Sigmoid          node_sigmoid_3           1 1 conv2d_23 sigmoid_3
+BinaryOp         node_mul_1053            2 1 leaky_relu_17_splitncnn_0 sigmoid_3 mul_1053 0=2
+Deconvolution    node_convolution_3       1 1 mul_1053 convolution_3 0=64 1=2 11=2 2=1 12=1 3=2 13=2 4=0 14=0 15=0 16=0 18=0 19=0 5=1 6=16384
+ReLU             node_leaky_relu_18       1 1 convolution_3 leaky_relu_18 0=1.000000e-01
+BinaryOp         node_add_347             2 1 pad_2 leaky_relu_18 add_347 0=0
+Convolution      node_conv2d_24           1 1 add_347 conv2d_24 0=64 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=36864
+ReLU             node_leaky_relu_19       1 1 conv2d_24 leaky_relu_19 0=1.000000e-01
+Convolution      node_conv2d_25           1 1 leaky_relu_19 conv2d_25 0=3 1=3 11=3 2=1 12=1 3=1 13=1 4=0 14=0 15=0 16=0 5=1 6=1728
+Crop             node_pad_4               1 1 convolution_1_splitncnn_0 pad_4 -23309=3,0,20,20 -23310=3,2147483647,-20,-20 -23311=3,0,1,2
+BinaryOp         node_add_375             2 1 pad_4 conv2d_25 add_375 0=0
+Clip             node_clamp               1 1 add_375 output 0=0.000000e+00 1=1.000000e+00
