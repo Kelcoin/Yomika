@@ -1,8 +1,8 @@
 import { createSemaphore } from '../lib/concurrency';
 import { allocateNativeReaderSession, hasNativeReaderTiles } from '../lib/readerNativeTiles';
 import { ReaderTitle } from './ReaderTitle';
-import { usePageActive } from '../app/RetainedPage';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ReaderSettingsPause, usePageActive } from '../app/RetainedPage';
+import { useContext, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { ArrowLeft, RotateCcw } from 'lucide-react';
 import { z } from 'zod';
@@ -192,6 +192,7 @@ export function ReaderRouteChromeShell({ className, title, goBack, children }: {
 
 export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const pageActive = usePageActive();
+  const sessionOpen = useContext(ReaderSettingsPause) || pageActive;
   const documentVisibleRef = useRef(document.visibilityState !== 'hidden');
   const pageActiveRef = useRef(pageActive);
   pageActiveRef.current = pageActive;
@@ -361,7 +362,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     setUpscaleWanted(false);
     setDlssnrWanted(false);
     upscaleChosenRef.current = false;
-  }, [archiveId, pageActive]);
+  }, [archiveId, sessionOpen]);
   useEffect(() => { if (!upscaleConfigured) setUpscaleWanted(false); }, [upscaleConfigured]);
   useEffect(() => { if (!dlssnrAvailable) setDlssnrWanted(false); }, [dlssnrAvailable]);
   const upscaleEnabled = upscaleConfigured && upscaleWanted;
@@ -1317,18 +1318,14 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // 一整屏白图。
   // 进出这一本各清一次盘上的「成品」（超分 / DLSSNR 的产物）：见 `purgeReaderProducts`。
   //
-  // 触发点是 `pageActive`，**不是挂载 / 卸载**：阅读器被 `RetainedPage` 收着时从不卸载
-  // （`App.tsx` 的 readers 表只给子树加 `hidden`），卸载只在「第三本把它挤掉」时才发生，
-  // 那已经是下一次阅读了——真机上「读完一本回书架」那一半因此从来没跑过。
-  // `pageActive` 说的正是「这一本就是当前路由」：切到另一本会翻成 false（各自清各自的），
-  // 应用转后台不会（路由没变；`App.tsx` 的 visibilitychange 只停标签翻译）。
-  //
+  // 临时打开阅读设置时，保留这一趟的成品与开关。离开档案才清理，
+  // 因为 RetainedPage 可能继续挂着这一本，直到它被缓存淘汰。
   // 两半分开写，而不是一个 effect 带清理函数：那样翻成 false 时清理函数与函数体会连着跑
   // 两遍，也就是两次删文件循环。这里只在真的离开时清一次。
   useEffect(() => {
-    if (pageActive) return;
+    if (sessionOpen) return;
     void purgeReaderProducts(scopeId, archiveId);
-  }, [pageActive, scopeId, archiveId]);
+  }, [sessionOpen, scopeId, archiveId]);
   // 进来那一次：清掉上一趟留下的（上次可能崩了，或者离开那一半没走完）。
   //
   // 这一次要**等它落地**（见 `sessionPurged`）再让派生队列开工。超时或清理失败都放行：
@@ -1347,7 +1344,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }, [scopeId, archiveId]);
 
   useEffect(() => {
-    if (pageActive) return;
+    if (sessionOpen) return;
     releaseDerived({ dropVisible: true });
     // 页都放掉了，顺手把工作集也还给系统（见 `trimProcessMemory`）。
     trimProcessMemory();
@@ -1355,7 +1352,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // 见 `releaseDlssnrWorkspaces`）。离开这一本时正好一起交回。
     cancelWorkspaceRelease();
     releaseDlssnrWorkspaces();
-  }, [pageActive, releaseDerived, cancelWorkspaceRelease]);
+  }, [sessionOpen, releaseDerived, cancelWorkspaceRelease]);
 
   /** Called by the reader with the pages actually on screen.
    *

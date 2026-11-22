@@ -8,7 +8,7 @@
  *
  * 所以"按下去"由这里自己记：pointerdown 落在哪个可点元素上，就给它一个瞬时的
  * `is-pressed`，抬手 / 取消 / 手指滑走 / 页面滚动立刻撤掉。它是瞬时的，所以不会变成
- * 那个粘在屏幕上的 hover。鼠标不参与——桌面本来就有 hover。
+ * 那个粘在屏幕上的 hover。普通鼠标按压仍交给 CSS。带 data-animated-press 的按钮统一跟踪鼠标和触屏。
  *
  * 只负责标记，不负责画：`is-pressed` 落成什么颜色由样式表决定，加一个新组件不必改
  * 这里。
@@ -38,26 +38,37 @@ const PRESSED_CLASS = 'is-pressed';
 const SLOP_PX = 10;
 /** 兜底：万一 pointerup 没送到，高亮也不能留在屏幕上。 */
 const SAFETY_MS = 1500;
+const MIN_ANIMATED_PRESS_MS = 75;
 
 export function installPressFeedback(): () => void {
   let pressed: Element | undefined;
   let origin = { x: 0, y: 0 };
   let safety: number | undefined;
+  let releaseTimer: number | undefined;
+  let animated = false;
+  let pressedAt = 0;
+  let pointerId: number | undefined;
 
   const release = () => {
     if (safety !== undefined) window.clearTimeout(safety);
+    if (releaseTimer !== undefined) window.clearTimeout(releaseTimer);
     safety = undefined;
+    releaseTimer = undefined;
+    pointerId = undefined;
     pressed?.classList.remove(PRESSED_CLASS);
     pressed = undefined;
   };
 
   const onPointerDown = (event: PointerEvent) => {
-    // 桌面有 hover，鼠标按下去不需要这一层。
-    if (event.pointerType === 'mouse') return;
-    release();
     const target = event.target instanceof Element ? event.target.closest(PRESSABLE) : null;
-    if (!target) return;
+    const animate = Boolean(target?.closest('[data-animated-press]'));
+    if (event.pointerType === 'mouse' && !animate) return;
+    release();
+    if (!target || event.button > 0 || target.matches(':disabled, [aria-disabled="true"]')) return;
     pressed = target;
+    animated = animate;
+    pressedAt = performance.now();
+    pointerId = event.pointerId;
     origin = { x: event.clientX, y: event.clientY };
     target.classList.add(PRESSED_CLASS);
     safety = window.setTimeout(release, SAFETY_MS);
@@ -65,18 +76,29 @@ export function installPressFeedback(): () => void {
 
   // 手指滑走就不算"按着"了——否则松开时会在别处留着一块高亮。
   const onPointerMove = (event: PointerEvent) => {
-    if (!pressed) return;
+    if (!pressed || pointerId !== event.pointerId) return;
     if (Math.abs(event.clientX - origin.x) > SLOP_PX || Math.abs(event.clientY - origin.y) > SLOP_PX) release();
   };
+
+  const onPointerUp = (event: PointerEvent) => {
+    if (!pressed || pointerId !== event.pointerId) return;
+    pointerId = undefined;
+    const remaining = animated ? MIN_ANIMATED_PRESS_MS - (performance.now() - pressedAt) : 0;
+    if (remaining > 0) releaseTimer = window.setTimeout(release, remaining);
+    else release();
+  };
+  // Implicit capture is lost after pointerup. Only an unexpected loss should
+  // cancel the minimum feedback time for a quick tap.
+  const onPointerCancel = (event: PointerEvent) => { if (releaseTimer === undefined && pointerId === event.pointerId) release(); };
 
   // 开始滚动同样撤掉：下拉刷新、翻列表都不该让某一项一直亮着。
   const onScroll = () => { if (pressed) release(); };
 
   document.addEventListener('pointerdown', onPointerDown, true);
   document.addEventListener('pointermove', onPointerMove, true);
-  document.addEventListener('pointerup', release, true);
-  document.addEventListener('pointercancel', release, true);
-  document.addEventListener('lostpointercapture', release, true);
+  document.addEventListener('pointerup', onPointerUp, true);
+  document.addEventListener('pointercancel', onPointerCancel, true);
+  document.addEventListener('lostpointercapture', onPointerCancel, true);
   document.addEventListener('visibilitychange', release);
   window.addEventListener('blur', release);
   document.addEventListener('scroll', onScroll, true);
@@ -84,9 +106,9 @@ export function installPressFeedback(): () => void {
     release();
     document.removeEventListener('pointerdown', onPointerDown, true);
     document.removeEventListener('pointermove', onPointerMove, true);
-    document.removeEventListener('pointerup', release, true);
-    document.removeEventListener('pointercancel', release, true);
-    document.removeEventListener('lostpointercapture', release, true);
+    document.removeEventListener('pointerup', onPointerUp, true);
+    document.removeEventListener('pointercancel', onPointerCancel, true);
+    document.removeEventListener('lostpointercapture', onPointerCancel, true);
     document.removeEventListener('visibilitychange', release);
     window.removeEventListener('blur', release);
     document.removeEventListener('scroll', onScroll, true);

@@ -794,10 +794,10 @@ pub fn save_preferences(
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
+    let previous = load_preferences_from(&connection).ok();
     #[cfg(target_os = "windows")]
     let notify_service = {
         let _ = &app;
-        let previous = load_preferences_from(&connection).ok();
         if previous.as_ref().is_none_or(|value| value.start_with_windows != input.start_with_windows) {
             let executable = std::env::current_exe().map_err(|error| error.to_string());
             if let Err(error) = executable.and_then(|path| update_windows_autostart(&path, input.start_with_windows)) {
@@ -811,11 +811,18 @@ pub fn save_preferences(
                 || value.compute_center_port != input.compute_center_port
                 || value.compute_center_token != input.compute_center_token)
     };
-    #[cfg(not(target_os = "windows"))]
-    let _ = app;
     #[cfg(target_os = "windows")]
     let data = connection.path().and_then(|path| std::path::Path::new(path).parent()).map(std::path::Path::to_path_buf);
     let saved = save_preferences_to(&mut connection, input);
+    if let Ok(value) = &saved {
+        if previous.as_ref().is_some_and(|old| old.cache_max_bytes > value.cache_max_bytes) {
+            if let Ok(app_data) = crate::data_paths::data_dir(&app) {
+                if let Err(error) = crate::cache::maintain_image_cache_quota(&connection, &app_data) {
+                    eprintln!("Image cache cleanup after lowering quota failed: {error}");
+                }
+            }
+        }
+    }
     // The service reads this same database before acknowledging the signal.
     // Never wait for that acknowledgement while holding the writer's mutex.
     drop(connection);

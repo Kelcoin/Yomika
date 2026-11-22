@@ -7009,6 +7009,9 @@ fn delete_server_row(connection: &mut Connection, server_id: &str) -> CommandRes
     if let Err(error) = transaction.execute("DELETE FROM servers WHERE id = ?1", params![server_id]) {
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }
+    if let Err(error) = invalidate_category_cache(&transaction, server_id) {
+        return CommandResult::failure("UNKNOWN", error, true);
+    }
     if let Err(error) = transaction.commit() {
         return CommandResult::failure("UNKNOWN", error.to_string(), true);
     }

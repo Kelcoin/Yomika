@@ -118,22 +118,25 @@ function routeCacheStorage(): Storage | undefined {
   }
 }
 
-/** 把内存镜像写回磁盘。写失败（配额用尽、被禁用、PrivacyError）只吞掉，绝不抛
- * 给调用方；同时**不**在失败时去 `removeItem`——上一次成功落盘的副本比一个空
- * 存储有用，一次写不进去不该让用户下次启动比这次更糟。 */
+/** Write the latest index. The browser quota is shared with other settings,
+ * so an otherwise in-budget snapshot may still need to evict older entries. */
 function persistRouteCache(): void {
   const storage = routeCacheStorage();
   if (!storage) return;
-  try {
-    if (persisted.size === 0) {
-      storage.removeItem(PERSIST_KEY);
+  while (true) {
+    try {
+      if (persisted.size === 0) {
+        storage.removeItem(PERSIST_KEY);
+        return;
+      }
+      storage.setItem(PERSIST_KEY, JSON.stringify(Object.fromEntries(persisted)));
       return;
+    } catch (error) {
+      const oldest = persisted.keys().next();
+      if (!(error instanceof DOMException) || error.name !== 'QuotaExceededError'
+        || oldest.done || persisted.size <= 1) return;
+      dropPersistedEntry(oldest.value);
     }
-    const payload: Record<string, PersistedEntry> = {};
-    for (const [key, entry] of persisted) payload[key] = entry;
-    storage.setItem(PERSIST_KEY, JSON.stringify(payload));
-  } catch {
-    // 静默降级成纯内存：内存镜像仍是「本该落盘的样子」，下一次写成功时会补上。
   }
 }
 
@@ -237,7 +240,8 @@ function hydrateRouteCache(): void {
 /** 读一份快照；比 `maxAgeMs` 更旧的一律当作没有。读到会把该条移到 LRU 尾部，
  * 让正在显示的页面在一次性的详情浏览里活下来。 */
 export function readRouteCache<T>(key: string, maxAgeMs = DEFAULT_MAX_AGE_MS): T | undefined {
-  const entry = entries.get(key);
+  const diskEntry = persisted.get(key);
+  const entry = entries.get(key) ?? diskEntry;
   if (!entry) return undefined;
   if (Date.now() - entry.at > maxAgeMs) {
     dropEntry(key);
@@ -246,15 +250,21 @@ export function readRouteCache<T>(key: string, maxAgeMs = DEFAULT_MAX_AGE_MS): T
     if (dropPersistedEntry(key)) persistRouteCache();
     return undefined;
   }
-  entries.delete(key);
+  if (!entries.delete(key)) totalBytes += entry.size;
   entries.set(key, entry);
+  evictOverBudget();
+  // The next write persists recency without synchronous storage I/O on reads.
+  if (diskEntry) {
+    persisted.delete(key);
+    persisted.set(key, diskEntry);
+  }
   return entry.value as T;
 }
 
 /** Age of a snapshot in milliseconds, or `undefined` if there is none. Lets a
  * route render a slightly older snapshot while still deciding to revalidate. */
 export function routeCacheAge(key: string): number | undefined {
-  const entry = entries.get(key);
+  const entry = entries.get(key) ?? persisted.get(key);
   return entry ? Date.now() - entry.at : undefined;
 }
 
@@ -322,6 +332,8 @@ export function invalidateRouteCache(prefix?: string): void {
 export function resetRouteCacheForTests(): void {
   entries.clear();
   totalBytes = 0;
+  persisted.clear();
+  persistedBytes = 0;
 }
 
 /** 测试用：模拟一次「进程重启」——清空内存后只从 localStorage 重新 hydrate，

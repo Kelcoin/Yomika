@@ -61,6 +61,8 @@ import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { readerSettingsOrigin } from '../lib/pageBackNavigation';
+import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { openExternalUrl } from '../bridge/externalUrl';
 import { readTextFromFile, saveTextToFile } from '../bridge/textFile';
 
@@ -202,6 +204,8 @@ function sectionLabel(id: string): string {
 export function SettingsWorkspace() {
   const pageActive = usePageActive();
   const location = useLocation();
+  const readerOrigin = readerSettingsOrigin(`${location.pathname}${location.search}`, location.state?.returnTo);
+  const goBack = useReturnNavigation('/settings');
   const { showToast } = useToast();
   const preferenceState = usePreferences();
   const [preferenceDraftOverride, setPreferenceDraft] = useState<PreferenceSnapshot>();
@@ -235,7 +239,7 @@ export function SettingsWorkspace() {
   // `webView.goBack()`），所以设置项开着时按返回，人想要的是先回到分类列表，而不是
   // 把整个设置页带回上一页。开着的时候压一条守卫条目，返回手势弹掉它、就地回到列表；
   // 页内那个「返回设置分类」按钮关掉这一层时，守卫自己把条目吃掉（`lib/overlayBackGuard`）。
-  useOverlayBackGuard(pageActive && compact && compactDrilled, () => setCompactDrilled(false));
+  useOverlayBackGuard(pageActive && compact && compactDrilled && !readerOrigin, () => setCompactDrilled(false));
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
@@ -974,9 +978,9 @@ export function SettingsWorkspace() {
         )}
         {showSectionContent && (
         <div className="settings-content">
-      {compact && (
+      {(compact || readerOrigin) && (
         <header className="settings-compact-heading">
-          <button className="reader-icon-button" type="button" aria-label="返回设置分类" onClick={() => setCompactDrilled(false)}>
+          <button className="reader-icon-button" type="button" aria-label={readerOrigin ? '返回阅读模式' : '返回设置分类'} onClick={readerOrigin ? goBack : () => setCompactDrilled(false)}>
             <ArrowLeft aria-hidden="true" />
           </button>
           <h2>{settingsSections.find((section) => section.id === selectedSettingsSection)?.icon}<span>{sectionLabel(selectedSettingsSection)}</span></h2>

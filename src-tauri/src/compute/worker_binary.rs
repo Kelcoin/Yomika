@@ -273,12 +273,19 @@ mod tests {
     #[test]
     fn a_payload_whose_bytes_or_header_were_tampered_with_is_refused() {
         let bytes = vec![7u8; 2048];
-        let mut payload = pack(&bytes);
+        let original_payload = pack(&bytes);
 
-        // 正文改一个字节：摘要对不上。压缩流本身就多半解不出来，两条路都算拒。
-        let last = payload.len() - 1;
-        payload[last] ^= 0xff;
-        assert!(unpack(&payload).is_err());
+        // 重新压缩同样长度的不同正文，再放回原摘要，确保触发正文校验。
+        let mut changed_bytes = bytes.clone();
+        changed_bytes[0] ^= 0xff;
+        let mut payload = pack(&changed_bytes);
+        assert_eq!(unpack(&payload).expect("改写后的正文能正常解压"), changed_bytes);
+        payload[DIGEST_OFFSET..HEADER_LEN]
+            .copy_from_slice(&original_payload[DIGEST_OFFSET..HEADER_LEN]);
+        assert_eq!(
+            unpack(&payload).unwrap_err(),
+            "解出来的字节与载荷头记的摘要对不上"
+        );
 
         // 记号不对：这不是我们的载荷。
         let mut payload = pack(&bytes);

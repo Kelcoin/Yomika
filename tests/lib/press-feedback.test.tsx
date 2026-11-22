@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { installPressFeedback } from '../../src/lib/pressFeedback';
 
@@ -39,6 +39,23 @@ describe('press feedback', () => {
 
     fireEvent.pointerUp(document);
     expect(screen.getByTestId('card')).not.toHaveClass('is-pressed');
+  });
+
+  it('holds quick-tap feedback across pointer release but clears a canceled gesture immediately', () => {
+    vi.useFakeTimers();
+    try {
+      mount(<div data-animated-press><button type="button">推荐</button></div>);
+      const button = screen.getByRole('button');
+      fireEvent.pointerDown(button);
+      fireEvent.pointerUp(button);
+      fireEvent.lostPointerCapture(button);
+      expect(button).toHaveClass('is-pressed');
+      vi.advanceTimersByTime(100);
+      expect(button).not.toHaveClass('is-pressed');
+      fireEvent.pointerDown(button);
+      fireEvent.pointerCancel(button);
+      expect(button).not.toHaveClass('is-pressed');
+    } finally { vi.useRealTimers(); }
   });
 
   it('marks an element that claims the press for itself', () => {

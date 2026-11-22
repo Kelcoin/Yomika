@@ -1621,10 +1621,10 @@ pub fn evict_cache_batch(
     }
 
     let candidates = {
-        // SUM 而不是 MAX：DELETE 按路径删掉全部行，字节账本（递减与
-        // bytes_freed）要的就是这个路径上的总字节。
+        // Keys can share a physical file. Count its bytes once and use the
+        // latest access through any of its keys.
         let mut statement = connection.prepare(
-            "SELECT path,SUM(size) FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 ORDER BY MIN(last_accessed_at),path LIMIT ?1"
+            "SELECT path,MAX(size) FROM cache_entries GROUP BY path HAVING MAX(pinned)=0 ORDER BY MAX(last_accessed_at),path LIMIT ?1"
         ).map_err(|error| error.to_string())?;
         let rows = statement
             .query_map([batch_limit as i64], |row| {
@@ -1639,10 +1639,7 @@ pub fn evict_cache_batch(
     let mut removed_entries = 0;
     let mut removed_files = 0;
     let mut bytes_freed = 0_u64;
-    // 全表 SUM 聚合只算一次，循环内按删掉的条目递减：原来每个候选都重跑
-    // 一遍聚合（最多 4096 次全表扫描），而且此时多半持有全局 DB 锁。
-    // 近似误差由收尾的精确 remaining_bytes 与外层的多批循环兜底。
-    let mut current_bytes = indexed_cache_bytes(connection)?;
+    let mut current_bytes = before;
     for (relative, indexed_size) in candidates {
         if current_bytes <= max_bytes {
             break;
@@ -2044,9 +2041,7 @@ mod tests {
             CacheEvictionResult {
                 removed_entries: 2,
                 removed_files: 1,
-                // 共享路径的两行各 6 字节，DELETE 按路径删掉两行，
-                // 实际释放 12 字节——SUM(size)，不是 MAX(size) 的 6。
-                bytes_freed: 12,
+                bytes_freed: 6,
                 remaining_bytes: 14,
                 quota_satisfied: true,
                 has_more: false
@@ -2534,6 +2529,29 @@ mod tests {
 
         assert_eq!(read_cache_stats(&connection).unwrap().bytes, 50);
         assert!(!cache.join("old.bin").exists());
+        std::fs::remove_dir_all(app_data).unwrap();
+    }
+
+    #[test]
+    fn quota_preserves_a_shared_file_recently_read_through_either_key() {
+        let connection = cache_db();
+        let app_data = temp_app_data("cache-shared-recency");
+        let cache = app_data.join("cache/images");
+        std::fs::create_dir_all(&cache).unwrap();
+        for name in ["shared", "cold", "older"] {
+            std::fs::write(cache.join(format!("{name}.bin")), b"123456").unwrap();
+        }
+        connection.execute_batch("INSERT INTO cache_entries (key,kind,path,size,source_scope,content_hash,last_accessed_at) VALUES
+          ('shared-a','image','cache/images/shared.bin',6,'a','shared','2025-01-01'),
+          ('shared-b','image','cache/images/shared.bin',6,'b','shared','2026-03-01'),
+          ('cold','image','cache/images/cold.bin',6,'a','cold','2026-02-01'),
+          ('older','image','cache/images/older.bin',6,'a','older','2026-01-01');").unwrap();
+        let result = evict_cache_batch(&connection, &app_data, 6, 8).unwrap();
+        assert_eq!(result.bytes_freed, 12);
+        assert!(result.quota_satisfied);
+        assert!(cache.join("shared.bin").exists());
+        assert!(!cache.join("cold.bin").exists());
+        assert!(!cache.join("older.bin").exists());
         std::fs::remove_dir_all(app_data).unwrap();
     }
 

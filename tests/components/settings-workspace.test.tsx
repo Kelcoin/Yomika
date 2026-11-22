@@ -1,10 +1,12 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, vi } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { RetainedPage } from '../../src/app/RetainedPage';
+import { ReaderScreen } from '../../src/components/ReaderScreen';
+import { MOBILE_BACK_EVENT, usePageBackNavigation } from '../../src/lib/pageBackNavigation';
 import { SettingsWorkspace } from '../../src/components/SettingsWorkspace';
 import { ConfirmDialog } from '../../src/components/ConfirmDialog';
 import { PreferencesProvider } from '../../src/app/preferences';
@@ -1900,4 +1902,38 @@ it('does not overwrite newer detail action edits with an earlier save response',
   await vi.waitFor(() => expect(adapter.mock.calls.filter(([command]) => command === 'save_preferences')).toHaveLength(2));
   expect(screen.getByRole('checkbox', { name: '详情页显示下载' })).toHaveAttribute('aria-checked', 'false');
   expect(screen.getByRole('checkbox', { name: '详情页显示编辑' })).toHaveAttribute('aria-checked', 'true');
+});
+
+it.each(['system Back', 'settings back button'])('returns from the reader settings shortcut with %s', async (action) => {
+  document.documentElement.dataset.nativeMobile = 'true';
+  const matchMedia = window.matchMedia;
+  window.matchMedia = query => ({
+    matches: query === COMPACT_WIDTH_QUERY, media: query, onchange: null,
+    addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false,
+  });
+  const readerPath = '/reader/local/file?file=sample.cbz&page=4';
+  function Pages() {
+    usePageBackNavigation();
+    const location = useLocation();
+    return <><output data-testid="location">{location.pathname}{location.search}</output><Routes>
+      <Route path="/reader/local/file" element={<ReaderScreen archiveId="sample" title="Sample" pages={['/page.png']} />} />
+      <Route path="/settings" element={<SettingsWorkspace />} />
+    </Routes></>;
+  }
+  try {
+    setInvokeAdapterForTests(async command => command === 'load_preferences'
+      ? { ok: true, value: DEFAULT_PREFERENCES } : { ok: true, value: [] });
+    render(<MemoryRouter initialEntries={[readerPath]}><PreferencesProvider><Pages /></PreferencesProvider></MemoryRouter>);
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('link', { name: '阅读设置' }));
+    expect(screen.getByRole('heading', { name: '阅读' })).toBeInTheDocument();
+    if (action === 'system Back') fireEvent(window, new Event(MOBILE_BACK_EVENT, { cancelable: true }));
+    else fireEvent.click(screen.getByRole('button', { name: '返回阅读模式' }));
+    expect(await screen.findByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+    expect(screen.getByTestId('location').textContent).toBe(readerPath);
+  } finally {
+    window.matchMedia = matchMedia;
+    delete document.documentElement.dataset.nativeMobile;
+    resetOverlayBackGuardForTests();
+  }
 });

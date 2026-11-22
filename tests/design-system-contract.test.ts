@@ -136,14 +136,19 @@ describe('design system contract', () => {
   });
   it('invalidates the shelf snapshots after a category mirror write', () => {
     // Successful category writes invalidate remote Favorites snapshots as well as shelves.
+    // 行为面（成功掉三份快照、失败一份不动、只写元数据不碰收藏）由
+    // tests/repositories/category-cache-invalidation.test.ts 逐条断言；这里钉的是那条链
+    // 还连着：两条写都走 invalidateFavorites，后者再落到 invalidateShelves。
     const repository = read('src/repositories/nativeLibraryRepository.ts');
     const add = repository.slice(repository.indexOf('addArchiveToCategory('), repository.indexOf('removeArchiveFromCategory('));
-    expect(add, '分类写成功后作废收藏夹快照').toMatch(/then\(invalidateFavorites\)/);
+    expect(add, '分类写成功后作废收藏夹快照').toMatch(/return invalidateFavorites\(result\)/);
+    expect(add, '分类读的挂起表也要一起丢掉').toMatch(/if \(result\.ok\) invalidateCategoryReads\(serverId\)/);
     const remove = repository.slice(repository.indexOf('removeArchiveFromCategory('), repository.indexOf('updateArchiveMetadata('));
-    expect(remove).toMatch(/then\(invalidateFavorites\)/);
+    expect(remove).toMatch(/return invalidateFavorites\(result\)/);
     const metadataWrite = repository.slice(repository.indexOf('updateArchiveMetadata('), repository.indexOf('listMetadataPlugins('));
     expect(metadataWrite).toMatch(/then\(invalidateShelves\)/);
-    expect(repository).toMatch(/function invalidateFavorites[\s\S]*?invalidateShelves\(result\)/);
+    expect(repository).toMatch(/function invalidateFavorites[\s\S]*?invalidateRouteCache\('favorites:'\)[\s\S]*?invalidateShelves\(result\)/);
+    expect(repository, '失败时一份都不作废').toMatch(/function invalidateShelves[\s\S]{0,80}if \(result\.ok\) \{/);
     // Favorites membership comes exclusively from the current remote category.
     const routes = read('src/app/routes.tsx');
     expect(routes, '收藏夹读取服务器分类').toMatch(/readFavoritesCategory/);
@@ -291,7 +296,11 @@ describe('design system contract', () => {
     // 手势也归画布自己管——ReaderScreen 按布局把 touch-action 写在画布上，连续
     // 模式让浏览器纵向滚动，单页/双页整个交给自己的双击、双指与滚轮。
     const reader = read('src/components/ReaderScreen.tsx');
-    expect(reader).toMatch(/transform: `scale\(\$\{zoomRef\.current\.scale\}\)/);
+    // 一层 transform，铺在装着这一屏所有页帧的那个元素上（双页两半共用同一个矩阵，
+    // 各缩各的会从各自中心长大、互相叠上）；平移量按缩放后的像素走，顺序不能反。
+    expect(reader).toContain('transform: `scale(${zoom.scale}) translate(${zoom.panX}px, ${zoom.panY}px)`');
+    expect(reader).toContain("transformOrigin: 'center center'");
+    expect(reader, '缩放骑在页帧那一层，不是整条轨道').toMatch(/style=\{offset === 0 \? zoomStyle/);
     expect(reader).toMatch(/touchAction: effectiveLayout === 'webtoon' \? 'pan-y' : 'none'/);
     // 阅读页里没有任何文本控件，所以下面那条字号下限够不到它。
     expect(reader).not.toMatch(/<input|<textarea|<select/);
@@ -742,13 +751,13 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css');
     const button = ruleBody(shell, '.archive-recommendations-tabs button');
     expect(button).toMatch(/white-space:\s*nowrap/);
-    expect(ruleBody(shell, '.archive-recommendations-tabs')).toMatch(/grid-template-columns:\s*auto minmax\(0, 0fr\)/);
-    expect(ruleBody(shell, '.archive-recommendations-tabs.has-creator')).toMatch(/grid-template-columns:\s*auto minmax\(0, 1fr\)/);
+    expect(ruleBody(shell, '.archive-recommendations-tabs')).toMatch(/grid-template-columns:\s*max-content minmax\(0, 0fr\)/);
+    expect(ruleBody(shell, '.archive-recommendations-tabs.has-creator')).toMatch(/grid-template-columns:\s*max-content minmax\(0, 1fr\)/);
     expect(shell).not.toMatch(/archive-recommendations-tabs:not\(\.has-creator\) \.archive-recommendations-tab-creator\s*\{\s*display:\s*none/);
     const collapsed = ruleBody(shell, '.archive-recommendations-tabs .archive-recommendations-tab-creator');
-    expect(collapsed).toMatch(/padding-inline:\s*0/);
-    // 长出来的时候留白要还回去，否则两个标签会挤在一起。
-    expect(shell).toMatch(/\.archive-recommendations-tabs\.has-creator \.archive-recommendations-tab-creator \{[^}]*padding-inline:\s*var\(--space-4\)/);
+    expect(collapsed).toMatch(/width:\s*max-content/);
+    expect(collapsed).toMatch(/padding-inline:\s*var\(--space-4\)/);
+    expect(collapsed).not.toMatch(/transition:[^;]*padding-inline/);
   });
 
   it('scrolls the settings menu body instead of clipping a tall form', () => {
@@ -1300,6 +1309,12 @@ describe('design system contract', () => {
     expect(counter).toMatch(/border-radius:\s*var\(--radius-pill\)/);
     expect(counter).toMatch(/font-variant-numeric:\s*tabular-nums/);
 
+    // 大窗口使用 16px 组间距、12px 组内间距，窄屏逐级收紧。
+    expect(toolbar).toMatch(/column-gap:\s*var\(--space-4\)/);
+    expect(ruleBody(reader, '.reader-toolbar-group')).toMatch(/gap:\s*var\(--space-3\)/);
+    expect(ruleBody(reader, '@media (max-width: 610px)')).toMatch(/\.reader-toolbar\s*\{[^}]*column-gap:\s*var\(--space-3\)/);
+    expect(ruleBody(reader, '@media (max-width: 380px)')).toMatch(/\.reader-toolbar\s*\{[^}]*column-gap:\s*var\(--space-2\)/);
+
     expect(ruleBody(reader, '@media (max-width: 610px)')).not.toMatch(/grid-template-columns/);
     expect(read('src/components/ReaderScreen.tsx')).toContain('<span className="reader-toolbar-counter">');
   });
@@ -1370,8 +1385,6 @@ describe('design system contract', () => {
     const toolbar = ruleBody(reader, '.reader-toolbar');
     expect(toolbar).toMatch(/height:\s*calc\(var\(--reader-toolbar-height\) \+ var\(--safe-bottom\)\)/);
     expect(toolbar).toMatch(/padding:\s*0 var\(--space-1\) var\(--safe-bottom\)/);
-    // 功能组之间留 8dp；组内图标仍由各自的触控面提供间距。
-    expect(toolbar).toMatch(/gap:\s*var\(--space-2\)/);
     expect(ruleBody(reader, '.reader-toolbar-group')).toMatch(/display:\s*flex/);
     // 底栏 = 主题的 surface-container——和顶栏同一档（一条在上、一条在下，中间隔着
     // 画面），分隔线同样取 hairline。「两条栏不是同一个材质」这条设计仍然成立，只是
@@ -1495,7 +1508,15 @@ describe('design system contract', () => {
     expect(indicatorScreen, '初始首帧也采用设备默认位置').toMatch(/const indicatorPlacement = coarsePointer \? 'bottom' : 'corner';/);
     expect(indicatorScreen, '只有结论变了（或缩放还在缓动）才排第二趟测量').toMatch(/if \(!measure\(true\)\) settle = window\.setTimeout\(\(\) => \{ measure\(true\); \}, 240\);/);
     expect(indicatorScreen, '还没解码的页不能拿来量底缝').toMatch(/if \(image\.naturalWidth === 0\) continue;/);
-    expect(indicatorScreen, '指针类型进了依赖，换设备也要重量一次').toMatch(/\}, \[coarsePointer, effectiveLayout,[^\]]*pageMeasurement[^\]]*bottomPresence\.mounted[^\]]*zoom\.scale\]\);/);
+    // 依赖按**集合**核，不按顺序：指针类型/布局/视口/缩放任何一项变了都要重量一次。
+    const measureDeps = (() => {
+      const from = indicatorScreen.slice(indicatorScreen.indexOf('if (image.naturalWidth === 0) continue;'));
+      const open = from.indexOf('}, [');
+      return from.slice(open + 4, from.indexOf(']);', open)).split(',').map((item) => item.trim()).filter(Boolean);
+    })();
+    for (const dependency of ['coarsePointer', 'effectiveLayout', 'pageMeasurement', 'bottomPresence.mounted', 'bottomPresence.leaving', 'viewport.width', 'viewport.height', 'zoom.scale']) {
+      expect(measureDeps, `重量一次的依赖里要有 ${dependency}`).toContain(dependency);
+    }
     expect(indicatorScreen, '退场窗口里胶囊要认领 is-leaving').toMatch(/bottomPresence\.leaving \? ' is-leaving' : ''/);
     // 2026-10-15 用户要求：底栏一出现，页码就隐藏。这一条钉的是**安静条件的组成**——
     // 少了 `mounted` 就退回「胶囊压在栏上」，少了 `leaving` 就会在栏淡出的 260ms 里
@@ -1516,18 +1537,18 @@ describe('design system contract', () => {
     expect(indicatorScreen, '自动收起清除两侧的唤出状态').toMatch(/setTappedBands\(\{ top: false, bottom: false \}\);\s*callbacksRef\.current\.onHide\(\)/);
     expect(indicatorScreen, 'Escape 收起也要清意见').toMatch(/setHover\(undefined\);[\s\S]{0,40}setState\(toggleReaderChrome\)/);
 
-    // 底栏的「动」有三件事必须同时在场，少一件它就成了静止的一块：
-    // ① 入场走自己的高度（8px 位移在 80dp 的栏上等于没动）；② 指针下按下要比悬停再实
-    // 一档（只有悬停一层时，鼠标停在「下一页」上连点翻页看不出点到了）；③ 每翻一页栏顶
-    // 铺开一道主题色短线。
-    expect(reader, '入场要走栏自己的高度').toMatch(/@keyframes reader-chrome-bottom-in \{\s*from \{\s*opacity:\s*0;\s*transform:\s*translateY\(100%\);?\s*\}\s*\}/);
+    expect(reader).toMatch(/@keyframes reader-chrome-top-in \{ from \{ transform: translateY\(-100%\); \} \}/);
+    expect(reader).toMatch(/@keyframes reader-chrome-top-out \{ to \{ transform: translateY\(-100%\); \} \}/);
+    expect(reader).toMatch(/@keyframes reader-chrome-bottom-in \{ from \{ transform: translateY\(100%\); \} \}/);
+    expect(reader).toMatch(/@keyframes reader-chrome-bottom-out \{ to \{ transform: translateY\(100%\); \} \}/);
     expect(ruleBody(reader, '.reader-toolbar')).toMatch(/animation:\s*reader-chrome-bottom-in var\(--motion-slow\) backwards/);
-    expect(ruleBody(reader, '.reader-toolbar button:hover')).toMatch(/background:\s*var\(--surface-container-high\)/);
-    const pressLayer = ruleBody(reader, '.reader-toolbar button:active:not(:disabled)');
-    expect(pressLayer, '按下要比悬停再实一档').toMatch(/background:\s*var\(--surface-container-highest\)/);
-    expect(pressLayer).toMatch(/transform:\s*translateY\(1px\) scale\(/);
-    // 触屏那一档的收缩与指针那一档是同一份（配色分成两档，手感不能分）。
-    expect(ruleBody(reader, '.reader-toolbar button:is(.is-pressed, :active)')).toMatch(/transform:\s*translateY\(1px\) scale\(/);
+    expect(ruleBody(reader, '.reader-toolbar button:hover:not(:disabled)::before')).toMatch(/background:\s*var\(--surface-container-high\)/);
+    expect(reader).toMatch(/\.reader-toolbar button:is\(\.is-pressed, :active\):not\(:disabled\)::before \{ background: var\(--surface-container-highest\); \}/);
+    expect(reader).toMatch(/\.reader-toolbar button\.is-pressed:not\(:disabled\) \{ transform: scale\(/);
+    const stateLayer = ruleBody(reader, '.reader-toolbar button::before');
+    expect(stateLayer).toMatch(/inline-size:\s*var\(--reader-action-width\)/);
+    expect(stateLayer).toMatch(/block-size:\s*var\(--reader-action-width\)/);
+    expect(stateLayer).toMatch(/border-radius:\s*50%/);
     expect(reader, '翻页的回应要有一条动画').toMatch(/@keyframes reader-toolbar-turn \{\s*from \{/);
     const cue = ruleBody(reader, '.reader-toolbar-turn');
     expect(cue).toMatch(/animation:\s*reader-toolbar-turn var\(--motion-slow\)/);
@@ -1560,7 +1581,7 @@ describe('design system contract', () => {
     // 面板还出现在去重工作区那个跟随主题的对话框里，里面的标签芯片本来就是主题色。按
     // 选择器把这两组规则**整条**剔掉，再看剩下的（画布、页码胶囊、重试按钮……）。
     const reader = read('src/styles/reader.css');
-    const themed = /[^{}]*\.(?:reader-chrome-top|reader-toolbar|reader-error-bar|reader-overview|reader-incognito-badge)[\w-]*[^{}]*\{[^{}]*\}/g;
+    const themed = /[^{}]*\.(?:reader-chrome-top|reader-toolbar|reader-error-bar|reader-overview|reader-incognito-badge|reader-icon-button)[\w-]*[^{}]*\{[^{}]*\}/g;
     const rest = reader.replace(/\/\*[\s\S]*?\*\//g, '').replace(themed, '');
     const rules = [...rest.matchAll(/([^{}]*)\{([^{}]*)\}/g)];
     const chrome = rules.map(([whole]) => whole).join('\n');
@@ -1710,7 +1731,12 @@ describe('design system contract', () => {
     // 档案卡与设置行里的模型下载条是**同一个组件**：量法（`cardProgressWidth`）与
     // 类名都只有一份，两处不可能各画各的。
     expect(card).toMatch(/import \{ CardProgressBar \} from '\.\/CardProgressBar';/);
-    expect(card).toMatch(/<CardProgressBar percent=\{percent\} label="阅读进度" cornerAware=\{cornerAware\} \/>/);
+    // 进度是**真值**：页号 / 总页数，读过一页才算有进度（0 页或没读过不画条），
+    // 异步冒出来的那一条带进场类，圆角由 cornerAware 交给共享组件。
+    expect(card).toMatch(/const read = typeof page === 'number' && page >= 1;/);
+    expect(card).toMatch(/const percent = pageCount > 0 \? Math\.min\(100, \(page \/ pageCount\) \* 100\) : 1;/);
+    expect(card).toMatch(/<CardProgressBar percent=\{percent\} label="阅读进度" cornerAware=\{cornerAware\} className=\{hadEmptyFrame\.current \? 'is-reading-progress-entering' : ''\} \/>/);
+    expect(card, '异步冒出来的那条才播进场').toMatch(/if \(!visible\) hadEmptyFrame\.current = true;/);
     const shared = read('src/components/CardProgressBar.tsx');
     expect(shared).toMatch(/export function cardProgressWidth\(percent: number, trackWidth: number, cornerAware: boolean\): string \{/);
     // 长度只在宽行这一支上排除圆角：预览/网格卡那条压在封面接缝上，没有圆角可让。
@@ -2108,9 +2134,22 @@ describe('design system contract', () => {
     expect(`${loading}
 ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     expect(read('src/components/ArchiveListSkeleton.tsx')).toContain('className="archive-row-wrap"');
-    expect(ruleBody(loading, '.archive-list-skeleton.is-wide .archive-row-skeleton')).toMatch(/margin-block:\s*4px/);
-    expect(shell).toMatch(/\.archive-row-skeleton\s*\{[^}]*height:\s*158px/);
-    expect(shell).toMatch(/\.archive-list\.is-wide \.archive-row\s*\{[^}]*margin-block:\s*4px;[^}]*height:\s*158px/);
+    // 占位行与真行是**同一个盒子**：高度、内边距、两列网格、间距、描边、圆角、表面
+    // 逐项相同，上下内缩取自同一个令牌，所以行盒总高（卡片 + 两份内缩）也相同——
+    // 任何一项对不上，落地那一刻整列会跳一下。
+    const inset = shell.match(/--archive-row-inset:\s*([\d.]+px);/)?.[1];
+    expect(inset, '行的上下内缩由令牌给').toBe('4px');
+    expect(ruleBody(loading, '.archive-list-skeleton.is-wide .archive-row-skeleton')).toMatch(new RegExp(`margin-block:\\s*${inset}`));
+    const rowRule = shell.match(/\.archive-list\.is-wide \.archive-row \{([\s\S]*?)\n\}/)?.[1] ?? '';
+    const skeletonRule = shell.match(/\.archive-row-skeleton \{ ([^\n]*)\}/)?.[1] ?? '';
+    for (const property of ['height:\\s*158px', 'padding:\\s*var\\(--space-2\\)', 'grid-template-columns:\\s*100px minmax\\(0, 1fr\\)', 'gap:\\s*var\\(--space-3\\)', 'outline:\\s*1px solid var\\(--outline-variant\\)', 'border-radius:\\s*var\\(--radius-card\\)', 'background:\\s*var\\(--surface-container-high\\)']) {
+      expect(rowRule, `真行要有 ${property}`).toMatch(new RegExp(property));
+      expect(skeletonRule, `占位行要有 ${property}`).toMatch(new RegExp(property));
+    }
+    expect(rowRule, '真行的上下内缩走令牌').toMatch(/margin-block:\s*var\(--archive-row-inset\)/);
+    const wrapHeight = Number(shell.match(/\.archive-list\.is-wide \.archive-row-wrap \{[^}]*height:\s*(\d+)px/)?.[1]);
+    const cardHeight = Number(rowRule.match(/height:\s*(\d+)px/)?.[1]);
+    expect(wrapHeight, '行盒 = 卡片 + 上下各一份内缩').toBe(cardHeight + 2 * Number.parseFloat(inset!));
     // 时间轴那一栏是行的第一列：真行是 82px 的网格列，骨架行也让出同样的 82px（而不是
     // 靠容器的 padding-left），轨线由列表背景画，占位层不再重复画一根。
     expect(ruleBody(loading, '.archive-list-skeleton-layer .archive-list-skeleton.has-timeline .archive-row-skeleton')).toMatch(/margin-left:\s*82px/);
@@ -2235,7 +2274,8 @@ ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     // 靠 `data-press-surface` 认领这次按压，否则触屏上它永远糊着。
     const reader = read('src/styles/reader.css');
     expect(reader).toMatch(/\.reader-overview-cover-frame:is\(\.is-pressed, :active\) > \.reader-overview-cover/);
-    expect(reader).toMatch(/\.reader-overview-thumbnails button:is\(\.is-pressed, :active\) img/);
+    expect(shell).toMatch(/\.archive-page-thumbnail:is\(\.is-pressed, :active\) img/);
+    expect(read('src/components/ArchiveOverviewPanel.tsx')).toContain('<DetailPageThumbnail ');
     expect(read('src/components/ArchiveOverviewPanel.tsx')).toMatch(/className="reader-overview-cover-frame" data-press-surface/);
     expect(read('src/lib/pressFeedback.ts')).toMatch(/'\[data-press-surface\]'/);
   });
@@ -3481,9 +3521,12 @@ describe('the 2026-10-17 UI batch', () => {
     expect(retained, '恢复位置要临时关掉平滑滚动：视觉优化那批给 .workspace 与滚动区开了 scroll-behavior: smooth').toMatch(
       /function writeInstantScroll\(region: HTMLElement, write: \(\) => void\) \{[\s\S]{0,140}region\.style\.scrollBehavior = 'auto';/,
     );
-    expect(retained, '工作区那一处要走它').toContain(
-      'writeInstantScroll(workspace, () => { workspace.scrollTop = positions.current.get(workspace) ?? 0; })',
+    // 工作区那一处也走它；位置缺省是 0（第一次进这一页就该在顶上），且只在真的
+    // 不一样时才写——一样就写一次会让浏览器把平滑滚动重新跑一遍。
+    expect(retained, '工作区那一处要走它').toMatch(
+      /const top = positions\.current\.get\(workspace\) \?\? 0;\s*if \(workspace\.scrollTop !== top\) writeInstantScroll\(workspace, \(\) => \{ workspace\.scrollTop = top; \}\);/,
     );
+    expect(retained, '隐藏的滚动区不许被改写').toMatch(/region !== workspace && !region\.closest\('\[hidden\]'\) && region\.scrollTop !== top/);
     expect(retained, '滚动区那一处也要走它').toContain(
       'writeInstantScroll(region, () => { region.scrollTop = top; })',
     );

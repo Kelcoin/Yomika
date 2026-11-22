@@ -484,6 +484,7 @@ describe('library route workspace', () => {
     const dropdown = await screen.findByRole('combobox', { name: '分类筛选' });
     expect(dropdown).toHaveTextContent('Reading');
     expect(screen.queryByText('正在读取分类')).toBeNull();
+    await vi.waitFor(() => expect(resolveCategories).toBeTypeOf('function'));
     resolveCategories({ ok: true, value: [] });
     await vi.waitFor(() => expect(screen.getByRole('combobox', { name: '分类筛选' })).not.toHaveTextContent('Reading'));
   });

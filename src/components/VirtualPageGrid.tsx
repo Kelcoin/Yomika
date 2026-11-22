@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from 'react';
+import { useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode, type RefObject } from 'react';
 import { usePageActive } from '../app/RetainedPage';
 
 /** Keep page previews bounded by the viewport, including detail grids which
@@ -11,12 +11,15 @@ export function VirtualPageGrid({ count, className, minWidth, children, onRangeC
   initialIndex?: number | undefined;
   autoHideScrollbar?: boolean;
   children: (index: number) => ReactNode;
-  onRangeChange?: ((start: number, end: number) => void) | undefined;
+  /** The mounted range, plus the part of it the reader can actually see. The
+   * two differ by the overscan rows, and the caller needs both: the visible
+   * rows are what a freed slot should serve first. */
+  onRangeChange?: ((start: number, end: number, visible: { start: number; end: number }) => void) | undefined;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const gridId = useId();
   const active = usePageActive();
-  const [window, setWindow] = useState({ start: 0, end: Math.min(count, 48), columns: 1, stride: 0, gap: 8 });
+  const [window, setWindow] = useState({ start: 0, end: Math.min(count, 48), visibleStart: 0, visibleEnd: Math.min(count, 48), columns: 1, stride: 0, gap: 8 });
   const initialScroll = useRef(initialIndex);
   const rangeCallback = useRef(onRangeChange);
   rangeCallback.current = onRangeChange;
@@ -42,8 +45,19 @@ export function VirtualPageGrid({ count, className, minWidth, children, onRangeC
       const height = host.clientHeight || globalThis.innerHeight || 800;
       const start = Math.min(Math.max(0, Math.ceil(count / columns) - 1), Math.max(0, Math.floor(top / stride) - 3)) * columns;
       const end = Math.min(count, (Math.ceil((top + height) / stride) + 3) * columns);
-      setWindow((previous) => previous.start === start && previous.end === end && previous.columns === columns && previous.stride === stride
-        ? previous : { start, end: Math.max(start, end), columns, stride, gap });
+      // The rows on screen, decided by row centre: a row peeking in at the edge
+      // is buffer, not something to load before the row under the eyes. When no
+      // centre lands inside (a viewport shorter than one row), fall back to the
+      // rows the viewport overlaps.
+      const centreFirst = Math.ceil((top - stride / 2) / stride);
+      const centreLast = Math.floor((top + height - stride / 2) / stride);
+      const seenFirst = Math.max(0, centreLast >= centreFirst ? centreFirst : Math.floor(top / stride));
+      const seenLast = Math.max(seenFirst, centreLast >= centreFirst ? centreLast : Math.ceil((top + height) / stride) - 1);
+      const visibleStart = Math.max(start, Math.min(end, seenFirst * columns));
+      const visibleEnd = Math.max(visibleStart, Math.min(end, (seenLast + 1) * columns));
+      setWindow((previous) => previous.start === start && previous.end === end && previous.visibleStart === visibleStart && previous.visibleEnd === visibleEnd
+        && previous.columns === columns && previous.stride === stride
+        ? previous : { start, end: Math.max(start, end), visibleStart, visibleEnd, columns, stride, gap });
     };
     const schedule = () => { if (frame === undefined) frame = requestAnimationFrame(measure); };
     measure();
@@ -68,12 +82,20 @@ export function VirtualPageGrid({ count, className, minWidth, children, onRangeC
   }, [active, window.columns, window.stride]);
   const start = Math.min(count, window.start);
   const end = Math.min(count, window.end);
-  useLayoutEffect(() => { if (active) rangeCallback.current?.(start, end); }, [active, start, end, window.stride]);
+  const visibleStart = Math.max(start, Math.min(end, window.visibleStart));
+  const visibleEnd = Math.max(visibleStart, Math.min(end, window.visibleEnd));
+  useLayoutEffect(() => {
+    // With a measurable grid, the first layout pass already queued the real
+    // window. Don't load the provisional 48 items before that pass commits.
+    if (active && (window.stride || !root.current?.clientWidth)) {
+      rangeCallback.current?.(start, end, { start: visibleStart, end: visibleEnd });
+    }
+  }, [active, start, end, visibleStart, visibleEnd, window.stride]);
   const before = start / window.columns * window.stride;
   const after = Math.max(0, Math.ceil(count / window.columns) - Math.ceil(end / window.columns)) * window.stride;
   // Spacer rows themselves have the grid's gap on either side.
   const gap = window.gap;
-  const grid = <div ref={root} id={autoHideScrollbar ? gridId : undefined} className={className}>
+  const grid = <div ref={root} id={autoHideScrollbar ? gridId : undefined} className={className} style={{ '--thumbnail-min-width': `${minWidth}px` } as CSSProperties}>
     {before > 0 && <div aria-hidden="true" style={{ gridColumn: '1 / -1', height: Math.max(0, before - gap) }} />}
     {Array.from({ length: Math.max(0, end - start) }, (_, offset) => children(start + offset))}
     {after > 0 && <div aria-hidden="true" style={{ gridColumn: '1 / -1', height: Math.max(0, after - gap) }} />}

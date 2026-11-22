@@ -1,22 +1,25 @@
 import { ReaderTitle } from './ReaderTitle';
 import { StateIcon } from './StateIcon';
-import { usePageActive } from '../app/RetainedPage';
-import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, BookOpen, Copy, EyeOff, GalleryVertical, LogOut, RectangleVertical, RotateCcw, Settings, Square, Wand2 } from 'lucide-react';
+import { ReaderSettingsPause, usePageActive } from '../app/RetainedPage';
+import { ArrowLeft, ArrowRight, BookOpen, Copy, EyeOff, File, GalleryVerticalEnd, LogOut, RotateCcw, ScanText, Settings, Square } from 'lucide-react';
 import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, Fragment, memo, type CSSProperties, type KeyboardEvent, type MouseEvent, type RefObject, type TouchEvent, type UIEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import { flushSync } from 'react-dom';
 
 import { advanceReader, classifyPageShape, createReaderState, createZoomState, boundLargeImageZoom, doubleTapZoomAt, readerDoubleTapProfile, effectiveReaderLayout, fitPageSize, getPrefetchPages, getVisiblePageIndexes, nextReaderLayout, READER_LAYOUT_LABELS, resolveReaderLayout, settleZoom, pageTurnDuration, shouldCommitPageTurn, toggleReaderChrome, WEBTOON_ESTIMATED_PAGE_RATIO, webtoonPageOffsets, webtoonWindow, zoomByWheel, type ReaderLayoutPreference, type ReadingDirection, type ZoomState } from '../domain/reader';
 import { elasticPinchScale, panZoom, zoomAtPoint } from '../domain/reader';
 import { ArchiveOverviewPanel } from './ArchiveOverviewPanel';
 import { DlssnrIcon } from './DlssnrIcon';
+import { SvgIcon } from './SvgIcon';
 import { UpscaleIcon } from './UpscaleIcon';
 import { LoadingIndicator } from './LoadingIndicator';
 import { useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 import { getPlatformCapabilities, setStatusBarVisible } from '../bridge/platform';
 import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
+import { hapticFeedback } from '../lib/haptics';
 import { EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
+import { ThumbnailScheduler } from '../lib/thumbnailScheduler';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
@@ -650,6 +653,7 @@ function NativeReaderSpread({ source, nativeTarget, indexes, rtl, visible, inter
 export function ReaderScreen({ readerSession, archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed, onDerivedRejected }: ReaderScreenProps) {
   const nativeSession = useMemo(() => readerSession ?? allocateNativeReaderSession(), [archiveId, readerSession]);
   const pageActive = usePageActive();
+  const keepNativeSlots = useContext(ReaderSettingsPause) || pageActive;
   const { paused: handoverPaused, canPromote, pause: pauseHandover, resume: resumeHandover, setNativeBusy } = useReaderImageHandover(pageActive);
   const reduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   /** 手指点的设备：页码胶囊在手机上只走居中那一档（见下面量底缝的那一处）。
@@ -662,6 +666,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
    * 就会在两处得到不同的结论。 */
   const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
   const goBack = useReturnNavigation();
+  const { pathname, search } = useLocation();
   const [viewport, setViewport] = useState(readViewport);
   // Built once. A different archive arrives as an unmount, not a prop change:
   // `ReaderRoute` clears `pages` when `archiveId` changes and renders its loading
@@ -701,6 +706,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     return !!images?.length && images.length === frame?.querySelectorAll('.reader-slot').length
       && Array.from(images).every((image) => image.complete && image.naturalWidth > 0);
   }, []);
+  const hideChromeForZoomRef = useRef<() => void>();
   const zoomFrameRef = useRef<number>();
   const zoomAnimationRef = useRef<Animation>();
   const maxSettledZoom = useRef(3);
@@ -761,6 +767,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     }
   }, [nativeSession]);
   const followZoom = useCallback((next: ZoomState, direct = false) => {
+    if (next.scale !== zoomRef.current.scale) hideChromeForZoomRef.current?.();
     // Gesture input must not wait for reconciliation of pages, chrome or thumbnails.
     zoomRef.current = next;
     zoomScaleRef.current = next.scale;
@@ -885,13 +892,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const webtoonScrolledRef = useRef(false);
   const webtoonEnteredRef = useRef(false);
   const reportedPageRef = useRef(-1);
-  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const touchStartRef = useRef<{ x: number; y: number; time: number; toolbar: boolean } | null>(null);
   const lastTapRef = useRef<{ x: number; y: number; time: number }>();
   const quickScale = useRef<{ x: number; y: number; lastY: number; span: number; moved: boolean; profile: Extract<ReturnType<typeof readerDoubleTapProfile>, { large: true }> }>();
   const touchZoomAt = useRef(-Infinity);
   const touchEndAt = useRef(-Infinity);
   const chromeTouchAt = useRef(-Infinity);
-  const dragPagedRef = useRef(false);
   /** Set on release when the pointer travelled far enough to be a drag, so the
    * click that follows can be ignored. */
   const gestureMovedRef = useRef(false);
@@ -899,9 +905,13 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const [autoTurnReadyKey, setAutoTurnReadyKey] = useState<string>();
   const [autoTurnForeground, setAutoTurnForeground] = useState(() => document.visibilityState !== 'hidden');
   const [thumbnailPanelOpen, setThumbnailPanelOpen] = useState(false);
-  const [thumbnailRange, setThumbnailRange] = useState({ start: 0, end: 0 });
-  const onThumbnailRange = useCallback((start: number, end: number) => {
-    setThumbnailRange((range) => range.start === start && range.end === end ? range : { start, end });
+  /** The grid's mounted window plus the rows actually on screen: freed slots
+   * serve the visible rows first and the buffer with what is left. */
+  const [thumbnailRange, setThumbnailRange] = useState({ start: 0, end: 0, visibleStart: 0, visibleEnd: 0 });
+  const onThumbnailRange = useCallback((start: number, end: number, visible: { start: number; end: number }) => {
+    setThumbnailRange((range) => range.start === start && range.end === end
+      && range.visibleStart === visible.start && range.visibleEnd === visible.end
+      ? range : { start, end, visibleStart: visible.start, visibleEnd: visible.end });
   }, []);
   useLayoutEffect(() => {
     if (!pageActive) {
@@ -913,6 +923,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       setAutoPlay(false);
       setAutoTurnReadyKey(undefined);
       setThumbnailPanelOpen(false);
+      // The queue dies with the visit: whatever is still loading must not land
+      // in the next archive's cache.
+      thumbnailScheduler.current?.dispose();
+      thumbnailScheduler.current = undefined;
       setThumbnails((current) => current.size === 0 ? current : new Map());
     }
   }, [pageActive, settleZoomNow]);
@@ -922,7 +936,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   // Undefined keeps tap/keyboard behaviour; mouse movement chooses one edge.
   // 可见性、感应带与自动隐藏都在 `useReaderChrome` 里——加载态的 `ReaderRoute` 用同一个
   // hook，所以「加载中」和「加载完」的顶栏是同一套行为，而不是两处各写一遍的近似。
-  const { topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive: stopChromeToggle, clearHover } = useReaderChrome({
+  const { topChromeVisible, bottomChromeVisible, topPresence, bottomPresence, hoverTarget, setHover, handleCanvasClick, keepAlive: stopChromeToggle, clearHover } = useReaderChrome({
     rootRef,
     visible: state.phase === 'chrome-visible',
     active: pageActive,
@@ -933,6 +947,11 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     onToggle: () => setState(toggleReaderChrome),
     onHide: () => setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current),
   });
+  hideChromeForZoomRef.current = topChromeVisible || bottomChromeVisible ? () => {
+    hideChromeForZoomRef.current = undefined;
+    clearHover();
+    setState((current) => current.phase === 'chrome-visible' ? { ...current, phase: 'ready' } : current);
+  } : undefined;
   const loadingPagesRef = useRef(new Map<number, AbortController>());
   /** Failed loads, with their attempt count and the earliest time to try again.
    * A page that simply failed used to be retried on every render — or, once the
@@ -1343,23 +1362,38 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     setScrollTop(container.scrollTop);
   }, [slotHeightFor]);
 
-  // The thumbnail panel used to pin every page of the archive as a full-size
-  // image. Load the small page-thumbnail rendition instead, one at a time so a
-  // long archive cannot burst hundreds of requests.
+  /** One preview queue for the whole visit. The panel unmounts on close, so a
+   * queue built inside its effect started four more while the first four were
+   * still in the air, and a page that failed once was never asked again. This
+   * one keeps its slots and its successes across close/reopen, and a page that
+   * leaves the window and comes back gets a fresh chance. */
+  const thumbnailScheduler = useRef<ThumbnailScheduler>();
+  const thumbnailLive = useRef(pageActive);
+  thumbnailLive.current = pageActive;
   useEffect(() => {
-    if (!pageActive || !thumbnailPanelOpen || !loadPageThumbnail) return undefined;
-    let active = true;
-    void (async () => {
-      for (let index = thumbnailRange.start; index < Math.min(pages.length, thumbnailRange.end); index += 1) {
-        if (!active) return;
-        if (thumbnails.has(index)) continue;
-        const url = await loadPageThumbnail(index);
-        if (!active) return;
-        if (url) setThumbnails((current) => current.get(index) === url ? current : new Map(current).set(index, url));
-      }
-    })();
-    return () => { active = false; };
-  }, [loadPageThumbnail, pages.length, thumbnailPanelOpen, pageActive, thumbnailRange]);
+    if (!pageActive || !loadPageThumbnail) return undefined;
+    const scheduler: ThumbnailScheduler = new ThumbnailScheduler({
+      load: (index) => loadPageThumbnail(index),
+      // A result from a previous archive or reading session must not paint this
+      // one's tiles.
+      onLoaded: (index, url) => setThumbnails((current) => current.has(index) ? current : new Map(current).set(index, url)),
+      isLive: (): boolean => thumbnailLive.current && thumbnailScheduler.current === scheduler,
+    });
+    thumbnailScheduler.current = scheduler;
+    return () => {
+      if (thumbnailScheduler.current === scheduler) thumbnailScheduler.current = undefined;
+      scheduler.dispose();
+    };
+  }, [archiveId, loadPageThumbnail, pageActive]);
+  useEffect(() => {
+    const scheduler = thumbnailScheduler.current;
+    if (!scheduler) return;
+    // Closed with requests still in the air: keep their slots, stop starting
+    // new ones.
+    if (!thumbnailPanelOpen) { scheduler.suspend(); return; }
+    scheduler.resume();
+    scheduler.setRange(thumbnailRange);
+  }, [archiveId, loadPageThumbnail, pageActive, thumbnailPanelOpen, thumbnailRange]);
 
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the canvas would zoom *and* scroll. Bind natively.
@@ -1394,6 +1428,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
         if (disposed) return;
         if (page === nativePageRef.current && !panStart.current && !pinchStart.current) {
           if (next) {
+            if (next.scale !== zoomRef.current.scale) hideChromeForZoomRef.current?.();
             zoomRef.current = next;
             zoomScaleRef.current = next.scale;
             const visible = zoomElementRef.current;
@@ -1763,8 +1798,9 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
 
   const trackDrag = useCallback((dx: number, dy: number, elapsed: number) => {
     if (sliding.current) return;
-    // A vertical drag is a scroll, not a page turn, and zoomed-in drags pan.
-    if (zoomScaleRef.current > PAGE_SWIPE_MAX_ZOOM || layoutRef.current === 'webtoon' || (!horizontalDrag.current && (Math.abs(dy) > Math.abs(dx) || Math.abs(dx) <= TAP_SLOP))) {
+    // Preview the first horizontal pixels. Slop only locks the axis and
+    // distinguishes taps at release, so it cannot delay visual tracking.
+    if (zoomScaleRef.current > PAGE_SWIPE_MAX_ZOOM || layoutRef.current === 'webtoon' || (!horizontalDrag.current && Math.abs(dx) <= Math.abs(dy))) {
       hideExitHint();
       dragOffset.current = 0;
       if (nativeEdgePage.current !== undefined) updateNativeReaderEdge(nativeEdgePage.current, 0, 0, nativeSession);
@@ -1773,7 +1809,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       if (trackRef.current) trackRef.current.style.transform = 'translate3d(0,0,0)';
       return;
     }
-    horizontalDrag.current = true;
+    horizontalDrag.current ||= Math.abs(dx) > TAP_SLOP;
     const width = rootBox().width;
     const previous = dragSample.current;
     const dt = elapsed - (previous?.elapsed ?? 0);
@@ -1845,6 +1881,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       const detail = (event as CustomEvent<{ session: number; page: number; active: boolean }>).detail;
       if (detail.session !== nativeSession || detail.page !== nativePageRef.current) return;
       if (detail.active) {
+        hideChromeForZoomRef.current?.();
         // UIKit may have accepted the newly presented neighbour while its
         // WebKit configuration is still in flight.
         if (pinchStart.current) {
@@ -1861,6 +1898,11 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       }
       setNativeBusy(detail.active);
     };
+    const zoomStart = (event: Event) => {
+      const { session, page } = (event as CustomEvent<{ session: number; page: number }>).detail;
+      if (session === nativeSession && page === nativePageRef.current) hideChromeForZoomRef.current?.();
+    };
+    window.addEventListener('yomika-reader-native-zoom-start', zoomStart);
     window.addEventListener('yomika-reader-native-zoom', sync);
     window.addEventListener('yomika-reader-native-pinch', gesture);
     window.addEventListener('yomika-reader-native-boundary', boundary);
@@ -1869,6 +1911,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       nativePinchPage.current = undefined;
       nativePinchTouches.current = false;
       nativePanTouches.current = false;
+      window.removeEventListener('yomika-reader-native-zoom-start', zoomStart);
       window.removeEventListener('yomika-reader-native-zoom', sync);
       window.removeEventListener('yomika-reader-native-pinch', gesture);
       window.removeEventListener('yomika-reader-native-boundary', boundary);
@@ -1881,7 +1924,9 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
 
   useLayoutEffect(() => { setNativeBusy(false); }, [nativePage, nativeSession, setNativeBusy]);
 
-  const nativeCanTurn = !topPresence.mounted && !bottomPresence.mounted && !autoPlay;
+  // The bars share the reader's swipe surface. Keep the native neighbours armed
+  // while chrome is visible, so native artwork still follows the finger.
+  const nativeCanTurn = !thumbnailPanelOpen && !autoPlay;
   const nativeLeftPage = nativeCanTurn ? (neighbourIndexes.next[0] ?? -1) + 1 : 0;
   const nativeRightPage = nativeCanTurn ? (neighbourIndexes.previous[0] ?? -1) + 1 : 0;
   const nativeExitLeft = nativeCanTurn && pages.length > 0 ? state.direction !== 'rtl' : undefined;
@@ -1910,7 +1955,9 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const animateDoubleTap = useCallback((clientX: number, clientY: number, profile = getDoubleTapProfile()) => {
     if (layoutRef.current === 'webtoon') return false;
     if (!readerUsesShellGestures() && zoomElementRef.current?.querySelector('[data-native-reader-visible]')) {
-      return requestNativeReaderDoubleTap(nativePageRef.current, clientX, clientY, reduceMotion, nativeSession);
+      const accepted = requestNativeReaderDoubleTap(nativePageRef.current, clientX, clientY, reduceMotion, nativeSession);
+      if (accepted) hideChromeForZoomRef.current?.();
+      return accepted;
     }
     if (!canZoomCurrentImage()) return false;
     const element = zoomElementRef.current;
@@ -1922,7 +1969,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       if (nativePinchPage.current === nativePageRef.current) void configureNativePinchInput(nativeSession, nativePageRef.current, true, Math.min(14, maxSettledZoom.current), reduceMotion,
         nativeLeftPage, nativeRightPage, nativeExitLeft);
     }
-    setZoom(next);
+    const animateNative = readerUsesShellGestures() && !reduceMotion && next.scale !== current.scale;
+    if (next.scale !== current.scale) hideChromeForZoomRef.current?.();
+    setZoom(next, !animateNative);
+    if (animateNative) updateNativeReaderTransform(nativePageRef.current, next, nativeSession, current, profile.duration);
     if (element) {
       element.style.transition = 'none';
       element.style.transform = `scale(${next.scale}) translate(${next.panX}px, ${next.panY}px)`;
@@ -1955,7 +2005,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const handleTouchStart = useCallback((event: TouchEvent) => {
     // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
     if (thumbnailPanelOpen) return;
-    if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+    const target = event.target as Element;
+    const toolbar = Boolean(target.closest('.reader-toolbar'));
+    if (!toolbar && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+    if (toolbar && (event.touches.length > 1 || layoutRef.current === 'webtoon' || zoomScaleRef.current > PAGE_SWIPE_MAX_ZOOM)) return;
     // Commit the previous landing before accepting the next gesture. Dropping
     // touches throughout the animation made rapid consecutive swipes feel late.
     if (sliding.current) finishSlideRef.current?.();
@@ -2004,7 +2057,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       && Boolean(zoomElementRef.current?.querySelector('[data-native-reader-visible]'));
     nativePanTouches.current = nativePan;
     const previousTap = lastTapRef.current;
-    if (!nativePan && previousTap && Date.now() - previousTap.time < 300 && Math.hypot(touch.clientX - previousTap.x, touch.clientY - previousTap.y) <= 40
+    if (!toolbar && !nativePan && previousTap && Date.now() - previousTap.time < 300 && Math.hypot(touch.clientX - previousTap.x, touch.clientY - previousTap.y) <= 40
       && layoutRef.current !== 'webtoon' && canZoomCurrentImage()) {
       const profile = getDoubleTapProfile();
       if (profile.large) {
@@ -2017,7 +2070,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       panStart.current = { x: touch.clientX, y: touch.clientY, zoom: zoomRef.current };
       setPanning(true);
     }
-    touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+    touchStartRef.current = { x: touch.clientX, y: touch.clientY, time: Date.now(), toolbar };
   }, [hideExitHint, thumbnailPanelOpen, pauseHandover, canZoomCurrentImage, getDoubleTapProfile, readLiveZoom]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
@@ -2083,7 +2136,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       touchStartRef.current = null;
       return;
     }
-    trackDrag(touch.clientX - start.x, touch.clientY - start.y, Date.now() - start.time);
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    gestureMovedRef.current ||= Math.hypot(dx, dy) > TAP_SLOP;
+    trackDrag(dx, dy, Date.now() - start.time);
   }, [canZoomCurrentImage, trackDrag]);
 
   const handleChromeTouchTap = useCallback((event: TouchEvent, clientY: number) => {
@@ -2166,11 +2222,14 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     const elapsed = Date.now() - start.time;
     touchStartRef.current = null;
 
-    if (event.touches.length === 0 && elapsed < 500 && Math.hypot(dx, dy) <= TAP_SLOP && handleChromeTouchTap(event, touch.clientY)) return;
+    gestureMovedRef.current ||= Math.hypot(dx, dy) > TAP_SLOP;
+    if (!gestureMovedRef.current || (start.toolbar && !horizontalDrag.current)) finishDrag(0, 0);
+    if (start.toolbar && !horizontalDrag.current) return;
+    if (!gestureMovedRef.current && event.touches.length === 0 && elapsed < 500 && handleChromeTouchTap(event, touch.clientY)) return;
 
     if (zoomScaleRef.current > PAGE_SWIPE_MAX_ZOOM) return;
 
-    if (event.touches.length === 0 && elapsed < 500 && Math.hypot(dx, dy) <= TAP_SLOP) {
+    if (!gestureMovedRef.current && event.touches.length === 0 && elapsed < 500) {
       touchDoubleTap(touch.clientX, touch.clientY, Date.now());
       return;
     }
@@ -2181,19 +2240,21 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     if (layoutRef.current === 'webtoon') return;
     if (!horizontalDrag.current && Math.abs(dx) <= Math.abs(dy)) { finishDrag(0, 0); return; }
     // Same distance and recent-velocity rule as the mouse.
-    gestureMovedRef.current = true;
     finishDrag(dx, elapsed, true);
   }, [animateDoubleTap, handleChromeTouchTap, settleZoomNow, resumeHandover, touchDoubleTap]);
 
   /** Windows fires mouse events for a trackpad or mouse drag, so paging needs a
    * press-drag-release gesture here; touch keeps its own swipe handler. */
-  const pointerStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const pointerStartRef = useRef<{ x: number; y: number; time: number; toolbar: boolean } | null>(null);
 
   const handleMouseDown = useCallback((event: MouseEvent<HTMLElement>) => {
     if (Date.now() - touchEndAt.current < 600) return;
     // 面板那一层（蒙版 + 面板体）是自己的，不是画布：落在它上面的按下不开始画布手势。
     // `.reader-overview` 只匹配面板体，蒙版得自己列出来。
-    if ((event.target as Element).closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+    const target = event.target as Element;
+    const toolbar = Boolean(target.closest('.reader-toolbar'));
+    if (!toolbar && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
+    if (toolbar && (layoutRef.current === 'webtoon' || zoomScaleRef.current > PAGE_SWIPE_MAX_ZOOM)) return;
     if (sliding.current) finishSlideRef.current?.();
     dragSample.current = undefined;
     horizontalDrag.current = false;
@@ -2205,7 +2266,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       setPanning(true);
       return;
     }
-    pointerStartRef.current = { x: event.clientX, y: event.clientY, time: Date.now() };
+    pointerStartRef.current = { x: event.clientX, y: event.clientY, time: Date.now(), toolbar };
   }, [pauseHandover]);
 
   const handleMouseMove = useCallback((event: MouseEvent<HTMLElement>) => {
@@ -2217,7 +2278,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     if (panStart.current && event.buttons === 1) { dragZoom(event.clientX, event.clientY); return; }
     const start = pointerStartRef.current;
     if (!start || event.buttons !== 1) return;
-    trackDrag(event.clientX - start.x, event.clientY - start.y, Date.now() - start.time);
+    const dx = event.clientX - start.x;
+    const dy = event.clientY - start.y;
+    gestureMovedRef.current ||= Math.hypot(dx, dy) > TAP_SLOP;
+    trackDrag(dx, dy, Date.now() - start.time);
   }, [hoverTarget, setHover, trackDrag, thumbnailPanelOpen]);
 
   const handleMouseUp = useCallback((event: MouseEvent<HTMLElement>) => {
@@ -2237,11 +2301,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     // Anything past a few pixels was a drag, and a drag is not a tap on the page
     // — drag-scrolling in continuous mode used to toggle the chrome on release.
     // The threshold sits just above a resting finger's jitter.
-    gestureMovedRef.current = Math.abs(dx) > TAP_SLOP || Math.abs(dy) > TAP_SLOP;
+    gestureMovedRef.current ||= Math.hypot(dx, dy) > TAP_SLOP;
     if (zoomScaleRef.current > PAGE_SWIPE_MAX_ZOOM || layoutRef.current === 'webtoon') return;
-    if (!horizontalDrag.current && Math.abs(dx) <= Math.abs(dy)) { finishDrag(0, 0); return; }
-    // A drag is a page turn, not a chrome toggle.
-    dragPagedRef.current = true;
+    if (!gestureMovedRef.current || (start.toolbar && !horizontalDrag.current) || (!horizontalDrag.current && Math.abs(dx) <= Math.abs(dy))) {
+      finishDrag(0, 0);
+      return;
+    }
     finishDrag(dx, Date.now() - start.time);
   }, [resumeHandover, settleZoomNow]);
 
@@ -2297,6 +2362,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, []);
 
   function cancelGesture() {
+    if (touchStartRef.current || pointerStartRef.current || panStart.current) gestureMovedRef.current = true;
     resumeHandover();
     touchStartRef.current = null;
     pointerStartRef.current = null;
@@ -2379,7 +2445,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     Number(Boolean(upscale?.configured)) + Number(Boolean(dlssnr?.configured));
   const autoPlayJoinsProcessing = enhancementCount < 2;
   const autoPlayControl = (
-    <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => setAutoPlay((value) => !value)}><StateIcon name={autoPlay ? 'pause' : 'play'} selected={autoPlay} /></button>
+    <button type="button" aria-label={autoPlay ? '停止自动翻页' : '自动翻页'} aria-pressed={autoPlay} onClick={() => { hapticFeedback('light'); setAutoPlay((value) => !value); }}><SvgIcon data-icon="auto-turn" data-icon-state={autoPlay ? 'filled' : 'outline'}>
+      <rect x="2" y="3" width="20" height="18" rx="2.5" />
+      {autoPlay ? <path d="M8.5 8.5H11v7H8.5zm4.5 0h2.5v7H13z" fill="currentColor" stroke="none" /> : <path d="m9.5 8.5 6 3.5-6 3.5z" />}
+    </SvgIcon></button>
   );
   /** The Readoshi page pill: what is on screen and out of how many, spread
    * ranges joined with an en dash. It sits outside the auto-hiding chrome so
@@ -2531,13 +2600,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     // 帧就要画它"时在主线程上同步解一张几百万像素的页图，而这一刻屏幕上往往正转着加载圈
     // ——它就是主线程画的。
     const continuous = effectiveLayout === 'webtoon';
-    const visible = !continuous && visibleIndexes.includes(index);
-    const chromeOpen = topPresence.mounted || bottomPresence.mounted;
-    const tileCanTurn = visible && !chromeOpen && !thumbnailPanelOpen && !autoPlay && zoom.scale === 1;
+    const visible = pageActive && !continuous && visibleIndexes.includes(index);
+    const tileCanTurn = visible && nativeCanTurn && zoom.scale === 1;
     return (
       <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
         {source && !exhaustedPages.has(index)
-          ? <ReaderPageImage continuous={continuous} tileEnabled={(!continuous || hasNativeReaderTiles()) && pagesInSlot === 1 && pageActive} tileVisible={continuous ? pageActive : visible} tileTurnTargets={tileCanTurn ? { left: (neighbourIndexes.next[0] ?? -1) + 1, right: (neighbourIndexes.previous[0] ?? -1) + 1, reduceMotion } : undefined} tileCurrent={visible && !thumbnailPanelOpen && zoom.scale === 1} index={index} source={source} fitWidth={size?.width} fitHeight={size?.height} onMeasured={measurePage} onDisplayed={staging ? undefined : onDerivedDisplayed} onFailed={staging ? ignoreStagedPageFailure : failPage} onRejected={onDerivedRejected} handoverPaused={handoverPaused || staging} canPromote={canPromote} readDomViewport={readDomViewport} applyNativeViewport={applyNativeViewport} />
+          ? <ReaderPageImage continuous={continuous} tileEnabled={(!continuous || hasNativeReaderTiles()) && pagesInSlot === 1 && keepNativeSlots} tileVisible={continuous ? pageActive : visible} tileTurnTargets={tileCanTurn ? { left: (neighbourIndexes.next[0] ?? -1) + 1, right: (neighbourIndexes.previous[0] ?? -1) + 1, reduceMotion } : undefined} tileCurrent={visible && !thumbnailPanelOpen && zoom.scale === 1} index={index} source={source} fitWidth={size?.width} fitHeight={size?.height} onMeasured={measurePage} onDisplayed={staging ? undefined : onDerivedDisplayed} onFailed={staging ? ignoreStagedPageFailure : failPage} onRejected={onDerivedRejected} handoverPaused={handoverPaused || staging} canPromote={canPromote} readDomViewport={readDomViewport} applyNativeViewport={applyNativeViewport} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -2554,23 +2622,23 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       data-image-interaction={handoverPaused}
       style={{ touchAction: effectiveLayout === 'webtoon' ? 'pan-y' : 'none' }}
       ref={rootRef}
-      onTouchStartCapture={() => { chromeTouchAt.current = -Infinity; }}
+      onPointerDownCapture={() => { gestureMovedRef.current = false; chromeTouchAt.current = -Infinity; }}
+      onTouchStartCapture={(event) => {
+        if (event.touches.length === 1) {
+          gestureMovedRef.current = false;
+          chromeTouchAt.current = -Infinity;
+        }
+      }}
       onClickCapture={(event) => {
-        // touchend can reveal a control under the finger before WebView sends
-        // its compatibility click. Stop it BEFORE the button/link handler,
-        // not at the canvas's bubble handler after navigation has already run.
-        // A new touch clears the guard; keyboard activation (detail 0) works too.
-        if (event.detail > 0 && Date.now() - chromeTouchAt.current < 600) {
+        // WebViews can dispatch a compatibility click after releasing a swipe,
+        // including on whichever toolbar control is under the finger.
+        if (event.detail > 0 && (gestureMovedRef.current || Date.now() - chromeTouchAt.current < 600)) {
           event.preventDefault();
           event.stopPropagation();
         }
       }}
       onClick={(event) => {
         if (Date.now() - chromeTouchAt.current < 600) return;
-        // A drag that turned the page, the second click of a double click, and a
-        // drag that merely scrolled must none of them toggle the chrome.
-        if (dragPagedRef.current) { dragPagedRef.current = false; return; }
-        if (gestureMovedRef.current) { gestureMovedRef.current = false; return; }
         if (event.detail > 1) return;
         // 缩略面板开着时，关它是面板外面那一层的事：这一次点击只关面板，不顺手把
         // chrome 翻一遍（否则点一次空白会同时收起面板和两条栏）。
@@ -2656,13 +2724,13 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
             const nativeTarget = sources.every((url) => Boolean(url && canPresentNativePage(url)));
             // Keep the spread owner mounted while a compatibility rendition takes
             // over. Its predecessor still owns the viewport and pinch gestures.
-            const nativeSpread = pageActive && indexes.length === 2 && aspect >= 0.1 && aspect <= 10 &&
+            const nativeSpread = keepNativeSlots && indexes.length === 2 && aspect >= 0.1 && aspect <= 10 &&
               sources.every(Boolean) && (nativeTarget || indexes.every((index) => {
                 const original = loadedPages.get(index);
                 return original && canPresentNativePage(original);
               }));
-            const spreadInteractive = offset === 0 && !thumbnailPanelOpen && zoom.scale === 1;
-            const spreadTurnTargets = spreadInteractive && !topPresence.mounted && !bottomPresence.mounted && !autoPlay
+            const spreadInteractive = pageActive && offset === 0 && !thumbnailPanelOpen && zoom.scale === 1;
+            const spreadTurnTargets = spreadInteractive && nativeCanTurn
               ? { left: (neighbourIndexes.next[0] ?? -1) + 1, right: (neighbourIndexes.previous[0] ?? -1) + 1, reduceMotion }
               : undefined;
             const renderPages = (staging?: boolean) => indexes.map((index) => renderSlot(index, indexes.length, staging));
@@ -2686,7 +2754,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                     ? { transform: 'scale(1) translate(0px, 0px)', transformOrigin: 'center center', willChange: 'transform' } : undefined}
                 >
                   {nativeSpread ? <NativeReaderSpread key={state.direction} source={{ urls: sources as [string, string], aspect }} nativeTarget={nativeTarget}
-                    indexes={[indexes[0]!, indexes[1]!]} rtl={state.direction === 'rtl'} visible={offset === 0}
+                    indexes={[indexes[0]!, indexes[1]!]} rtl={state.direction === 'rtl'} visible={pageActive && offset === 0}
                     interactive={spreadInteractive} turnTargets={spreadTurnTargets} paused={handoverPaused}
                     canPromote={canPromote} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onRejected={onDerivedRejected} applyNativeViewport={applyNativeViewport} fallback={renderPages} /> : renderPages()}
                 </div>
@@ -2733,8 +2801,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
               {renderWindowMaximize()}
             {/* 缩略面板从底栏挪上来：它是「这块档案」的一件事，和返回、标题、阅读
                 设置同一层；底栏留给翻页与画面处理。 */}
-              <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => setThumbnailPanelOpen((value) => !value)}><StateIcon name="grid" selected={thumbnailPanelOpen} /></button>
-              <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
+              <button className="reader-icon-button reader-chrome-thumbnails" type="button" aria-label="缩略面板" aria-pressed={thumbnailPanelOpen} onClick={() => { hapticFeedback('light'); setThumbnailPanelOpen((value) => !value); }}><StateIcon name="grid" selected={thumbnailPanelOpen} /></button>
+              <Link className="reader-icon-button reader-chrome-settings" to="/settings?section=reading" state={{ returnTo: `${pathname}${search}`, returnViaHistory: true }} aria-label="阅读设置" title="阅读设置"><Settings aria-hidden="true" /></Link>
             </div>
           </header>
         )}
@@ -2743,6 +2811,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
             className={`reader-toolbar${bottomPresence.leaving ? ' is-leaving' : ''}`}
             role="toolbar"
             aria-label="阅读控制"
+            data-animated-press
+            data-page-swipe={effectiveLayout !== 'webtoon' || undefined}
             onPointerDown={stopChromeToggle}
             onClick={stopChromeToggle}
           >
@@ -2755,8 +2825,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                   reader is, what is done to the page. The counter is the middle
                   slot by grid position, not by luck — the sides are equal `1fr`
                   tracks, so it stays centred whatever the two sides hold. */}
-              <div className="reader-toolbar-group reader-toolbar-layout"><button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) }))}>
-                {state.layout === 'auto' ? <Wand2 aria-hidden="true" /> : state.layout === 'single' ? <RectangleVertical aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVertical aria-hidden="true" />}
+              <div className="reader-toolbar-group reader-toolbar-layout"><button type="button" aria-label={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}，点击切换`} title={`阅读布局：${READER_LAYOUT_LABELS[state.layout]}`} onClick={() => { hapticFeedback('light'); setState((current) => ({ ...current, layout: nextReaderLayout(current.layout) })); }}>
+                {state.layout === 'auto' ? <ScanText aria-hidden="true" /> : state.layout === 'single' ? <File aria-hidden="true" /> : state.layout === 'double' ? <BookOpen aria-hidden="true" /> : <GalleryVerticalEnd aria-hidden="true" />}
               </button>
               {/* One control, cycling 自动 → 单页 → 双页 → webtoon. Three separate
                   buttons spent three toolbar slots to express one choice, and
@@ -2765,7 +2835,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                   two, not a switch that is on, and the pressed styling made the
                   button look permanently hovered whenever the answer was
                   right-to-left. */}
-              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' }))}>{state.direction === 'ltr' ? <ArrowRightToLine aria-hidden="true" /> : <ArrowLeftToLine aria-hidden="true" />}</button>
+              <button type="button" aria-label={state.direction === 'ltr' ? '从左到右' : '从右到左'} onClick={() => { hapticFeedback('light'); setState((current) => ({ ...current, direction: current.direction === 'ltr' ? 'rtl' : 'ltr' })); }}><ArrowRight aria-hidden="true" style={state.direction === 'rtl' ? { transform: 'scaleX(-1)' } : undefined} /></button>
               {!autoPlayJoinsProcessing && autoPlayControl}</div>
               <div className="reader-toolbar-group reader-toolbar-pages">
                 <span className="reader-toolbar-counter">{pages.length === 0 ? '0 / 0' : `${state.pageIndex + 1} / ${pages.length}`}</span>
@@ -2783,11 +2853,11 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                   aria-pressed={upscale.configured && upscale.active}
                   aria-label={upscale.configured ? (upscale.active ? '关闭超分' : '开启超分') : '超分：未选择模型'}
                   title={upscale.configured ? '超分' : '超分：先在阅读设置里选择模型'}
-                  onClick={upscale.toggle}
+                  onClick={() => { hapticFeedback('light'); upscale.toggle(); }}
                 ><UpscaleIcon enabled={upscale.configured && upscale.active} /></button>
               )}
               {dlssnr?.configured && (
-                <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={dlssnr.toggle}><DlssnrIcon enabled={dlssnr.active} /></button>
+                <button type="button" aria-pressed={dlssnr.active} aria-label={dlssnr.active ? '关闭 DLSSNR' : '开启 DLSSNR'} title="DLSSNR" onClick={() => { hapticFeedback('light'); dlssnr.toggle(); }}><DlssnrIcon enabled={dlssnr.active} /></button>
               )}
               {autoPlayJoinsProcessing && autoPlayControl}
               </div>

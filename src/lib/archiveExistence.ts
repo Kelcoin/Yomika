@@ -2,10 +2,11 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 
 const repository = new NativeLibraryRepository();
 
-/** Ids already confirmed this session, so switching back to a shelf does not
- * re-ask the server about the same archives. */
-const checked = new Set<string>();
-const missing = new Set<string>();
+/** Recently checked IDs survive route changes. Bound the index and retry
+ * old checks so a deleted or re-added archive can be detected later. */
+const verdicts = new Map<string, { missing: boolean; at: number }>();
+const MAX_VERDICTS = 4096;
+const VERDICT_TTL_MS = 10 * 60 * 1000;
 
 /** Keep in step with `VERIFY_ARCHIVE_LIMIT` in src-tauri/src/commands/library.rs:
  * one call checks at most this many. */
@@ -43,26 +44,41 @@ export async function findMissingArchives(
   if (!serverId) return new Set();
   const unique = [...new Set(archiveIds)].filter(Boolean);
   const key = (id: string) => `${serverId}:${id}`;
-  const knownMissing = new Set(unique.filter((id) => missing.has(key(id))));
-  const unchecked = unique
-    .filter((id) => !checked.has(key(id)) && !missing.has(key(id)))
-    .slice(0, VERIFY_BUDGET);
+  const knownMissing = new Set<string>();
+  const now = Date.now();
+  const unchecked = unique.filter(id => {
+    const idKey = key(id);
+    const found = verdicts.get(idKey);
+    if (!found) return true;
+    verdicts.delete(idKey);
+    if (now - found.at > VERDICT_TTL_MS) return true;
+    verdicts.set(idKey, found);
+    if (found.missing) knownMissing.add(id);
+    return false;
+  }).slice(0, VERIFY_BUDGET);
   for (let at = 0; at < unchecked.length; at += VERIFY_BATCH) {
     const batch = unchecked.slice(at, at + VERIFY_BATCH);
     const result = await repository.verifyArchivesExist(serverId, batch);
     // A failure stops here rather than skipping the batch: an id that was never
     // looked at must not be remembered as checked.
     if (!result.ok) break;
-    for (const id of batch) checked.add(key(id));
-    for (const id of result.value) {
-      missing.add(key(id));
-      knownMissing.add(id);
+    const missing = new Set(result.value);
+    const checkedAt = Date.now();
+    for (const id of batch) {
+      const idKey = key(id);
+      verdicts.delete(idKey);
+      verdicts.set(idKey, { missing: missing.has(id), at: checkedAt });
+      if (missing.has(id)) knownMissing.add(id);
+    }
+    while (verdicts.size > MAX_VERDICTS) {
+      const oldest = verdicts.keys().next();
+      if (oldest.done) break;
+      verdicts.delete(oldest.value);
     }
   }
   return knownMissing;
 }
 
 export function resetArchiveExistenceForTests(): void {
-  checked.clear();
-  missing.clear();
+  verdicts.clear();
 }

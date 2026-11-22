@@ -273,3 +273,20 @@ it('moves Android gesture ownership in the same transaction as a ready same-page
   const present = reader.split('private fun updateUnderlay()')[1]!.split('private fun staticTileSize(')[0]!;
   expect(present).toMatch(/underlay = next[\s\S]*?if \(next != null && id != null\)[\s\S]*?if \(previous != null && slots\[selected\] === previous && previous\.tag == next\.tag\) \{\s+selected = id[\s\S]*?yomika-reader-tile-presented/);
 });
+
+it('returns an Android double-tap zoom to fit through the native animation', () => {
+  const reader = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/ReaderTiles.kt');
+  const doubleTap = reader.split('private fun doubleTap(')[1]!.split('private fun stopZoomAnimation(')[0]!;
+  expect(doubleTap).toMatch(/val scale = if \(reset\) tiles\.minScale/);
+  expect(doubleTap).toMatch(/ValueAnimator\.ofFloat[\s\S]*?setScaleAndCenter\(frame\.scale[\s\S]*?if \(zoomAnimation !== animation\) return[\s\S]*?if \(reset\) hide\(\)/);
+});
+
+it('previews Android page turns before touch slop and uses slop for release classification', () => {
+  const reader = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/ReaderTiles.kt');
+  const dispatch = reader.split('fun dispatch(e: MotionEvent')[1]!.split('private fun finishNativeTouch')[0]!;
+  const move = dispatch.split('MotionEvent.ACTION_MOVE -> if (singleTouch)')[1]!.split('MotionEvent.ACTION_POINTER_DOWN,')[0]!;
+  expect(move).toMatch(/val horizontal = kotlin\.math\.abs\(dx\) > kotlin\.math\.abs\(dy\)/);
+  expect(move).toMatch(/if \(horizontalTurnDrag && previewSwipe\(e, dx, dy, normal\)\) return true/);
+  expect(move.replace(/turnExceededSlop = .*\r?\n/, '')).not.toContain('touchSlop');
+  expect(dispatch).toMatch(/!turnExceededSlop[\s\S]*?finishSwipe\(\)[\s\S]*?normal\(start\)[\s\S]*?normal\(e\)/);
+});

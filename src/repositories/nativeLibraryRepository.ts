@@ -25,7 +25,7 @@ import {
   type ReadingHistoryRecord,
 } from '../domain/library';
 import type { CommandResult } from '../domain/result';
-import { invalidateRouteCache } from '../lib/routeCache';
+import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { rememberServerPresence } from '../lib/serverPresence';
 import { NativeLrrBridgeRepository, bridgeProgress, bridgeWatchlist, bridgeHistory, invalidateLrrBridgeConfig, type BridgeCollectionRecord } from './nativeLrrBridgeRepository';
 import { ok, err } from '../domain/result';
@@ -75,9 +75,17 @@ const membershipKey = (scopeId: string, archiveId: string) => `${scopeId}\0${arc
 const readArchiveState = (scopeId: string, archiveId: string) =>
   sharePendingRead(pendingStates, membershipKey(scopeId, archiveId), () => lrrBridge.states(scopeId, [archiveId]));
 
+const categorySnapshotKey = (serverId: string) => `categories:${encodeURIComponent(serverId)}:`;
+
+export function readCategorySnapshot(serverId: string): Category[] | undefined {
+  const parsed = CategorySchema.array().safeParse(readRouteCache(categorySnapshotKey(serverId), Infinity));
+  return parsed.success ? parsed.data : undefined;
+}
+
 function invalidateCategoryReads(serverId: string) {
   pendingFavorites.delete(serverId);
   pendingCategories.delete(serverId);
+  invalidateRouteCache(categorySnapshotKey(serverId));
 }
 
 const pendingWrites = new Map<string, Promise<unknown>>();
@@ -422,8 +430,17 @@ export class NativeLibraryRepository {
    * `/api/search` each). Leave it off for navigation: the native side serves a
    * persisted snapshot instead. */
   listCategories(serverId: string, force = false): Promise<CommandResult<Category[]>> {
-    const load = () => invokeCommand('list_categories', { serverId, force }, z.array(CategorySchema));
-    return force ? load() : sharePendingRead(pendingCategories, serverId, load);
+    if (force) pendingCategories.delete(serverId);
+    const pending = sharePendingRead(pendingCategories, serverId, () => {
+      const request = invokeCommand('list_categories', { serverId, force }, CategorySchema.array());
+      return request.then(result => {
+        if (result.ok && pendingCategories.get(serverId) === pending) {
+          writeRouteCache(categorySnapshotKey(serverId), result.value, { persist: true });
+        }
+        return result;
+      });
+    });
+    return pending;
   }
   /** 镜像写：本机那张收藏表由 `setWatchlist` 先写，服务器上这条静态分类随后才落地。
    *
@@ -444,7 +461,10 @@ export class NativeLibraryRepository {
     });
   }
   updateArchiveMetadata(serverId: string, archiveId: string, metadata: { title?: string; tags?: string; summary?: string }): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema).then(invalidateShelves);
+    return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema).then(result => {
+      if (result.ok) invalidateCategoryReads(serverId);
+      return result;
+    }).then(invalidateShelves);
   }
   listMetadataPlugins(serverId: string): Promise<CommandResult<unknown>> {
     return invokeCommand('list_metadata_plugins', { serverId }, z.unknown());

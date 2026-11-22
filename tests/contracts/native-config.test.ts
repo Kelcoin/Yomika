@@ -34,13 +34,37 @@ function tomlSection(source: string, header: string): string {
   return (end < 0 ? rest : rest.slice(0, end)).join('\n');
 }
 
+/**
+ * `tauri::generate_handler![...]` 的正文：名单里夹着 `#[cfg(...)]`，所以不能拿
+ * `split(']')[0]` 去切——那会在第一个属性宏的方括号上截断，后面注册的命令一条都查不到。
+ * 按方括号深度扫到配平的那一个为止。
+ */
+function handlerList(source: string): string {
+  const marker = 'tauri::generate_handler![';
+  const open = source.indexOf(marker);
+  if (open < 0) return '';
+  const start = open + marker.length;
+  let depth = 1;
+  for (let index = start; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '[') {
+      depth += 1;
+    } else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, index);
+    }
+  }
+  return '';
+}
+
 describe('native shell configuration', () => {
   it('registers model release and the reader commands, and none that run a model in this process', () => {
     const lib = read('../../src-tauri/src/lib.rs');
     // 名单里夹着行内注释（每一条都在说这条路为什么存在），先把注释去掉再切分：
     // 否则一条「注释 + 换行 + 命令名」会被当成一个条目，命令名就查不到了。
-    const handlers = (lib.split('tauri::generate_handler![')[1]?.split(']')[0] ?? '')
+    const handlers = handlerList(lib)
       .split('\n')
+      .filter((line) => !line.trim().startsWith('#['))
       .map((line) => line.split('//')[0] ?? '')
       .join('\n');
     const registered = handlers.split(',').map((item) => item.trim()).filter(Boolean);
@@ -676,7 +700,7 @@ describe('native shell configuration', () => {
     // 取消标志要真的走进核心那两扇门：静态一扇、动图一扇。留在门口不往下传，「取消之后这一页
     // 停下来」就只是宿主那边的错觉。
     expect(workerDlssnr, '静态那一页的取消标志要传到核心').toContain(
-      'filter::apply_with_token(&data_dir, &image, &settings, request.cancel)',
+      'filter::apply_still_with_token(&data_dir, image, &settings, request.cancel)',
     );
     expect(workerDlssnr, '动图那一页走逐帧那条路，取消标志同样要传下去').toContain(
       'apply_dlssnr(&data_dir, &source, &settings, request.cancel)',

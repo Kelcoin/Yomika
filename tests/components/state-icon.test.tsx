@@ -33,10 +33,12 @@ describe('functional icon states', () => {
 
   it.each([UpscaleIcon, DlssnrIcon])('keeps enhancement headings neutral and fills enabled switches', Icon => {
     const view = render(<Icon />);
-    expect(view.container.querySelector('[fill="currentColor"]')).toBeNull();
+    const svg = view.container.querySelector('svg');
+    const fill = svg?.querySelector('.enhancement-icon-fill');
+    expect(svg).toHaveAttribute('data-icon-state', 'outline');
+    expect(fill).toHaveAttribute('fill', 'currentColor');
     view.rerender(<Icon enabled />);
-    expect(view.container.querySelector('[fill="currentColor"]')).not.toBeNull();
-    view.rerender(<Icon enabled={false} />);
-    expect(view.container.querySelector('[fill="currentColor"]')).toBeNull();
+    expect(svg).toHaveAttribute('data-icon-state', 'filled');
+    expect(svg?.querySelector('.enhancement-icon-fill')).toBe(fill);
   });
 });

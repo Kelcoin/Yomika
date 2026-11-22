@@ -52,7 +52,7 @@ describe('archive overview image lifetimes', () => {
       });
     };
     await complete('b');
-    expect(screen.getByRole('button', { name: '第 1 页' }).querySelector('img')).toHaveAttribute('src', 'b-page-thumbnail');
+    expect(screen.getByRole('figure', { name: '第 1 页' }).querySelector('img')).toHaveAttribute('src', 'b-page-thumbnail');
     await complete('a');
     expect(document.querySelector('.reader-overview-cover')).toHaveAttribute('src', 'b-cover');
     expect(cache.release).toHaveBeenCalledWith(expect.objectContaining({ url: 'a-cover' }));

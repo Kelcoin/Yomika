@@ -1104,7 +1104,14 @@ describe('dedup scan progress and saved results', () => {
     const overview = await screen.findByRole('dialog', { name: 'Archive A' });
     expect(screen.queryByRole('dialog', { name: '不重复关系' })).not.toBeInTheDocument();
     expect(within(overview).getByLabelText('档案概览')).toBeInTheDocument();
-    expect(within(overview).getByRole('button', { name: '第 1 页' })).toBeInTheDocument();
+    // 概览是只读的：这里没有「跳页」这件事，所以页格不是按钮，而是具名的 figure
+    // （`DetailPageThumbnail` 在 `onOpen` 缺席时退成 figure）。键盘仍然停得上去，
+    // 按住仍然能揭图——这两件事都不需要按钮语义。
+    const firstPage = within(overview).getByRole('figure', { name: '第 1 页' });
+    expect(firstPage).toHaveAttribute('tabindex', '0');
+    expect(firstPage).toHaveAttribute('data-press-surface', 'true');
+    expect(firstPage.querySelector('.archive-page-thumbnail-number')).toHaveTextContent('1');
+    expect(within(overview).queryByRole('button', { name: '跳转到第 1 页' })).toBeNull();
     await user.click(within(overview).getByRole('button', { name: '关闭概览' }));
     expect(await screen.findByRole('dialog', { name: '不重复关系' })).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '搜索不重复关系' })).not.toHaveFocus();

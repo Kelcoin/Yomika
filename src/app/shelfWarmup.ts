@@ -26,7 +26,7 @@ export function shelfRead<T>(key: string, load: () => Promise<T>): Promise<T> {
  * The default server is resolved afresh per task; invalidations cancel publication. */
 export async function warmShelfSnapshot(name: 'history' | 'toRead' | 'watchlist', canRun: () => boolean): Promise<void> {
   const key = `state:${name}:default`;
-  if (!canRun() || readRouteCache(key)) return;
+  if (!canRun() || readRouteCache(key, Infinity)) return;
   const started = generation;
   const valid = () => canRun() && started === generation;
   const servers = await shelfRead('servers', () => repository.listServers());
@@ -46,7 +46,7 @@ export async function warmShelfSnapshot(name: 'history' | 'toRead' | 'watchlist'
     : name === 'toRead' ? watchlist.filter(item => !item.deleted).map(item => item.archiveId) : favoriteIds)];
   // Do not publish a truncated shelf or fan out remote metadata for absent mirror rows.
   if (ids.length > 60) return;
-  const archives = await shelfRead(`archives:${server.id}:${JSON.stringify(ids)}`, () => repository.listArchivesByIds(server.id, ids));
+  const archives = await shelfRead(`archives:mirror:${server.id}:${JSON.stringify(ids)}`, () => repository.listArchivesByIds(server.id, ids, { resolveMissing: false }));
   if (!valid() || !archives.ok || archives.value.some(item => item.serverId !== server.id)
     || ids.some(id => !archives.value.some(item => item.archiveId === id))) return;
   const snapshot = { history, watchlist: name === 'watchlist' ? favoriteIds.map(archiveId => ({
@@ -56,9 +56,9 @@ export async function warmShelfSnapshot(name: 'history' | 'toRead' | 'watchlist'
     ...(name !== 'watchlist' ? { needsForegroundVerification: true } : {}),
     ...(name === 'watchlist' ? { favoritesSource: 'remote', favoritesCategoryPresent: shelf.value !== null } : {}),
   };
-  writeRouteCache(key, snapshot, { persist: true });
+  writeRouteCache(key, snapshot, { persist: name !== 'watchlist' });
   if (name === 'watchlist') {
     writeRouteCache(`favorites:last:${server.id}`, snapshot, { persist: true });
-    writeRouteCache('favorites:last:default', snapshot, { persist: true });
+    if (server.id !== 'default') writeRouteCache('favorites:last:default', snapshot);
   }
 }

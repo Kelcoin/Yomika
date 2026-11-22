@@ -1,7 +1,7 @@
 import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
 
 const translationLifecycle = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn() }));
@@ -495,6 +495,84 @@ describe('application shell', () => {
     expect(screen.getByRole('button', { name: '展开侧栏' })).toHaveAttribute('aria-expanded', 'false');
   });
 
+  it('scrolls to the top on a bottom-tab reselect and refreshes once on a double tap', async () => {
+    const originalMedia = window.matchMedia;
+    window.matchMedia = query => ({
+      matches: query === COMPACT_WIDTH_QUERY, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {},
+      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    });
+    const readServers = vi.fn();
+    setInvokeAdapterForTests(async command => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') { readServers(); return { ok: true, value: [] }; }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    try {
+      renderAt('/');
+      const home = within(screen.getByRole('navigation', { name: '移动导航' })).getByRole('link', { name: '首页' });
+      const workspace = document.querySelector('#main-content')!;
+      const scrollTo = vi.fn();
+      Object.defineProperty(workspace, 'scrollTo', { value: scrollTo });
+      await waitFor(() => expect(readServers).toHaveBeenCalled());
+      const readsBefore = readServers.mock.calls.length;
+      fireEvent.click(home, { detail: 1 });
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+      expect(readServers).toHaveBeenCalledTimes(readsBefore);
+      // WebViews can report both taps as individual clicks with detail=1.
+      fireEvent.click(home, { detail: 1 });
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: 'instant' });
+      await waitFor(() => expect(readServers).toHaveBeenCalledTimes(readsBefore + 1));
+    } finally {
+      cleanup();
+      window.matchMedia = originalMedia;
+    }
+  });
+
+  it('leaves a local-archive detail when its own tab is chosen again, keeping the other filters', async () => {
+    const originalMedia = window.matchMedia;
+    window.matchMedia = query => ({
+      matches: query === COMPACT_WIDTH_QUERY, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {},
+      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    });
+    const readLocal = vi.fn();
+    setInvokeAdapterForTests(async command => {
+      if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, bottomNavItems: ['home', 'library', 'downloads'] } };
+      if (command === 'list_servers' || command === 'list_tasks') return { ok: true, value: [] };
+      if (command === 'list_local_archives') { readLocal(); return { ok: true, value: [] }; }
+      return { ok: true, value: [] };
+    });
+    function Probe() {
+      const location = useLocation();
+      return <output data-testid="here">{`${location.pathname}${location.search}`}</output>;
+    }
+    try {
+      render(<MemoryRouter initialEntries={['/downloads?path=a.zip&sort=size']}><App /><Probe /></MemoryRouter>);
+      const tab = within(await screen.findByRole('navigation', { name: '移动导航' })).getByRole('link', { name: '本地档案' });
+      // 详情与列表是同一个 pathname：重选要当成一次真导航（回列表），而不是列表重选。
+      fireEvent.click(tab, { detail: 1 });
+      await waitFor(() => expect(screen.getByTestId('here')).toHaveTextContent('/downloads?sort=size'));
+      // 筛选是合法的查询参数，跟着走；只有 path 该掉。
+      expect(screen.getByTestId('here')).not.toHaveTextContent('path=');
+
+      const workspace = document.querySelector('#main-content')!;
+      const scrollTo = vi.fn();
+      Object.defineProperty(workspace, 'scrollTo', { value: scrollTo });
+      const readsBefore = readLocal.mock.calls.length;
+      const list = within(screen.getByRole('navigation', { name: '移动导航' })).getByRole('link', { name: '本地档案' });
+      fireEvent.click(list, { detail: 1 });
+      // 已经是列表了：单击回顶、不刷新。
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+      expect(readLocal).toHaveBeenCalledTimes(readsBefore);
+      fireEvent.click(list, { detail: 1 });
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 0, behavior: 'instant' });
+      await waitFor(() => expect(readLocal.mock.calls.length).toBeGreaterThan(readsBefore));
+    } finally {
+      cleanup();
+      window.matchMedia = originalMedia;
+    }
+  });
   it('places secondary pages before fixed settings in the mobile home header', async () => {
     const user = userEvent.setup();
     const original = window.matchMedia;

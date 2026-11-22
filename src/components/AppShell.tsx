@@ -13,21 +13,29 @@ import { YomikaMark } from './YomikaMark';
 import { usePreferences } from '../app/preferences';
 import { NAVIGATION_ENTRIES, compactNavItems, compactNavHiddenItems, navEntryActive, navigationOwner } from '../lib/navigationOrder';
 import { useNavigationDrag } from '../lib/useNavigationDrag';
+import { requestWorkspaceRefresh } from '../app/workspaceRefresh';
 
 /** 手机 / 平板外壳：Android WebView 与 iOS WKWebView 都会带这些标记，桌面
  * WebView2 不会。只用来决定第一帧画不画自绘标题栏。 */
 const isMobileShell = isMobileDevice;
+
+/** Tabs whose detail view lives at the same pathname behind a query flag. When
+ * one of those is open, the tab is not being reselected: it is a real
+ * navigation back to the list, so it must not be swallowed by the reselect
+ * handler (which only scrolls and refreshes). */
+const DETAIL_QUERY: Record<string, string> = { '/downloads': 'path' };
 
 interface AppShellProps {
   children: ReactNode;
   returningHome?: boolean;
 }
 
-function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[] }) {
+function Navigation({ compact = false, floating = false, hidden = false, bottomNavItems, onReselect }: { compact?: boolean; floating?: boolean; hidden?: boolean; bottomNavItems?: readonly string[]; onReselect?: (route: string, refresh: boolean) => void }) {
   const location = useLocation();
   const navigate = useNavigate();
   const navRef = useRef<HTMLElement | null>(null);
   const [hovered, setHovered] = useState<string>();
+  const lastTap = useRef<{ locationKey: string; at: number }>();
   useNavigationDrag(navRef, { enabled: compact, elastic: true, hidden, active: navigationOwner(location.pathname), layoutKey: `${floating}:${bottomNavItems?.join(',')}`,
     onSelect: to => { setHovered(undefined); void navigate(to, { state: { navigationTab: true } }); } });
   useEffect(() => { setHovered(undefined); }, [location.pathname, hidden]);
@@ -65,6 +73,27 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
             onPointerCancel={() => setHovered(undefined)}
             onPointerDown={event => { if (event.pointerType !== 'mouse') setHovered(undefined); }}
             onBlur={() => setHovered(undefined)}
+            onClick={event => {
+              if (!onReselect || event.defaultPrevented || event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) return;
+              if (location.pathname !== to) { lastTap.current = undefined; return; }
+              const detailParam = DETAIL_QUERY[to];
+              if (detailParam && new URLSearchParams(location.search).has(detailParam)) {
+                // Detail open on top of this tab: go back to the list and drop
+                // the flag, keeping whatever else the list carries.
+                const next = new URLSearchParams(location.search);
+                next.delete(detailParam);
+                lastTap.current = undefined;
+                event.preventDefault();
+                void navigate({ pathname: to, search: next.toString() }, { state: { navigationTab: true } });
+                return;
+              }
+              event.preventDefault();
+              const now = performance.now();
+              const previous = lastTap.current;
+              const refresh = event.detail !== 0 && previous?.locationKey === location.key && now - previous.at <= 350;
+              lastTap.current = refresh || event.detail === 0 ? undefined : { locationKey: location.key, at: now };
+              onReselect(to, refresh);
+            }}
             state={{ navigationTab: true }}
             title={label}
           >
@@ -385,7 +414,16 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
         <StatusBar />
       </div>
 
-          <Navigation compact floating={floatingNav} hidden={compactNavHidden} bottomNavItems={preferences.bottomNavItems} />
+          <Navigation compact floating={floatingNav} hidden={compactNavHidden} bottomNavItems={preferences.bottomNavItems} onReselect={(route, refresh) => {
+            const workspace = workspaceRef.current;
+            const instant = refresh || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+            const options: ScrollToOptions = { top: 0, behavior: instant ? 'instant' : 'smooth' };
+            workspace?.scrollTo?.(options);
+            workspace?.querySelectorAll<HTMLElement>('[data-scroll-region]').forEach(region => {
+              if (!region.closest('[hidden]')) region.scrollTo?.(options);
+            });
+            if (refresh) requestWorkspaceRefresh(route);
+          }} />
     </div>
   );
 }

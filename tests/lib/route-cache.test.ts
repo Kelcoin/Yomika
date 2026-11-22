@@ -207,3 +207,17 @@ function readPersistedKeys(): string[] {
   const raw = window.localStorage.getItem(PERSIST_KEY);
   return raw ? Object.keys(JSON.parse(raw) as Record<string, unknown>) : [];
 }
+
+
+it('uses persistent snapshots after memory eviction and protects reads from the next disk eviction', () => {
+  invalidateRouteCache();
+  writeRouteCache('disk:hot', { id: 'hot' }, { persist: true });
+  for (let index = 0; index < 7; index += 1) writeRouteCache(`disk:${index}`, index, { persist: true });
+  for (let index = 0; index < 65; index += 1) writeRouteCache(`memory:${index}`, index);
+  expect(readRouteCache('disk:hot', Infinity)).toEqual({ id: 'hot' });
+  writeRouteCache('disk:new', 8, { persist: true });
+  simulateRouteCacheRestartForTests();
+  expect(readRouteCache('disk:hot', Infinity)).toEqual({ id: 'hot' });
+  expect(readRouteCache('disk:0', Infinity)).toBeUndefined();
+  invalidateRouteCache();
+});

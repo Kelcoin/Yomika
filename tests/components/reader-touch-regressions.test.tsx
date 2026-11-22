@@ -316,3 +316,27 @@ it('warms the next paged image while idle and reuses it on landing', async () =>
     else Reflect.deleteProperty(HTMLImageElement.prototype, 'decode');
   }
 });
+
+it('renders each of the first horizontal pixels and resets a tap-sized drag on release', () => {
+  vi.useFakeTimers();
+  render(<MemoryRouter><ReaderScreen archiveId="slow-swipe" title="Swipe" pages={['blob:a', 'blob:b']} layout="single" /></MemoryRouter>);
+  const reader = screen.getByRole('main', { name: '漫画阅读器' });
+  const track = reader.querySelector<HTMLElement>('.reader-track')!;
+  fireEvent.touchStart(reader, { touches: [{ clientX: 600, clientY: 300 }] });
+  fireEvent.touchMove(reader, { touches: [{ clientX: 600, clientY: 303 }] });
+  act(() => vi.advanceTimersByTime(16));
+  expect(track.style.transform).toBe('translate3d(0,0,0)');
+  for (const dx of [2, 4, 7]) {
+    fireEvent.touchMove(reader, { touches: [{ clientX: 600 - dx, clientY: 300 }] });
+    act(() => vi.advanceTimersByTime(16));
+    expect(track.style.transform).toBe(`translate3d(-${dx}px,0,0)`);
+  }
+  fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 593, clientY: 300 }] });
+  fireEvent.touchStart(reader, { touches: [{ clientX: 600, clientY: 300 }] });
+  fireEvent.touchMove(reader, { touches: [{ clientX: 598, clientY: 300 }] });
+  act(() => vi.advanceTimersByTime(16));
+  expect(track.style.transform).toBe('translate3d(-2px,0,0)');
+  fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 598, clientY: 300 }] });
+  expect(track.style.transform).toBe('translate3d(0,0,0)');
+  expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+});

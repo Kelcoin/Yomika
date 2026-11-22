@@ -1982,6 +1982,14 @@ describe('reader route', () => {
     await waitFor(() => expect(commands).toContain('dlssnr_release_workspaces'));
     expect(commands).toContain('inference_release_sessions');
 
+    const loadsBeforeSettings = derivedLoads().length;
+    fireEvent.click(screen.getByRole('link', { name: '阅读设置' }));
+    const returnToReader = await screen.findByRole('button', { name: '返回阅读模式' });
+    expect(release.mock.calls.map(([handle]) => handle.key)).not.toContain('dlssnr-0');
+    fireEvent.click(returnToReader);
+    expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:dlssnr-0');
+    expect(derivedLoads()).toHaveLength(loadsBeforeSettings);
+
     // 切到另一本：刚才那本还留着（App 的保留上限是 2），只是不再显示。
     fireEvent.click(screen.getByRole('button', { name: '换一本' }));
     const releasedKeys = () => release.mock.calls.map(([handle]) => handle.key);

@@ -426,13 +426,10 @@ body:has(.reader-screen [data-native-reader-visible]),
    填充值用 `backwards` 而不是 `both`：动画结束后留着的那点 opacity/transform 也是
    「非 none 的 transform」，会把元素变成 `position: fixed` 子元素的包含块。
    「减少动效」由 base.css 那条通杀规则收掉，这里不必再写一份。 */
-@keyframes reader-chrome-top-in { from { opacity: 0; transform: translateY(-8px); } }
-@keyframes reader-chrome-top-out { to { opacity: 0; transform: translateY(-8px); } }
-/* 底栏是屏幕底边那一整块 80dp 表面：它入场的位移要走**自己的高度**（100%），原来那
-   8px 在这么高的栏上等于没动。出来的那一半仍只走 8px——退场是加速曲线、只有 260ms，
-   走满一整条栏会像被抽走。 */
-@keyframes reader-chrome-bottom-in { from { opacity: 0; transform: translateY(100%); } }
-@keyframes reader-chrome-bottom-out { to { opacity: 0; transform: translateY(8px); } }
+@keyframes reader-chrome-top-in { from { transform: translateY(-100%); } }
+@keyframes reader-chrome-top-out { to { transform: translateY(-100%); } }
+@keyframes reader-chrome-bottom-in { from { transform: translateY(100%); } }
+@keyframes reader-chrome-bottom-out { to { transform: translateY(100%); } }
 /* 每一页翻过去，栏顶那条分隔线上铺开一道主题色短线（从中间向两侧）。它是另挂的**新
    元素**（见下面 `.reader-toolbar-turn`）：栏自己的 `animation` 位置是入场的，一个元素
    上两条 animation 会互相顶掉；而重播一条 CSS 动画只有 `animation-name` 换一个或元素
@@ -642,7 +639,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   100% { stroke-dasharray: 2 124; stroke-dashoffset: -126; }
 }
 
-/* 栏退场的那 260ms 里它还挂在树上淡出。胶囊这时跟着栏一起淡出（`is-leaving` 就是这一
+/* 栏退场的那 260ms 里它还挂在树上滑出。胶囊这时跟着栏一起淡出（`is-leaving` 就是这一
    档）。它**不再有落位要推迟**：胶囊在「栏在 + 退场」整段里根本不移动（2026-10-15 改成
    隐藏，见上面那条注释），原来那条 `bottom 0s var(--duration-exit)` 是为了让它别从栏顶
    滑到屏幕底、横穿整条栏——那个动作没有了，那条过渡也就没有存在的理由。
@@ -678,7 +675,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   background: transparent;
   color: inherit;
   cursor: pointer;
-  transition: color var(--motion-standard), background-color var(--motion-standard);
+  transition: color var(--motion-standard), background-color var(--motion-standard), transform var(--motion-fast);
 }
 
 /* M3 bottom app bar content colour: the actions are on-surface-variant, one
@@ -695,16 +692,14 @@ body:has(.reader-screen [data-native-reader-visible]),
    黑画布上的控件用的（只剩重试那颗），在这两条主题色的栏上会淡得看不见。 */
 @media (hover: hover) {
   .reader-icon-button:hover,
-  .reader-toolbar button:hover {
+  .reader-toolbar button:hover:not(:disabled)::before {
     background: var(--surface-container-high);
   }
 
-  /* 按下再实一档，外加一点点收缩。桌面从前只有悬停这一层：鼠标停在「下一页」上连点
-     翻页，按钮始终是同一个悬停色，看不出点到了——翻页的动感只剩画面自己在换。M3 也
-     是两层（悬停 8%、按下 10%）。这一条刻意不带 `:hover`：上面那条契约把「悬停色必须
-     与触屏孪生逐字一致」钉死，按下这层只服务指针，不参与孪生核对。 */
-  .reader-icon-button:active:not(:disabled),
-  .reader-toolbar button:active:not(:disabled) {
+  /* Use a stronger state layer while a pointer is held down. */
+  .reader-toolbar button:is(.is-pressed, :active):not(:disabled)::before { background: var(--surface-container-highest); }
+
+  .reader-icon-button:active:not(:disabled) {
     background: var(--surface-container-highest);
     transform: translateY(1px) scale(0.94);
   }
@@ -713,16 +708,22 @@ body:has(.reader-screen [data-native-reader-visible]),
 /* 触屏按下去的颜色（机制见 src/lib/pressFeedback.ts）：和悬停同一层，只是按住才有、
    抬手就没。收缩与指针那一层一样——两条路径的手感只能有一份。 */
 @media (hover: none) {
-  .reader-icon-button:is(.is-pressed, :active),
-  .reader-toolbar button:is(.is-pressed, :active) {
+  .reader-icon-button:is(.is-pressed, :active) {
     background: var(--surface-container-high);
     transform: translateY(1px) scale(0.94);
   }
+
+  .reader-toolbar button:is(.is-pressed, :active):not(:disabled)::before { background: var(--surface-container-high); }
 
   /* 重试那颗落在黑画布上（出错视图），用阅读器自己那层。 */
   .reader-retry-button:is(.is-pressed, :active) {
     background: var(--reader-control-hover);
   }
+}
+
+.reader-toolbar button:active { transform: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .reader-toolbar button.is-pressed:not(:disabled) { transform: scale(.94); }
 }
 
 /* M3 standard icon button, selected: the icon takes the scheme's primary and
@@ -734,18 +735,8 @@ body:has(.reader-screen [data-native-reader-visible]),
   color: var(--primary);
 }
 
-/* M3 bottom app bar: an 80dp container (plus the safe area), 4dp of inline
-   padding, actions as standard icon buttons with no gap between their boxes
-   (IconButtonSpace = 0 — each box carries its own padding).
-
-   三段式，不是一排：中列是页码，左右各一组。三列**都按内容宽**（`auto`），整排再
-   `justify-content: center`——两组因此向中间靠拢，页码仍然按网格落在栏的正中。
-   这一条曾经是 `minmax(0, 1fr) auto minmax(0, 1fr)` 加两侧各自的
-   `justify-self: start/end`：宽窗口下两组被推到栏的两端，离中间那枚页码最远
-   （user report:「底栏左右两侧按钮离中心太远」）。最窄的那一档（见 610px 那条查询）
-   同样保持三列单行，只收紧组间距和按钮宽度。
-   容器和顶栏同一档 `surface-container`：一条在上、一条在下，中间隔着画面，不再靠
-   色调差互相区分。朝向内容那一侧同样留一条 1px 分隔线。 */
+/* Equal side tracks keep the page count centered. The action groups pack
+   toward the counter; compact layouts reduce their spacing on narrow screens. */
 .reader-toolbar {
   position: absolute;
   /* 与顶栏同一层：两条栏都在胶囊之上（理由见 `.reader-deriving` 上面那段）。 */
@@ -756,7 +747,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  gap: var(--space-2);
+  column-gap: var(--space-4);
   height: calc(var(--reader-toolbar-height) + var(--safe-bottom));
   padding: 0 var(--space-1) var(--safe-bottom);
   overflow-x: auto;
@@ -767,6 +758,10 @@ body:has(.reader-screen [data-native-reader-visible]),
   animation: reader-chrome-bottom-in var(--motion-slow) backwards;
   pointer-events: auto;
 }
+
+/* This bar is a scroll container, so the reader root's touch-action alone
+   does not reach its buttons. Keep horizontal drags with the reader. */
+.reader-toolbar[data-page-swipe] { touch-action: none; }
 
 /* 翻页那一瞬的回应：栏顶那条分隔线上铺开一道主题色短线（从中间向两侧，和阅读方向
    无关）。它是 ReaderScreen 按翻页次数挂上来的**新元素**（`key` 一变 React 就换一个），
@@ -793,15 +788,11 @@ body:has(.reader-screen [data-native-reader-visible]),
 
 .reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; pointer-events: none; }
 
-/* 组只管间距，不带底色。M3 的 bottom app bar 是一排 standard icon button，没有
-   分组容器这一层，所以这里只把相关的图标凑近、组与组之间留 8dp。图标颜色走
-   `.reader-toolbar button` 那条（on-surface-variant），页码那一组靠自己的亮墨
-   （on-surface）分出来——和顶栏「一明一暗」是同一套读法。 */
 .reader-toolbar-group {
   display: flex;
   align-items: center;
   flex: none;
-  gap: var(--space-1);
+  gap: var(--space-3);
   min-height: var(--icon-button-size);
   padding: 0;
 }
@@ -816,10 +807,6 @@ body:has(.reader-screen [data-native-reader-visible]),
 .reader-toolbar button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
-}
-
-@media (hover: hover) {
-  .reader-toolbar button:disabled:hover { background: transparent; }
 }
 
 /* The page count is a read-only label on a tonal surface. */
@@ -840,7 +827,26 @@ body:has(.reader-screen [data-native-reader-visible]),
 }
 
 .reader-toolbar button {
-  flex: 0 0 var(--icon-button-size);
+  --reader-action-width: var(--icon-button-size);
+  position: relative;
+  isolation: isolate;
+  width: var(--reader-action-width);
+  min-width: var(--reader-action-width);
+  flex: 0 0 var(--reader-action-width);
+}
+
+/* Keep the state layer circular even when the phone layout narrows the hit area. */
+.reader-toolbar button::before {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  margin: auto;
+  inline-size: var(--reader-action-width);
+  block-size: var(--reader-action-width);
+  border-radius: 50%;
+  transition: background-color var(--motion-standard);
+  content: '';
+  pointer-events: none;
 }
 
 /* Every control is an icon now, so no button needs extra text width. */
@@ -964,34 +970,16 @@ body:has(.reader-screen [data-native-reader-visible]),
   object-fit: cover;
 }
 
-/* SFW 也覆盖这面概览：封面与页缩略图是浏览用的画面，和档案库的封面一样默认
-   模糊，悬停或聚焦到才显示。正在读的那一页不在此列——那是内容本身。 */
-:root[data-sfw='true'] .reader-overview-cover,
-:root[data-sfw='true'] .reader-overview-thumbnails img {
+:root[data-sfw='true'] .reader-overview-cover {
   filter: blur(14px);
   transform: scale(1.12);
 }
-.reader-overview-cover,
-.reader-overview-thumbnails img {
-  transition: filter var(--motion-standard), transform var(--motion-standard);
-}
-:root[data-sfw='true'] .reader-overview-thumbnails button:focus-visible img {
-  filter: none;
-  transform: none;
-}
+.reader-overview-cover { transition: filter var(--motion-standard), transform var(--motion-standard); }
 @media (hover: hover) {
-  :root[data-sfw='true'] .reader-overview-cover:hover,
-  :root[data-sfw='true'] .reader-overview-thumbnails button:hover img {
-    filter: none;
-    transform: none;
-  }
+  :root[data-sfw='true'] .reader-overview-cover:hover { filter: none; transform: none; }
 }
-/* 触屏上的同一件事：按住概览里的封面就看清，抬手回到模糊。页缩略图的钩子挂在按钮
-   上；封面外那层 `span` 自己不是可点元素，pressFeedback 靠它身上的 `data-press-surface`
-   才认得它（见 src/lib/pressFeedback.ts）。 */
 @media (hover: none) {
-  :root[data-sfw='true'] .reader-overview-cover-frame:is(.is-pressed, :active) > .reader-overview-cover,
-  :root[data-sfw='true'] .reader-overview-thumbnails button:is(.is-pressed, :active) img {
+  :root[data-sfw='true'] .reader-overview-cover-frame:is(.is-pressed, :active) > .reader-overview-cover {
     filter: none;
     transform: none;
   }
@@ -1019,49 +1007,29 @@ body:has(.reader-screen [data-native-reader-visible]),
 .reader-overview-tags .tag-group > div { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .reader-overview-thumbnails {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
-  grid-auto-rows: max-content;
-  /* `stretch` (the default) overrides a grid item's aspect-ratio, so every row
-     collapsed and the thumbnails stacked on top of each other. Aligning to the
-     start lets the 3:4 ratio size each button. */
-  align-items: start;
   align-content: start;
-  gap: 8px;
+  align-items: start;
+  grid-auto-rows: max-content;
   min-height: 0;
   min-width: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: hidden auto;
+  touch-action: pan-y;
 }
 
-.reader-overview-thumbnails button {
-  position: relative;
-  display: grid;
-  place-items: center;
-  aspect-ratio: 3 / 4;
-  width: 100%;
-  min-width: 0;
-  padding: 0;
-  overflow: hidden;
-  isolation: isolate;
-  box-sizing: border-box;
-  border: 2px solid var(--outline-variant);
-  border-radius: var(--radius-control);
-  background: var(--surface-container);
-  color: inherit;
-  cursor: pointer;
+.reader-overview-thumbnails [aria-current='true'] .archive-page-thumbnail-media::after {
+  position: absolute;
+  inset: 0;
+  border: 2px solid var(--primary);
+  border-radius: inherit;
+  content: '';
+  pointer-events: none;
 }
 
-/* Keep the artwork inside the same clip and border at every selection state. */
-.reader-overview-thumbnails button[aria-current="true"] {
-  border-color: var(--primary);
-}
 .reader-overview-thumbnail-scroll-area {
   position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
-  padding-right: 24px;
   min-height: 0;
   min-width: 0;
 }
@@ -1070,10 +1038,12 @@ body:has(.reader-screen [data-native-reader-visible]),
   scrollbar-width: none;
 }
 .reader-overview-thumbnails::-webkit-scrollbar { display: none; }
+/* The track lives in the dialog padding, outside the measured grid. */
 .reader-overview-thumbnail-scrollbar {
   position: absolute;
-  inset: 0 0 0 auto;
-  width: 24px;
+  inset-block: 0;
+  inset-inline-start: 100%;
+  inline-size: var(--space-6);
   touch-action: none;
   user-select: none;
   cursor: grab;
@@ -1103,27 +1073,6 @@ body:has(.reader-screen [data-native-reader-visible]),
 @media (forced-colors: active) {
   .reader-overview-thumbnail-scrollbar-thumb { forced-color-adjust: none; background: CanvasText; opacity: 1; }
 }
-/* Preview mode (opened from the duplicate workspace): the grid is reference
-   only, and it must not look like a control that will turn the page. */
-.reader-overview-thumbnails.is-preview button { cursor: default; }
-.reader-overview-thumbnails img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-
-/* 页码压在缩略图上，底下的画面可能是任何亮度（SFW 下还带着模糊），所以它和阅读
-   chrome 一样是主题无关的：黑底 + 阅读器的亮墨。不写 color 就会继承面板的墨色，
-   浅色主题下变成深字压黑底。 */
-.reader-overview-page-number {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  background: var(--reader-page-overlay);
-  color: var(--reader-ink);
-  font-family: var(--font-utility);
-  font-size: var(--text-xs);
-  line-height: 14px;
-  text-align: center;
-}
-
 /* Compact layout, matching COMPACT_WIDTH_QUERY in lib/useMediaQuery.ts and the
    shell's own media query. 底栏**不在这条查询里改对齐**：上一轮把 ≤900px 的
    `justify-content` 压成 `flex-start`，于是窗口一窄，页码就从栏中间滑到左边
@@ -1132,9 +1081,6 @@ body:has(.reader-screen [data-native-reader-visible]),
 :where(:root[data-layout='compact']) {
   .reader-overview-summary { grid-template-columns: 88px minmax(0, 1fr); }
   .reader-overview-cover-frame { width: 88px; }
-  .reader-toolbar {
-    gap: var(--space-1);
-  }
 }
 
 /* Keep the same three groups on one row, including narrow phones. Wrapping the
@@ -1146,17 +1092,18 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-toolbar {
     display: grid;
     grid-template-rows: minmax(0, 1fr);
-    gap: var(--space-1);
+    column-gap: var(--space-3);
   }
-  .reader-toolbar-group { min-height: 44px; gap: 0; padding-inline: 0; }
-  .reader-toolbar button,
+  .reader-toolbar-group { min-height: 44px; gap: var(--space-2); }
+  .reader-toolbar button { --reader-action-width: 36px; }
   .reader-chrome-top .reader-icon-button { width: 36px; min-width: 36px; flex-basis: 36px; }
   .reader-chrome-actions { gap: 0; }
 }
 
 @media (max-width: 380px) {
-  .reader-toolbar { gap: 2px; }
-  .reader-toolbar button,
+  .reader-toolbar { column-gap: var(--space-2); }
+  .reader-toolbar-group { gap: 6px; }
+  .reader-toolbar button { --reader-action-width: 30px; }
   .reader-chrome-top .reader-icon-button { width: 30px; min-width: 30px; flex-basis: 30px; }
   .reader-toolbar-counter { min-inline-size: 56px; padding-inline: 4px; }
   .reader-toolbar svg,

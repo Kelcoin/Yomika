@@ -53,7 +53,6 @@ type DetailPanel = (typeof DETAIL_PANELS)[number];
 /** How long a detail page may paint from the previous visit before it insists on
  * fresh metadata. It revalidates either way; this only decides whether the page
  * shows a loading state first. */
-const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
 
 function ArchiveDownloadedIcon() {
   return (
@@ -65,7 +64,7 @@ function ArchiveDownloadedIcon() {
 }
 
 function readDetailSnapshot(key: string, archiveId: string) {
-  const parsed = ArchiveMetadataSchema.safeParse(readRouteCache<unknown>(key, DETAIL_SNAPSHOT_FRESH_MS));
+  const parsed = ArchiveMetadataSchema.safeParse(readRouteCache<unknown>(key, Infinity));
   return parsed.success && parsed.data.archiveId === archiveId ? parsed.data : undefined;
 }
 
@@ -212,14 +211,9 @@ detailBasePath?: string | undefined }) {
       // Stale while revalidating: the page paints from the last visit's metadata
       // and corrects itself a beat later. Skipping the request instead would show
       // a stale title after the metadata editor wrote a new one.
-      const scopedLast = readDetailSnapshot(`archive-detail:last:${server.id}:${archiveId}`, archiveId);
-      const cached = readDetailSnapshot(`archive-detail:${server.id}:${archiveId}`, archiveId);
-      if (scopedLast) setMetadata(scopedLast);
-      if (cached) {
-        setMetadata(cached);
-      } else {
-        setMetadata(undefined);
-      }
+      const cached = readDetailSnapshot(`archive-detail:${server.id}:${archiveId}`, archiveId)
+        ?? readDetailSnapshot(`archive-detail:last:${server.id}:${archiveId}`, archiveId);
+      setMetadata(cached);
       void repository.loadArchiveMetadata(server.id, archiveId).then((result) => {
         if (!active) return;
         if (result.ok) {
@@ -806,7 +800,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
   // The rail draws the panel, so the tabs go inside it as its heading. Rendered
   // as a sibling above, they floated outside the component they belonged to.
   const tabs = (
-    <div className={`archive-recommendations-tabs${hasCreator || activeTab === 'creator' ? ' has-creator' : ''}`} role="tablist" aria-label="推荐分组">
+    <div className={`archive-recommendations-tabs${hasCreator || activeTab === 'creator' ? ' has-creator' : ''}`} role="tablist" aria-label="推荐分组" data-animated-press>
       <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
       {/* In the DOM from the start, collapsed to nothing: the segment grows out of
           the strip rather than popping in and shoving the heading sideways.

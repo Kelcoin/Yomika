@@ -44,7 +44,8 @@ describe('shelf snapshots', () => {
     } finally {
       finishMetadata();
     }
-    expect(await screen.findByText('Remote history archive')).toBeInTheDocument();
+    expect((await screen.findByText('Remote history archive')).closest('.archive-row-wrap')).toHaveClass('is-fresh');
+    expect(screen.getByText('Cached history archive').closest('.archive-row-wrap')).not.toHaveClass('is-fresh');
   });
   it('offers three labelled history actions and exits with the selection toggle', async () => {
     setInvokeAdapterForTests(async (command: string) => {

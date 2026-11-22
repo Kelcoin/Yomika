@@ -6,6 +6,9 @@ import type { RouteDirection } from '../lib/routeMotion';
 const PageActiveContext = createContext(true);
 export const usePageActive = () => useContext(PageActiveContext);
 
+/** Reading settings cover the reader without ending the reading session. */
+export const ReaderSettingsPause = createContext(false);
+
 export function animateRouteEntry(panel: HTMLElement, motionSurface = false, direction: RouteDirection = 1, motion?: RouteMotion, fadeEntry = false): Animation | undefined {
   if (!routeMotionAllowed() || typeof panel.animate !== 'function' || motion?.kind === 'none' || motion?.kind === 'detail-close' || motion?.kind === 'page-close') return undefined;
   if (motion?.kind === 'page-open' && !panel.querySelector('.settings-page')) return animateDetail(panel);

@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { RetainedPage } from '../../src/app/RetainedPage';
 
+import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { SwitchControl } from '../../src/components/SettingsControls';
+
 const pages = Array.from({ length: 8 }, () => 'data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=');
 
 function readyImages(container: HTMLElement) {
@@ -38,6 +41,33 @@ afterEach(() => {
 });
 
 describe('reader auto turn', () => {
+  it('gives one light tap per manual auto-turn toggle and enabled switch click', async () => {
+    const calls: unknown[] = [];
+    const userAgent = Object.getOwnPropertyDescriptor(navigator, 'userAgent');
+    Object.defineProperty(navigator, 'userAgent', { configurable: true, value: 'Android' });
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'haptic_feedback') calls.push(args);
+      return { ok: true, value: null };
+    });
+    try {
+      mount();
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: '停止自动翻页' }));
+      });
+      const onToggle = vi.fn();
+      const view = render(<SwitchControl label="测试开关" checked={false} onToggle={onToggle} />);
+      fireEvent.click(screen.getByRole('switch', { name: '测试开关' }));
+      view.rerender(<SwitchControl label="测试开关" checked disabled onToggle={onToggle} />);
+      fireEvent.click(screen.getByRole('switch', { name: '测试开关' }));
+      expect(onToggle).toHaveBeenCalledTimes(1);
+      expect(calls).toEqual([{ kind: 'light' }, { kind: 'light' }, { kind: 'light' }]);
+    } finally {
+      resetInvokeAdapterForTests();
+      if (userAgent) Object.defineProperty(navigator, 'userAgent', userAgent);
+      else Reflect.deleteProperty(navigator, 'userAgent');
+    }
+  });
+
   it.each(['ltr', 'rtl'] as const)('advances in reading order in %s single and double page layouts', (direction) => {
     for (const layout of ['single', 'double'] as const) {
       const view = mount(direction, layout);

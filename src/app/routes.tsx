@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
 import { RetainedPage, usePageActive } from './RetainedPage';
+import { useWorkspaceRefresh } from './workspaceRefresh';
 import { useRouteDirection } from '../lib/useRouteDirection';
 import type { RouteDirection } from './RetainedPage';
 import { detailIdentity, type RouteMotion } from '../lib/routeMotion';
@@ -65,7 +66,7 @@ export function preloadLazyPages(getForegroundPath: () => string = () => '/'): (
 }
 import { scheduleStartupWarmup } from './startupWarmup';
 import { shelfRead, warmShelfSnapshot } from './shelfWarmup';
-import { CategorySchema, NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { CategorySchema, NativeLibraryRepository, readCategorySnapshot } from '../repositories/nativeLibraryRepository';
 import { ArchiveThumbnailRail } from '../components/ArchiveThumbnailCard';
 import { useArchiveContextMenu } from '../components/useArchiveContextMenu';
 import { useArchiveSelection } from '../components/useArchiveSelection';
@@ -340,6 +341,12 @@ function HomeWorkspace() {
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
+  useWorkspaceRefresh('/', useCallback(() => {
+    setRecentLoading(true);
+    restoredFromSnapshot.current = false;
+    randomServerRef.current = undefined;
+    setServerLoadAttempt(attempt => attempt + 1);
+  }, []));
   /** 书架与首页的数据源：当前启用的服务器（设置里一次只允许启用一台）。 */
   const homeServer = servers?.ok ? pickServer(servers.value, null) : undefined;
   useEffect(() => {
@@ -511,20 +518,34 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
   const favoriteFallbackKey = `favorites:last:${serverParam ?? 'default'}`;
   const [snapshot] = useState(() => {
     if (name !== 'watchlist') {
-      const cached = readShelfSnapshot(cacheKey);
+      const cached = readShelfSnapshot(cacheKey, Infinity);
       return !serverParam || cached?.serverId === serverParam ? cached : undefined;
     }
     return undefined; // Favorites provenance is checked after resolving the server.
   });
-  const verifiedSnapshot = useRef(!snapshot?.needsForegroundVerification);
   const [verificationPending, setVerificationPending] = useState(Boolean(snapshot?.needsForegroundVerification));
   const [favoritesCategoryPresent, setFavoritesCategoryPresent] = useState<boolean>();
-  const [hasFavoriteSnapshot, setHasFavoriteSnapshot] = useState(Boolean(snapshot && name === 'watchlist'));
-  const canShowStale = name === 'watchlist' && hasFavoriteSnapshot;
+  const [canShowStale, setCanShowStale] = useState(Boolean(snapshot));
   const [reloadToken, setReloadToken] = useState(0);
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
+  const shownArchiveIds = useRef(snapshot ? new Set(snapshot.archives.map(archive => archive.archiveId)) : undefined);
+  const [freshArchiveIds, setFreshArchiveIds] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    if (freshArchiveIds.size === 0) return;
+    const timer = window.setTimeout(() => setFreshArchiveIds(new Set()), 700);
+    return () => window.clearTimeout(timer);
+  }, [freshArchiveIds]);
+  const showArchives = useCallback((next: ArchiveRecord[], animate: boolean) => {
+    const shown = shownArchiveIds.current;
+    if (animate && shown) {
+      const fresh = next.filter(archive => !shown.has(archive.archiveId)).map(archive => archive.archiveId);
+      if (fresh.length) setFreshArchiveIds(current => new Set([...current, ...fresh]));
+    }
+    shownArchiveIds.current = new Set(next.map(archive => archive.archiveId));
+    setArchives(next);
+  }, []);
   /** 收藏与待看的顶栏与档案库同一套（分类筛选、排序方式、多选、显示模式）。
    * 历史没有：它的顺序就是那列时间线，按标题重排会把它读的东西弄丢。 */
   const showShelfToolbar = name !== 'history';
@@ -563,6 +584,11 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
   // grid has no continuous vertical edge for that rail, so history always uses
   // the shared wide row presentation.
   const shelfCardStyle = name === 'history' ? 'wide' : cardStyle;
+  const refreshShelf = useCallback(() => {
+    setPulling(true);
+    setReloadToken(value => value + 1);
+  }, []);
+  useWorkspaceRefresh(detailBasePath, refreshShelf);
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
   // Removing an entry is here rather than in a toolbar: the multi-select bar that
@@ -620,8 +646,8 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
   // the same way. Categories need a server-side list this page does not load.
   useEffect(() => {
     if (!pageActive) return;
-    if (snapshot && verifiedSnapshot.current && reloadToken === 0 && name !== 'watchlist') return;
     let active = true;
+    if (name !== 'watchlist') setVerificationPending(true);
     if (name === 'watchlist') {
       setError(undefined);
     }
@@ -638,6 +664,9 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       const changedServer = loadedShelfServer.current !== server.id;
       loadedShelfServer.current = server.id;
       if (changedServer) {
+        shownArchiveIds.current = undefined;
+        setFreshArchiveIds(new Set());
+        setCanShowStale(false);
         setCategoryFilter('');
         setHistory([]);
         setWatchlist([]);
@@ -651,17 +680,17 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
           ?? readShelfSnapshot(favoriteFallbackKey, Infinity);
         const valid = cached?.favoritesSource === 'remote' && cached.serverId === server.id
           && cached.scopeId === server.scopeId && cached.archives.every(archive => archive.serverId === server.id);
-        setHasFavoriteSnapshot(Boolean(valid));
-        setArchives(valid ? cached.archives : []);
+        setCanShowStale(Boolean(valid));
+        if (valid) showArchives(cached.archives, false);
         setWatchlist(valid ? cached.watchlist : []);
         setFavoritesCategoryPresent(valid ? cached.favoritesCategoryPresent : undefined);
         setLoading(!valid);
       }
       setServerId(server.id);
       setScopeId(server.scopeId);
-      const needsCategories = showShelfToolbar && (changedServer || name === 'watchlist' || categoriesRef.current === undefined);
-      // The filters refresh independently of the shelf contents.
-      if (needsCategories) {
+      if (showShelfToolbar) {
+        const cachedCategories = readCategorySnapshot(server.id);
+        if (cachedCategories) setCategories(cachedCategories);
         void repository.listCategories(server.id).then(result => {
           if (active && result.ok) setCategories(result.value);
         }).catch(() => {});
@@ -680,49 +709,48 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       const uniqueIds = [...new Set(shelfIds)];
       const resolveArchives = () => shelfRead(`archives:${server.id}:${JSON.stringify(uniqueIds)}`,
         () => repository.listArchivesByIds(server.id, uniqueIds));
-      const cachedHistoryArchives = name === 'history' && !snapshot && uniqueIds.length
+      const mirroredArchives = name !== 'watchlist' && !shownArchiveIds.current && uniqueIds.length
         ? await repository.listArchivesByIds(server.id, uniqueIds, { resolveMissing: false })
         : undefined;
       if (!active) return;
-      const completeHistory = cachedHistoryArchives?.ok && cachedHistoryArchives.value.length === uniqueIds.length;
-      if (cachedHistoryArchives?.ok && !completeHistory && cachedHistoryArchives.value.length) {
-        // Render cached cards while missing metadata is fetched. Persist the
-        // shelf after metadata resolution and the existence check finish.
-        setVerificationPending(true);
-        setHistory(shelf.value as ReadingHistoryRecord[]);
-        setArchives(cachedHistoryArchives.value);
+      const completeMirror = mirroredArchives?.ok && mirroredArchives.value.length === uniqueIds.length;
+      if (mirroredArchives?.ok && !completeMirror && mirroredArchives.value.length) {
+        // Show the locally indexed cards while the missing metadata arrives.
+        if (name === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
+        else setWatchlist(shelf.value as WatchlistRecord[]);
+        showArchives(mirroredArchives.value, false);
+        setCanShowStale(true);
         setLoading(false);
       }
       const archiveResult = name === 'watchlist'
         ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds, (shelf.value as { id: string } | null)?.id) }
-        : completeHistory ? cachedHistoryArchives : await resolveArchives();
+        : completeMirror ? mirroredArchives : await resolveArchives();
       if (!active) return;
       if (!archiveResult.ok) setError(archiveResult.error.message);
       else {
-      if (name === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
-      else if (name === 'toRead') setWatchlist(shelf.value as WatchlistRecord[]);
-      else setWatchlist(favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })));
-        setArchives(archiveResult.value);
+        if (name === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
+        else if (name === 'toRead') setWatchlist(shelf.value as WatchlistRecord[]);
+        else setWatchlist(favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })));
+        showArchives(archiveResult.value, true);
+        setCanShowStale(true);
         setError(undefined);
         if (name === 'watchlist') {
           const favoritesCategoryPresent = shelf.value !== null;
           setFavoritesCategoryPresent(favoritesCategoryPresent);
-          setHasFavoriteSnapshot(true);
           const value: ShelfSnapshot = {
             favoritesSource: 'remote', favoritesCategoryPresent, history: [],
             watchlist: favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })),
             archives: archiveResult.value, serverId: server.id, scopeId: server.scopeId, query: '',
             categories: categoriesRef.current ?? [],
           };
-          writeRouteCache(cacheKey, value, { persist: true });
-          writeRouteCache(favoriteFallbackKey, value, { persist: true });
+          writeRouteCache(cacheKey, value);
+          if (favoriteFallbackKey !== `favorites:last:${server.id}`) writeRouteCache(favoriteFallbackKey, value);
           writeRouteCache(`favorites:last:${server.id}`, value, { persist: true });
         }
       }
       setLoading(false);
       if (name === 'watchlist') {
         // Fresh remote membership supersedes redundant per-archive probes.
-        verifiedSnapshot.current = true;
         setVerificationPending(false);
         return;
       }
@@ -731,14 +759,13 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
       if (!active) return;
       if (missing.size > 0) setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
-      verifiedSnapshot.current = true;
       setVerificationPending(false);
     })().catch(error => { if (active) { setError(String(error)); setLoading(false); } }).finally(() => { if (active) setPulling(false); });
     return () => { active = false; };
-  }, [name, pageActive, reloadToken, serverParam, snapshot]);
+  }, [name, pageActive, reloadToken, serverParam, showArchives, showShelfToolbar]);
   useEffect(() => {
     if (name === 'watchlist' || loading || verificationPending || error || !serverId || !scopeId) return;
-    // 书架快照同理：读的时候走默认 10 分钟 TTL，落盘不会让过期数据复活。
+    // Keep the last complete shelf available for background revalidation.
     const value = { history, watchlist, archives, serverId, scopeId, query, ...(categories ? { categories } : {}) } satisfies ShelfSnapshot;
     writeRouteCache(cacheKey, value, { persist: true });
   }, [archives, cacheKey, categories, error, favoriteFallbackKey, history, loading, name, query, scopeId, serverId, watchlist, verificationPending]);
@@ -888,7 +915,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
           above an empty state was most of what the page showed. 收藏与待看现在有
           档案库那条顶栏（分类筛选、排序方式、多选、显示模式）；历史没有，它的顺序
           就是那列时间线，重排会把它读的东西弄丢。 */}
-      {error && <p className="form-error" role="alert">{canShowStale ? `离线缓存：显示上次收藏快照，可能已过期。${error}` : error}</p>}
+      {error && <p className="form-error" role="alert">{canShowStale ? `离线缓存：显示上次${name === 'watchlist' ? '收藏' : '书架'}快照，可能已过期。${error}` : error}</p>}
       {/* 已知没有服务器时不等 loading：这次拉取的结果只会再确认一遍这个事实，
           而它落地之前用户看到的就是这一页该给的引导（`!loading` 那版会让骨架
           先转一帧）。 */}
@@ -899,6 +926,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
         // from the ShelfShell panel; this page adds none of its own.
         <LibraryWorkspace
           archives={visibleArchives}
+          freshArchiveIds={freshArchiveIds}
           listLoading={loading}
           emptyContent={<EmptyState icon={FolderHeart} title={name === 'watchlist' && favoritesCategoryPresent === false ? '服务器尚未创建 🔖 Favorites 分类' : `暂无${title}`} description={name === 'watchlist' && favoritesCategoryPresent === false ? '请先在 LANraragi 中创建名为 🔖 Favorites 的静态分类，之后才能添加收藏。' : description} />}
           heading={null}
@@ -932,7 +960,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
           /* Pulling a shelf re-reads the shelf, in place — same gesture, same
              disc, as the library. */
           refreshing={pulling}
-          onRefresh={() => { setPulling(true); setReloadToken((value) => value + 1); }}
+          onRefresh={refreshShelf}
           {...selection.props}
           selectionActions={<>
             {selection.actions}

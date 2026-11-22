@@ -439,6 +439,14 @@ textarea:focus {
   }
 }
 
+.enhancement-icon-fill { opacity: 0; }
+[data-icon-state='filled'] > .enhancement-icon-fill { opacity: 1; }
+[data-icon-state='filled'] > .enhancement-icon-outline { opacity: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .enhancement-icon-fill,
+  .enhancement-icon-outline { transition: opacity var(--motion-fast); }
+}
+
 /* 按压的**动画**：`button:active` 那条只给几何、不给过渡，凡是自己没有声明
    `transition` 的按钮/链接，按下去那一拍就是瞬变（用户 2026-10-18：按钮的点击缩小
    效果缺少动画）。这里只补 `transform` 一项，组件自己声明的 `transition`（在

@@ -27,7 +27,7 @@ describe('archive existence', () => {
     // Every id costs one request, so the budget is real — but a shelf longer than
     // one batch has to keep going, or the ids past the cap are never looked at and
     // the card that fails is always one of those.
-    const calls = adapter(() => ({ missing: ['gone-64', 'gone-200'] }));
+    const calls = adapter(ids => ({ missing: ids.filter(id => id === 'arch-64' || id === 'arch-190') }));
     const ids = Array.from({ length: 200 }, (_, index) => `arch-${index}`);
 
     const missing = await findMissingArchives('server-a', ids);
@@ -35,7 +35,7 @@ describe('archive existence', () => {
     expect(calls.map((batch) => batch.length)).toEqual([64, 64, 64]);
     expect(calls[0]?.[0]).toBe('arch-0');
     expect(calls[2]?.[0]).toBe('arch-128');
-    expect(missing).toEqual(new Set(['gone-64', 'gone-200']));
+    expect(missing).toEqual(new Set(['arch-64', 'arch-190']));
   });
 
   it('remembers the answers for the session so a second visit finishes the shelf', async () => {

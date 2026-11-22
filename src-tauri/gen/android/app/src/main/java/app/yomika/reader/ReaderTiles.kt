@@ -99,6 +99,10 @@ internal class ReaderTiles(private val web: WebView) {
     private fun JSONObject.readerPage() = ReaderPage(getLong("session"), getInt("page"))
     private val committedSlots = mutableMapOf<ReaderPage, Int>()
     private var singleTouch = false
+    private var horizontalTurnDrag = false
+    private var turnExceededSlop = false
+    private var zoomStartReported = false
+    private var pinchBackdrop: View? = null
     private var turnVelocity: VelocityTracker? = null
     private var webSwipe = false
     // A replacement and its predecessor may both be requested until React
@@ -634,6 +638,9 @@ internal class ReaderTiles(private val web: WebView) {
                 down?.recycle()
                 down = MotionEvent.obtain(e)
                 singleTouch = true
+                horizontalTurnDrag = false
+                turnExceededSlop = false
+                zoomStartReported = false
                 turnVelocity?.recycle()
                 turnVelocity = VelocityTracker.obtain().also { it.addMovement(e) }
                 webSwipe = false
@@ -641,17 +648,22 @@ internal class ReaderTiles(private val web: WebView) {
             MotionEvent.ACTION_MOVE -> if (singleTouch) {
                 turnVelocity?.addMovement(e)
                 val start = down
-                val active = showing
                 if (webSwipe) return normal(e)
-                if (swipe?.onSettled != null && start != null) {
-                    if (kotlin.math.hypot(e.rawX - start.rawX, e.rawY - start.rawY) <= touchSlop) return normal(e)
-                    finishSwipe("drag")
-                }
                 if (start != null) {
                     val dx = e.rawX - start.rawX
                     val dy = e.rawY - start.rawY
-                    if (previewSwipe(e, dx, dy, normal)) return true
-                    if (active != null && kotlin.math.abs(dx) >= touchSlop && canSwipe(active, dx, dy)) {
+                    val horizontal = kotlin.math.abs(dx) > kotlin.math.abs(dy)
+                    turnExceededSlop = turnExceededSlop || kotlin.math.hypot(dx, dy) > touchSlop
+                    if (swipe?.onSettled != null) {
+                        if (!horizontal) return normal(e)
+                        finishSwipe("drag")
+                    }
+                    // Start drawing with the first horizontal sample. Use slop
+                    // only to decide whether a tiny preview was a tap on release.
+                    if (horizontal) horizontalTurnDrag = true
+                    if (horizontalTurnDrag && previewSwipe(e, dx, dy, normal)) return true
+                    val active = showing
+                    if (active != null && horizontal && canSwipe(active, dx, dy)) {
                         // The DOM track owns the boundary and unprepared pages.
                         // A captured zoom consumes DOWN, so replay it before handing off.
                         webSwipe = true
@@ -690,7 +702,18 @@ internal class ReaderTiles(private val web: WebView) {
                 }
                 if (tryTurn(e, velocity, normal)) return true
                 swipe?.takeIf { it.onSettled == null }?.let {
-                    animateSwipe(it, 0f, 160)
+                    val start = down
+                    if (start != null && !turnExceededSlop &&
+                        kotlin.math.hypot(e.rawX - start.rawX, e.rawY - start.rawY) <= touchSlop &&
+                        e.eventTime - start.eventTime < 500L) {
+                        // Preview cancelled the WebView stream or consumed DOWN.
+                        // Restore a tap after taking the preview off screen.
+                        finishSwipe()
+                        normal(start)
+                        normal(e)
+                    } else {
+                        animateSwipe(it, 0f, 160)
+                    }
                     finishNativeTouch(null)
                     return true
                 }
@@ -716,8 +739,7 @@ internal class ReaderTiles(private val web: WebView) {
             val dx = if (start == null) 0f else e.rawX - start.rawX
             val dy = if (start == null) 0f else e.rawY - start.rawY
             val moved = kotlin.math.hypot(dx, dy) > touchSlop
-            // Only page turns use the system slop. Applying it to image pans
-            // delays the first pixels and then replays them in a single jump.
+            // Image pans also follow the first move. Slop only classifies taps.
             val panMove = action == MotionEvent.ACTION_MOVE && (dx != 0f || dy != 0f) &&
                 (viewportOf(active)?.scale ?: 1f) > 1f && !canSwipe(active, dx, dy)
             if (!nativePanStarted && start != null && (action == MotionEvent.ACTION_POINTER_DOWN || panMove)) {
@@ -786,7 +808,14 @@ internal class ReaderTiles(private val web: WebView) {
             MotionEvent.ACTION_MOVE -> {
                 val sample = sampleGesture(event, gesture.screenX, gesture.screenY)
                 val previous = gesture.sample
-                if (sample.span > 0f && previous.span > 0f) gesture.rawScale *= sample.span / previous.span
+                if (sample.span > 0f && previous.span > 0f && sample.span != previous.span) {
+                    gesture.rawScale *= sample.span / previous.span
+                    if (!zoomStartReported) {
+                        zoomStartReported = true
+                        val page = view.readerPage
+                        web.evaluateJavascript("window.dispatchEvent(new CustomEvent('yomika-reader-native-zoom-start',{detail:{session:${page.session},page:${page.number}}}))", null)
+                    }
+                }
                 val min = view.minScale
                 val scale = gesture.rawScale.coerceIn(min, maxOf(min, view.maxScale))
                 val next = gesture.transform.follow(
@@ -851,7 +880,14 @@ internal class ReaderTiles(private val web: WebView) {
         pinchReturn?.start()
     }
 
+    private fun clearPinchBackdrop() {
+        val backdrop = pinchBackdrop ?: return
+        (backdrop.parent as? ViewGroup)?.removeView(backdrop)
+        pinchBackdrop = null
+    }
+
     private fun clearPinchFeedback() {
+        clearPinchBackdrop()
         val animation = pinchReturn
         pinchReturn = null
         animation?.cancel()
@@ -859,53 +895,77 @@ internal class ReaderTiles(private val web: WebView) {
     }
 
     private fun applyPinchFeedback(tiles: SubsamplingScaleImageView, scale: Float) {
+        // The tile surface and its background shrink together. Place black in a
+        // separate, stationary sibling to cover the portion exposed by underscale.
+        if (scale < 1f && pinchBackdrop == null) {
+            val parent = tiles.parent as? ViewGroup
+            if (parent != null) {
+                val backdrop = View(web.context).apply {
+                    setBackgroundColor(Color.BLACK)
+                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                }
+                parent.addView(backdrop, parent.indexOfChild(tiles), ViewGroup.LayoutParams(-1, -1))
+                pinchBackdrop = backdrop
+            }
+        } else if (scale >= 1f) {
+            clearPinchBackdrop()
+        }
         // Composite adjacent tiles into one surface before applying a fractional
         // overscale. Otherwise antialiasing each tile exposes hairline seams.
-        val layer = if (scale == 1f) View.LAYER_TYPE_NONE else View.LAYER_TYPE_HARDWARE
-        if (layer != tiles.layerType) tiles.setLayerType(layer, null)
         tiles.scaleX = scale
         tiles.scaleY = scale
+        updateTileLayer(tiles)
+    }
+
+    private fun updateTileLayer(view: View) {
+        val layer = if (view.scaleX != 1f || edgeView === view) View.LAYER_TYPE_HARDWARE else View.LAYER_TYPE_NONE
+        if (layer != view.layerType) view.setLayerType(layer, null)
     }
 
     private fun doubleTap(page: ReaderPage, x: Float, y: Float, reduceMotion: Boolean) {
         val tiles = underlay ?: return
         if (paused || nativeTouchActive || tiles.tag != page || !x.isFinite() || !y.isFinite()) return
-        val zoomed = tiles.scale > tiles.minScale * 1.05f
-        if (zoomed || showing === tiles) {
+        val reset = tiles.scale > tiles.minScale * 1.05f || showing === tiles
+        stopZoomAnimation()
+        if (reset && reduceMotion) {
             hide()
-        } else {
-            val center = tiles.viewToSourceCoord(x.coerceIn(0f, 1f) * tiles.width, y.coerceIn(0f, 1f) * tiles.height) ?: return
-            val scale = minOf(tiles.maxScale, tiles.minScale * 2f)
-            val current = tiles.center ?: return
-            val start = transformAt(tiles, tiles.scale, current.x, current.y)
-            val target = transformAt(tiles, scale, center.x, center.y)
-            val fit = fitCenter(tiles)
-            val width = (fit.x * 2f).toInt()
-            val height = (fit.y * 2f).toInt()
-            val end = target.bounded(tiles.width, tiles.height, width, height)
-            showing = tiles
-            if (reduceMotion) {
-                tiles.setScaleAndCenter(scale, gestureCenter(tiles, end))
-            } else {
-                zoomAnimation = ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 180L
-                    addUpdateListener {
-                        val t = it.animatedFraction
-                        val frame = ReaderImageTransform(
-                            start.scale + (end.scale - start.scale) * t,
-                            start.left + (end.left - start.left) * t,
-                            start.top + (end.top - start.top) * t,
-                        ).bounded(tiles.width, tiles.height, width, height)
-                        tiles.setScaleAndCenter(frame.scale, gestureCenter(tiles, frame))
-                    }
-                    addListener(object : AnimatorListenerAdapter() {
-                        override fun onAnimationEnd(animation: Animator) {
-                            if (zoomAnimation === animation) zoomAnimation = null
-                        }
-                    })
-                }.also { it.start() }
-            }
+            return
         }
+        val fit = fitCenter(tiles)
+        val center = if (reset) fit else tiles.viewToSourceCoord(
+            x.coerceIn(0f, 1f) * tiles.width,
+            y.coerceIn(0f, 1f) * tiles.height,
+        ) ?: return
+        val scale = if (reset) tiles.minScale else minOf(tiles.maxScale, tiles.minScale * 2f)
+        val current = tiles.center ?: return
+        val start = transformAt(tiles, tiles.scale, current.x, current.y)
+        val width = (fit.x * 2f).toInt()
+        val height = (fit.y * 2f).toInt()
+        val end = transformAt(tiles, scale, center.x, center.y).bounded(tiles.width, tiles.height, width, height)
+        showing = tiles
+        if (reduceMotion) {
+            tiles.setScaleAndCenter(scale, gestureCenter(tiles, end))
+            return
+        }
+        zoomAnimation = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 180L
+            addUpdateListener {
+                val t = it.animatedFraction
+                val frame = ReaderImageTransform(
+                    start.scale + (end.scale - start.scale) * t,
+                    start.left + (end.left - start.left) * t,
+                    start.top + (end.top - start.top) * t,
+                ).bounded(tiles.width, tiles.height, width, height)
+                tiles.setScaleAndCenter(frame.scale, gestureCenter(tiles, frame))
+            }
+            addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    if (zoomAnimation !== animation) return
+                    zoomAnimation = null
+                    if (reset) hide()
+                }
+            })
+        }.also { it.start() }
     }
 
     private fun stopZoomAnimation() {
@@ -936,12 +996,17 @@ internal class ReaderTiles(private val web: WebView) {
         if (edgeView !== view) resetEdge()
         view.animate().cancel()
         edgeView = view
+        // Composite once before fractional boundary translation, including snap-back.
+        updateTileLayer(view)
         val translation = offset.coerceIn(-1f, 1f) * view.width
         if (duration > 0) {
-            view.animate().translationX(translation).setDuration(duration.coerceAtMost(360)).setInterpolator(edgeEasing).start()
+            view.animate().translationX(translation).setDuration(duration.coerceAtMost(360))
+                .setInterpolator(edgeEasing).withEndAction {
+                    if (edgeView === view && translation == 0f) resetEdge()
+                }.start()
         } else {
             view.translationX = translation
-            if (translation == 0f) edgeView = null
+            if (translation == 0f) resetEdge()
         }
     }
 
@@ -950,6 +1015,7 @@ internal class ReaderTiles(private val web: WebView) {
         edgeView = null
         view.animate().cancel()
         view.translationX = 0f
+        updateTileLayer(view)
     }
 
     private fun previewSwipe(event: MotionEvent, dx: Float, dy: Float, normal: (MotionEvent) -> Boolean): Boolean {
@@ -1033,6 +1099,7 @@ internal class ReaderTiles(private val web: WebView) {
     }
 
     private fun tryTurn(end: MotionEvent, velocity: Float, normal: (MotionEvent) -> Boolean): Boolean {
+        if (!horizontalTurnDrag) return false
         val start = down ?: return false
         val dx = end.rawX - start.rawX
         val density = web.resources.displayMetrics.density

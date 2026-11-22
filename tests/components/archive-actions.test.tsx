@@ -49,9 +49,10 @@ describe('archive actions', () => {
     expect(await screen.findByRole('menuitem', { name: '移出待看' })).toBeInTheDocument();
   });
   it('offers local progress reset while the remote favorites service is still pending', async () => {
+    let settleFavorites!: (value: unknown) => void;
     setInvokeAdapterForTests(async command => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 'scope', name: 'S', baseUrl: 'https://lrr.test' }] };
-      if (command === 'read_favorites_category') return new Promise(() => {});
+      if (command === 'read_favorites_category') return new Promise(resolve => { settleFavorites = resolve; });
       if (command === 'load_reading_progress') return { ok: true, value: { scopeId: 'scope', archiveId: 'a', pageIndex: 0, pageCount: 259, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } };
       return { ok: true, value: { reading: false, favorites: false } };
     });
@@ -59,6 +60,12 @@ describe('archive actions', () => {
     fireEvent.click(screen.getByRole('button', { name: '打开菜单' }));
     expect(await screen.findByRole('menuitem', { name: '清除阅读进度' })).toBeEnabled();
     expect(screen.getByRole('menuitem', { name: '加入收藏夹' })).toHaveAttribute('aria-disabled', 'true');
+    // 这条用例要的是「收藏查询还悬着，进度照样能用」。但悬着的 Promise 会被
+    // `pendingFavorites` 按 server id 合并（`nativeLibraryRepository.ts:72`），同一个
+    // fixture 里后面的用例再问同一个 server 就会拿到这份永不完成的请求、菜单的
+    // `Promise.all` 一直等下去。断言拿到之后必须把它放走。
+    expect(settleFavorites).toBeTypeOf('function');
+    await act(async () => { settleFavorites({ ok: true, value: { id: 'favorites', archives: [] } }); });
   });
   it('clears progress and history together only for a previously read archive', async () => {
     let read = true;
@@ -180,7 +187,9 @@ describe('archive actions', () => {
     }
     render(<MemoryRouter><Menus /></MemoryRouter>);
     await user.click(screen.getByRole('button', { name: 'First' }));
-    await user.click(await screen.findByRole('menuitem', { name: '加入待看' }));
+    // 菜单项先出现、再变成可用：成员状态探针回来之前点下去什么都不会发生。
+    await waitFor(() => expect(screen.getByRole('menuitem', { name: '加入待看' })).toBeEnabled());
+    await user.click(screen.getByRole('menuitem', { name: '加入待看' }));
     await waitFor(() => expect(finish).toBeDefined());
     await user.click(screen.getByRole('button', { name: 'Second' }));
     await waitFor(() => expect(screen.getByRole('menuitem', { name: '加入待看' })).toBeEnabled());
@@ -200,7 +209,8 @@ describe('archive actions', () => {
     setInvokeAdapterForTests(adapter);
     render(<MemoryRouter><ToastProvider><Menu /></ToastProvider></MemoryRouter>);
     await user.click(screen.getByRole('button', { name: '打开菜单' }));
-    expect(await screen.findByRole('menuitem', { name: '移出待看' })).toBeEnabled();
+    const leaveReadingList = await screen.findByRole('menuitem', { name: '移出待看' });
+    await waitFor(() => expect(leaveReadingList).toBeEnabled());
     expect(screen.getByRole('menuitem', { name: '加入收藏夹' })).toBeEnabled();
     expect(screen.getByRole('menuitem', { name: '删除档案' })).toBeInTheDocument();
     await user.click(screen.getByRole('menuitem', { name: '下载档案' }));

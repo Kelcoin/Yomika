@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Profiler } from 'react';
+import { ReaderSettingsPause, RetainedPage } from '../../src/app/RetainedPage';
 import { ReaderScreen } from '../../src/components/ReaderScreen';
 import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 import { forgetTileSource, rememberTileSource } from '../../src/lib/readerNativeTiles';
@@ -623,6 +624,50 @@ it('keeps a native iOS zoom sample when the same page is being processed', async
   } finally {
     rendered.unmount();
     for (const url of [plain, derived]) forgetTileSource(url);
+    resetInvokeAdapterForTests();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('passes the current zoom to the native host when double-tapping back to fit', async () => {
+  const invoke = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  vi.stubGlobal('__yomikaNativeReaderPreview', true);
+  try {
+    render(view());
+    const target = screen.getByRole('img', { name: '第 1 页' });
+    // Ordinary pages cycle from fit through two zoom levels before resetting.
+    for (let tap = 0; tap < 3; tap += 1) fireEvent.doubleClick(target, { clientX: 40, clientY: 40 });
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('reader_native_view_transform', expect.objectContaining({
+      transform: expect.objectContaining({ scale: 1, panX: 0, panY: 0 }),
+      transition: expect.objectContaining({ durationMs: expect.any(Number), zoomFrom: expect.objectContaining({ scale: 3 }) }),
+    }), undefined));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+
+it('hides and re-presents the same native slot during a reading settings round trip', () => {
+  const messages: { op: string; id: number }[] = [];
+  vi.stubGlobal('YomikaTiles', { postMessage: (message: string) => messages.push(JSON.parse(message)) });
+  const invoke = vi.fn(async (_command: string) => ({ ok: true, value: true }));
+  setInvokeAdapterForTests(invoke);
+  rememberTileSource(plain, { contentHash: 'd'.repeat(64), leaseId: 'lease', decodedBytes: 128 * 1024 * 1024 });
+  const reader = (active: boolean) => <RetainedPage active={active}><ReaderSettingsPause.Provider value={!active}>{view()}</ReaderSettingsPause.Provider></RetainedPage>;
+  try {
+    const rendered = render(reader(true));
+    const id = messages.find(message => message.op === 'present')!.id;
+    messages.length = 0;
+    rendered.rerender(reader(false));
+    expect(messages).toContainEqual({ op: 'unpresent', id });
+    expect(messages.some(message => message.op === 'drop' || message.op === 'present')).toBe(false);
+    rendered.rerender(reader(true));
+    expect(messages).toContainEqual({ op: 'present', id });
+    expect(invoke.mock.calls.filter(([command]) => command === 'reader_prepare_native_slot')).toHaveLength(1);
+    rendered.unmount();
+  } finally {
+    forgetTileSource(plain);
     resetInvokeAdapterForTests();
     vi.unstubAllGlobals();
   }

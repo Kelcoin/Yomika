@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { Check, Lock } from 'lucide-react';
+import { hapticFeedback } from '../lib/haptics';
 
 /* The controls that are neither a button nor a field, drawn once.
  *
@@ -28,7 +29,10 @@ export function SwitchControl({ label, checked, disabled, tabIndex, onToggle }: 
       aria-checked={checked}
       disabled={disabled}
       tabIndex={tabIndex}
-      onClick={onToggle}
+      onClick={onToggle && (() => {
+        hapticFeedback('light');
+        onToggle();
+      })}
     ><span /></button>
   );
 }

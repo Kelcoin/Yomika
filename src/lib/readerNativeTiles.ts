@@ -82,7 +82,7 @@ let previewTransform: PreviewTransform | undefined;
 type SlideTransition = { from: number; durationMs: number; boundary?: boolean; zoomFrom?: ZoomState };
 let latestTransform: { transform: PreviewTransform; transition?: SlideTransition } | undefined;
 let transforming: Promise<void> | undefined;
-export function updateNativeReaderTransform(page: number, zoom: ZoomState, session = 0, zoomFrom?: ZoomState): void {
+export function updateNativeReaderTransform(page: number, zoom: ZoomState, session = 0, zoomFrom?: ZoomState, durationMs = 140): void {
   if (!readerUsesShellGestures()) return;
   const previous = previewTransform;
   const samePage = previous?.page === page && previous.session === session;
@@ -90,7 +90,7 @@ export function updateNativeReaderTransform(page: number, zoom: ZoomState, sessi
     ...zoom, session, page, pixelRatio: window.devicePixelRatio || 1,
     edgeOffset: samePage ? previous.edgeOffset : 0,
     neighbourPage: samePage ? previous.neighbourPage : undefined,
-  }, zoomFrom ? { from: samePage ? previous.edgeOffset : 0, durationMs: 140, zoomFrom } : undefined);
+  }, zoomFrom ? { from: samePage ? previous.edgeOffset : 0, durationMs, zoomFrom } : undefined);
 }
 
 function sendPreviewTransform(transform: PreviewTransform, transition?: SlideTransition): void {

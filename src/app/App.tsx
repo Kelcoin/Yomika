@@ -1,4 +1,4 @@
-import { RetainedPage } from './RetainedPage';
+import { ReaderSettingsPause, RetainedPage } from './RetainedPage';
 import { AppShell } from '../components/AppShell';
 import { AppSecurityGate } from '../components/AppSecurityGate';
 import { useEffect, useLayoutEffect, useRef } from 'react';
@@ -16,7 +16,7 @@ import { ComputeWorkerToasts } from '../components/ComputeWorkerToasts';
 import { PairingCodeNotice } from '../components/PairingCodeNotice';
 import { RenderGuard } from '../components/RenderGuard';
 import { ArchiveTitleTooltip } from '../components/ArchiveTitleTooltip';
-import { usePageBackNavigation } from '../lib/pageBackNavigation';
+import { readerSettingsOrigin, usePageBackNavigation } from '../lib/pageBackNavigation';
 import { useRouteDirection } from '../lib/useRouteDirection';
 import { useWorkspaceRouteMotion } from '../lib/useWorkspaceRouteMotion';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
@@ -59,6 +59,7 @@ export function App() {
   const foregroundPath = useRef(pathname);
   foregroundPath.current = pathname;
   const reading = pathname.startsWith('/reader/');
+  const settingsOrigin = readerSettingsOrigin(`${pathname}${location.search}`, location.state?.returnTo);
   useLayoutEffect(() => {
     if (!reading) return;
     const viewport = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
@@ -132,7 +133,9 @@ export function App() {
           <Routes location={workspaceTransition.location}><Route path="*" element={<AppShell returningHome={workspaceTransition.returning && pathname === '/'}><WorkspaceRoutes direction={direction} motion={workspaceTransition.motion} surfaceRef={workspaceTransition.surface} previewLocation={workspaceTransition.previewLocation} /></AppShell>} /></Routes>
         </RetainedPage>}
         {[...readers.current].map(([key, saved]) => <RetainedPage key={key} active={reading && readerKey === key}>
-          <Routes location={saved}><Route path="*" element={<ReaderRoutes />} /></Routes>
+          <ReaderSettingsPause.Provider value={settingsOrigin === `${saved.pathname}${saved.search}`}>
+            <Routes location={saved}><Route path="*" element={<ReaderRoutes />} /></Routes>
+          </ReaderSettingsPause.Provider>
         </RetainedPage>)}
         {/* 版本提醒挂在所有页面之外：在阅读器里也该收到，而它自己不做任何渲染。 */}
         <UpdateNotice />

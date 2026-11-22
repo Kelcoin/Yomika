@@ -28,6 +28,7 @@ import { useLoadingReveal } from '../lib/useLoadingReveal';
 import { TextInputDialog } from './TextInputDialog';
 import { useToast } from './Toast';
 import { usePageActive } from '../app/RetainedPage';
+import { useWorkspaceRefresh } from '../app/workspaceRefresh';
 import { panelLayout } from '../lib/panelLayout';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { getPlatformCapabilities, revealInFileManager } from '../bridge/platform';
@@ -256,6 +257,11 @@ export function LocalArchivesWorkspace() {
     setArchives(result.value);
     setArchivesLoaded(true);
   }, []);
+
+  useWorkspaceRefresh('/downloads', useCallback(() => {
+    void loadArchives();
+    setTaskReload(value => value + 1);
+  }, [loadArchives]));
 
   // 本地档案是磁盘的镜像，下载跑完才会多一份：任务列表每次落地都重读一次。
   useEffect(() => {

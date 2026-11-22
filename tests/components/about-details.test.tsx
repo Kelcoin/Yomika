@@ -11,8 +11,9 @@ it('opens the bundled full license, including the warranty and copyright notice'
   expect(text).toContain('THE SOFTWARE IS PROVIDED "AS IS"');
   expect(text).toContain('SOFTWARE.');
 });
-it('shows build details in a secondary menu', () => {
+it('leaves the build details off the about page', () => {
   render(<AboutDetails />);
-  fireEvent.click(screen.getByRole('button', { name: /构建于/ }));
-  expect(screen.getByRole('dialog')).toHaveTextContent('SQLite 保存本地档案索引、阅读进度与待看列表');
+  expect(screen.queryByText('构建于')).toBeNull();
+  expect(screen.queryByText('Tauri 2 · React 18 · SQLite')).toBeNull();
+  expect(screen.queryByRole('button', { name: /构建于/ })).toBeNull();
 });

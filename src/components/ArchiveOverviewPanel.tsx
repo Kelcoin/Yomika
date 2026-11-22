@@ -1,5 +1,6 @@
 import { X } from 'lucide-react';
 import { VirtualPageGrid } from './VirtualPageGrid';
+import { DetailPageThumbnail, DETAIL_THUMBNAIL_FOOTER } from './DetailPageThumbnail';
 import { useLayoutEffect, useRef, type MouseEvent } from 'react';
 
 import { formatByteSize } from '../lib/archiveCardPresentation';
@@ -26,9 +27,12 @@ export interface ArchiveOverviewPanelProps {
   thumbnailAt: (index: number) => string | undefined;
   /** Hands the caller each tile as it mounts, so it can fetch what is visible. */
   registerTile?: ((index: number, node: HTMLElement | null) => void) | undefined;
-  onRangeChange?: ((start: number, end: number) => void) | undefined;
-  /** Turning to a page. Without it the grid is reference only — the tiles are
-   * still buttons (they hold the number and the frame) but nothing moves. */
+  /** Mounted range plus the rows on screen; the reader loads the visible ones
+   * first and spends what is left on the buffer. */
+  onRangeChange?: ((start: number, end: number, visible: { start: number; end: number }) => void) | undefined;
+  /** Turning to a page. Without it the grid is reference only: the tiles become
+   * plain figures — they still hold the number and the frame, still take focus and
+   * still reveal on press, but nothing jumps. With it they are buttons. */
   onSelectPage?: ((index: number) => void) | undefined;
   onClose: () => void;
   /** The reader stops its chrome toggle from reading a press on the panel as a
@@ -119,20 +123,16 @@ export function ArchiveOverviewPanel({ title, pageCount, cover, sizeBytes, tags,
       </div>
 
     </div>
-    <VirtualPageGrid count={Math.max(0, pageCount)} minWidth={80} className={`reader-overview-thumbnails${onSelectPage ? '' : ' is-preview'}`} onRangeChange={onRangeChange} initialIndex={currentPage} autoHideScrollbar>
+    <VirtualPageGrid count={Math.max(0, pageCount)} minWidth={76} footerHeight={DETAIL_THUMBNAIL_FOOTER}
+      className="archive-page-thumbnails-grid reader-overview-thumbnails" onRangeChange={onRangeChange} initialIndex={currentPage} autoHideScrollbar>
       {(index) => {
         const preview = thumbnailAt(index);
-        return <button
-          key={index}
-          ref={registerTile ? (node) => registerTile(index, node) : undefined}
-          type="button"
-          aria-label={onSelectPage ? `跳转到第 ${index + 1} 页` : `第 ${index + 1} 页`}
-          aria-current={currentPage === index}
-          onClick={onSelectPage ? () => onSelectPage(index) : undefined}
-        >
-          {preview ? <img src={preview} alt="" loading="lazy" decoding="async" /> : <span aria-hidden="true">{index + 1}</span>}
-          <span className="reader-overview-page-number" aria-hidden="true">{index + 1}</span>
-        </button>;
+        return <DetailPageThumbnail key={index} page={index + 1} current={currentPage === index} loading={!preview}
+          label={onSelectPage ? `跳转到第 ${index + 1} 页` : `第 ${index + 1} 页`}
+          tileRef={registerTile ? (node) => registerTile(index, node) : undefined}
+          onOpen={onSelectPage ? () => onSelectPage(index) : undefined}>
+          {preview && <img src={preview} alt="" decoding="async" />}
+        </DetailPageThumbnail>;
       }}
     </VirtualPageGrid>
   </aside>;

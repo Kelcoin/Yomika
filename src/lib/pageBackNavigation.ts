@@ -12,6 +12,13 @@ export function pageRoot(path: string): string {
   return `/${section}`;
 }
 
+/** A section opened by the reader belongs to that reading excursion. */
+export function readerSettingsOrigin(url: string, returnTo: unknown): string | undefined {
+  const [path, query] = url.split('?');
+  return path === '/settings' && new URLSearchParams(query).get('section') === 'reading'
+    && typeof returnTo === 'string' && returnTo.startsWith('/reader/') ? returnTo : undefined;
+}
+
 export class PageBackHistory {
   private pages = new Map<string, string[]>();
   private owner = '/';
@@ -21,7 +28,7 @@ export class PageBackHistory {
     const path = url.split('?')[0]!;
     // Reader/editor routes belong to the page which opened them, even if their
     // route prefix is /library or /reader. Never inherit another tab's stack.
-    const leaf = path.startsWith('/reader/') || path.endsWith('/edit');
+    const leaf = path.startsWith('/reader/') || path.endsWith('/edit') || Boolean(readerSettingsOrigin(url, returnTo));
     const owner = leaf ? (returnTo ? this.ownerFor(returnTo) : this.owner) : pageRoot(path);
     // Home shortcuts open a page excursion; bottom tabs explicitly select an
     // independent workspace and must never inherit that excursion later.

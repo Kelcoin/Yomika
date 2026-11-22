@@ -239,6 +239,19 @@ describe('reader screen', () => {
     expect(1.75 * (fromCentre + panX)).toBeCloseTo(fromCentre);
   });
 
+  it('slides both bars away when the image starts zooming', () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    const top = reader.querySelector('.reader-chrome-top');
+    const bottom = reader.querySelector('.reader-toolbar');
+    expect(top).toBeInTheDocument();
+    expect(bottom).toBeInTheDocument();
+    fireEvent.doubleClick(reader, { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 });
+    expect(top).toHaveClass('is-leaving');
+    expect(bottom).toHaveClass('is-leaving');
+  });
+
   it('zooms about the midpoint of two fingers and springs undershoot back', async () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
@@ -499,7 +512,7 @@ describe('reader screen', () => {
     } finally { view.unmount(); vi.useRealTimers(); }
   });
 
-  it('does not start a page swipe from a toolbar control', () => {
+  it('routes desktop drags from a bottom control through the page swipe', () => {
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     // 底栏那三颗在底端感应带里，鼠标挪过去就把底栏叫出来（点一下只会亮起点在的那一侧）。
@@ -508,7 +521,7 @@ describe('reader screen', () => {
     fireEvent.mouseDown(button, { button: 0, clientX: 500, clientY: 700 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 100, clientY: 700 });
     fireEvent.mouseUp(reader, { button: 0, clientX: 100, clientY: 700 });
-    expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
   });
 
   it('keeps toolbar Space, composition and modified arrows out of canvas navigation', () => {
@@ -1059,6 +1072,32 @@ describe('reader screen', () => {
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
   });
 
+  it('turns once when swiping from a bottom action and suppresses its compatibility click', async () => {
+    const toggle = vi.fn();
+    render(<MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={pages} layout="single"
+      upscale={{ configured: true, active: false, toggle }} /></MemoryRouter>);
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.click(reader);
+    const action = screen.getByRole('button', { name: '开启超分' });
+    const touch = (clientX: number) => ({ clientX, clientY: 700 });
+    // A release has no swipe ownership until a horizontal move was observed.
+    fireEvent.touchStart(action, { touches: [touch(490)] });
+    fireEvent.touchEnd(action, { touches: [], changedTouches: [touch(160)] });
+    fireEvent.click(action, { detail: 1 });
+    expect(toggle).not.toHaveBeenCalled();
+    expect(reader.querySelector('.reader-toolbar-counter')).toHaveTextContent('1 / 3');
+    fireEvent.touchStart(action, { touches: [touch(490)] });
+    fireEvent.touchMove(action, { touches: [touch(300)] });
+    fireEvent.touchEnd(action, { touches: [], changedTouches: [touch(160)] });
+    fireEvent.click(action, { detail: 1 });
+    expect(toggle).not.toHaveBeenCalled();
+    await waitFor(() => expect(reader.querySelector('.reader-toolbar-counter')).toHaveTextContent('2 / 3'));
+    fireEvent.touchStart(action, { touches: [touch(490)] });
+    fireEvent.touchEnd(action, { touches: [], changedTouches: [touch(490)] });
+    fireEvent.click(action, { detail: 1 });
+    expect(toggle).toHaveBeenCalledOnce();
+  });
+
   it('opens the virtual thumbnail grid around the current page and shows its scrollbar while scrolling', () => {
     const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(360);
     const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400);
@@ -1075,6 +1114,8 @@ describe('reader screen', () => {
       fireEvent.click(screen.getByRole('button', { name: '缩略面板' }));
       const tile = screen.getByRole('button', { name: '跳转到第 158 页' });
       expect(tile).toHaveAttribute('aria-current', 'true');
+      expect(tile).toHaveClass('archive-page-thumbnail');
+      expect(tile.querySelector('.archive-page-thumbnail-number')).toHaveTextContent('158');
       expect(screen.queryByRole('button', { name: '跳转到第 1 页' })).not.toBeInTheDocument();
       const grid = tile.parentElement!;
       expect(grid.scrollTop).toBeGreaterThan(1000);
@@ -1114,6 +1155,43 @@ describe('reader screen', () => {
     resetOverlayBackGuardForTests();
   });
 
+  it('loads the latest thumbnail window after a rapid jump even when an earlier request fails', async () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(330);
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400);
+    const original = window.getComputedStyle.bind(window);
+    const styles = vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
+      const style = original(element);
+      if (element.classList.contains('reader-overview-thumbnails')) style.overflowY = 'auto';
+      return style;
+    });
+    const queued: Array<() => void> = [];
+    const loadPageThumbnail = vi.fn((index: number) => index < 20
+      ? new Promise<string>((resolve, reject) => queued.push(() => index % 2 ? reject(new Error('unavailable')) : resolve(`thumb-${index}`)))
+      : Promise.resolve(`thumb-${index}`));
+    try {
+      const { container } = render(<MemoryRouter><ReaderScreen archiveId="a1" title="Long archive"
+        pages={Array.from({ length: 300 }, () => pages[0]!)} loadPageThumbnail={loadPageThumbnail} /></MemoryRouter>);
+      fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      fireEvent.click(screen.getByRole('button', { name: '缩略面板' }));
+      await waitFor(() => expect(queued).toHaveLength(4));
+      const grid = container.querySelector<HTMLElement>('.reader-overview-thumbnails')!;
+      grid.scrollTop = 9000;
+      fireEvent.scroll(grid);
+      await waitFor(() => expect(screen.queryByRole('button', { name: '跳转到第 1 页' })).not.toBeInTheDocument());
+      expect(loadPageThumbnail).toHaveBeenCalledTimes(4);
+      await act(async () => { queued.forEach((complete) => complete()); });
+      const visible = [...grid.querySelectorAll<HTMLButtonElement>('button')];
+      expect(visible.length).toBeGreaterThan(3);
+      await waitFor(() => expect(visible.every((tile) => tile.querySelector('img')?.getAttribute('src')?.startsWith('thumb-'))).toBe(true));
+      expect(loadPageThumbnail.mock.calls.filter(([index]) => index < 20)).toHaveLength(4);
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: '关闭概览' })); });
+    } finally {
+      width.mockRestore();
+      height.mockRestore();
+      styles.mockRestore();
+    }
+  });
+
   it('previews the thumbnail panel with the small rendition instead of pinning every full page', async () => {
     const user = userEvent.setup();
     const loadPage = vi.fn(async (_pageIndex: number) => undefined);
@@ -1134,7 +1212,7 @@ describe('reader screen', () => {
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '缩略面板' }));
 
-    await vi.waitFor(() => expect(loadPageThumbnail.mock.calls.map(([index]) => index)).toEqual([0, 1, 2, 3, 4]));
+    await vi.waitFor(() => expect(loadPageThumbnail.mock.calls.map(([index]) => index).sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4]));
     // Only the prefetch window may be fetched at full size, never the whole archive.
     expect(loadPage.mock.calls.map(([index]) => index)).toEqual([1]);
   });
@@ -1165,18 +1243,18 @@ describe('reader screen', () => {
   });
 
   it('closes the thumbnail panel and stops its queue when the reader becomes inactive', async () => {
-    let finish!: (url: string) => void;
-    const loadPageThumbnail = vi.fn(() => new Promise<string>((resolve) => { finish = resolve; }));
-    const content = <MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={pages}
+    const finish: Array<(url: string) => void> = [];
+    const loadPageThumbnail = vi.fn(() => new Promise<string>((resolve) => { finish.push(resolve); }));
+    const content = <MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={Array.from({ length: 12 }, () => pages[0]!)}
       loadPageThumbnail={loadPageThumbnail} /></MemoryRouter>;
     const view = render(<RetainedPage active>{content}</RetainedPage>);
     fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
     fireEvent.click(screen.getByRole('button', { name: '缩略面板' }));
-    expect(loadPageThumbnail).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(loadPageThumbnail).toHaveBeenCalledTimes(4));
     view.rerender(<RetainedPage active={false}>{content}</RetainedPage>);
     expect(document.querySelector('.reader-overview-backdrop')).not.toBeInTheDocument();
-    await act(async () => { finish('old-thumbnail'); });
-    expect(loadPageThumbnail).toHaveBeenCalledTimes(1);
+    await act(async () => { finish.forEach((complete) => complete('old-thumbnail')); });
+    expect(loadPageThumbnail).toHaveBeenCalledTimes(4);
     view.rerender(<RetainedPage active>{content}</RetainedPage>);
     expect(document.querySelector('.reader-overview-backdrop')).not.toBeInTheDocument();
   });
@@ -1774,47 +1852,24 @@ describe('reader screen', () => {
     expect(toggleUpscale).toHaveBeenCalledTimes(1);
   });
 
-  // 用户报 4（2026-10-18）：「为超分和 dlssnr 图标绘制关闭 / 启用两种状态，不要单纯只是
-  // 颜色变化。」所以判据钉在**几何**上：同一个开关在开/关两态下画出来的 svg 不是同一张
-  // 图。关闭态多一条 lucide 的 off 语汇斜杠（`image-off` 那句 `line x1=2 y1=2 x2=22
-  // y2=22`），启用态没有；两态的 `innerHTML` 也必须不同——只换颜色的话这里是相等的。
-  it('draws a different glyph for the on and off state of both enhancement switches', async () => {
-    const user = userEvent.setup();
-    const noop = () => undefined;
-
-    const geometry = async (active: boolean) => {
-      const view = render(
-        <MemoryRouter>
-          <ReaderScreen
-            archiveId="a1"
-            title="Test archive"
-            pages={pages}
-            upscale={{ configured: true, active, toggle: noop }}
-            dlssnr={{ configured: true, active, toggle: noop }}
-          />
-        </MemoryRouter>,
-      );
-      await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-      const svgOf = (name: string) => screen.getByRole('button', { name }).querySelector('svg')!.innerHTML;
-      const drawn = {
-        upscale: svgOf(active ? '关闭超分' : '开启超分'),
-        dlssnr: svgOf(active ? '关闭 DLSSNR' : '开启 DLSSNR'),
-      };
-      view.unmount();
-      return drawn;
-    };
-
-    const on = await geometry(true);
-    const off = await geometry(false);
-
-    expect(off.upscale).not.toBe(on.upscale);
-    expect(off.dlssnr).not.toBe(on.dlssnr);
-
-    // Selection changes geometry, independent of the control's colour.
-    expect(on.upscale).toContain('fill="currentColor"');
-    expect(off.upscale).not.toContain('fill="currentColor"');
-    expect(on.dlssnr).toContain('fill="currentColor"');
-    expect(off.dlssnr).not.toContain('fill="currentColor"');
+  it('toggles the enhancement fill layer without changing the icon contour', () => {
+    const reader = (active: boolean) => <MemoryRouter><ReaderScreen archiveId="a1" title="Test archive" pages={pages}
+      upscale={{ configured: true, active, toggle: () => undefined }}
+      dlssnr={{ configured: true, active, toggle: () => undefined }} /></MemoryRouter>;
+    const { rerender } = render(reader(false));
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    const icon = (label: string) => screen.getByRole('button', { name: label }).querySelector('svg')!;
+    const upscale = icon('开启超分');
+    const dlssnr = icon('开启 DLSSNR');
+    expect(upscale).toHaveAttribute('data-icon-state', 'outline');
+    expect(dlssnr).toHaveAttribute('data-icon-state', 'outline');
+    const upscaleFill = upscale.querySelector('.enhancement-icon-fill');
+    const dlssnrFill = dlssnr.querySelector('.enhancement-icon-fill');
+    rerender(reader(true));
+    expect(icon('关闭超分').querySelector('.enhancement-icon-fill')).toBe(upscaleFill);
+    expect(icon('关闭 DLSSNR').querySelector('.enhancement-icon-fill')).toBe(dlssnrFill);
+    expect(upscale).toHaveAttribute('data-icon-state', 'filled');
+    expect(dlssnr).toHaveAttribute('data-icon-state', 'filled');
   });
 
   it('loads only a window of pages in continuous mode', async () => {

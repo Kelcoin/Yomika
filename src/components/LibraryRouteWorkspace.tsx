@@ -4,9 +4,10 @@ import { RotateCcw, ServerCrash } from 'lucide-react';
 import { z } from 'zod';
 
 import { usePageActive } from '../app/RetainedPage';
+import { useWorkspaceRefresh } from '../app/workspaceRefresh';
 import { ArchiveRecordSchema, type ArchiveRecord } from '../domain/library';
 import { pickServer } from '../domain/server';
-import { CategorySchema, NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
+import { CategorySchema, NativeLibraryRepository, readCategorySnapshot } from '../repositories/nativeLibraryRepository';
 import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { EmptyState } from './EmptyState';
 import { LibraryWorkspace } from './LibraryWorkspace';
@@ -172,7 +173,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
   /** 分类在会话之间也保持可见：路由快照过期或应用重启后，用上一次的
    * localStorage 镜像同步注水，下拉不再闪骨架——原生六小时快照随后静默
    * 校正。镜像按服务器分开（?server= 未指定时归入 default）。 */
-  const persistedCategories = useMemo(() => readPersistedCategories(serverParam), [serverParam]);
+  const persistedCategories = useMemo(() => (serverParam ? readCategorySnapshot(serverParam) : undefined) ?? readPersistedCategories(serverParam), [serverParam]);
   const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? persistedCategories ?? []);
   const categorySnapshot = useRef(categories);
   categorySnapshot.current = categories;
@@ -663,6 +664,16 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     });
   }, [loadFirstPage]);
 
+  const refreshLibrary = useCallback(() => {
+    if (!serverId || refreshing) return;
+    setRefreshError(undefined);
+    setRefreshing(true);
+    void refreshVisiblePage(serverId).catch((cause: unknown) => {
+      setRefreshError(cause instanceof Error ? cause.message : '刷新档案库失败');
+    }).finally(() => setRefreshing(false));
+  }, [serverId, refreshing, refreshVisiblePage]);
+  useWorkspaceRefresh('/library', refreshLibrary);
+
   useEffect(() => {
     if (!serverId) return;
     // A matching cached page remains visible while its first page is re-read, and
@@ -738,10 +749,18 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     // 因刷新回到骨架；骨架只在分类一无所知时出现。
     let active = true;
     const owner = favoriteOwner.current;
+    const cachedCategories = readCategorySnapshot(serverId);
+    if (cachedCategories && !categoriesOnScreen.current) {
+      categoriesOnScreen.current = true;
+      setCategories(cachedCategories);
+      setCategoriesLoading(false);
+    }
     if (!categoriesOnScreen.current) setCategoriesLoading(true);
     void repository.listCategories(serverId).then((categoryResult) => {
       if (!active || favoriteOwner.current !== owner) return;
       if (categoryResult.ok) {
+        // The scoped route snapshot replaces this pre-upgrade mirror.
+        try { window.localStorage.removeItem(`yomika:library-categories:${serverParam ?? 'default'}`); } catch { /* Storage is optional. */ }
         categoriesOnScreen.current = true;
         setCategories(categoryResult.value);
         setCategoryError(undefined);
@@ -750,7 +769,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
       if (active && favoriteOwner.current === owner) setCategoriesLoading(false);
     });
     return () => { active = false; };
-  }, [reloadToken, serverId]);
+  }, [reloadToken, serverId, serverParam]);
 
   useEffect(() => {
     if (!serverId || !scopeId || archives.length === 0) return;
@@ -793,19 +812,6 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
       categoryFilter,
     } satisfies LibrarySnapshot, { persist: true });
   }, [archives, categories, categoryFilter, hasMoreArchives, listQueryKey, searchQuery, selectedArchiveId, serverParam, sortMode, sortOrder, totalArchives]);
-
-  // The categories' own durable mirror. The route snapshot is durable too now, but
-  // it is one entry with a size cap; the dropdown is the one control that must not
-  // flash a skeleton over data the native snapshot would answer instantly.
-  useEffect(() => {
-    if (categories.length === 0) return;
-    try {
-      window.localStorage.setItem(`yomika:library-categories:${serverParam ?? 'default'}`, JSON.stringify(categories));
-    } catch {
-      // Storage full or unavailable: the mirror is an optimization, never a
-      // source of truth — the native snapshot re-answers in milliseconds.
-    }
-  }, [categories, serverParam]);
 
   // 读不出来的这一页只说「怎么办」，不再复读原生报错。
   //
@@ -856,14 +862,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
         metadataLoading={metadataLoading}
         thumbnail={thumbnail}
         refreshing={refreshing}
-        onRefresh={() => {
-          if (!serverId) return;
-          setRefreshError(undefined);
-          setRefreshing(true);
-          void refreshVisiblePage(serverId).catch((cause: unknown) => {
-            setRefreshError(cause instanceof Error ? cause.message : '刷新档案库失败');
-          }).finally(() => setRefreshing(false));
-        }}
+        onRefresh={refreshLibrary}
         categories={categories}
         categoriesLoading={categoriesLoading}
         totalCount={totalArchives}
