@@ -17,8 +17,7 @@ import { EhComments } from './EhComments';
 import { usePanelPager } from '../lib/usePanelPager';
 import { categoryTagLabel } from '../lib/tags';
 import { createGalleryImageLoader, EhGalleryThumbnail, useGalleryImage, useGalleryThumbnails } from './EhGalleryMedia';
-import { DetailPageThumbnail, DETAIL_THUMBNAIL_FOOTER, DETAIL_THUMBNAIL_WIDTH } from './DetailPageThumbnail';
-import { VirtualPageGrid } from './VirtualPageGrid';
+import { DetailPageThumbnail, DetailPageThumbnailGrid } from './DetailPageThumbnail';
 import '../styles/detail-pager.css';
 
 const repository = new NativeEhRepository();
@@ -108,14 +107,14 @@ export function EhGalleryDetail({ accountId, galleryId, token, onClose }: { acco
         </div>
         <div ref={pager.containerRef} className={pager.containerClass}>
           <div role="tabpanel" aria-label="画廊详情" {...pager.panelProps('details')}><ArchiveDetailTagSection groups={groups} colorFor={colorFor} loading={!gallery && !error} />
-            {gallery && gallery.thumbnails.length > 0 && <section className="archive-page-thumbnails" aria-label="画廊缩略图" aria-busy={loading}>
-              <VirtualPageGrid count={gallery.pageCount} className="archive-page-thumbnails-grid" minWidth={DETAIL_THUMBNAIL_WIDTH} footerHeight={DETAIL_THUMBNAIL_FOOTER} onRangeChange={thumbnails.loadRange}>
+            {gallery && gallery.thumbnails.length > 0 && <div aria-busy={loading}>
+              <DetailPageThumbnailGrid count={gallery.pageCount} onRangeChange={thumbnails.loadRange} label="画廊缩略图">
                 {index => { const thumbnail = thumbnails.items.get(index + 1); return thumbnail
                   ? <EhGalleryThumbnail key={index} thumbnail={thumbnail} loader={images} sprite={thumbnails.sprites.has(thumbnail.url)} />
                   : <DetailPageThumbnail key={index} page={index + 1} loading><span /></DetailPageThumbnail>; }}
-              </VirtualPageGrid>
+              </DetailPageThumbnailGrid>
               {thumbnails.error && <><StatusLine tone="error">{thumbnails.error}</StatusLine><button type="button" className="secondary-action" onClick={thumbnails.retry}>重试缩略图</button></>}
-            </section>}
+            </div>}
           </div>
           <div role="tabpanel" aria-label="画廊评论" {...pager.panelProps('comments')}><EhComments accountId={accountId} galleryId={galleryId} token={token} /></div>
         </div>

@@ -239,3 +239,27 @@ it('ignores an obsolete decoded candidate and keeps a healthy image when the new
   expect(screen.getByRole('img', { name: '第 1 页' })).toBe(original);
   expect(screen.queryByRole('button', { name: '重试加载' })).not.toBeInTheDocument();
 });
+
+it('keeps a neighbour enhancement decoded through the gesture and promotes that same image after it settles', async () => {
+  vi.useFakeTimers();
+  let finish: (() => void) | undefined;
+  const decode = vi.fn(() => new Promise<void>((resolve) => { finish = resolve; }));
+  setImageDecoderForTests(decode);
+  const view = (derivedPages?: ReadonlyMap<number, string>) => (
+    <MemoryRouter><ReaderScreen archiveId="warm-neighbour" title="Warm neighbour" pages={['blob:first', 'blob:next']} layout="single" derivedPages={derivedPages} /></MemoryRouter>
+  );
+  const { container, rerender } = render(view());
+  rerender(view(new Map([[1, 'blob:enhanced-next']])));
+  const candidate = container.querySelector('img[src="blob:enhanced-next"]');
+  expect(candidate).not.toBeNull();
+  const reader = screen.getByRole('main', { name: '漫画阅读器' });
+  fireEvent.touchStart(reader, { touches: [{ clientX: 150, clientY: 300 }] });
+  await act(async () => { finish?.(); });
+  expect(candidate).toHaveClass('is-candidate');
+  expect(candidate).toBeInTheDocument();
+  fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 150, clientY: 300 }] });
+  await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+  expect(candidate).not.toHaveClass('is-candidate');
+  expect(candidate).toBeInTheDocument();
+  expect(decode).toHaveBeenCalledTimes(1);
+});

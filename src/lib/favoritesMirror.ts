@@ -16,12 +16,26 @@ export async function mirrorFavorites(serverId: string, archiveIds: readonly str
 }
 
 /** Resolve remote-only favorites without unbounded parallel metadata requests. */
-export async function loadFavoriteArchives(serverId: string, ids: readonly string[]): Promise<ArchiveRecord[]> {
+export async function loadFavoriteArchives(serverId: string, ids: readonly string[], categoryId?: string): Promise<ArchiveRecord[]> {
   const unique = [...new Set(ids)];
   const cached = await repository.listArchivesByIds(serverId, unique, { resolveMissing: false });
   if (!cached.ok) throw new Error(cached.error.message);
   const membership = new Set(unique);
   const records = new Map(cached.value.filter(a => membership.has(a.archiveId)).map(a => [a.archiveId, a]));
+  // A cold static shelf may have hundreds of members. Populate the mirror in
+  // pages before resolving outliers (including archives absent from search).
+  if (categoryId && unique.length - records.size > 4) {
+    let start = 0;
+    for (let page = 0; page < 4 && records.size < unique.length; page++) {
+      const result = await repository.searchArchivesPage(serverId, start, { categoryId });
+      if (!result.ok) break;
+      for (const archive of result.value.items) {
+        if (membership.has(archive.archiveId)) records.set(archive.archiveId, archive);
+      }
+      if (!result.value.hasMore || result.value.items.length === 0) break;
+      start += result.value.items.length;
+    }
+  }
   const missing = unique.filter(id => !records.has(id));
   let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {

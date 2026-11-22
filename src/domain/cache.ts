@@ -34,6 +34,8 @@ export interface ImageCacheIdentity {
    * 后者正在跑时会被让位。**不进缓存键**——同一张图前台后台拿到的是同一份产物。 */
   priority?: 'foreground' | 'background';
   transform?: string;
+  /** Scope in-process handles to the reader that acquired them. Disk keys stay content-based. */
+  readerSession?: number;
 }
 
 export function createImageCacheKey(identity: ImageCacheIdentity): string {

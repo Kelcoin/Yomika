@@ -43,19 +43,16 @@ function renderDetail(detailBasePath?: string) {
 
 describe('archive detail route', () => {
   it('keeps the read label and action available when the optional progress fact fails', async () => {
-    let attempts = 0;
     setInvokeAdapterForTests(async command => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
-      if (command === 'load_reading_progress') return ++attempts === 1
-        ? { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } }
-        : { ok: true, value: { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 4, pageCount: 12, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } };
+      if (command === 'load_reading_progress') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } };
       return { ok: true, value: [] };
     });
     function LocationProbe() { return <output data-testid="reading-retry-location">{useLocation().pathname}</output>; }
     render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /><LocationProbe /></MemoryRouter>);
     await screen.findByRole('heading', { name: metadata.title });
-    const read = screen.getByRole('link', { name: '阅读' });
+    const read = await screen.findByRole('link', { name: '阅读' });
     expect(read).toHaveTextContent('阅读');
     expect(read).toHaveAttribute('aria-disabled', 'false');
     expect(document.querySelector('.archive-read-label-skeleton')).toBeNull();
@@ -63,7 +60,7 @@ describe('archive detail route', () => {
     await waitFor(() => expect(screen.getByTestId('reading-retry-location')).toHaveTextContent('/reader/archive-a'));
   });
 
-  it('keeps the read label fixed and puts hydrated progress in the page-count fact', async () => {
+  it('waits for hydrated progress before displaying the read label', async () => {
     // A cached snapshot can paint immediately, but must not publish a label
     // before fresh metadata has hydrated the remote reading progress.
     writeRouteCache(`archive-detail:${server.id}:archive-a`, metadata);
@@ -81,11 +78,12 @@ describe('archive detail route', () => {
     setInvokeAdapterForTests(adapter);
     renderDetail();
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('load_reading_progress', { scopeId: server.scopeId, archiveId: metadata.archiveId }));
-    expect(screen.getByRole('link', { name: '阅读' })).toHaveTextContent('阅读');
+    expect(screen.queryByRole('link', { name: '阅读' })).toBeNull();
+    expect(document.querySelector('.archive-read-label-skeleton')).toBeInTheDocument();
     hydrated = true;
     finishMetadata({ ok: true, value: { ...metadata, progress: 5 } });
     await waitFor(() => expect(document.querySelector('[data-fact="pages"] dd')).toHaveTextContent('5 / 12 页'));
-    expect(screen.getByRole('link', { name: '阅读' })).toHaveTextContent('阅读');
+    expect(screen.getByRole('link', { name: '从第 5 页继续' })).toHaveTextContent('继续');
   });
   it('swipes the content between details and comments without stealing vertical or rail gestures', async () => {
     setInvokeAdapterForTests(async command => {
@@ -220,7 +218,7 @@ describe('archive detail route', () => {
     expect(stage.className).toBe('archive-detail-panels');
     expect(comments.getAttribute('style') ?? '').toBe('');
   });
-  it('shows final saved progress beside the cover while keeping the read label fixed', async () => {
+  it('shows the last saved page in both the detail facts and the continue action', async () => {
     setInvokeAdapterForTests(async command => {
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: metadata };
@@ -232,7 +230,7 @@ describe('archive detail route', () => {
     });
     renderDetail();
     await waitFor(() => expect(document.querySelector('[data-fact="pages"] dd')).toHaveTextContent('12 / 12 页'));
-    expect(screen.getByRole('link', { name: '阅读' })).toHaveTextContent('阅读');
+    expect(screen.getByRole('link', { name: '从第 12 页继续' })).toHaveTextContent('继续');
   });
 
   it('refreshes retained progress, reading-list membership and metadata after synchronization', async () => {
@@ -340,6 +338,31 @@ describe('archive detail route', () => {
     await screen.findByRole('heading', { name: metadata.title });
   });
 
+  it('waits for the download status and tracks an existing transfer through completion', async () => {
+    let finishStatus!: (value: unknown) => void;
+    const firstStatus = new Promise(resolve => { finishStatus = resolve; });
+    let statusCalls = 0;
+    setInvokeAdapterForTests(async command => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: metadata };
+      if (command === 'archive_download_status') {
+        if (++statusCalls === 1) return firstStatus;
+        return { ok: true, value: { downloaded: true, downloading: false, receivedBytes: 0, totalBytes: null } };
+      }
+      return { ok: true, value: [] };
+    });
+    renderDetail();
+    await screen.findByRole('heading', { name: metadata.title });
+    expect(screen.queryByRole('button', { name: '下载档案' })).toBeNull();
+    await act(async () => finishStatus({ ok: true, value: { downloaded: false, downloading: true, receivedBytes: 256, totalBytes: 1024 } }));
+    const transfer = screen.getByRole('button', { name: '正在下载 25%' });
+    expect(transfer).toBeDisabled();
+    expect(transfer.querySelector('progress')).toBeNull();
+    expect(transfer.querySelector('.archive-download-spinner')).toBeInTheDocument();
+    expect(transfer.querySelector('[data-transfer=percent]')).toHaveTextContent('25%');
+    expect(await screen.findByRole('button', { name: '已下载' })).toBeDisabled();
+  });
+
   it('serializes downloads per detail and does not keep B busy or unlock it after A completes', async () => {
     const finishes = new Map<string, (value: unknown) => void>();
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -352,17 +375,18 @@ describe('archive detail route', () => {
     setInvokeAdapterForTests(adapter);
     const view = render(<MemoryRouter><ArchiveDetailRoute archiveId="archive-a" /></MemoryRouter>);
     await screen.findByRole('heading', { name: 'archive-a' });
-    const download = screen.getByRole('button', { name: '下载档案' });
+    const download = await screen.findByRole('button', { name: '下载档案' });
     act(() => { fireEvent.click(download); fireEvent.click(download); });
     expect(adapter.mock.calls.filter(([command]) => command === 'download_archive')).toHaveLength(1);
     view.rerender(<MemoryRouter><ArchiveDetailRoute archiveId="archive-b" /></MemoryRouter>);
     await screen.findByRole('heading', { name: 'archive-b' });
-    expect(screen.getByRole('button', { name: '下载档案' })).toBeEnabled();
-    fireEvent.click(screen.getByRole('button', { name: '下载档案' }));
+    const nextDownload = await screen.findByRole('button', { name: '下载档案' });
+    expect(nextDownload).toBeEnabled();
+    fireEvent.click(nextDownload);
     await act(async () => finishes.get('archive-a')!({ ok: true, value: { status: 'completed', path: 'a.zip', taskId: 'a' } }));
-    expect(screen.getByRole('button', { name: '下载档案' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /正在下载/ })).toBeDisabled();
     await act(async () => finishes.get('archive-b')!({ ok: true, value: { status: 'completed', path: 'b.zip', taskId: 'b' } }));
-    expect(screen.getByRole('button', { name: '下载档案' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '已下载' })).toBeDisabled();
   });
 
   it.each([false, true])('does not carry an incognito press or dialog into the next archive (open=%s)', async open => {
@@ -802,7 +826,7 @@ describe('archive detail route', () => {
   it('reads 推荐 before the searches land, and grows the creator tab out of it', async () => {
     // The heading used to be 猜你喜欢 until the results arrived, and only then
     // turned into tabs — so the same section announced two different names.
-    const releases: Array<() => void> = [];
+    const releases: Array<{ creator: boolean; release: () => void }> = [];
     setInvokeAdapterForTests(async (command, args) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'load_archive_metadata') {
@@ -815,7 +839,7 @@ describe('archive detail route', () => {
       if (command === 'list_watchlist') return { ok: true, value: [] };
       if (command === 'search_archives_page' || command === 'list_archives_page') {
         const query = String((args?.input as { query?: string } | undefined)?.query ?? '');
-        await new Promise<void>((resolve) => { releases.push(resolve); });
+        await new Promise<void>((resolve) => { releases.push({ creator: query.startsWith('artist:'), release: resolve }); });
         const rows = query.startsWith('artist:')
           ? [{ serverId: 'scope-a', archiveId: 'by-same-artist', title: 'By same artist', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['artist:someone'] }]
           : [{ serverId: 'scope-a', archiveId: 'strong', title: 'Strong match', pageCount: 4, updatedAt: '2026-08-28T00:00:00Z', tags: ['female:glasses', 'female:futanari', 'category:manga'] }];
@@ -845,8 +869,13 @@ describe('archive detail route', () => {
     expect(creatorTab).toHaveAttribute('aria-hidden', 'true');
     expect(creatorTab).toHaveAttribute('tabindex', '-1');
 
-    act(() => releases.forEach((release) => release()));
+    await vi.waitFor(() => expect(releases.some(({ creator }) => creator)).toBe(true));
+    act(() => releases.filter(({ creator }) => creator).forEach(({ release }) => release()));
     await vi.waitFor(() => expect(within(rail).getByRole('tab', { name: '同作者' })).toBeEnabled());
+    expect(within(rail).getByRole('tab', { name: '推荐' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(rail).getByRole('tab', { name: '同作者' })).toHaveAttribute('aria-selected', 'false');
+    act(() => releases.filter(({ creator }) => !creator).forEach(({ release }) => release()));
+    await within(rail).findByRole('link', { name: /Strong match/ });
     // The strip carries the class the width animation keys off.
     expect(document.querySelector('.archive-recommendations-tabs.has-creator')).not.toBeNull();
     expect(screen.getByRole('region', { name: '推荐' })).toBe(rail);
@@ -984,10 +1013,11 @@ describe('archive detail route', () => {
     expect(within(rail).queryByRole('link', { name: /Gone recommendation/ })).not.toBeInTheDocument();
   });
 
-  it('keeps recommendation cards inside the page that owns the detail', async () => {
+  it('shows recommendations on the owning page even while history is pending', async () => {
     // 推荐条里的卡片从前一律指向 `/library/:id`：首页或书架的详情栏点一条推荐，
     // 左边那一栏会跟着换成档案库——与「谁的详情谁来持有」正好相反。
     setInvokeAdapterForTests(async (command) => {
+      if (command === 'list_reading_history') return new Promise(() => {});
       if (command === 'list_servers') return { ok: true, value: [server] };
       if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
@@ -1267,7 +1297,7 @@ it('opens the shared menu from the header and downloads from the default toolbar
   setInvokeAdapterForTests(adapter);
   renderDetail();
   await screen.findByRole('heading', { name: 'Archive detail' });
-  fireEvent.click(screen.getByRole('button', { name: '下载档案' }));
+  fireEvent.click(await screen.findByRole('button', { name: '下载档案' }));
   expect(adapter).toHaveBeenCalledWith('download_archive', { serverId: 'server-a', archiveId: 'archive-a' });
   fireEvent.click(screen.getByRole('button', { name: '档案菜单' }));
   expect(await screen.findByRole('menuitem', { name: '编辑元数据' })).toBeInTheDocument();

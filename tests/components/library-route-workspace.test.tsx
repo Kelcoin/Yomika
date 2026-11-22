@@ -161,6 +161,36 @@ describe('library route workspace', () => {
     expect(await screen.findByRole('button', { name: /^Fresh Archive\b/ })).toBeInTheDocument();
   });
 
+  it('restores an empty search after clearing it while the server has yet to respond', async () => {
+    writeRouteCache('library:workspace:default', {
+      archives: [{ serverId: 'scope-a', archiveId: 'old', title: 'Prior Search Result', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }],
+      fetchedCount: 1, categories: [], totalArchives: 1, hasMoreArchives: false,
+      searchQuery: 'prior', sortMode: 'added', sortOrder: 'desc', categoryFilter: '',
+    }, { persist: true });
+    simulateRouteCacheRestartForTests();
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'search_archives_page') {
+        if ((args?.input as { query?: string } | undefined)?.query === 'no hits$') return servedPage([]);
+        return new Promise(() => {});
+      }
+      if (command.startsWith('list_')) return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    setInvokeAdapterForTests(adapter);
+    const view = renderLibrary();
+    expect(await screen.findByLabelText('搜索档案')).toHaveValue('prior');
+    fireEvent.change(screen.getByLabelText('搜索档案'), { target: { value: 'no hits$' } });
+    await waitFor(() => expect(screen.queryByRole('button', { name: /^Prior Search Result/ })).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: '清除搜索' }));
+    expect(screen.getByLabelText('搜索档案')).toHaveValue('');
+    view.unmount();
+    simulateRouteCacheRestartForTests();
+    renderLibrary();
+    expect(await screen.findByLabelText('搜索档案')).toHaveValue('');
+    expect(screen.queryByRole('button', { name: /^Prior Search Result/ })).toBeNull();
+  });
+
   it('does not show a cached page for a different URL query', async () => {
     writeRouteCache('library:workspace:default', {
       archives: [{ serverId: 'scope-a', archiveId: 'cached', title: 'Old Query', pageCount: 2, updatedAt: '2026-08-26T00:00:00Z' }],
@@ -439,12 +469,13 @@ describe('library route workspace', () => {
     window.localStorage.setItem('yomika:library-categories:default', JSON.stringify([
       { id: 'SET_1613080290', name: 'Reading', pinned: false, search: null, archives: [] },
     ]));
+    let resolveCategories!: (value: unknown) => void;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
       if (command === 'search_archives_page') return servedPage([{ serverId: 'scope-a', archiveId: 'a1', title: 'Hydrated', pageCount: 1, updatedAt: '2026-09-01T00:00:00Z' }]);
       if (command === 'load_preferences') return { ok: true, value: { theme: 'system', defaultLayout: 'auto', defaultDirection: 'ltr', cacheMaxBytes: 2_147_483_648 } };
       // 分类请求永不返回：下拉仍然立即出现，证明它来自镜像。
-      if (command === 'list_categories') return new Promise(() => undefined);
+      if (command === 'list_categories') return new Promise(resolve => { resolveCategories = resolve; });
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
@@ -453,6 +484,8 @@ describe('library route workspace', () => {
     const dropdown = await screen.findByRole('combobox', { name: '分类筛选' });
     expect(dropdown).toHaveTextContent('Reading');
     expect(screen.queryByText('正在读取分类')).toBeNull();
+    resolveCategories({ ok: true, value: [] });
+    await vi.waitFor(() => expect(screen.getByRole('combobox', { name: '分类筛选' })).not.toHaveTextContent('Reading'));
   });
 
   it('refreshes categories silently while the cached dropdown is on screen', async () => {
@@ -471,7 +504,7 @@ describe('library route workspace', () => {
     renderLibrary();
 
     await screen.findByRole('button', { name: /^Cached Refresh\b/ });
-    expect(screen.getByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
+    expect(await screen.findByRole('combobox', { name: '分类筛选' })).toBeInTheDocument();
     const requestsBefore = categoryRequests;
 
     // 全量失效广播（启用服务器切换的形状）重跑分类加载：下拉保持显示，
@@ -712,7 +745,7 @@ describe('library route workspace', () => {
 
     expect(await screen.findByRole('heading', { name: 'First archive' })).toBeInTheDocument();
     expect(screen.queryByText('first.cbz')).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: '阅读' })).toHaveAttribute('href', '/reader/first?server=scope-a');
+    expect(await screen.findByRole('link', { name: '阅读' })).toHaveAttribute('href', '/reader/first?server=scope-a');
     expect(adapter).toHaveBeenCalledWith('load_archive_metadata', { serverId: 'scope-a', archiveId: 'first' });
   });
 

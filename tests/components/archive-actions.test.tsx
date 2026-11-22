@@ -205,7 +205,7 @@ describe('archive actions', () => {
     expect(screen.getByRole('menuitem', { name: '删除档案' })).toBeInTheDocument();
     await user.click(screen.getByRole('menuitem', { name: '下载档案' }));
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('download_archive', { serverId: 's', archiveId: 'a' }));
-    expect(await screen.findByText('下载完成：E:\\Comics\\a.zip')).toBeInTheDocument();
+    expect(await screen.findByText('Archive 下载完成')).toBeInTheDocument();
   });
 
   it('requires the drawn confirmation and permits opting out of favorite sync', async () => {

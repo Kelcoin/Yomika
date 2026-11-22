@@ -115,8 +115,8 @@ export class NativeComputeRepository {
   /** 拿一张图的租借：回包里 `url` 是渲染器唯一的把手（里面只有不透明租借号）。
    *
    * 租借同时会在宿主侧给这份内容上 pin，所以**必须**配对调用 `releaseArtifact`。 */
-  async acquireArtifact(jobId: string, artifactId: string): Promise<CommandResult<ComputedImageLease>> {
-    return invokeCommand('compute_artifact_acquire', { jobId, artifactId }, ComputedImageLeaseSchema);
+  async acquireArtifact(jobId: string, artifactId: string, readerSession?: number): Promise<CommandResult<ComputedImageLease>> {
+    return invokeCommand('compute_artifact_acquire', { jobId, artifactId, readerSession }, ComputedImageLeaseSchema);
   }
 
   /** 还掉一张租借（也会把宿主的 pin 还掉）。幂等。 */

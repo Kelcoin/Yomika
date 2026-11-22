@@ -30,6 +30,7 @@ const preferences = {
   continueReadingShowFinished: true,
   randomRoamShowFinished: true,
   ehMyTagsPriority: false,
+  ehCommentSort: 'score-asc' as const,
   sfwMode: false,
   detailActions: ['read', 'readingList', 'favorites', 'download'] as Array<'read' | 'readingList' | 'favorites' | 'download' | 'edit' | 'delete'>,
   detailDateKind: 'published' as 'added' | 'published',

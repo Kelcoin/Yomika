@@ -870,7 +870,12 @@ export function SettingsWorkspace() {
     const scroller = pageRef.current?.closest('.workspace');
     // scrollTop, not scrollTo: the assignment is all this needs, and it works in
     // the jsdom the tests run in.
-    if (scroller instanceof HTMLElement) scroller.scrollTop = 0;
+    if (scroller instanceof HTMLElement && scroller.scrollTop !== 0) {
+      const previous = scroller.style.scrollBehavior;
+      scroller.style.scrollBehavior = 'auto';
+      scroller.scrollTop = 0;
+      scroller.style.scrollBehavior = previous;
+    }
   }, [compactDrilled, selectedSettingsSection]);
 
   /** The compact bar answers scrolling the way the scroll-to-top disc does. */
@@ -1252,7 +1257,7 @@ export function SettingsWorkspace() {
               <SettingsDisclosure open={preferenceDraft.floatingNav}>
                 <SettingsSwitch
                   icon={<PanelBottom />}
-                  label="向下滚动时自动收起"
+                  label="悬浮底栏自动收起"
                   hint="向上滚动或回到顶部时重新显示底栏"
                   checked={preferenceDraft.floatingNavAutoHide}
                   onToggle={() => editPreferences({ floatingNavAutoHide: !preferenceDraft.floatingNavAutoHide })}
@@ -1724,6 +1729,17 @@ export function SettingsWorkspace() {
             disabled={!ehAccountName}
             checked={preferenceDraft.ehMyTagsPriority && Boolean(ehAccountName)}
             onToggle={() => editPreferences({ ehMyTagsPriority: !preferenceDraft.ehMyTagsPriority })}
+          />
+          <SettingsChoice
+            icon={<ArrowDownWideNarrow />}
+            label="评论排序"
+            value={preferenceDraft.ehCommentSort}
+            options={[
+              { value: 'score-desc', label: '评分从高到低' },
+              { value: 'score-asc', label: '评分从低到高' },
+              { value: 'gallery', label: '画廊原顺序' },
+            ]}
+            onChange={(value) => editPreferences({ ehCommentSort: value as PreferenceSnapshot['ehCommentSort'] })}
           />
         </div>
       </section>

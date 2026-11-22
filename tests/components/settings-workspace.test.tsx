@@ -41,6 +41,22 @@ function renderSettings(section?: string) {
   );
 }
 
+it('shows and saves the E-Hentai comment sort without requiring an account', async () => {
+  const user = userEvent.setup();
+  const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+    if (command === 'save_preferences') return { ok: true, value: args?.input };
+    return { ok: true, value: [] };
+  });
+  setInvokeAdapterForTests(adapter);
+  renderSettings('eh');
+  await user.click(await screen.findByRole('button', { name: '评论排序' }));
+  const menu = screen.getByRole('dialog', { name: '评论排序' });
+  expect(within(menu).getByRole('button', { name: '评分从高到低' })).toHaveAttribute('aria-pressed', 'true');
+  await user.click(within(menu).getByRole('button', { name: '评分从低到高' }));
+  await waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: expect.objectContaining({ ehCommentSort: 'score-asc' }) }));
+});
+
 it.each(['realcugan-2x-denoise3x', 'waifu2x-upconv7'])('opens adjustable weights with a selected default when the active model is %s', async (activeModel) => {
   const user = userEvent.setup();
   const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -1560,17 +1576,17 @@ describe('settings workspace', () => {
 
     // 悬浮底栏是样式分区里的一行开关；翻开关即保存。
     const floatingBar = await screen.findByRole('switch', { name: '悬浮底栏' });
-    expect(screen.queryByRole('switch', { name: '向下滚动时自动收起' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: '悬浮底栏自动收起' })).not.toBeInTheDocument();
     await user.click(floatingBar);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, floatingNav: true } }));
-    const autoHide = await screen.findByRole('switch', { name: '向下滚动时自动收起' });
+    const autoHide = await screen.findByRole('switch', { name: '悬浮底栏自动收起' });
     expect(autoHide).toBeChecked();
     await user.click(autoHide);
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('save_preferences', { input: { ...DEFAULT_PREFERENCES, floatingNav: true, floatingNavAutoHide: false } }));
     await user.click(floatingBar);
-    expect(screen.queryByRole('switch', { name: '向下滚动时自动收起' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: '悬浮底栏自动收起' })).not.toBeInTheDocument();
     await user.click(floatingBar);
-    expect(await screen.findByRole('switch', { name: '向下滚动时自动收起' })).not.toBeChecked();
+    expect(await screen.findByRole('switch', { name: '悬浮底栏自动收起' })).not.toBeChecked();
   });
 
   it('customizes bottom bar items with only 档案库 pinned', async () => {

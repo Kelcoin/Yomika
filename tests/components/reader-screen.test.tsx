@@ -216,7 +216,7 @@ describe('reader screen', () => {
     fireEvent.mouseDown(reader, { button: 0, clientX: 300, clientY: 300 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 400, clientY: 360 });
     await act(async () => { await new Promise(requestAnimationFrame); });
-    expect(frame.style.transform).toBe('scale(2) translate(50px, 30px)');
+    expect(frame.style.transform).toBe(`scale(1.75) translate(${100 / 1.75}px, ${60 / 1.75}px)`);
     expect(frame.style.transition).toBe('none');
     fireEvent.mouseUp(reader, { button: 0, clientX: 400, clientY: 360 });
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
@@ -229,15 +229,14 @@ describe('reader screen', () => {
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
     // 画布盒子量不到时按视口兜底（`measureReaderRoot`），所以落点从视口中心算：
-    // 中心往左 100px ⇒ 锚点 (-100, 0)；1 倍放大到 2 倍，`zoomAtPoint` 给
-    // panX = -100·(1/2 - 1) = 50，panY = 0。
+    // 中心往左 100px，对照放大后的实际屏幕坐标。
     const fromCentre = -100;
     fireEvent.doubleClick(reader, { clientX: window.innerWidth / 2 + fromCentre, clientY: window.innerHeight / 2 });
-    expect(frame.style.transform).toBe('scale(2) translate(50px, 0px)');
+    expect(frame.style.transform).toContain('scale(1.75)');
     // 换一种说法验同一件事：缩放前落在指针下的内容点，缩放后仍然在指针下。
     // 屏上位置 = scale·(内容点 + pan)，两边都该等于锚点自己。
-    const panX = 50;
-    expect(2 * (fromCentre + panX)).toBe(fromCentre);
+    const panX = Number(/translate\(([^p]+)px/.exec(frame.style.transform)?.[1]);
+    expect(1.75 * (fromCentre + panX)).toBeCloseTo(fromCentre);
   });
 
   it('zooms about the midpoint of two fingers and springs undershoot back', async () => {
@@ -252,7 +251,9 @@ describe('reader screen', () => {
     expect(frame.style.transform).toBe('scale(2) translate(-50px, 0px)');
     fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
     await act(async () => { await new Promise(requestAnimationFrame); });
-    expect(frame.style.transform).toContain('scale(0.88)');
+    const undershoot = Number(frame.style.transform.match(/scale\(([^)]+)\)/)?.[1]);
+    expect(undershoot).toBeGreaterThan(0.88);
+    expect(undershoot).toBeLessThan(1);
     fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] });
     expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
   });
@@ -271,7 +272,9 @@ describe('reader screen', () => {
     fireEvent.touchStart(reader, { touches: [{ clientX: x - 50, clientY: y }, { clientX: x + 50, clientY: y }] });
     fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
     await act(async () => { await new Promise(requestAnimationFrame); });
-    expect(frame.style.transform).toContain('scale(0.8');
+    const undershoot = Number(frame.style.transform.match(/scale\(([^)]+)\)/)?.[1]);
+    expect(undershoot).toBeGreaterThan(0.88);
+    expect(undershoot).toBeLessThan(1);
     fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] });
     expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
     // 收势不是硬跳：不在拖拽时那一层带 140ms 的过渡。
@@ -287,7 +290,9 @@ describe('reader screen', () => {
     fireEvent.touchStart(reader, { touches: [{ clientX: x - 100, clientY: y }, { clientX: x + 100, clientY: y }] });
     fireEvent.touchMove(reader, { touches: [{ clientX: x - 20, clientY: y }, { clientX: x + 20, clientY: y }] });
     await act(async () => { await new Promise(requestAnimationFrame); });
-    expect(frame.style.transform).toContain('scale(0.8');
+    const undershoot = Number(frame.style.transform.match(/scale\(([^)]+)\)/)?.[1]);
+    expect(undershoot).toBeGreaterThan(0.88);
+    expect(undershoot).toBeLessThan(1);
     // Separate the render that enables transitions from the direct DOM write.
     await act(async () => { fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: x - 20, clientY: y }] }); });
     await act(async () => { await new Promise(requestAnimationFrame); });
@@ -499,7 +504,7 @@ describe('reader screen', () => {
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     // 底栏那三颗在底端感应带里，鼠标挪过去就把底栏叫出来（点一下只会亮起点在的那一侧）。
     fireEvent.mouseMove(reader, { buttons: 0, clientY: window.innerHeight - 110 });
-    const button = screen.getByRole('button', { name: '上一页' });
+    const button = screen.getByRole('button', { name: /阅读布局/ });
     fireEvent.mouseDown(button, { button: 0, clientX: 500, clientY: 700 });
     fireEvent.mouseMove(reader, { buttons: 1, clientX: 100, clientY: 700 });
     fireEvent.mouseUp(reader, { button: 0, clientX: 100, clientY: 700 });
@@ -800,7 +805,9 @@ describe('reader screen', () => {
       expect(hint).toHaveAttribute('data-visible', 'true');
       expect(hint).toHaveAttribute('data-ready', 'true');
       expect(hint).toHaveAttribute('data-side', direction === 'ltr' ? 'right' : 'left');
-      expect(hint).toHaveTextContent('松手退出阅读');
+      expect(hint).toHaveAttribute('aria-label', '松手退出阅读');
+      expect(hint?.textContent).toBe('');
+      expect((hint as HTMLElement).style.getPropertyValue('--reader-exit-progress')).toBe('1');
       const track = reader.querySelector('.reader-track') as HTMLElement;
       const draggedTransform = track.style.transform;
       fireEvent.touchEnd(reader, { changedTouches: [{ clientX: endX, clientY: 300 }] });
@@ -820,9 +827,18 @@ describe('reader screen', () => {
     try {
       const reader = screen.getByRole('main', { name: '漫画阅读器' });
       fireEvent.touchStart(reader, { touches: [{ clientX: 400, clientY: 300 }] });
-      fireEvent.touchMove(reader, { touches: [{ clientX: 150, clientY: 300 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: 330, clientY: 300 }] });
       act(() => vi.advanceTimersByTime(32));
-      const hint = document.querySelector('.reader-exit-hint');
+      const hint = document.querySelector<HTMLElement>('.reader-exit-hint')!;
+      const progress = () => Number(hint.style.getPropertyValue('--reader-exit-progress'));
+      expect(hint.querySelector('.reader-exit-hint-fill')).toBeInTheDocument();
+      expect(progress()).toBeGreaterThan(0);
+      expect(progress()).toBeLessThan(1);
+      const previous = progress();
+      fireEvent.touchMove(reader, { touches: [{ clientX: 360, clientY: 300 }] });
+      act(() => vi.advanceTimersByTime(32));
+      expect(progress()).toBeGreaterThan(0);
+      expect(progress()).toBeLessThan(previous);
       expect(hint).toHaveAttribute('data-visible', 'true');
       fireEvent.touchCancel(reader);
       expect(hint).toHaveAttribute('data-visible', 'false');
@@ -946,6 +962,7 @@ describe('reader screen', () => {
     // centre. The curve is multiplicative, so 120 units of wheel is
     // exp(-0.18) ≈ 0.835.
     const zoomed = () => container.querySelector('.reader-single, .reader-spread') as HTMLElement;
+    await act(async () => { await new Promise(requestAnimationFrame); });
     expect(zoomed().getAttribute('style')).toMatch(/scale\(0\.96/);
     expect(screen.getByRole('img', { name: '第 1 页' }).getAttribute('style')).toBeNull();
     fireEvent.wheel(reader, { deltaY: -120 });
@@ -1020,7 +1037,7 @@ describe('reader screen', () => {
 
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     await user.click(screen.getByRole('button', { name: '从左到右' }));
-    await user.click(screen.getByRole('button', { name: '上一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageUp' });
 
     expect(onProgress).toHaveBeenCalledWith(1, { layout: 'auto', direction: 'rtl' });
   });
@@ -1040,6 +1057,35 @@ describe('reader screen', () => {
 
     expect(onProgress).toHaveBeenCalledWith(2, { layout: 'auto', direction: 'ltr' });
     expect(screen.getByRole('toolbar', { name: '阅读控制' })).toBeInTheDocument();
+  });
+
+  it('opens the virtual thumbnail grid around the current page and shows its scrollbar while scrolling', () => {
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(360);
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400);
+    const scrollHeight = vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(12_000);
+    const original = window.getComputedStyle.bind(window);
+    const styles = vi.spyOn(window, 'getComputedStyle').mockImplementation(element => {
+      const style = original(element);
+      if (element.classList.contains('reader-overview-thumbnails')) style.overflowY = 'auto';
+      return style;
+    });
+    try {
+      render(<MemoryRouter><ReaderScreen archiveId="a1" title="Long archive" pages={Array.from({ length: 300 }, (_, index) => `page-${index}`)} initialPage={157} /></MemoryRouter>);
+      fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      fireEvent.click(screen.getByRole('button', { name: '缩略面板' }));
+      const tile = screen.getByRole('button', { name: '跳转到第 158 页' });
+      expect(tile).toHaveAttribute('aria-current', 'true');
+      expect(screen.queryByRole('button', { name: '跳转到第 1 页' })).not.toBeInTheDocument();
+      const grid = tile.parentElement!;
+      expect(grid.scrollTop).toBeGreaterThan(1000);
+      fireEvent.scroll(grid);
+      expect(screen.getByRole('scrollbar', { name: '缩略图滚动位置' })).toHaveAttribute('data-scrolling', 'true');
+    } finally {
+      width.mockRestore();
+      height.mockRestore();
+      scrollHeight.mockRestore();
+      styles.mockRestore();
+    }
   });
 
   it('closes the thumbnail panel on the system back gesture before leaving the reader', async () => {
@@ -1293,6 +1339,27 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
   });
 
+  it('zooms the incoming page when both fingers land during a committed slide', async () => {
+    renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const track = reader.querySelector('.reader-track') as HTMLDivElement;
+    const slide = { cancel: vi.fn(), onfinish: undefined as (() => void) | undefined };
+    Object.defineProperty(track, 'animate', { value: () => slide, configurable: true });
+    fireEvent.touchStart(reader, { touches: [{ clientX: 340, clientY: 400 }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: 100, clientY: 400 }] });
+    fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 100, clientY: 400 }] });
+    const finish = slide.onfinish;
+    fireEvent.touchStart(reader, { touches: [{ clientX: 200, clientY: 400 }, { clientX: 300, clientY: 400 }] });
+    const frame = reader.querySelector<HTMLElement>('[aria-label="分页阅读"] > div');
+    expect(frame?.querySelector('img')).toHaveAttribute('alt', '第 2 页');
+    fireEvent.touchMove(reader, { touches: [{ clientX: 150, clientY: 400 }, { clientX: 350, clientY: 400 }] });
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(frame?.style.transform).toContain('scale(2)');
+    fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 150, clientY: 400 }] });
+    act(() => finish?.());
+    expect(frame?.querySelector('img')).toHaveAttribute('alt', '第 2 页');
+  });
+
   it('allows a damped undershoot but settles back to 100 percent', () => {
     vi.useFakeTimers();
     const view = renderReader();
@@ -1300,6 +1367,7 @@ describe('reader screen', () => {
       const reader = screen.getByRole('main', { name: '漫画阅读器' });
       const frame = reader.querySelector('[aria-label="分页阅读"] > div') as HTMLElement;
       fireEvent.wheel(reader, { deltaY: 120 });
+      act(() => vi.advanceTimersToNextFrame());
       expect(frame.style.transform).toMatch(/scale\(0\.96/);
       act(() => vi.advanceTimersByTime(180));
       expect(frame.style.transform).toContain('scale(1)');
@@ -1364,7 +1432,7 @@ describe('reader screen', () => {
     expect(screen.getByRole('img', { name: '第 1 页' })).toBeInTheDocument();
     expect(screen.queryByRole('img', { name: '第 2 页' })).not.toBeInTheDocument();
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    await user.click(screen.getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     expect(screen.getByRole('img', { name: '第 2 页' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: '第 3 页' })).toBeInTheDocument();
     // One layout control, cycling 自动 → 单页 → 双页 → webtoon: from 双页 the next
@@ -1595,24 +1663,25 @@ describe('reader screen', () => {
     expect(screen.queryByRole('button', { name: '重置缩放' })).not.toBeInTheDocument();
   });
 
-  it('sends a double click back to the original scale from wherever the wheel left it', () => {
+  it('follows the PhotoView zoom steps starting between two levels', async () => {
     const { container } = renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     const zoomed = () => container.querySelector('.reader-single, .reader-spread') as HTMLElement;
 
     fireEvent.wheel(reader, { deltaY: -200 });
-    expect(zoomed().style.transform).not.toContain('scale(1)');
-    // It used to reset only once the scale had reached the double-tap target, so
-    // anything in between was enlarged further instead.
-    fireEvent.doubleClick(reader);
-    expect(zoomed().style.transform).toContain('scale(1)');
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(zoomed().style.transform).toMatch(/scale\(1\./);
+    for (const scale of [1.75, 3, 1]) {
+      fireEvent.doubleClick(reader);
+      expect(zoomed().style.transform).toContain(`scale(${scale})`);
+    }
   });
 
   // 用户报的：阅读模式是整屏的，自绘标题栏（唯一能拖窗口的地方）被它盖住，于是
   // 那一屏没法移动窗口。阅读态的顶栏现在铺外套那套手势：空处按下＝原生拖动，
   // 双击＝最大化，并且**就地吃掉**这一下——根部还有一个「双击回到原始比例」的
   // 处理器，点在栏上不该顺手把画布比例也翻一遍。
-  it('drags and maximizes the native window from the reader top bar', () => {
+  it('drags and maximizes the native window from the reader top bar', async () => {
     const invoke = vi.fn(() => Promise.resolve(false));
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
     const view = renderReader();
@@ -1625,6 +1694,7 @@ describe('reader screen', () => {
 
       // 先把比例从 1 挪开：这样「双击有没有漏到画布上」才看得出来。
       fireEvent.wheel(reader, { deltaY: -200 });
+      await act(async () => { await new Promise(requestAnimationFrame); });
       expect(zoomed().style.transform).not.toContain('scale(1)');
 
       const title = bar.querySelector('strong') as HTMLElement;
@@ -1650,7 +1720,7 @@ describe('reader screen', () => {
   // 量不到它——顶栏那两下手势自己 `stopPropagation` 了，它在乎的是**没有漏到画布上**
   // 这一件事实；漏的是另外两条路：底栏根本没铺那两下手势，而顶栏铺了却在碰到控件时
   // 早退（`isControl`）。所以这一条把落点放在底栏的空白处与顶栏的按钮上。
-  it('keeps a double click on either bar off the page underneath it', () => {
+  it('keeps a double click on either bar off the page underneath it', async () => {
     const invoke = vi.fn(() => Promise.resolve(false));
     (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ = { invoke };
     const view = renderReader();
@@ -1663,6 +1733,7 @@ describe('reader screen', () => {
 
       // 先把比例从 1 挪开：这样「双击有没有漏到画布上」才看得出来。
       fireEvent.wheel(reader, { deltaY: -200 });
+      await act(async () => { await new Promise(requestAnimationFrame); });
       const anchored = zoomed().style.transform;
       expect(anchored).not.toContain('scale(1)');
 
@@ -1840,6 +1911,7 @@ describe('reader screen', () => {
     try {
       const image = screen.getByRole('img', { name: '第 1 页' });
       const source = image.getAttribute('src');
+      fireEvent.load(image);
       Object.defineProperties(image, {
         naturalWidth: { configurable: true, value: 6000 },
         naturalHeight: { configurable: true, value: 8000 },
@@ -1851,7 +1923,7 @@ describe('reader screen', () => {
       await act(async () => { await new Promise(requestAnimationFrame); });
       expect(screen.getByRole('img', { name: '第 1 页' })).toBe(image);
       expect(image).toHaveAttribute('src', source);
-      expect(view.container.querySelector('canvas.reader-gesture-texture')).toBeNull();
+      expect(view.container.querySelector('canvas')).toBeNull();
       fireEvent.touchEnd(reader, { touches: [], changedTouches: [{ clientX: 75, clientY: 400 }] });
       expect(bitmap).not.toHaveBeenCalled();
     } finally { view.unmount(); vi.unstubAllGlobals(); }
@@ -1875,7 +1947,23 @@ describe('reader screen', () => {
     expect(frame.style.transform).toBe('scale(1) translate(0px, 0px)');
     markImagesReady(container);
     fireEvent.doubleClick(reader, { clientX: 195, clientY: 400 });
-    expect(frame.style.transform).toContain('scale(2)');
+    expect(frame.style.transform).toContain('scale(1.75)');
+  });
+
+  it('continues the same pinch when the incoming page finishes loading between touch samples', () => {
+    const { container } = renderReader();
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    fireEvent.keyDown(reader, { key: 'ArrowRight' });
+    const image = screen.getByRole('img', { name: '第 2 页' });
+    Object.defineProperty(image, 'complete', { configurable: true, value: false });
+    const frame = image.closest('.reader-single') as HTMLElement;
+    fireEvent.touchStart(reader, { touches: [{ clientX: 100, clientY: 200 }, { clientX: 200, clientY: 200 }] });
+    fireEvent.touchMove(reader, { touches: [{ clientX: 90, clientY: 200 }, { clientX: 210, clientY: 200 }] });
+    expect(frame.style.transform).toContain('scale(1)');
+    markImagesReady(container);
+    fireEvent.touchMove(reader, { touches: [{ clientX: 60, clientY: 200 }, { clientX: 240, clientY: 200 }] });
+    expect(frame.style.transform).toContain('scale(1.5)');
+    fireEvent.touchEnd(reader, { touches: [] });
   });
 
   it('preserves the decoded neighbouring image when a swipe lands', () => {
@@ -1941,6 +2029,7 @@ describe('reader screen', () => {
     expect(within(toolbar).queryByRole('button', { name: '全屏' })).not.toBeInTheDocument();
     expect(within(toolbar).queryByRole('button', { name: '退出全屏' })).not.toBeInTheDocument();
     expect(within(toolbar).getByText('1 / 3')).toBeInTheDocument();
+    expect(within(toolbar).queryByRole('button', { name: /^(上一页|下一页)$/ })).not.toBeInTheDocument();
   });
 
   it('answers every turn of the page with a fresh cue on the bottom bar', async () => {
@@ -1951,18 +2040,18 @@ describe('reader screen', () => {
     // 还没翻过页：光线那个元素不该在（栏自己的进场动画与它不是一件事）。
     expect(toolbar.querySelector('.reader-toolbar-turn')).toBeNull();
 
-    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     const first = toolbar.querySelector('.reader-toolbar-turn');
     expect(first).not.toBeNull();
 
     // 每翻一页得是一个**新元素**：重挂载才是重播一条 CSS 动画，改属性值不是——实测
     // （debug_outputs/reader-motion）里只把属性在两个值之间轮流，第二页一条动画都没跑。
-    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     const second = toolbar.querySelector('.reader-toolbar-turn');
     expect(second).not.toBeNull();
     expect(second).not.toBe(first);
 
-    await user.click(within(toolbar).getByRole('button', { name: '上一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageUp' });
     expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBe(second);
   });
 
@@ -1972,7 +2061,7 @@ describe('reader screen', () => {
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     await user.click(reader);
     const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
-    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBeNull();
 
     // 收起来：底栏是条件挂载，260ms 退场窗口过去之后整棵子树摘掉。
@@ -1987,7 +2076,7 @@ describe('reader screen', () => {
     expect(again.querySelector('.reader-toolbar-turn')).toBeNull();
 
     // 真翻一页还是要回应。
-    await user.click(within(again).getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     expect(again.querySelector('.reader-toolbar-turn')).not.toBeNull();
   });
 
@@ -2036,7 +2125,7 @@ describe('reader screen', () => {
     );
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
     const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
-    await user.click(within(toolbar).getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBeNull();
   });
 

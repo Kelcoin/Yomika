@@ -89,7 +89,7 @@ fn get(c: &Connection, scope: &str, name: &str, key: &str) -> Result<Value, Stri
     let raw:Option<String>=c.query_row("SELECT record FROM lrr_bridge_collections WHERE scope_id=?1 AND collection=?2 AND key=?3",params![scope,name,key],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
     raw.map(|r|serde_json::from_str(&r).map_err(|_|"Invalid cached collection record".into())).unwrap_or_else(||Ok(json!({"collection":name,"key":key,"version":0,"value":null,"createdAt":null,"updatedAt":null})))
 }
-fn mirror(c: &Connection, scope: &str, r: &Value) -> Result<(), String> {
+pub(super) fn mirror(c: &Connection, scope: &str, r: &Value) -> Result<(), String> {
     validate_record(r)?;
     let name = r["collection"].as_str().unwrap();
     let key = r["key"].as_str().unwrap();
@@ -117,7 +117,7 @@ fn mirror(c: &Connection, scope: &str, r: &Value) -> Result<(), String> {
     Ok(())
 }
 pub(super) fn queue(c: &mut Connection, scope: &str, op: Value) -> Result<Value, String> {
-    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let tx = super::write_transaction(c)?;
     let result = queue_in(&tx, scope, op)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
@@ -237,7 +237,7 @@ async fn list_once(app: &tauri::AppHandle, scope: &str, input: Value) -> Result<
         if records.len() >= total {
             let scope = scope.to_owned();
             return db(app,move|c|{
-                let tx=c.transaction().map_err(|e|e.to_string())?;
+                let tx=super::write_transaction(c)?;
                 let keys=records.iter().map(|r|r["key"].as_str().unwrap()).collect::<std::collections::HashSet<_>>();
                 if keys.len()!=records.len(){return Err("Invalid duplicate collection key".into());}
                 // A complete authoritative snapshot may omit cached rows after restore.
@@ -268,7 +268,7 @@ pub(super) fn acknowledge(
     op: &Value,
     data: &Value,
 ) -> Result<(), String> {
-    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let tx = super::write_transaction(c)?;
     if data["errorCode"] == "BRIDGE_CONFLICT" {
         tx.execute(
             "UPDATE lrr_bridge_outbox SET conflict=1 WHERE operation_id=?1",
@@ -332,7 +332,7 @@ pub(super) async fn discard(
     let scope = scope.to_owned();
     let target = target.to_owned();
     db(app, move |c| {
-        let tx = c.transaction().map_err(|e| e.to_string())?;
+        let tx = super::write_transaction(c)?;
         tx.execute(
             "DELETE FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2",
             params![scope, target],
@@ -441,7 +441,12 @@ mod tests {
         c.execute("UPDATE lrr_bridge_outbox SET conflict=1", [])
             .unwrap();
         assert!(queue(&mut c, "s", preset("second")).is_err());
-        assert!(super::super::configure_local(&mut c, "s".into(), false, None).is_err());
+        let disabled = super::super::configure_local(&mut c, "s".into(), false, None).unwrap();
+        assert_eq!(disabled["enabled"], false);
+        assert_eq!(disabled["conflicts"], 1);
+        let resumed = super::super::configure_local(&mut c, "s".into(), true, None).unwrap();
+        assert_eq!(resumed["conflicts"], 1);
+        assert!(queue(&mut c, "s", preset("third")).is_err());
         super::super::abandon_pending(&mut c, "s".into()).unwrap();
         assert_eq!(
             c.query_row("SELECT count(*) FROM search_presets", [], |r| r

@@ -37,6 +37,7 @@ const EH_FAVORITE_DELETE_SYNC_KEY: &str = "preferences.eh_favorite_delete_sync";
 const CONFIRM_EH_FAVORITE_DELETE_KEY: &str = "preferences.confirm_eh_favorite_delete";
 const CONTINUE_READING_SHOW_FINISHED_KEY: &str = "preferences.continue_reading_show_finished";
 const RANDOM_ROAM_SHOW_FINISHED_KEY: &str = "preferences.random_roam_show_finished";
+const EH_COMMENT_SORT_KEY: &str = "preferences.eh_comment_sort";
 const EH_MY_TAGS_PRIORITY_KEY: &str = "preferences.eh_my_tags_priority";
 const DETAIL_ACTIONS_KEY: &str = "preferences.detail_actions";
 const SFW_MODE_KEY: &str = "preferences.sfw_mode";
@@ -176,6 +177,8 @@ pub struct PreferenceSnapshot {
     /// colours. Needs a signed-in account and one mytags fetch.
     #[serde(default)]
     pub eh_my_tags_priority: bool,
+    #[serde(default = "default_eh_comment_sort")]
+    pub eh_comment_sort: String,
     /// SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。
     #[serde(default)]
     pub sfw_mode: bool,
@@ -332,6 +335,7 @@ impl Default for PreferenceSnapshot {
             continue_reading_show_finished: true,
             random_roam_show_finished: true,
             eh_my_tags_priority: false,
+            eh_comment_sort: default_eh_comment_sort(),
             sfw_mode: false,
             detail_date_kind: default_detail_date_kind(),
             detail_actions: default_detail_actions(),
@@ -399,6 +403,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         || value.detail_actions.len() > 7
         || value.detail_actions.iter().any(|item| !matches!(item.as_str(), "read" | "readingList" | "favorites" | "download" | "edit" | "clearProgress" | "delete"))
         || !matches!(value.detail_date_kind.as_str(), "added" | "published")
+        || !matches!(value.eh_comment_sort.as_str(), "score-desc" | "score-asc" | "gallery")
         // 导入导出范围：条目数与长度都设上限，避免一行手改的配置把界面撑坏。
 
     {
@@ -427,6 +432,10 @@ fn normalize_bottom_nav_items(items: &[String]) -> Vec<String> {
 /// One table scan replaces one point query per key: load_preferences_from used
 /// to run ~28 SELECTs + parses per invocation, on the main thread, at startup
 /// and at every preferences reload.
+fn default_eh_comment_sort() -> String {
+    "score-desc".into()
+}
+
 fn map_value<T: serde::de::DeserializeOwned>(
     stored: &std::collections::HashMap<String, String>,
     key: &str,
@@ -516,6 +525,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
             EH_MY_TAGS_PRIORITY_KEY,
             defaults.eh_my_tags_priority,
         )?,
+        eh_comment_sort: map_value(&stored, EH_COMMENT_SORT_KEY, defaults.eh_comment_sort)?,
         sfw_mode: map_value(&stored, SFW_MODE_KEY, defaults.sfw_mode)?,
         detail_date_kind: map_value(&stored, DETAIL_DATE_KIND_KEY, defaults.detail_date_kind)?,
         detail_actions: map_value(&stored, DETAIL_ACTIONS_KEY, defaults.detail_actions)?,
@@ -636,6 +646,7 @@ pub(crate) fn write_preference_keys(
             EH_MY_TAGS_PRIORITY_KEY,
             serde_json::to_string(&value.eh_my_tags_priority),
         ),
+        (EH_COMMENT_SORT_KEY, serde_json::to_string(&value.eh_comment_sort)),
         (SFW_MODE_KEY, serde_json::to_string(&value.sfw_mode)),
         (DETAIL_DATE_KIND_KEY, serde_json::to_string(&value.detail_date_kind)),
         (DETAIL_ACTIONS_KEY, serde_json::to_string(&value.detail_actions)),
@@ -1009,6 +1020,7 @@ mod tests {
             continue_reading_show_finished: false,
             random_roam_show_finished: false,
             eh_my_tags_priority: true,
+            eh_comment_sort: "score-asc".into(),
             sfw_mode: true,
             detail_actions: vec!["read".into(), "download".into()],
             floating_nav: true,

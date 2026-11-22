@@ -13,7 +13,7 @@ my $JSON = JSON::PP->new->canonical->ascii->allow_nonref;
 
 sub plugin_info {
     return (name => 'Yomika Bridge', type => 'script', namespace => 'yomikabridge',
-        author => 'Yomika', version => '1.2.0', parameters => {
+        author => 'Yomika', version => '1.2.3', parameters => {
             import_external_history => {
                 type => 'bool', default_value => 0,
                 desc => 'Include reading recorded by LANraragi or other clients in Yomika history',
@@ -196,24 +196,33 @@ if action=='import_native_history' then
    redis.call('HSET',p..'states',visit.id,cjson.encode(s))
    local version=redis.call('HINCRBY',meta,'version',1)
    redis.call('ZADD',p..'history',version,visit.id)
-   redis.call('ZADD',p..'records',0,visit.id)
+   redis.call('ZADD',p..'records',version,visit.id)
   end
  end
  redis.call('HSET',meta,'nativeHistoryCursor',req.cursor)
  redis.call('HINCRBY',meta,'nativeHistoryRevision',1)
  if req.cursor=='0' then redis.call('HSET',meta,'nativeHistoryCompletedAt',req.now) end
- return cjson.encode(envelope({}))
+ return cjson.encode(envelope({advanced=true}))
 end
 if action=='hello' then return cjson.encode(envelope({capabilities={states=true,history=true,watchlist=true,workspace=true,collections=true,export=true,coverStatus=false,push=false},limits={requestBytes=6000,states=50,page=100,workspaceBytes=1800,collectionPage=50,collectionValueBytes=4000}})) end
 if action=='states' then
  local out={}; for _,id in ipairs(req.ids) do table.insert(out,state(id)) end
  return cjson.encode(envelope({states=out}))
 end
+if action=='history_changes' then
+ local key=p..'records'
+ local min='('..tostring(req.since)
+ local stamp=tonumber(redis.call('HGET',p..'meta','version'))
+ if req.since>stamp then return conflict({}) end
+ local ids=redis.call('ZRANGEBYSCORE',key,min,'+inf','LIMIT',req.offset,req.limit)
+ local out={}; for _,id in ipairs(ids) do table.insert(out,state(id)) end
+ return cjson.encode(envelope({states=out,total=redis.call('ZCOUNT',key,min,'+inf')}))
+end
 if action=='list' or action=='export' then
  local key=p..(action=='export' and 'records' or req.kind)
  local ids=redis.call('ZREVRANGE',key,req.offset,req.offset+req.limit-1)
  local out={}; for _,id in ipairs(ids) do table.insert(out,state(id)) end
- return cjson.encode(envelope({states=out,total=redis.call('ZCARD',key)}))
+ return cjson.encode(envelope({states=out,total=redis.call('ZCARD',key),historyDelta=true}))
 end
 if action=='workspace_get' then return workspace_response(workspace(req.key)) end
 if action=='collection_get' then return record_response(record(req.collection,req.key)) end
@@ -283,12 +292,11 @@ for batch=1,8 do
  cursor=scan[1]
  for _,id in ipairs(scan[2]) do
   if redis.call('TYPE',id).ok=='hash' then
-   local fields=redis.call('HMGET',id,'file','lastreadtime','progress','pagecount')
+   local fields=redis.call('HMGET',id,'file','lastreadtime','progress')
    local at=tonumber(fields[2])
    local page=tonumber(fields[3])
-   local count=tonumber(fields[4])
    if fields[1] and at and at>0 and at<=tonumber(ARGV[2]) and at==math.floor(at)
-       and page and page>=1 and page==math.floor(page) and count and count>=page and count<=1000000 then
+       and page and page>=1 and page==math.floor(page) and page<=1000000 then
     result[#result+1]={id=id,ts=at,pageIndex=page-1}
    end
   end
@@ -299,34 +307,43 @@ return cjson.encode({cursor=cursor,visits=result})
 LUA
 
 sub import_native_history {
-    my ($redis, $archives, $execute) = @_;
+    my ($redis, $archives, $execute, $first_history_page) = @_;
     my $meta = $PREFIX . 'meta';
-    my $revision = $redis->hget($meta, 'nativeHistoryRevision') // '0';
-    my $cursor = $redis->hget($meta, 'nativeHistoryCursor') // '0';
-    my $now = time;
-    my $completed = $redis->hget($meta, 'nativeHistoryCompletedAt') // 0;
-    return if $cursor eq '0' && $now - $completed < 10;
-    my $scan = $JSON->decode($archives->eval($NATIVE_HISTORY_SCAN, 0, $cursor, $now));
-    my @visits = sort {$a->{ts} <=> $b->{ts} || $a->{id} cmp $b->{id}}
-        @{ref($scan->{visits}) eq 'ARRAY' ? $scan->{visits} : []};
-    for my $visit (@visits) {
-        $visit->{at} = strftime('%Y-%m-%dT%H:%M:%S.000Z', gmtime(delete $visit->{ts}));
+    # Finish a typical large library on the first History request. Yield Redis
+    # between batches and bound catch-up on larger libraries or slower servers.
+    my $deadline = Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()) + 0.2;
+    my $batch_limit = $first_history_page ? 8 : 1;
+    for (1 .. $batch_limit) {
+        my $revision = $redis->hget($meta, 'nativeHistoryRevision') // '0';
+        my $cursor = $redis->hget($meta, 'nativeHistoryCursor') // '0';
+        my $now = time;
+        my $completed = $redis->hget($meta, 'nativeHistoryCompletedAt') // 0;
+        return if $cursor eq '0' && $now - $completed < 10;
+        my $scan = $JSON->decode($archives->eval($NATIVE_HISTORY_SCAN, 0, $cursor, $now));
+        my @visits = sort {$a->{ts} <=> $b->{ts} || $a->{id} cmp $b->{id}}
+            @{ref($scan->{visits}) eq 'ARRAY' ? $scan->{visits} : []};
+        for my $visit (@visits) {
+            $visit->{at} = strftime('%Y-%m-%dT%H:%M:%S.000Z', gmtime(delete $visit->{ts}));
+        }
+        my $result = $execute->({action => 'import_native_history', fromCursor => "$cursor", cursor => "$scan->{cursor}",
+            scanRevision => "$revision", now => $now, visits => \@visits});
+        return if !$result->{advanced} || $scan->{cursor} eq '0'
+            || Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()) >= $deadline;
     }
-    $execute->({action => 'import_native_history', fromCursor => "$cursor", cursor => "$scan->{cursor}",
-        scanRevision => "$revision", now => $now, visits => \@visits});
 }
 
 sub dispatch {
     my ($redis, $archives, $req, $import_external_history) = @_;
     fail('BRIDGE_INVALID_REQUEST') unless ref($req) eq 'HASH' && integer($req->{protocol}) && $req->{protocol} == 1;
     my $action = $req->{action} // '';
-    fail('BRIDGE_INVALID_REQUEST') unless !ref($action) && $action =~ /\A(?:hello|states|list|export|apply|workspace_get|workspace_put|collection_list|collection_get|collection_apply)\z/;
+    fail('BRIDGE_INVALID_REQUEST') unless !ref($action) && $action =~ /\A(?:hello|states|list|export|history_changes|apply|workspace_get|workspace_put|collection_list|collection_get|collection_apply)\z/;
     my %arg = %$req;
     if ($action eq 'states') {
         fail('BRIDGE_INVALID_REQUEST') unless ref($req->{ids}) eq 'ARRAY' && @{$req->{ids}} >= 1 && @{$req->{ids}} <= 50;
         fail('BRIDGE_INVALID_REQUEST') for grep {!archive_id($_)} @{$req->{ids}};
-    } elsif ($action eq 'list' || $action eq 'export') {
+    } elsif ($action eq 'list' || $action eq 'export' || $action eq 'history_changes') {
         fail('BRIDGE_INVALID_REQUEST') unless integer($req->{offset}) && integer($req->{limit}) && $req->{limit} >= 1 && $req->{limit} <= 100;
+        fail('BRIDGE_INVALID_REQUEST') if $action eq 'history_changes' && !integer($req->{since});
         fail('BRIDGE_INVALID_REQUEST') if $action eq 'list' && (ref($req->{kind}) || ($req->{kind} // '') !~ /\A(?:history|watchlist)\z/);
     } elsif ($action eq 'collection_list') {
         fail('BRIDGE_INVALID_REQUEST') unless collection_name($req->{collection}) && integer($req->{offset})
@@ -381,11 +398,12 @@ sub dispatch {
     # IDs are persisted using HSETNX inside the same script, including concurrent first callers.
     my $entropy = join(':', time, $$, rand(), rand(), {});
     my $execute = sub {$JSON->decode($redis->eval($LUA, 1, $PREFIX, $JSON->encode($_[0]), sha256_hex($entropy), sha256_hex('epoch:' . $entropy)))};
-    if ($import_external_history && $action eq 'list' && $req->{kind} eq 'history' && !$req->{offset}) {
-        import_native_history($redis, $archives, $execute);
+    my $first_history_page = !$req->{offset} && ($action eq 'history_changes' || ($action eq 'list' && $req->{kind} eq 'history'));
+    if ($import_external_history && ($action eq 'hello' || $first_history_page)) {
+        import_native_history($redis, $archives, $execute, $first_history_page && $action ne 'history_changes');
     }
     my $result = $execute->(\%arg);
-    if ($action =~ /\A(?:hello|states|list|export|collection_list|collection_get)\z/) {
+    if ($action =~ /\A(?:hello|states|list|export|history_changes|collection_list|collection_get)\z/) {
         my $candidates = $action eq 'hello' ? $execute->({action => 'reconcile_candidates'}) : $result;
         my (@missing_states, @missing_pairs);
         for my $s (ref($candidates->{states}) eq 'ARRAY' ? @{$candidates->{states}} : ()) {
@@ -422,6 +440,9 @@ sub dispatch {
     }
     # Redis Lua cjson serializes its empty table as {}, not [].
     $result->{states} = [] if exists($result->{states}) && ref($result->{states}) eq 'HASH' && !keys(%{$result->{states}});
+    if ($action eq 'hello') {
+        $result->{capabilities}{importExternalHistory} = $import_external_history ? JSON::PP::true : JSON::PP::false;
+    }
     return $result;
 }
 
@@ -438,7 +459,10 @@ sub run_script {
         require LANraragi::Model::Config;
         $redis = LANraragi::Model::Config->get_redis_config;
         $archives = LANraragi::Model::Config->get_redis;
-        my $flag = ref($settings) eq 'HASH' ? $settings->{import_external_history} : undef;
+        # A stale customargs field makes LANraragi call named plugins with
+        # positional arguments, even though the UI reads/writes named settings.
+        my $flag = ref($settings) eq 'HASH' ? $settings->{import_external_history}
+            : $redis->hget('LRR_PLUGIN_YOMIKABRIDGE', 'import_external_history');
         my $import_external_history = defined($flag) && $flag =~ /\A(?:1|true|on)\z/i;
         $result = dispatch($redis, $archives, $req, $import_external_history);
         1;

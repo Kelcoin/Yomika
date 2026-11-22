@@ -94,6 +94,46 @@ pub async fn security_call<T: serde::de::DeserializeOwned>(
     app: &AppHandle, command: &str, payload: serde_json::Value,
 ) -> Result<T, String> { call(app, command, payload).await }
 
+pub(crate) async fn prepare_reader_slot(
+    app: &AppHandle,
+    file: crate::compute::leases::ReaderFile,
+    right_file: Option<crate::compute::leases::ReaderFile>,
+    aspect: f32,
+    slot: i32,
+    page: i32,
+    session: u32,
+) -> Result<bool, String> {
+    use std::os::fd::AsRawFd;
+
+    let cache = app.path().app_cache_dir().map_err(|error| error.to_string())?;
+    let files = [Some(file.clone()), right_file.clone()];
+    let animations = tokio::task::spawn_blocking(move || {
+        files.map(|source| -> Result<Option<std::fs::File>, ()> {
+            let Some(source) = source else { return Ok(None); };
+            let file = source.lock().map_err(|_| ())?;
+            crate::native_reader::animation::Animation::prepare_apng(&file, &cache)
+        })
+    }).await.map_err(|error| error.to_string())?;
+    let [Ok(left_animation), Ok(right_animation)] = animations else { return Ok(false); };
+    let fd = file.lock().map_err(|_| "Reader file unavailable")?.as_raw_fd();
+    let right_fd = match &right_file {
+        Some(file) => file.lock().map_err(|_| "Reader file unavailable")?.as_raw_fd(),
+        None => -1,
+    };
+    // Keep the file alive until Kotlin opens its independently owned descriptor.
+    #[derive(serde::Deserialize)]
+    struct PreparedSlot { prepared: bool }
+    let prepared = call::<PreparedSlot>(app, "prepareReaderSlot", json!({
+        "fd": fd, "rightFd": right_fd,
+        "animationFd": left_animation.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+        "rightAnimationFd": right_animation.as_ref().map_or(-1, AsRawFd::as_raw_fd),
+        "aspect": aspect, "slot": slot, "page": page, "session": session,
+    }))
+        .await.is_ok_and(|result| result.prepared);
+    drop((file, right_file, left_animation, right_animation));
+    Ok(prepared)
+}
+
 pub async fn login_open(app: &AppHandle, url: &str, user_agent: &str) -> Result<(), String> {
     call::<serde_json::Value>(app, "ehLoginOpen", json!({ "url": url, "userAgent": user_agent }))
         .await
@@ -175,6 +215,12 @@ pub async fn set_system_bar_style(app: &AppHandle, dark: bool) -> Result<(), Str
 pub async fn set_status_bar_visible(app: &AppHandle, visible: bool) -> Result<(), String> {
     call::<serde_json::Value>(app, "setStatusBarVisible", json!({ "visible": visible }))
         .await.map(|_| ())
+}
+
+pub async fn set_reader_keyboard_overlay(app: &AppHandle, enabled: bool) -> Result<(), String> {
+    call::<serde_json::Value>(app, "setReaderKeyboardOverlay", json!({ "enabled": enabled }))
+        .await
+        .map(|_| ())
 }
 
 /// 触感反馈：长按这类「按住了」的确认。档位（`light` / `medium` / `heavy` / `selection`）

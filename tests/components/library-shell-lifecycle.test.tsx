@@ -62,6 +62,7 @@ it('keeps compact list DOM and scroll position across actual detail navigation',
     workspace.scrollTop = 650;
     fireEvent.scroll(workspace);
     fireEvent.click(screen.getByText('open detail'));
+    expect(workspace.scrollTop).toBe(0);
     workspace.scrollTop = 120;
     fireEvent.scroll(workspace);
     fireEvent.click(screen.getByText('back'));
@@ -80,4 +81,17 @@ it('keeps the same library DOM and state when opening and closing a split detail
   expect(input).toHaveValue('artist:sample');
   view.rerender(<MemoryRouter><LibraryShell /></MemoryRouter>);
   expect(screen.getByRole('textbox')).toBe(input);
+});
+
+
+it('starts a different split detail at the top while preserving the list scroll', () => {
+  const view = render(<MemoryRouter><LibraryShell archiveId="archive-a" /></MemoryRouter>);
+  const list = view.container.querySelector<HTMLElement>('.library-shell-list')!;
+  const detail = view.container.querySelector<HTMLElement>('.library-shell-detail')!;
+  list.scrollTop = 650;
+  detail.scrollTop = 320;
+  view.rerender(<MemoryRouter><LibraryShell archiveId="archive-b" /></MemoryRouter>);
+  expect(view.container.querySelector('.library-shell-detail')).toBe(detail);
+  expect(detail.scrollTop).toBe(0);
+  expect(list.scrollTop).toBe(650);
 });

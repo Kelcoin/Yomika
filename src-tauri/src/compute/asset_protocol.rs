@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use super::leases::{is_allowed_image_mime, LeaseError, LeaseStore};
+use super::leases::{is_allowed_image_mime, LeaseError, LeaseStore, ReaderFile};
 /// 协议名与主机名都在租借表那边定义（URL 是租借拼出来的），这里转手给外面用。
 pub use super::leases::{HOST, SCHEME};
 
@@ -223,13 +223,22 @@ pub fn parse_range(header: &str, total: u64) -> Result<(u64, u64), AssetError> {
 /// 把一次请求翻译成「回什么状态、读哪一段字节」。
 ///
 /// 传进去的 `now` 让过期判断不依赖真实时钟，测试里一步就能跨过 TTL。
+#[cfg(test)]
 pub fn plan(
     request: &AssetRequest,
     store: &LeaseStore,
     now: Instant,
 ) -> Result<AssetReply, AssetError> {
+    plan_file(request, store, now).map(|(reply, _)| reply)
+}
+
+fn plan_file(
+    request: &AssetRequest,
+    store: &LeaseStore,
+    now: Instant,
+) -> Result<(AssetReply, Option<ReaderFile>), AssetError> {
     let lease_id = parse_lease_id(&request.uri)?;
-    let view = store.view(&lease_id, &request.webview_label, now)?;
+    let (view, file) = store.view_with_file(&lease_id, &request.webview_label, now)?;
     // 租借表里的类型在开租借时已经过白名单，这里再查一次：这一层是渲染器的门口，
     // 门口的规则应该自己站得住，而不是「上面那层查过了」。
     if !is_allowed_image_mime(&view.mime) {
@@ -239,25 +248,25 @@ pub fn plan(
     }
     let total = view.byte_length;
     if request.method == AssetMethod::Head {
-        return Ok(AssetReply {
+        return Ok((AssetReply {
             status: STATUS_OK,
             mime: view.mime,
             content_length: total,
             content_range: None,
             body: AssetBody::Empty,
-        });
+        }, file));
     }
     let Some(header) = request.range.as_deref() else {
-        return Ok(AssetReply {
+        return Ok((AssetReply {
             status: STATUS_OK,
             mime: view.mime,
             content_length: total,
             content_range: None,
             body: AssetBody::Full(view.path),
-        });
+        }, file));
     };
     let (start, end) = parse_range(header, total)?;
-    Ok(AssetReply {
+    Ok((AssetReply {
         status: STATUS_PARTIAL,
         mime: view.mime,
         content_length: end - start + 1,
@@ -267,7 +276,7 @@ pub fn plan(
             start,
             length: end - start + 1,
         },
-    })
+    }, file))
 }
 
 // ---------------------------------------------------------------------------
@@ -331,8 +340,8 @@ fn build_response<R: tauri::Runtime>(
         webview_label: webview_label.to_string(),
         range: range.map(str::to_string),
     };
-    match plan(&request, handle.leases(), Instant::now()) {
-        Ok(reply) => materialize(reply, method),
+    match plan_file(&request, handle.leases(), Instant::now()) {
+        Ok((reply, file)) => materialize(reply, method, file),
         Err(error) => {
             let content_range = match &error {
                 // 416 要告诉客户端文件到底多大，否则它没法重试。
@@ -345,17 +354,17 @@ fn build_response<R: tauri::Runtime>(
 }
 
 /// 按计划把字节读出来。读失败是 500：文件可能刚好被清缓存删掉，那不是请求的错。
-fn materialize(reply: AssetReply, method: AssetMethod) -> tauri::http::Response<Vec<u8>> {
+fn materialize(reply: AssetReply, method: AssetMethod, file: Option<ReaderFile>) -> tauri::http::Response<Vec<u8>> {
     let bytes = match (&reply.body, method) {
         (_, AssetMethod::Head) => Vec::new(),
         (AssetBody::Empty, _) => Vec::new(),
-        (AssetBody::Full(path), _) => match std::fs::read(path) {
+        (AssetBody::Full(path), _) => match read_range(path, file.as_ref(), 0, reply.content_length) {
             Ok(bytes) => bytes,
             Err(error) => {
                 return error_response(STATUS_INTERNAL, &format!("读产物失败：{error}"), None)
             }
         },
-        (AssetBody::Range { path, start, length }, _) => match read_range(path, *start, *length) {
+        (AssetBody::Range { path, start, length }, _) => match read_range(path, file.as_ref(), *start, *length) {
             Ok(bytes) => bytes,
             Err(error) => {
                 return error_response(STATUS_INTERNAL, &format!("读产物失败：{error}"), None)
@@ -365,7 +374,7 @@ fn materialize(reply: AssetReply, method: AssetMethod) -> tauri::http::Response<
     let mut builder = tauri::http::Response::builder()
         .status(reply.status)
         .header(tauri::http::header::CONTENT_TYPE, &reply.mime)
-        .header(tauri::http::header::CONTENT_LENGTH, bytes.len())
+        .header(tauri::http::header::CONTENT_LENGTH, reply.content_length)
         .header("X-Content-Type-Options", "nosniff")
         .header("Accept-Ranges", "bytes");
     if let Some(content_range) = &reply.content_range {
@@ -376,9 +385,16 @@ fn materialize(reply: AssetReply, method: AssetMethod) -> tauri::http::Response<
         .unwrap_or_else(|_| error_response(STATUS_INTERNAL, "响应拼不出来", None))
 }
 
-fn read_range(path: &std::path::Path, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
+fn read_range(path: &std::path::Path, file: Option<&ReaderFile>, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
+    if let Some(file) = file {
+        let mut file = file.lock().map_err(|_| std::io::Error::other("Reader file unavailable"))?;
+        return read_file_range(&mut file, start, length);
+    }
+    read_file_range(&mut std::fs::File::open(path)?, start, length)
+}
+
+fn read_file_range(file: &mut std::fs::File, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(start))?;
     let mut buffer = vec![0u8; length as usize];
     file.read_exact(&mut buffer)?;

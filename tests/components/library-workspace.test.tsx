@@ -153,6 +153,22 @@ describe('library workspace', () => {
     expect(screen.getByRole('button', { name: /显示模式：缩略图列表/ })).toBeInTheDocument();
   });
 
+  it('packs thumbnail rows to the measured list width before any resize observation', () => {
+    const observe = vi.spyOn(ResizeObserver.prototype, 'observe').mockImplementation(() => {});
+    const height = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(600);
+    const width = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('archive-list') ? 400 : 0;
+    });
+    try {
+      const { container } = renderWorkspace({ archives: archives.slice(0, 8), cardStyle: 'thumbnail' });
+      expect(container.querySelector('.archive-thumb-grid-row')?.children).toHaveLength(2);
+    } finally {
+      width.mockRestore();
+      height.mockRestore();
+      observe.mockRestore();
+    }
+  });
+
   it('marks a row as selected only once one has been chosen', async () => {
     const user = userEvent.setup();
     renderWorkspace({ archives });
@@ -300,7 +316,7 @@ describe('library workspace', () => {
     });
 
     const firstItem = screen.getAllByRole('listitem')[0]!;
-    const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+    const card = document.querySelector('[data-archive-tooltip="Archive 0"]')!;
     const timeline = firstItem.querySelector<HTMLElement>('.archive-row-timeline');
     // The day's first row names the day; every row still shows its own time.
     expect(timeline).toHaveTextContent('今天');
@@ -556,16 +572,17 @@ describe('library workspace', () => {
     expect(ticks[0]).not.toHaveClass('is-active');
   });
 
-  it('pins the reading progress to the card’s own bottom edge', () => {    renderWorkspace({
+  it.each(['wide', 'thumbnail'] as const)('pins the %s card reading progress to its own bottom edge', (cardStyle) => {
+    renderWorkspace({
       archives: archives.slice(0, 1),
-      cardStyle: 'wide',
+      cardStyle,
       readingProgressByArchiveId: new Map([['archive-0', 40]]),
       // 这一条量的是横条贴在哪儿，不是档位：默认档（仅历史记录）下档案库本来就不画条，
       // 所以把这张卡放在「历史那两处」的位置上，让横条真的渲染出来。
       progressScope: 'history',
     });
 
-    const card = screen.getByRole('button', { name: /^Archive 0\b/ });
+    const card = document.querySelector('[data-archive-tooltip="Archive 0"]')!;
     const bar = card.querySelector<HTMLElement>('.archive-card-progress');
     // 贴卡片自己的底边：横条是卡片的直接子元素，卡片自己的 overflow: hidden +
     // border-radius 才能把两端削成与下缘一致的圆角（在文案栏里只能贴到文案栏

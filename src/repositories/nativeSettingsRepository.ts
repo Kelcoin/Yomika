@@ -55,6 +55,7 @@ export const PreferenceSnapshotSchema = z.object({
    * cards and detail pages, colouring those chips with the account's preset
    * colours. Needs a signed-in account and one mytags fetch. */
   ehMyTagsPriority: z.boolean().default(false),
+  ehCommentSort: z.enum(['score-desc', 'score-asc', 'gallery']).default('score-desc'),
   /** SFW 模式：所有封面模糊显示，悬停/点击才临时显示该封面，移开或失焦恢复。 */
   sfwMode: z.boolean().default(false),
   detailActions: z.array(z.enum(DETAIL_ACTIONS)).max(7).default(DEFAULT_DETAIL_ACTIONS),
@@ -140,6 +141,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   continueReadingShowFinished: true,
   randomRoamShowFinished: true,
   ehMyTagsPriority: false,
+  ehCommentSort: 'score-desc',
   sfwMode: false,
   detailActions: [...DEFAULT_DETAIL_ACTIONS],
   detailDateKind: 'published',

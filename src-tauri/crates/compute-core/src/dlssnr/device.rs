@@ -953,7 +953,7 @@ impl GpuContext {
             let mut mapped: *mut std::ffi::c_void = std::ptr::null_mut();
             let range = D3D12_RANGE {
                 Begin: 0,
-                End: rgba.len(),
+                End: (height as usize - 1) * aligned_pitch as usize + row_pitch as usize,
             };
             buffer
                 .Map(0, Some(&range), Some(&mut mapped))

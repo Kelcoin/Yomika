@@ -63,12 +63,19 @@ export function ArchiveDetailFacts({ facts, loading = false }: { facts: readonly
   const root = useRef<HTMLDListElement>(null);
   useLoadingReveal(root, loading);
   return <dl ref={root} className="archive-detail-facts" aria-label="档案信息">
-    {facts.map(({ kind, label, value }) => (
-      <div key={kind} data-fact={kind} title={label}>
-        <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
-        <dd>{loading ? <span className="skeleton-line" /> : value}</dd>
-      </div>
-    ))}
+    {facts.map(({ kind, label, value }) => {
+      const dateTime = (kind === 'added' || kind === 'published') ? /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})$/.exec(value) : null;
+      return (
+        <div key={kind} data-fact={kind} title={dateTime && !loading ? `${label} · ${value}` : label}>
+          <dt aria-label={label}><DetailFactGlyph kind={kind} /><span className="visually-hidden">{label}</span></dt>
+          <dd>{loading ? <span className="skeleton-line" /> : dateTime ? (
+            <time className="archive-detail-fact-time" dateTime={`${dateTime[1]}T${dateTime[2]}`}>
+              <span>{dateTime[1]}</span>{' '}<span>{dateTime[2]}</span>
+            </time>
+          ) : value}</dd>
+        </div>
+      );
+    })}
   </dl>;
 }
 

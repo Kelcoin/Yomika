@@ -432,7 +432,7 @@ pub fn output_revision(
     // 动图那一条路产出的是**多大的一份字节**由计划器决定，所以计划器的版本也是这一版
     // 身份的一部分（见 [`ANIMATION_PLAN_REVISION`]）。
     hasher.update(&ANIMATION_PLAN_REVISION.to_le_bytes());
-    format!("dlssnr:v4:{}", hasher.finalize().to_hex())
+    format!("dlssnr:v6:{}", hasher.finalize().to_hex())
 }
 
 /// 「这一份 DLL 是哪一份」——按**内容**认（SHA-256 + 字节数）。

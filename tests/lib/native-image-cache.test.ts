@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { dlssnrTransform, NativeImageCacheAdapter, remoteTransform, renditionErrorCode } from '../../src/lib/nativeImageCache';
+import { dlssnrTransform, getNativeImageCache, loadDlssnrReaderPage, loadRemoteReaderPage, NativeImageCacheAdapter, remoteTransform, renditionErrorCode } from '../../src/lib/nativeImageCache';
 import { createImageCacheKey } from '../../src/domain/cache';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 
@@ -118,6 +118,66 @@ describe('NativeImageCacheAdapter', () => {
     expect(adapter).toHaveBeenCalledWith('remote_compute_process', {
       input: expect.objectContaining({ expectedRevision: 'a'.repeat(64) }),
     });
+  });
+
+  it('uses the Android remote lease without binary IPC and releases the exact version', async () => {
+    vi.stubGlobal('YomikaTiles', { postMessage: vi.fn() });
+    const result = { ok: true, value: { contentHash: 'e'.repeat(64), lease: {
+      leaseId: 'test-remote-file', artifactId: 'image', jobId: 'reader-remote',
+      url: 'yomika-image://assets/test-remote-file', mime: 'image/png',
+      width: 100, height: 200, byteLength: 500, estimatedDecodedBytes: 80_000,
+      pipelineRevision: 'remote-version', expiresInMs: 60_000,
+    } } };
+    const invoke = vi.fn(async (command: string, _args?: Record<string, unknown>) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'remote_compute_process_file') return result;
+      if (command === 'compute_artifact_release') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(invoke);
+    try {
+      const identity = { scopeId: 'scope', serverId: 'server', archiveId: 'remote-lease-test', pageIndex: 5,
+        rendition: 'remote' as const, transform: remoteTransform({ device: 'server', source: 'reader-page', chain: ['dlssnr'], revision: 'remote-version' }) };
+      const handle = await loadRemoteReaderPage(identity, new AbortController().signal);
+      expect(handle).toMatchObject({ url: result.value.lease.url, estimatedDecodedBytes: 80_000 });
+      expect(invoke).toHaveBeenCalledWith('remote_compute_process_file', { input: expect.objectContaining({ pageIndex: 5, expectedRevision: 'remote-version' }) });
+      expect(invoke.mock.calls.map(([command]) => command)).not.toContain('remote_compute_process');
+      getNativeImageCache().release(handle);
+      expect(invoke).toHaveBeenCalledWith('compute_artifact_release', { leaseId: 'test-remote-file' });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('delivers local DLSSNR to the native reader without binary IPC', async () => {
+    vi.stubGlobal('__yomikaNativeReaderPreview', true);
+    const lease = {
+      leaseId: 'test-local-dlssnr', artifactId: 'image', jobId: 'reader-dlssnr',
+      url: 'yomika-image://assets/test-local-dlssnr', mime: 'image/png',
+      width: 100, height: 200, byteLength: 500, estimatedDecodedBytes: 80_000,
+      pipelineRevision: 'dlssnr-version', expiresInMs: 60_000,
+    };
+    const invoke = vi.fn(async (command: string, _args?: Record<string, unknown>) => {
+      if (command === 'dlssnr_apply_page_file') return { ok: true, value: { lease, contentHash: 'd'.repeat(64) } };
+      if (command === 'compute_artifact_release') return { ok: true, value: null };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(invoke);
+    try {
+      const handle = await loadDlssnrReaderPage({
+        scopeId: 'scope', serverId: 'server', archiveId: 'dlssnr-file-test',
+        pageIndex: 5, rendition: 'dlssnr', readerSession: 42,
+      }, new AbortController().signal);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      expect(invoke).toHaveBeenCalledWith('dlssnr_apply_page_file', {
+        input: expect.objectContaining({ pageIndex: 5 }), readerSession: 42,
+      });
+      expect(handle.url).toBe(lease.url);
+      getNativeImageCache().release(handle);
+      expect(invoke).toHaveBeenCalledWith('compute_artifact_release', { leaseId: lease.leaseId });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('refuses to run a model in the host for the two computed renditions', async () => {

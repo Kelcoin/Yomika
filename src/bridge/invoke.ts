@@ -8,6 +8,23 @@ type InvokeAdapter = (command: string, args?: Record<string, unknown>) => Promis
 
 let testAdapter: InvokeAdapter | undefined;
 
+// A single proxy outage can affect every visible thumbnail. Keep the first
+// diagnostic for each server and error code while each cell handles its failure.
+const pageThumbnailLogUntil = new Map<string, number>();
+
+function shouldLogBinaryFailure(name: string, request: Record<string, unknown>, code: string): boolean {
+  if (QUIET_ERROR_CODES.has(code)) return false;
+  if (name !== 'load_archive_page_thumbnail') return true;
+  const now = Date.now();
+  const key = `${String(request.serverId)}:${code}`;
+  if ((pageThumbnailLogUntil.get(key) ?? 0) > now) return false;
+  for (const [entry, until] of pageThumbnailLogUntil) {
+    if (until <= now) pageThumbnailLogUntil.delete(entry);
+  }
+  pageThumbnailLogUntil.set(key, now + 30_000);
+  return true;
+}
+
 export function setInvokeAdapterForTests(adapter: InvokeAdapter): void {
   testAdapter = adapter;
 }
@@ -93,7 +110,7 @@ export async function invokeBinaryCommand<TRequest extends Record<string, unknow
       return err('INVALID_RESPONSE', 'Native command returned an invalid response', false);
     }
     if (!parsed.data.ok) {
-      if (!QUIET_ERROR_CODES.has(parsed.data.error.code)) {
+      if (shouldLogBinaryFailure(name, request, parsed.data.error.code)) {
         logError(`bridge/${name}`, `${parsed.data.error.code}: ${parsed.data.error.message}`, { request, error: parsed.data.error });
       }
       return err(parsed.data.error.code, parsed.data.error.message, parsed.data.error.retryable);

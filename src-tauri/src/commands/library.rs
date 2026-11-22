@@ -1049,32 +1049,15 @@ pub async fn list_categories(
             ))
         }
     };
-    let response = match reader_request(
-        reqwest::Method::GET,
-        format!("{}/api/categories", base_url.trim_end_matches('/')),
-        api_key.clone(),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
-    };
-    if !response.status().is_success() {
-        return Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            format!("LANraragi request failed ({})", response.status()),
-            response.status().is_server_error(),
-        ));
-    }
-    let raw_categories: serde_json::Value = match response.json().await {
-        Ok(value) => value,
-        Err(error) => {
-            return Ok(CommandResult::failure(
-                "INVALID_RESPONSE",
-                error.to_string(),
-                false,
-            ))
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let Some(raw_categories) = tokio::time::timeout_at(deadline, fetch_categories(&base_url, &api_key)).await.ok().flatten() else {
+        // A temporarily unreachable server should not erase the last known shelves.
+        if let Ok(connection) = database.connection.lock() {
+            if let Ok(Some(snapshot)) = read_category_snapshot(&connection, &server_id) {
+                return Ok(CommandResult::success(snapshot.categories));
+            }
         }
+        return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "Could not read LANraragi categories", true));
     };
     let wire = match parse_category_list(&raw_categories) {
         Ok(value) => value,
@@ -1088,48 +1071,51 @@ pub async fn list_categories(
     // library with many dynamic categories would otherwise fire them all at once.
     let mut dynamic_categories = JoinSet::new();
     let mut resolved = Vec::new();
-    let mut requested = 0usize;
+    let mut requested = Vec::new();
     for (index, category) in categories.iter().enumerate() {
         if !category.archives.is_empty() {
             continue;
         }
-        let Some(search) = category
-            .search
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-        else {
-            continue;
-        };
-        let base_url = base_url.clone();
-        let api_key = api_key.clone();
-        requested += 1;
-        dynamic_categories.spawn(async move {
-            resolve_category_archives(&base_url, &api_key, &search)
-                .await
-                .map(|archives| (index, archives))
-        });
-        if dynamic_categories.len() >= MAX_PARALLEL_CATEGORY_SEARCHES {
-            if let Some(Ok(Some(entry))) = dynamic_categories.join_next().await {
-                resolved.push(entry);
+        if let Some(search) = category.search.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            requested.push((index, search.to_owned()));
+        }
+    }
+    let mut next = requested.iter();
+    loop {
+        while dynamic_categories.len() < MAX_PARALLEL_CATEGORY_SEARCHES {
+            let Some((index, search)) = next.next() else { break };
+            let (index, search) = (*index, search.clone());
+            let base_url = base_url.clone();
+            let api_key = api_key.clone();
+            dynamic_categories.spawn(async move {
+                resolve_category_archives(&base_url, &api_key, &search).await.map(|archives| (index, archives))
+            });
+        }
+        match tokio::time::timeout_at(deadline, dynamic_categories.join_next()).await {
+            Ok(Some(Ok(Some(entry)))) => resolved.push(entry),
+            Ok(Some(_)) => continue,
+            _ => break,
+        }
+    }
+    drop(dynamic_categories);
+    let partial = resolved.len() < requested.len();
+    if partial {
+        let previous = database.connection.lock().ok()
+            .and_then(|connection| read_category_snapshot(&connection, &server_id).ok().flatten());
+        if let Some(previous) = previous {
+            let by_id: std::collections::HashMap<_, _> = previous.categories.into_iter().map(|category| (category.id.clone(), category)).collect();
+            for (index, _) in requested {
+                let category = &mut categories[index];
+                if let Some(old) = by_id.get(&category.id).filter(|old| old.search == category.search) {
+                    category.archives.clone_from(&old.archives);
+                }
             }
         }
     }
-    while let Some(result) = dynamic_categories.join_next().await {
-        if let Ok(Some(entry)) = result {
-            resolved.push(entry);
-        }
-    }
-    // A dynamic category that did not answer keeps an empty membership, which is
-    // the same thing an empty category looks like. Remember that the snapshot is
-    // incomplete so it is retried in minutes rather than in hours.
-    let partial = resolved.len() < requested;
     for (index, archives) in resolved {
-        if let Some(category) = categories.get_mut(index) {
-            category.archives = archives;
-        }
+        categories[index].archives = archives;
     }
+    let memberships = serde_json::to_string(&categories).map_err(|error| error.to_string())?;
     let sync_result = (|| -> Result<(), String> {
         let mut connection = database
             .connection
@@ -1144,22 +1130,18 @@ pub async fn list_categories(
                 [&server_id],
             )
             .map_err(|error| format!("清理分类缓存失败：{error}"))?;
-        for category in &categories {
-            for archive_id in &category.archives {
-                transaction
-                    .execute(
-                        "INSERT OR IGNORE INTO archive_categories (server_id, category_id, archive_id)
-                         SELECT ?1, ?2, ?3
-                         WHERE EXISTS (SELECT 1 FROM archives WHERE server_id = ?1 AND archive_id = ?3)",
-                        params![server_id, category.id, archive_id],
-                    )
-                    .map_err(|error| format!("写入分类缓存失败：{error}"))?;
-            }
-        }
+        transaction.execute(
+            "INSERT OR IGNORE INTO archive_categories (server_id, category_id, archive_id)
+             SELECT ?1, json_extract(category.value, '$.id'), archive.archive_id
+             FROM json_each(?2) AS category
+             JOIN json_each(category.value, '$.archives') AS member
+             JOIN archives AS archive ON archive.server_id = ?1 AND archive.archive_id = member.value",
+            params![server_id, memberships],
+        ).map_err(|error| format!("Category membership update failed: {error}"))?;
+        write_category_cache(&transaction, &server_id, &categories, partial)?;
         transaction
             .commit()
             .map_err(|error| format!("提交分类缓存失败：{error}"))?;
-        write_category_cache(&connection, &server_id, &categories, partial)?;
         Ok(())
     })();
     if let Err(error) = sync_result {
@@ -1632,6 +1614,10 @@ pub async fn load_archive_metadata(
 /// second local copy, and an externally removed file must be downloadable again.
 fn existing_archive_download(database: &Database, server_id: &str, archive_id: &str) -> Result<Option<DownloadResult>, String> {
     let connection = database.connection.lock().map_err(|e| e.to_string())?;
+    existing_archive_download_locked(&connection, server_id, archive_id)
+}
+
+fn existing_archive_download_locked(connection: &rusqlite::Connection, server_id: &str, archive_id: &str) -> Result<Option<DownloadResult>, String> {
     let mut statement = connection.prepare("SELECT path FROM local_archives WHERE server_id=?1 AND archive_id=?2 ORDER BY added_at DESC").map_err(|e| e.to_string())?;
     let paths = statement.query_map(params![server_id,archive_id], |row| row.get::<_,String>(0)).map_err(|e| e.to_string())?;
     for path in paths {
@@ -1645,6 +1631,59 @@ fn existing_archive_download(database: &Database, server_id: &str, archive_id: &
     connection.query_row("SELECT id,local_path FROM tasks WHERE kind='download' AND server_id=?1 AND archive_id=?2 AND status IN ('running','queued','paused','failed') ORDER BY created_at DESC LIMIT 1",
         params![server_id,archive_id], |row| Ok(DownloadResult { status: "existing".into(), task_id: row.get(0)?, path: row.get::<_,Option<String>>(1)?.unwrap_or_default() }))
         .optional().map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveDownloadStatus {
+    downloaded: bool,
+    downloading: bool,
+    received_bytes: u64,
+    total_bytes: Option<u64>,
+}
+
+#[tauri::command(async)]
+pub fn archive_download_status(
+    server_id: String,
+    archive_id: String,
+    database: State<'_, Database>,
+) -> CommandResult<ArchiveDownloadStatus> {
+    let result = (|| -> Result<_, String> {
+        let connection = database.connection.lock().map_err(|error| error.to_string())?;
+        let existing = existing_archive_download_locked(&connection, &server_id, &archive_id)?;
+        let mut status = ArchiveDownloadStatus {
+            downloaded: existing.as_ref().is_some_and(|item| item.status == "completed"),
+            downloading: false,
+            received_bytes: 0,
+            total_bytes: None,
+        };
+        if status.downloaded {
+            return Ok(status);
+        }
+        // A file is already usable between task completion and index insertion.
+        let task = connection.query_row(
+            "SELECT status,local_path,received_bytes,total_bytes FROM tasks
+             WHERE kind='download' AND server_id=?1 AND archive_id=?2
+             AND status IN ('running','queued','completed') ORDER BY created_at DESC LIMIT 1",
+            params![server_id, archive_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<u64>>(2)?.unwrap_or(0), row.get::<_, Option<u64>>(3)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        if let Some((task_status, path, received, total)) = task {
+            if task_status == "completed" {
+                status.downloaded = path.is_some_and(|path| std::path::Path::new(&path).is_file());
+            } else {
+                status.downloading = true;
+                status.received_bytes = received;
+                status.total_bytes = total;
+            }
+        }
+        Ok(status)
+    })();
+    match result {
+        Ok(status) => CommandResult::success(status),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    }
 }
 
 #[tauri::command]
@@ -3721,74 +3760,6 @@ fn sweep_orphan_parts(connection: &Connection, directory: &std::path::Path) {
     }
 }
 
-/// 批量版镜像补缺：一次把本页出现的所有 archive_id 问齐（按 500 分块，
-/// 尊重 SQLite 参数上限），原先每行一查，一页几百个本地档案就是几百次点查。
-/// 每个 id 优先取本地行归属的那台服务器的记录，没有就取第一条。
-fn query_mirror_local_archives(
-    connection: &Connection,
-    rows: &[LocalArchiveRow],
-) -> std::collections::HashMap<String, (String, String, Option<i64>, String, String)> {
-    let mut preferences: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut ids: Vec<String> = Vec::new();
-    for (_, archive_id, server_id, ..) in rows {
-        let Some(archive_id) = archive_id else { continue };
-        preferences.entry(archive_id).or_insert(server_id.as_deref().unwrap_or(""));
-        if seen.insert(archive_id) {
-            ids.push(archive_id.clone());
-        }
-    }
-    let mut mirrors: std::collections::HashMap<String, (String, String, Option<i64>, String, String)> =
-        std::collections::HashMap::new();
-    for chunk in ids.chunks(500) {
-        let mut sql = String::from(
-            "SELECT a.archive_id, a.server_id, s.scope_id, a.page_count, a.tags_json, a.title
-             FROM archives a JOIN servers s ON s.id = a.server_id
-             WHERE a.is_deleted = 0 AND a.archive_id IN (",
-        );
-        for (index, _) in chunk.iter().enumerate() {
-            if index > 0 {
-                sql.push(',');
-            }
-            sql.push_str(&format!("?{}", index + 1));
-        }
-        sql.push(')');
-        let candidates = connection
-            .prepare(&sql)
-            .and_then(|mut statement| {
-                let rows = statement.query_map(rusqlite::params_from_iter(chunk.iter()), |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                    ))
-                })?;
-                rows.collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(|error| error.to_string());
-        let Ok(candidates) = candidates else { continue };
-        for (archive_id, server_id, scope_id, page_count, tags_json, title) in candidates {
-            let preferred = preferences
-                .get(archive_id.as_str())
-                .is_some_and(|pref| **pref == server_id);
-            match mirrors.entry(archive_id) {
-                std::collections::hash_map::Entry::Vacant(slot) => {
-                    slot.insert((server_id, scope_id, page_count, tags_json, title));
-                }
-                std::collections::hash_map::Entry::Occupied(mut slot) => {
-                    if preferred {
-                        slot.insert((server_id, scope_id, page_count, tags_json, title));
-                    }
-                }
-            }
-        }
-    }
-    mirrors
-}
-
 /// 本地档案页上的一个条目。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -3898,76 +3869,19 @@ fn reconcile_local_archives(
             rows.collect::<Result<Vec<_>, _>>()
         })
         .map_err(|error| error.to_string())?;
-    let mirror = query_mirror_local_archives(connection, &rows);
-    Ok(rows
-        .into_iter()
-        .map(
-            |(path, archive_id, server_id, title, file_size, added_at, page_count, tags_json, scope_id)| {
-                let mirror = archive_id.as_deref().and_then(|archive_id| mirror.get(archive_id)).cloned();
-                // 服务器镜像只补缺：下载时抄下的那一份在，就不再要求 archives 表里
-                // 正好有这一份。补到的东西写回行里——下一次断网也读得到，而不是每
-                // 次都去问服务器上那份还在不在。
-                let mut record_server = server_id;
-                let mut record_scope = scope_id;
-                let mut record_pages = page_count;
-                let mut record_tags = tags_json;
-                let mut record_title = title;
-                if let Some((mirror_server, mirror_scope, mirror_pages, mirror_tags, mirror_title)) =
-                    mirror
-                {
-                    let before = (
-                        record_server.clone(),
-                        record_scope.clone(),
-                        record_pages,
-                        record_tags.clone(),
-                        record_title.clone(),
-                    );
-                    record_server = record_server.or(Some(mirror_server));
-                    record_scope = record_scope.or(Some(mirror_scope));
-                    record_pages = record_pages.or(mirror_pages);
-                    record_tags = record_tags.or(Some(mirror_tags));
-                    // 文件名拆出来的标题不算标题：认出了服务器上那一份就用它的。
-                    if record_title.trim().is_empty()
-                        || record_title == local_archive_title(std::path::Path::new(&path))
-                    {
-                        record_title = mirror_title;
-                    }
-                    // 只在真补到东西时写回：这一页每十几秒读一次，不能每次都对每行做
-                    // 一遍无谓的 UPDATE。
-                    if (
-                        record_server.clone(),
-                        record_scope.clone(),
-                        record_pages,
-                        record_tags.clone(),
-                        record_title.clone(),
-                    ) != before
-                    {
-                        let _ = connection.execute(
-                            "UPDATE local_archives SET server_id = ?1, scope_id = ?2, page_count = ?3, tags_json = ?4, title = ?5 WHERE path = ?6",
-                            params![record_server, record_scope, record_pages, record_tags, record_title, path],
-                        );
-                    }
-                }
-                LocalArchiveRecord {
-                    archive_id,
-                    server_id: record_server,
-                    scope_id: record_scope,
-                    title: record_title,
-                    page_count: record_pages,
-                    tags: record_tags
-                        .as_deref()
-                        .and_then(|tags| serde_json::from_str::<Vec<String>>(tags).ok())
-                        .unwrap_or_default(),
-                    path,
-                    file_size,
-                    added_at,
-                }
-            },
-        )
-        .collect())
+    // Download metadata is a snapshot owned by this file. A same-ID server
+    // archive must never overwrite it, including for manually added files.
+    Ok(rows.into_iter().map(
+        |(path, archive_id, server_id, title, file_size, added_at, page_count, tags_json, scope_id): LocalArchiveRow| LocalArchiveRecord {
+            archive_id, server_id, scope_id, title, path, file_size, added_at, page_count,
+            tags: tags_json.as_deref()
+                .and_then(|tags| serde_json::from_str::<Vec<String>>(tags).ok())
+                .unwrap_or_default(),
+        },
+    ).collect())
 }
 
-/// 本地档案页读的就是这个：先跟磁盘对齐，再回一份带镜像信息的列表。
+/// 本地档案页读的就是这个：先跟磁盘对齐，再返回本地记录。
 /// async：命令体里有目录 walk 与整表 UPSERT，必须离开主线程，
 /// 否则每 10-15s 一次的轮询会卡 UI。
 #[tauri::command(async)]
@@ -4489,6 +4403,109 @@ pub async fn load_reader_manifest(
     }))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReaderCachedFile {
+    lease: crate::compute::leases::ComputedImageLease,
+    content_hash: String,
+}
+
+/// Opens the exact cache revision without sending the encoded image through IPC.
+/// Animated formats still use the original loader, which normalizes loop counts.
+#[tauri::command]
+pub async fn reader_open_page_file(
+    server_id: String,
+    archive_id: String,
+    page_index: i64,
+    path: String,
+    task_id: Option<String>,
+    reader_session: Option<u32>,
+    database: State<'_, Database>,
+    compute: State<'_, crate::compute::ComputeHandle>,
+    webview: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+) -> Result<CommandResult<Option<ReaderCachedFile>>, String> {
+    let task = crate::inference::cancel::begin(task_id.as_deref());
+    if page_index < 0 || task.cancelled() {
+        return Ok(CommandResult::success(None));
+    }
+    let (_, scope_id) = {
+        let connection = database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
+        server_connection(&connection, &server_id)?
+    };
+    let app_data = crate::data_paths::data_dir(&app).map_err(|error| error.to_string())?;
+    let identity = reader_page_identity(&scope_id, &archive_id, page_index);
+    let mut location = crate::cache::cached_blob_location(&database, &app_data, &identity)?;
+    if location.is_none() {
+        let download = load_reader_page_bytes(server_id, archive_id, page_index, path, app.state(), app.clone());
+        match cancellable_reader_download(download, &task).await? {
+            CommandResult::Success { value, .. } => {
+                let hash = blake3::hash(&value).to_hex();
+                location = crate::cache::cached_blob_location(&database, &app_data, &identity)?
+                    .filter(|location| location.content_hash == hash.as_str());
+            }
+            CommandResult::Failure { ok, error } => return Ok(CommandResult::Failure { ok, error }),
+        }
+    }
+    let Some(location) = location.filter(|_| !task.cancelled()) else {
+        return Ok(CommandResult::success(None));
+    };
+    lease_cached_reader_file(&database, &compute, webview.label(), "reader-original", location, reader_session.map(|session| (session, page_index)))
+}
+
+pub(crate) fn lease_cached_reader_file(
+    database: &Database,
+    compute: &crate::compute::ComputeHandle,
+    webview_label: &str,
+    job_id: &str,
+    location: crate::cache::CachedBlobLocation,
+    reader_page: Option<(u32, i64)>,
+) -> Result<CommandResult<Option<ReaderCachedFile>>, String> {
+    let Ok(file) = std::fs::File::open(&location.path) else {
+        return Ok(CommandResult::success(None));
+    };
+    lease_open_reader_file(database, compute, webview_label, job_id, location, file, reader_page)
+}
+
+pub(crate) fn lease_open_reader_file(
+    database: &Database,
+    compute: &crate::compute::ComputeHandle,
+    webview_label: &str,
+    job_id: &str,
+    location: crate::cache::CachedBlobLocation,
+    file: std::fs::File,
+    reader_page: Option<(u32, i64)>,
+) -> Result<CommandResult<Option<ReaderCachedFile>>, String> {
+    let Some((mime, width, height)) = crate::native_reader::reader_file_info(&file, cfg!(any(windows, target_os = "ios", target_os = "android"))) else {
+        return Ok(CommandResult::success(None));
+    };
+    let actual_size = file.metadata().map_err(|error| error.to_string())?.len();
+    if actual_size != location.byte_length {
+        return Ok(CommandResult::success(None));
+    }
+    let spec = crate::compute::leases::LeaseSpec {
+        artifact_id: location.content_hash.clone(),
+        job_id: job_id.into(),
+        path: location.path,
+        cache_relative: None,
+        mime: mime.into(),
+        byte_length: actual_size,
+        width,
+        height,
+        pipeline_revision: location.content_hash.clone(),
+        webview_label: webview_label.into(),
+    };
+    let acquired = match compute.leases().acquire_file(spec, file, reader_page, std::time::Instant::now()) {
+        Ok(acquired) => acquired,
+        Err(error) => return Ok(CommandResult::failure(error.code(), error.message(), error.retryable())),
+    };
+    crate::compute::commands::unpin_leases(database, &acquired.expired);
+    Ok(CommandResult::success(Some(ReaderCachedFile {
+        lease: acquired.lease,
+        content_hash: location.content_hash,
+    })))
+}
+
 #[tauri::command]
 pub async fn load_reader_page(
     server_id: String,
@@ -4501,6 +4518,13 @@ pub async fn load_reader_page(
 ) -> Result<tauri::ipc::Response, String> {
     let task = crate::inference::cancel::begin(task_id.as_deref());
     let request = load_reader_page_bytes(server_id, archive_id, page_index, path, database, app);
+    cancellable_reader_download(request, &task).await.map(crate::domain::result::into_binary_response)
+}
+
+async fn cancellable_reader_download(
+    request: impl std::future::Future<Output = Result<CommandResult<Vec<u8>>, String>>,
+    task: &crate::inference::cancel::TaskGuard,
+) -> Result<CommandResult<Vec<u8>>, String> {
     tokio::pin!(request);
     let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(25));
     loop {
@@ -4508,12 +4532,10 @@ pub async fn load_reader_page(
             biased;
             _ = cancellation.tick() => {
                 if task.cancelled() {
-                    return Ok(crate::domain::result::into_binary_response(CommandResult::<Vec<u8>>::failure(
-                        "COMPUTE_CANCELLED", "阅读图片请求已取消", false,
-                    )));
+                    return Ok(CommandResult::failure("COMPUTE_CANCELLED", "阅读图片请求已取消", false));
                 }
             }
-            result = &mut request => return result.map(crate::domain::result::into_binary_response),
+            result = &mut request => return result,
         }
     }
 }
@@ -4721,7 +4743,7 @@ async fn fetch_cover_thumbnail(
     archive_id: &str,
     api_key: String,
 ) -> Result<CommandResult<Vec<u8>>, String> {
-    match fetch_cover_thumbnail_inner(base_url, archive_id, api_key, false, None).await? {
+    match fetch_cover_thumbnail_inner(base_url, archive_id, api_key, false, Some(thumbnail_deadline())).await? {
         CommandResult::Success {
             value: CoverThumbnail::Ready(bytes),
             ..
@@ -4756,15 +4778,12 @@ pub(crate) async fn load_scan_thumbnail(
         server_connection(&connection, server_id)?
     };
     let api_key = SystemCredentialStore.get_server_api_key(&scope_id)?;
-    if let Some((job, deadline)) = pending_job {
-        if let Some(error) =
-            wait_for_cover_thumbnail_job(&base_url, job, &api_key, Some(deadline)).await
-        {
+    let result = if let Some((job, deadline)) = pending_job {
+        let fetch_deadline = deferred_cover_deadline(deadline);
+        if let Some(error) = wait_for_cover_thumbnail_job(&base_url, job, &api_key, Some(deadline)).await {
             return Ok(CommandResult::Failure { ok: false, error });
         }
-    }
-    let result = if pending_job.is_some() {
-        fetch_cover_thumbnail_inner(&base_url, archive_id, api_key, false, pending_job.map(|(_, deadline)| deadline)).await?
+        fetch_cover_thumbnail_inner(&base_url, archive_id, api_key, false, Some(fetch_deadline)).await?
     } else {
         fetch_cover_thumbnail_deferred(&base_url, archive_id, api_key).await?
     };
@@ -4785,6 +4804,11 @@ pub(crate) async fn load_scan_thumbnail(
     Ok(result)
 }
 
+fn deferred_cover_deadline(deadline: tokio::time::Instant) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    if deadline <= now { now + std::time::Duration::from_secs(2) } else { deadline }
+}
+
 async fn wait_for_cover_thumbnail_job(
     base_url: &str,
     job_id: i64,
@@ -4793,6 +4817,22 @@ async fn wait_for_cover_thumbnail_job(
 ) -> Option<crate::domain::result::DomainError> {
     let deadline = deadline
         .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(120));
+    match tokio::time::timeout_at(deferred_cover_deadline(deadline), poll_cover_thumbnail_job(base_url, job_id, api_key, deadline)).await {
+        Ok(result) => result,
+        Err(_) => Some(crate::domain::result::DomainError {
+            code: "REMOTE_TIMEOUT",
+            message: "LANraragi thumbnail generation timed out".into(),
+            retryable: true,
+        }),
+    }
+}
+
+async fn poll_cover_thumbnail_job(
+    base_url: &str,
+    job_id: i64,
+    api_key: &str,
+    deadline: tokio::time::Instant,
+) -> Option<crate::domain::result::DomainError> {
     let failure = |code, message: String, retryable| crate::domain::result::DomainError {
         code,
         message,
@@ -4809,6 +4849,9 @@ async fn wait_for_cover_thumbnail_job(
                 Ok(value) => value,
                 Err(error) => return Some(failure(error.code, error.message, true)),
             };
+        if let Some((code, message, retryable)) = search_status_failure(status.status()) {
+            return Some(failure(code, format!("LANraragi thumbnail job: {message}"), retryable));
+        }
         let body = match status.bytes().await {
             Ok(body) => body,
             Err(error) => {
@@ -4866,6 +4909,26 @@ async fn fetch_cover_thumbnail_inner(
     deadline: Option<tokio::time::Instant>,
 ) -> Result<CommandResult<CoverThumbnail>, String> {
     let deadline = deadline.unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(120));
+    thumbnail_before(deadline, fetch_cover_thumbnail_until(base_url, archive_id, api_key, defer_generation, deadline)).await
+}
+
+async fn thumbnail_before<T>(
+    deadline: tokio::time::Instant,
+    request: impl std::future::Future<Output = Result<CommandResult<T>, String>>,
+) -> Result<CommandResult<T>, String> {
+    match tokio::time::timeout_at(deadline, request).await {
+        Ok(result) => result,
+        Err(_) => Ok(CommandResult::failure("REMOTE_TIMEOUT", "LANraragi thumbnail request timed out", true)),
+    }
+}
+
+async fn fetch_cover_thumbnail_until(
+    base_url: &str,
+    archive_id: &str,
+    api_key: String,
+    defer_generation: bool,
+    deadline: tokio::time::Instant,
+) -> Result<CommandResult<CoverThumbnail>, String> {
     // `no_fallback=true` 是必须的：不带它时，凡是缩略图尚未生成的档案都会拿到
     // 同一张占位图（HTTP 200），而那张图会被逐字节缓存下来——查重按封面比对时，
     // 所有待生成缩略图的档案封面完全相同，于是被判成一堆重复档案。带参数后
@@ -5048,6 +5111,96 @@ async fn fetch_page_thumbnail(
     api_key: String,
     poll_attempts: usize,
 ) -> Result<CommandResult<Vec<u8>>, String> {
+    let deadline = thumbnail_deadline();
+    thumbnail_before(
+        deadline,
+        fetch_page_thumbnail_inner(base_url, archive_id, page, api_key, poll_attempts, deadline),
+    ).await
+}
+
+fn thumbnail_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(12)
+}
+
+struct PageThumbnailPace {
+    next_request: tokio::time::Instant,
+    limited_until: tokio::time::Instant,
+}
+
+type PageThumbnailGate = std::sync::Arc<tokio::sync::Mutex<PageThumbnailPace>>;
+
+fn page_thumbnail_gate(base_url: &str) -> PageThumbnailGate {
+    static GATES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, PageThumbnailGate>>> = std::sync::OnceLock::new();
+    let origin = reqwest::Url::parse(base_url)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| base_url.to_string());
+    let mut gates = GATES.get_or_init(Default::default).lock().unwrap_or_else(|error| error.into_inner());
+    let now = tokio::time::Instant::now();
+    gates.retain(|_, gate| std::sync::Arc::strong_count(gate) > 1 || gate.try_lock()
+        .map_or(true, |pace| pace.next_request.max(pace.limited_until) > now));
+    gates.entry(origin).or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(
+        PageThumbnailPace { next_request: now, limited_until: now },
+    ))).clone()
+}
+
+fn thumbnail_retry_after(response: &reqwest::Response) -> std::time::Duration {
+    use std::time::{Duration, SystemTime};
+    response.headers().get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            if let Ok(seconds) = value.parse() {
+                return Some(Duration::from_secs(seconds));
+            }
+            let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+            let retry_at = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(date.timestamp().try_into().ok()?))?;
+            Some(retry_at.duration_since(SystemTime::now()).unwrap_or_default())
+        })
+        .unwrap_or(Duration::from_secs(2))
+}
+
+async fn page_thumbnail_request(
+    gate: &PageThumbnailGate,
+    url: &str,
+    api_key: &str,
+    deadline: tokio::time::Instant,
+) -> Result<reqwest::Response, ReaderRequestError> {
+    use std::time::Duration;
+    for attempt in 0..2 {
+        // All page cells share one paced HTTP stream per server. Hold the gate
+        // through the headers so queued requests can see a 429 before sending.
+        let mut pace = gate.lock().await;
+        if pace.limited_until >= deadline {
+            return Err(ReaderRequestError {
+                code: "REMOTE_RATE_LIMIT",
+                message: "LANraragi rate limited thumbnail requests (429)".into(),
+            });
+        }
+        tokio::time::sleep_until(pace.next_request.max(pace.limited_until)).await;
+        pace.next_request = tokio::time::Instant::now() + Duration::from_millis(200);
+        let response = reader_request(reqwest::Method::GET, url.to_string(), api_key.to_string()).await?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(response);
+        }
+        let delay = thumbnail_retry_after(&response).max(Duration::from_millis(200));
+        let now = tokio::time::Instant::now();
+        pace.limited_until = now.checked_add(delay).unwrap_or_else(|| now + Duration::from_secs(3600));
+        if attempt == 1 || pace.limited_until >= deadline {
+            return Ok(response);
+        }
+        // Retry this URL, including a Minion status URL, without creating a new job.
+    }
+    unreachable!("bounded thumbnail request loop always returns")
+}
+
+async fn fetch_page_thumbnail_inner(
+    base_url: &str,
+    archive_id: &str,
+    page: i64,
+    api_key: String,
+    poll_attempts: usize,
+    deadline: tokio::time::Instant,
+) -> Result<CommandResult<Vec<u8>>, String> {
+    let gate = page_thumbnail_gate(base_url);
     let thumbnail_url = format!(
         "{}/api/archives/{}/thumbnail?page={}&no_fallback=true",
         base_url.trim_end_matches('/'),
@@ -5055,7 +5208,7 @@ async fn fetch_page_thumbnail(
         page
     );
     let response =
-        match reader_request(reqwest::Method::GET, thumbnail_url.clone(), api_key.clone()).await {
+        match page_thumbnail_request(&gate, &thumbnail_url, &api_key, deadline).await {
             Ok(response) => response,
             Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
         };
@@ -5073,14 +5226,17 @@ async fn fetch_page_thumbnail(
         if let Some(job_id) = job_id {
             let mut finished = false;
             // 先查再等：与 thumbnail 那边的口径一致，不白付首次的半秒。
-            for _ in 0..poll_attempts {
+            for attempt in 0..poll_attempts {
                 let status_url =
                     format!("{}/api/minion/{}", base_url.trim_end_matches('/'), job_id);
                 let status =
-                    match reader_request(reqwest::Method::GET, status_url, api_key.clone()).await {
+                    match page_thumbnail_request(&gate, &status_url, &api_key, deadline).await {
                         Ok(value) => value,
                         Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
                     };
+                if let Some((code, message, retryable)) = search_status_failure(status.status()) {
+                    return Ok(CommandResult::failure(code, format!("LANraragi thumbnail job: {message}"), retryable));
+                }
                 let body = match status.bytes().await {
                     Ok(body) => body,
                     Err(error) => return Ok(reader_response_failure(error)),
@@ -5101,7 +5257,10 @@ async fn fetch_page_thumbnail(
                         true,
                     ));
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if attempt + 1 < poll_attempts {
+                    let delay = 500 << attempt.min(2);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
             }
             if !finished {
                 return Ok(CommandResult::failure(
@@ -5110,7 +5269,7 @@ async fn fetch_page_thumbnail(
                     true,
                 ));
             }
-            match reader_request(reqwest::Method::GET, thumbnail_url, api_key).await {
+            match page_thumbnail_request(&gate, &thumbnail_url, &api_key, deadline).await {
                 Ok(value) => value,
                 Err(error) => return Ok(CommandResult::failure(error.code, error.message, true)),
             }
@@ -5131,12 +5290,8 @@ async fn fetch_page_thumbnail(
             true,
         ));
     }
-    if !response.status().is_success() {
-        return Ok(CommandResult::failure(
-            "REMOTE_UNAVAILABLE",
-            format!("LANraragi request failed ({})", response.status()),
-            response.status().is_server_error(),
-        ));
+    if let Some((code, message, retryable)) = search_status_failure(response.status()) {
+        return Ok(CommandResult::failure(code, format!("LANraragi thumbnail: {message}"), retryable));
     }
     match response.bytes().await {
         Ok(bytes)
@@ -5552,25 +5707,35 @@ async fn resolve_category_archives(
     search: &str,
 ) -> Option<Vec<String>> {
     let url = build_category_search_url(base_url, search).ok()?;
+    // The IDs endpoint avoids hydrating every archive in a dynamic category.
+    // Older LANraragi versions expose only the metadata search endpoint.
+    let mut ids_url = Url::parse(&url).ok()?;
+    let ids_path = format!("{}/ids", ids_url.path());
+    ids_url.set_path(&ids_path);
+    let response = reader_request_with_timeout(
+        reqwest::Method::GET,
+        ids_url.to_string(),
+        api_key.to_owned(),
+        CATEGORY_SEARCH_TIMEOUT_SECONDS,
+    ).await.ok()?;
+    match response.status() {
+        reqwest::StatusCode::OK => {
+            #[derive(Deserialize)]
+            struct ArchiveIds { data: Vec<String> }
+            return response.json::<ArchiveIds>().await.ok().map(|result| result.data);
+        }
+        reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::METHOD_NOT_ALLOWED => {}
+        _ => return None,
+    }
     let response = reader_request_with_timeout(
         reqwest::Method::GET,
         url,
-        api_key.to_string(),
+        api_key.to_owned(),
         CATEGORY_SEARCH_TIMEOUT_SECONDS,
-    )
-    .await
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
+    ).await.ok()?.error_for_status().ok()?;
     let body = response.text().await.ok()?;
     let archives = parse_search_response(&body).ok()?;
-    Some(
-        archives
-            .into_iter()
-            .map(|archive| archive.archive_id)
-            .collect::<Vec<_>>(),
-    )
+    Some(archives.into_iter().map(|archive| archive.archive_id).collect())
 }
 
 /// How long a resolved category snapshot stays good. Long enough that browsing
@@ -5585,11 +5750,19 @@ const PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS: i64 = 10 * 60;
 /// Two at a time: each resolution is an unpaged full-library search, and a
 /// library with many dynamic categories would otherwise fire them all at once.
 const MAX_PARALLEL_CATEGORY_SEARCHES: usize = 2;
-/// A whole-library search is not a page request. Ten seconds is enough for
-/// `/api/categories` and nowhere near enough for `start=-1` on a large
-/// library — and a timeout here is stored as an empty category, which reads
-/// as "nothing is in it".
-const CATEGORY_SEARCH_TIMEOUT_SECONDS: u64 = 45;
+/// Per-attempt safety limit for dynamic category searches. Foreground callers
+/// also apply a shared deadline across the entire category operation.
+const CATEGORY_SEARCH_TIMEOUT_SECONDS: u64 = 8;
+
+async fn fetch_categories(base_url: &str, api_key: &str) -> Option<serde_json::Value> {
+    let response = reader_request_with_timeout(
+        reqwest::Method::GET,
+        format!("{}/api/categories", base_url.trim_end_matches('/')),
+        api_key.to_owned(),
+        5,
+    ).await.ok()?;
+    response.error_for_status().ok()?.json().await.ok()
+}
 
 /// The one category the shelves and the heart read: LANraragi's own 🔖 Favorites.
 /// Matched by name because that is what the API carries; the id is generated per
@@ -5626,22 +5799,7 @@ fn read_category_cache_from(
     server_id: &str,
     now: i64,
 ) -> Result<Option<Vec<CategoryRecord>>, String> {
-    let stored: Option<String> = connection
-        .query_row(
-            "SELECT value_json FROM settings WHERE key = ?1",
-            [category_cache_key(server_id)],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| format!("读取分类缓存失败：{error}"))?;
-    let Some(stored) = stored else {
-        return Ok(None);
-    };
-    let envelope: CategoryCacheEnvelope = match serde_json::from_str(&stored) {
-        Ok(value) => value,
-        // A snapshot written by an older schema is simply refetched.
-        Err(_) => return Ok(None),
-    };
+    let Some(envelope) = read_category_snapshot(connection, server_id)? else { return Ok(None) };
     let max_age = if envelope.partial {
         PARTIAL_CATEGORY_CACHE_MAX_AGE_SECONDS
     } else {
@@ -5652,6 +5810,21 @@ fn read_category_cache_from(
         return Ok(None);
     }
     Ok(Some(envelope.categories))
+}
+
+fn read_category_snapshot(
+    connection: &rusqlite::Connection,
+    server_id: &str,
+) -> Result<Option<CategoryCacheEnvelope>, String> {
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key = ?1",
+            [category_cache_key(server_id)],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("读取分类缓存失败：{error}"))?;
+    Ok(stored.and_then(|stored| serde_json::from_str(&stored).ok()))
 }
 
 fn write_category_cache(
@@ -5824,21 +5997,8 @@ pub async fn read_favorites_category(
             ))
         }
     };
-    let fetched = async {
-        let response = reader_request(
-            reqwest::Method::GET,
-            format!("{}/api/categories", base_url.trim_end_matches('/')),
-            api_key.clone(),
-        )
-        .await
-        .ok()?;
-        if !response.status().is_success() {
-            return None;
-        }
-        let raw: serde_json::Value = response.json().await.ok()?;
-        Some(raw)
-    }
-    .await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+    let fetched = tokio::time::timeout_at(deadline, fetch_categories(&base_url, &api_key)).await.ok().flatten();
     let favorites = match fetched {
         None => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "读取 LANraragi 分类失败", true)),
         Some(raw) => match parse_category_list(&raw) {
@@ -5857,7 +6017,7 @@ pub async fn read_favorites_category(
                     .map(str::to_owned);
                 if let (Some(favorites), Some(search)) = (found.as_mut(), search) {
                     if favorites.archives.is_empty() {
-                        match resolve_category_archives(&base_url, &api_key, &search).await {
+                        match tokio::time::timeout_at(deadline, resolve_category_archives(&base_url, &api_key, &search)).await.ok().flatten() {
                             Some(archives) => favorites.archives = archives,
                             None => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", "读取收藏分类成员失败", true)),
                         }
@@ -6399,7 +6559,11 @@ pub async fn search_archives_page(
         category: input.category_id.clone().filter(|value| !value.is_empty()),
         groupby_tanks: None,
     };
-    let (archives, filtered, _) = match fetch_search_page(&base_url, &api_key, &params).await {
+    let search = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        fetch_search_page(&base_url, &api_key, &params),
+    ).await.unwrap_or_else(|_| Err(("REMOTE_TIMEOUT", "LANraragi search timed out".into(), true)));
+    let (archives, filtered, _) = match search {
         Ok(value) => value,
         Err((code, message, retryable)) => {
             return Ok(CommandResult::failure(code, message, retryable))
@@ -8828,6 +8992,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn category_memberships_accept_ids_and_legacy_search_responses() {
+        let ids = r#"{"data":["0123456789abcdef0123456789abcdef01234567"],"recordsTotal":1,"recordsFiltered":1}"#;
+        let legacy = r#"{"data":[{"arcid":"0123456789abcdef0123456789abcdef01234567","title":"A"}],"recordsTotal":1,"recordsFiltered":1}"#;
+        for responses in [vec![(200, ids.into())], vec![(404, "{}".into()), (200, legacy.into())]] {
+            let (url, server) = test_http_server(responses).await;
+            let memberships = resolve_category_archives(&url, "key", "artist:test").await;
+            server.abort();
+            assert_eq!(memberships, Some(vec!["0123456789abcdef0123456789abcdef01234567".into()]));
+        }
+    }
+
+    #[tokio::test]
+    async fn thumbnail_deadline_includes_stalled_minion_body() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut thumbnail, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            read_request_head(&mut thumbnail, &mut request).await;
+            thumbnail.write_all(b"HTTP/1.1 202 Accepted\r\nContent-Length: 9\r\nConnection: close\r\n\r\n{\"job\":1}").await.unwrap();
+            drop(thumbnail);
+            let (mut minion, _) = listener.accept().await.unwrap();
+            read_request_head(&mut minion, &mut request).await;
+            minion.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{").await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(300);
+        let result = thumbnail_before(deadline, fetch_page_thumbnail_inner(&url, "archive", 1, "key".into(), 60, deadline)).await.unwrap();
+        server.abort();
+        assert!(matches!(result, CommandResult::Failure { error, .. } if error.code == "REMOTE_TIMEOUT" && error.retryable));
+    }
+
+    #[tokio::test]
     async fn reader_body_failures_separate_truncated_transport_from_invalid_content() {
         use tokio::io::AsyncWriteExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -8939,6 +9137,55 @@ mod tests {
         let result = fetch_cover_thumbnail(&url, "archive", "key".into()).await.unwrap();
         server.abort();
         assert!(matches!(result, CommandResult::Success { value, .. } if value == image.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn page_thumbnail_resumes_minion_polling_after_html_rate_limit() {
+        let (url, server) = test_http_server(vec![
+            (202, r#"{"job":42}"#.into()),
+            (429, "<html>rate limited</html>".into()),
+            (200, r#"{"state":"finished"}"#.into()),
+            (200, "GIF89a-test-image".into()),
+        ]).await;
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 1).await.unwrap();
+        server.abort();
+        assert!(matches!(&result, CommandResult::Success { value, .. } if value == b"GIF89a-test-image"), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn page_thumbnail_retry_after_stops_other_pages_on_the_same_server() {
+        use tokio::io::AsyncWriteExt;
+        use std::time::Duration;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_head(&mut socket, &mut [0; 4096]).await;
+            socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.is_err());
+        });
+        let requests = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                fetch_page_thumbnail(&url, "archive", 1, "key".into(), 1),
+                fetch_page_thumbnail(&url, "archive", 2, "key".into(), 1),
+            )
+        }).await.unwrap();
+        for result in [requests.0, requests.1] {
+            assert!(matches!(result, Ok(CommandResult::Failure { error, .. }) if error.code == "REMOTE_RATE_LIMIT" && error.retryable));
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn page_thumbnail_checks_minion_http_status_before_decoding() {
+        let (url, server) = test_http_server(vec![
+            (202, r#"{"job":42}"#.into()),
+            (403, "<html>forbidden</html>".into()),
+        ]).await;
+        let result = fetch_page_thumbnail(&url, "archive", 1, "key".into(), 1).await.unwrap();
+        server.abort();
+        assert!(matches!(&result, CommandResult::Failure { error, .. } if error.code == "REMOTE_UNAVAILABLE" && error.message.contains("403") && !error.retryable), "{result:?}");
     }
 
     #[tokio::test]

@@ -7,6 +7,7 @@ import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
 import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 import { getNativeImageCache, RenditionError } from '../../src/lib/nativeImageCache';
 import { serializeRemoteOps } from '../../src/repositories/nativeComputeCenterRepository';
 import type { ImageHandle } from '../../src/lib/unifiedImageCache';
@@ -1031,7 +1032,7 @@ describe('reader route', () => {
 
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
     await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    await user.click(screen.getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     expect(await screen.findByRole('img', { name: '第 2 页' })).toBeInTheDocument();
     // The overview panel's facts (metadata + cover) load in the background, so
     // their exact interleaving is not fixed; what matters is which commands run
@@ -1149,6 +1150,27 @@ describe('reader route', () => {
 
     expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
     expect(screen.queryByText('阅读页面加载失败')).not.toBeInTheDocument();
+  });
+
+  it('opens the first page through the regular image path if opening a native file fails transiently', async () => {
+    vi.stubGlobal('YomikaTiles', { postMessage: vi.fn() });
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_reader_manifest') return { ok: true, value: { archiveId: 'native-open-retry', title: 'Reader', pages: ['0.jpg'] } };
+      if (command === 'load_reading_progress') return { ok: true, value: null };
+      if (command === 'reader_open_page_file') return { ok: false, error: { code: 'NETWORK', message: 'Temporary source failure', retryable: true } };
+      if (command === 'load_reader_page') return { ok: true, value: [1, 2, 3] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    try {
+      render(<MemoryRouter initialEntries={['/reader/native-open-retry']}><App /></MemoryRouter>);
+      expect(await screen.findByRole('img', { name: '第 1 页' })).toBeInTheDocument();
+      expect(adapter.mock.calls.filter(([command]) => command === 'reader_open_page_file')).toHaveLength(1);
+      expect(adapter.mock.calls.filter(([command]) => command === 'load_reader_page')).toHaveLength(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('offers a way out and a retry when the reader cannot load', async () => {
@@ -2033,6 +2055,7 @@ describe('reader route', () => {
     probeFailures?: number;
     localModel?: string;
     pageCount?: number;
+    processFile?: () => unknown;
     rawPage?: (pageIndex: number) => unknown;
     prefetchPages?: number;
     startPage?: number;
@@ -2082,6 +2105,9 @@ describe('reader route', () => {
       }
       const host = await hostUpscaleAnswer(command, args as Record<string, unknown> | undefined);
       if (host !== null) return host;
+      if (command === 'remote_compute_process_file' && options.processFile) return options.processFile();
+      if (command === 'reader_prepare_native_slot') return { ok: true, value: true };
+      if (command === 'compute_artifact_release') return { ok: true, value: null };
       if (command === 'remote_compute_process') {
         return options.process ? options.process(args) : [0x89, 0x50, 0x4e, 0x47];
       }
@@ -2095,6 +2121,47 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/remote-reader']}><App /></MemoryRouter>);
     return { calls };
   }
+
+  it('reacquires and presents a remote result after native preparation fails in the same session', async () => {
+    const events: { op: string; id: number }[] = [];
+    vi.stubGlobal('YomikaTiles', { postMessage: (message: string) => events.push(JSON.parse(message)) });
+    let leases = 0;
+    // A bad lease must fail in both renderers before it can be reacquired.
+    setImageDecoderForTests(async (url) => {
+      if (url.endsWith('remote-recovery-1')) throw new Error('Invalid image lease');
+    });
+    try {
+      const { calls } = remoteReader({ ready: { upscale: true, dlssnr: true }, processFile: () => {
+        const leaseId = `remote-recovery-${++leases}`;
+        return { ok: true, value: { contentHash: 'e'.repeat(64), lease: {
+          leaseId, artifactId: 'image', jobId: 'reader-remote', url: `yomika-image://assets/${leaseId}`,
+          mime: 'image/png', width: 100, height: 200, byteLength: 500, estimatedDecodedBytes: 80_000,
+          pipelineRevision: 'remote-version', expiresInMs: 60_000,
+        } } };
+      } });
+      const page = await screen.findByRole('img', { name: '第 1 页' });
+      fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+      fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+      const preparedSlots = () => calls.filter(([name]) => name === 'reader_prepare_native_slot').map(([, args]) => Number(args?.slot));
+      const status = (slot: number, width: number, height: number) => window.dispatchEvent(
+        new CustomEvent('yomika-reader-tile-status', { detail: { slot, width, height } }),
+      );
+      await waitFor(() => expect(preparedSlots()).toHaveLength(1));
+      act(() => { status(preparedSlots()[0]!, 0, 0); });
+      await waitFor(() => expect(preparedSlots()).toHaveLength(2));
+      expect(screen.getByRole('img', { name: '第 1 页' })).toBe(page);
+      expect(leases).toBe(2);
+      expect(calls).toContainEqual(['compute_artifact_release', { leaseId: 'remote-recovery-1' }]);
+      const replacement = preparedSlots()[1]!;
+      act(() => { status(replacement, 100, 200); });
+      await waitFor(() => expect(events).toContainEqual(expect.objectContaining({ op: 'present', id: replacement })));
+      act(() => { window.dispatchEvent(new CustomEvent('yomika-reader-tile-presented', { detail: { slot: replacement } })); });
+      expect(screen.getByRole('img', { name: '第 1 页' })).toHaveAttribute('data-native-reader-visible', 'true');
+    } finally {
+      setImageDecoderForTests(undefined);
+      vi.unstubAllGlobals();
+    }
+  });
 
   it('sends one original page for the full remote chain without running the local model', async () => {
     installHost();

@@ -20,7 +20,7 @@ export type ReaderPhase = 'booting' | 'loading-page' | 'ready' | 'chrome-visible
 
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 3;
-const DOUBLE_TAP_ZOOM = 2;
+const PHOTO_VIEW_MIDDLE_SCALE = 1.75;
 /** Gestures may overshoot the limits and spring back, the way native viewers
  * behave; only `settleZoom` enforces the hard bounds. */
 export const ZOOM_RUBBER_MIN = 0.88;
@@ -53,47 +53,87 @@ export function panZoom(zoom: ZoomState, dx: number, dy: number, width: number, 
   if (zoom.scale <= 1) return zoom;
   const maxX = width * (1 - 1 / zoom.scale) / 2;
   const maxY = height * (1 - 1 / zoom.scale) / 2;
-  return { ...zoom, panX: Math.max(-maxX, Math.min(maxX, zoom.panX + dx / zoom.scale)), panY: Math.max(-maxY, Math.min(maxY, zoom.panY + dy / zoom.scale)) };
+  return {
+    ...zoom,
+    panX: Math.max(-maxX, Math.min(maxX, zoom.panX + dx / zoom.scale)),
+    panY: Math.max(-maxY, Math.min(maxY, zoom.panY + dy / zoom.scale)),
+  };
+}
+
+/** Pinch travel approaches its visual limit with progressively stronger resistance. */
+export function elasticPinchScale(raw: number, maximum: number): number {
+  if (raw >= ZOOM_MIN && raw <= maximum) return raw;
+  const edge = raw < ZOOM_MIN ? ZOOM_MIN : maximum;
+  const relativeTravel = raw / edge - 1;
+  // Keep this response in sync with Android's ReaderPinchElasticity.
+  const overshoot = (1 - ZOOM_RUBBER_MIN) * (1 - Math.exp(-2.75 * Math.abs(relativeTravel)));
+  return edge * (1 + Math.sign(relativeTravel) * overshoot);
 }
 
 /** Multiplicative wheel zoom keeps wheel steps proportional to the current scale. */
-export function zoomByWheel(zoom: ZoomState, deltaY: number): ZoomState {
+export function zoomByWheel(zoom: ZoomState, deltaY: number, maximum = ZOOM_MAX, snapToFit = true): ZoomState {
   if (!Number.isFinite(deltaY) || deltaY === 0) return zoom;
-  if (zoom.scale < 1 && deltaY < 0) return createZoomState();
+  if (snapToFit && zoom.scale < 1 && deltaY < 0) return createZoomState();
   const resistance = zoom.scale <= 1 && deltaY > 0 ? 0.22 : 1;
   const scaled = zoom.scale * Math.exp(-deltaY * WHEEL_ZOOM_SENSITIVITY * resistance);
   // Only catch a return toward 100%. Small high-resolution wheel steps moving
   // away from 100% must accumulate instead of being reset every other event.
-  const snapped = zoom.scale > 1 && deltaY > 0 && Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
-  const scale = Math.min(ZOOM_RUBBER_MAX, Math.max(ZOOM_RUBBER_MIN, snapped));
+  const snapped = snapToFit && zoom.scale > 1 && deltaY > 0 && Math.abs(scaled - 1) <= ZOOM_SNAP_TOLERANCE ? 1 : scaled;
+  const scale = Math.min(Math.max(ZOOM_RUBBER_MAX, maximum * 1.12), Math.max(ZOOM_RUBBER_MIN, snapped));
   return scale === 1 ? { scale: 1, panX: 0, panY: 0 } : { ...zoom, scale };
 }
 
 /** Applied when a gesture ends: pulls an overshoot back inside the limits and
  * drops the pan once the page fits again. */
-export function settleZoom(zoom: ZoomState): ZoomState {
-  const scale = clampZoom(zoom.scale);
+export function settleZoom(zoom: ZoomState, maximum = ZOOM_MAX): ZoomState {
+  const scale = Math.min(maximum, Math.max(ZOOM_MIN, zoom.scale));
   if (scale === zoom.scale) return scale <= 1 ? { scale, panX: 0, panY: 0 } : zoom;
   return scale <= 1 ? { scale, panX: 0, panY: 0 } : { ...zoom, scale };
 }
 
-/** Double click/tap: enlarge from 1, otherwise go back to 1 — **around the point
- * the gesture landed on**, the same way the wheel does (`zoomAtPoint`).
- *
- * The old rule only reset once the scale had reached the double-tap target, so
- * anything the wheel had left in between — 1.4, say — was enlarged further and
- * getting back to 100% took two more gestures. Resetting from *any* scale other
- * than 1 makes the gesture a reliable escape hatch, which is what it is for.
- *
- * The anchor is the second half of the same complaint: the old version flipped
- * the scale and dropped the pan to zero, so a double click on a face at the top
- * left threw it to the middle of the screen. Passing the point through
- * `zoomAtPoint` gives the two gestures one piece of arithmetic instead of two —
- * enlarging keeps what was under the pointer under the pointer, and going back
- * to 1 zeroes the pan by construction (`scale <= 1` inside `zoomAtPoint`). */
-export function doubleTapZoomAt(zoom: ZoomState, x: number, y: number): ZoomState {
-  const target = zoom.scale === 1 ? DOUBLE_TAP_ZOOM : 1;
-  return settleZoom(zoomAtPoint(zoom, target, x, y));
+const PHOTO_VIEW_DOUBLE_TAP = { large: false, duration: 200 } as const;
+
+export function readerDoubleTapProfile(
+  image: { width: number; height: number; animated?: boolean } | undefined,
+  viewport: { width: number; height: number },
+) {
+  if (!image || image.animated || image.width <= 0 || image.height <= 0 || viewport.width <= 0 || viewport.height <= 0) return PHOTO_VIEW_DOUBLE_TAP;
+  const ratio = image.width / image.height;
+  const xScale = viewport.width / image.width;
+  const yScale = viewport.height / image.height;
+  const fit = Math.min(xScale, yScale);
+  const cover = Math.max(xScale, yScale);
+  // A 16:9 page on a tall phone can leave most of the viewport empty even
+  // below the native bitmap limit. Give those pages the same fit/cover toggle.
+  const large = image.width * image.height * 4 > 100 * 1024 * 1024 ||
+    (Math.max(image.width, image.height) > 2048 && (ratio < 0.5 || ratio > 2)) ||
+    cover / fit >= 2;
+  if (!large) return PHOTO_VIEW_DOUBLE_TAP;
+  return {
+    large: true as const,
+    duration: 300,
+    cropScale: Math.max(1, Math.min(2, cover) / fit),
+    viewport,
+    fitted: { width: image.width * fit, height: image.height * fit },
+  };
+}
+
+type DoubleTapProfile = ReturnType<typeof readerDoubleTapProfile>;
+
+export function doubleTapZoomAt(zoom: ZoomState, x: number, y: number, profile: DoubleTapProfile = PHOTO_VIEW_DOUBLE_TAP): ZoomState {
+  if (!profile.large) {
+    const target = zoom.scale < PHOTO_VIEW_MIDDLE_SCALE ? PHOTO_VIEW_MIDDLE_SCALE : zoom.scale < ZOOM_MAX ? ZOOM_MAX : ZOOM_MIN;
+    return zoomAtPoint(zoom, target, x, y);
+  }
+  const target = zoom.scale <= profile.cropScale * 0.9 || zoom.scale <= ZOOM_MIN ? profile.cropScale : ZOOM_MIN;
+  return boundLargeImageZoom(zoomAtPoint(zoom, target, x, y), profile);
+}
+
+export function boundLargeImageZoom(zoom: ZoomState, profile: Extract<DoubleTapProfile, { large: true }>): ZoomState {
+  const limit = (view: number, image: number) => Math.max(0, (image - view / zoom.scale) / 2);
+  const maxX = limit(profile.viewport.width, profile.fitted.width);
+  const maxY = limit(profile.viewport.height, profile.fitted.height);
+  return { scale: zoom.scale, panX: Math.max(-maxX, Math.min(maxX, zoom.panX)), panY: Math.max(-maxY, Math.min(maxY, zoom.panY)) };
 }
 
 export function toggleDoubleTapZoom(zoom: ZoomState): ZoomState {
@@ -180,6 +220,12 @@ export const PAGE_TURN_FLICK_VELOCITY = 0.4;
 export const MIN_PAGE_TURN_DISTANCE = 30;
 /** Slow drags travel 20% of the reading area, capped at 180px on desktop.
  * Recent release velocity distinguishes a flick from a drag held stationary. */
+
+export function pageTurnDuration(remaining: number, releaseSpeed: number, returnToFit = false): number {
+  const speed = Number.isFinite(releaseSpeed) ? Math.max(0.7, Math.abs(releaseSpeed)) : 0.7;
+  const minimum = Math.max(returnToFit ? 140 : 115, Math.min(180, 115 + remaining * 0.15));
+  return Math.round(Math.max(minimum, Math.min(240, remaining / speed)));
+}
 
 export function shouldCommitPageTurn(dx: number, elapsedMs: number, viewportWidth: number, releaseVelocity?: number): boolean {
   const distance = Math.abs(dx);
@@ -328,9 +374,10 @@ export function advanceReader(state: ReaderState, intent: 'next' | 'previous'): 
   // slot advances by one page, a pair by two, and the arithmetic no longer has to
   // know which it is looking at.
   const slots = spreadsFor(state);
-  const current = findSlot(slots, clampPage(state.pageIndex, state.pageCount));
-  const target = slots[Math.min(slots.length - 1, Math.max(0, current + direction))];
-  const nextIndex = target?.[0] ?? state.pageIndex;
+  const pageIndex = clampPage(state.pageIndex, state.pageCount);
+  const current = findSlot(slots, pageIndex);
+  const target = slots[current + direction];
+  const nextIndex = target?.[0] ?? pageIndex;
   return { ...state, pageIndex: clampPage(nextIndex, state.pageCount), phase: 'ready' };
 }
 
@@ -357,42 +404,41 @@ export const WEBTOON_ESTIMATED_PAGE_RATIO = 1.4;
  * pages beyond the viewport stay mounted, which is what keeps a fast scroll from
  * showing holes.
  */
+export function webtoonPageOffsets(heights: readonly number[]): number[] {
+  const offsets = [0];
+  for (const height of heights) {
+    offsets.push(offsets[offsets.length - 1]! + Math.max(1, Number.isFinite(height) ? height : 1));
+  }
+  return offsets;
+}
+
 export function webtoonWindow(input: {
   scrollTop: number;
   viewportHeight: number;
-  heights: readonly number[];
+  offsets: readonly number[];
   overscan?: number;
 }): { first: number; last: number } {
-  const count = input.heights.length;
+  const count = input.offsets.length - 1;
   if (count <= 0) return { first: 0, last: -1 };
   const overscan = Math.max(0, Math.floor(input.overscan ?? 1));
   const scrollTop = Number.isFinite(input.scrollTop) ? Math.max(0, input.scrollTop) : 0;
   const viewportHeight = Number.isFinite(input.viewportHeight) && input.viewportHeight > 0 ? input.viewportHeight : 1;
-  const viewportBottom = scrollTop + viewportHeight;
-
-  let firstVisible = -1;
-  let lastVisible = -1;
-  let offset = 0;
-  for (let index = 0; index < count; index += 1) {
-    const height = Math.max(1, Number.isFinite(input.heights[index]) ? (input.heights[index] as number) : 1);
-    const pageBottom = offset + height;
-    if (pageBottom > scrollTop && offset < viewportBottom) {
-      if (firstVisible < 0) firstVisible = index;
-      lastVisible = index;
+  const boundary = (value: number, inclusive: boolean) => {
+    let low = 1;
+    let high = count;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      const offset = input.offsets[middle]!;
+      if (offset < value || (!inclusive && offset === value)) low = middle + 1;
+      else high = middle;
     }
-    offset = pageBottom;
-  }
-  // Scrolled past the end — which happens when measured heights turn out shorter
-  // than the estimates that sized the scroller. Hold the last page rather than
-  // reporting an empty window, or the reader would unmount everything and lose
-  // the measurements that would have corrected it.
-  if (firstVisible < 0) {
-    firstVisible = count - 1;
-    lastVisible = count - 1;
-  }
+    return low - 1;
+  };
+  const first = boundary(scrollTop, false);
+  const last = boundary(scrollTop + viewportHeight, true);
   return {
-    first: Math.max(0, firstVisible - overscan),
-    last: Math.min(count - 1, lastVisible + overscan),
+    first: Math.max(0, first - overscan),
+    last: Math.min(count - 1, last + overscan),
   };
 }
 

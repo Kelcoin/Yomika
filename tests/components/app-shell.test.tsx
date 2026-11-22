@@ -34,6 +34,21 @@ function renderAt(path = '/') {
 }
 
 describe('application shell', () => {
+  it('uses an overlay keyboard viewport only on the active reader route', () => {
+    const viewport = document.createElement('meta');
+    viewport.name = 'viewport';
+    viewport.content = 'width=device-width, interactive-widget=resizes-content';
+    document.head.append(viewport);
+    try {
+      const view = renderAt('/reader/example');
+      expect(viewport.content).toBe('width=device-width, interactive-widget=overlays-content');
+      view.unmount();
+      expect(viewport.content).toBe('width=device-width, interactive-widget=resizes-content');
+    } finally {
+      viewport.remove();
+    }
+  });
+
   it('runs tag translation updates only while the application is visible', () => {
     const view = renderAt();
     expect(translationLifecycle.start).toHaveBeenCalledTimes(1);

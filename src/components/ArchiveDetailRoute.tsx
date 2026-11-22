@@ -1,28 +1,28 @@
+import { DetailActionSkeleton, DetailReadAction } from './DetailReadAction';
 import { StateIcon } from './StateIcon';
-import { DetailPageThumbnail, DETAIL_THUMBNAIL_WIDTH, DETAIL_THUMBNAIL_FOOTER } from './DetailPageThumbnail';
+import { DetailPageThumbnail, DetailPageThumbnailGrid } from './DetailPageThumbnail';
 import { DialogSurface, DialogHeading } from './DialogSurface';
 import { useArchiveReadingProgress } from './useArchiveReadingProgress';
-import { VirtualPageGrid } from './VirtualPageGrid';
 import { EmptyState } from './EmptyState';
 import { usePageActive } from '../app/RetainedPage';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowLeft, BookOpen, Download, EyeOff, MoreVertical, X, MessageCircle, Pencil, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowLeft, Download, LoaderCircle, EyeOff, MoreVertical, X, MessageCircle, Pencil, RotateCcw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { z } from 'zod';
 
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { usePanelPager } from '../lib/usePanelPager';
-import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 
 import { parseArchiveTagString } from '../lib/tags';
 import { mirrorFavorites } from '../lib/favoritesMirror';
-import { createRecommendationSeed, createSeededShuffle, pickSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
+import { createRecommendationSeed, pickPopularSeedTags, rankRecommendations, sameCreatorTags, sortSameCreatorRecommendations } from '../lib/recommendation';
 import { pickServer } from '../domain/server';
 import { useTagTranslations } from '../lib/tagTranslationService';
-import { getNativeImageCache } from '../lib/nativeImageCache';
+import { getNativeImageCache, RenditionError } from '../lib/nativeImageCache';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
-import { ArchiveMetadataSchema, NativeLibraryRepository, type ArchiveMetadata } from '../repositories/nativeLibraryRepository';
+import { ArchiveMetadataSchema, isArchiveDownloadPending, NativeLibraryRepository, type ArchiveMetadata } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
 import { ArchiveRecordSchema } from '../domain/library';
 import { downloadResultMessage, downloadResultTone } from '../lib/downloadResult';
@@ -40,6 +40,7 @@ import { useDetailActions, useDetailDateKind } from '../app/preferences';
 import '../styles/detail-pager.css';
 
 const repository = new NativeLibraryRepository();
+type DownloadStatus = Extract<Awaited<ReturnType<typeof repository.archiveDownloadStatus>>, { ok: true }>['value'];
 const ehRepository = new NativeEhRepository();
 /** Long enough not to fire on a normal tap, short enough to discover by holding.
  * Matches the platform convention rather than the drag thresholds. */
@@ -53,6 +54,15 @@ type DetailPanel = (typeof DETAIL_PANELS)[number];
  * fresh metadata. It revalidates either way; this only decides whether the page
  * shows a loading state first. */
 const DETAIL_SNAPSHOT_FRESH_MS = 10 * 60 * 1000;
+
+function ArchiveDownloadedIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12 2.75 2.75L16 9.5" />
+    </svg>
+  );
+}
 
 function readDetailSnapshot(key: string, archiveId: string) {
   const parsed = ArchiveMetadataSchema.safeParse(readRouteCache<unknown>(key, DETAIL_SNAPSHOT_FRESH_MS));
@@ -78,12 +88,15 @@ detailBasePath?: string | undefined }) {
   const [error, setError] = useState<string>();
   const [retryToken, setRetryToken] = useState(0);
   const [serverId, setServerId] = useState<string>();
+  const [serverOwner, setServerOwner] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
   const favoritePageActive = usePageActive();
   const [favorite, setFavorite] = useState(false);
   const [favoriteReady, setFavoriteReady] = useState(false);
+  const [favoriteSettled, setFavoriteSettled] = useState(false);
   const [favoriteBusy, setFavoriteBusy] = useState(false);
   const [inReadingList, setInReadingList] = useState(false);
+  const [membershipReady, setMembershipReady] = useState(false);
   const [readingBusy, setReadingBusy] = useState(false);
   const readingIdentity = `${serverParam ?? 'default'}:${archiveId}`;
   const readingOwner = useRef({ identity: readingIdentity, generation: 0, busy: false });
@@ -97,7 +110,7 @@ detailBasePath?: string | undefined }) {
     favoriteOwner.current = { identity: favoriteIdentity, generation: favoriteOwner.current.generation + 1 };
   }
   const favoriteGeneration = favoriteOwner.current.generation;
-  useEffect(() => { setFavorite(false); setFavoriteReady(false); setFavoriteBusy(false); setMessage(undefined); }, [favoriteIdentity]);
+  useEffect(() => { setFavorite(false); setFavoriteReady(false); setFavoriteSettled(false); setFavoriteBusy(false); setMessage(undefined); }, [favoriteIdentity]);
   const navigate = useNavigate();
   /** Long-press on 阅读 offers incognito. A press that becomes the prompt must not
    * also follow the link, so the click is swallowed once. */
@@ -176,8 +189,10 @@ detailBasePath?: string | undefined }) {
     setScopeId(undefined);
     setFavorite(false);
     setInReadingList(false);
+    setMembershipReady(false);
     setReadingBusy(false);
     setFavoriteReady(false);
+    setFavoriteSettled(false);
     setMessage(undefined);
     setEhAccountId(undefined);
     setDetailPanel('media');
@@ -191,6 +206,7 @@ detailBasePath?: string | undefined }) {
       }
 
       setServerId(server.id);
+      setServerOwner(readingIdentity);
       setScopeId(server.scopeId);
 
       // Stale while revalidating: the page paints from the last visit's metadata
@@ -233,7 +249,7 @@ detailBasePath?: string | undefined }) {
     });
 
     return () => { active = false; };
-  }, [archiveId, navigate, serverParam, showToast, retryToken]);
+  }, [archiveId, navigate, serverParam, showToast, retryToken, readingIdentity]);
 
   useEffect(() => {
     if (!serverId) return;
@@ -243,6 +259,7 @@ detailBasePath?: string | undefined }) {
       const current = ++request;
       void repository.readFavoritesCategory(serverId).then(result => {
         if (!active || current !== request) return;
+        setFavoriteSettled(true);
         if (!result.ok) { setMessage(result.error.message); return; }
         setFavorite(result.value?.archives.includes(archiveId) ?? false); setFavoriteReady(true);
       });
@@ -264,8 +281,9 @@ detailBasePath?: string | undefined }) {
       const token = ++request;
       const generation = readingOwner.current.generation;
       void repository.archiveMembership(scopeId, archiveId).then(result => {
-        if (!active || token !== request || !result.ok || readingOwner.current.generation !== generation) return;
-        setInReadingList(result.value.reading);
+        if (!active || token !== request || readingOwner.current.generation !== generation) return;
+        if (result.ok) setInReadingList(result.value.reading);
+        setMembershipReady(true);
       });
     };
     const invalidate = (event: Event) => {
@@ -307,19 +325,62 @@ detailBasePath?: string | undefined }) {
 
   const detailActions = useDetailActions();
   const detailDateKind = useDetailDateKind();
+  const actionsHaveMetadata = serverOwner === readingIdentity && metadata?.archiveId === archiveId;
   const progress = useArchiveReadingProgress(scopeId, archiveId, metadata);
-  // The reader loads the resume position itself. Progress must not delay or
-  // rename this action; it belongs to the page-count fact beside the cover.
-  const readReady = Boolean(metadata && serverId);
-  const [downloading, setDownloading] = useState(false);
-  const downloadOwner = useRef({ identity: readingIdentity, busy: false, active: true });
-  if (downloadOwner.current.identity !== readingIdentity) downloadOwner.current = { identity: readingIdentity, busy: false, active: true };
+  const readReady = Boolean(actionsHaveMetadata && serverId && !metadataLoading && (progress.ready || progress.error));
+  const downloadIdentity = `${readingIdentity}:${serverId ?? ''}`;
+  const downloadOwner = useRef({ identity: downloadIdentity, busy: false, active: true });
+  if (downloadOwner.current.identity !== downloadIdentity) downloadOwner.current = { identity: downloadIdentity, busy: false, active: true };
   const currentDownloadOwner = downloadOwner.current;
+  const [pendingDownload, setPendingDownload] = useState<typeof currentDownloadOwner>();
+  const [downloadSnapshot, setDownloadSnapshot] = useState<{ owner: typeof currentDownloadOwner; status?: DownloadStatus }>();
+  const currentSnapshot = downloadSnapshot?.owner === currentDownloadOwner ? downloadSnapshot : undefined;
+  const downloaded = currentSnapshot?.status?.downloaded ?? false;
+  const submittingDownload = pendingDownload === currentDownloadOwner || Boolean(serverId && isArchiveDownloadPending(serverId, archiveId));
+  const downloading = !downloaded && (submittingDownload || Boolean(currentSnapshot?.status?.downloading));
+  const total = currentSnapshot?.status?.totalBytes;
+  const received = currentSnapshot?.status?.receivedBytes ?? 0;
+  const percent = total ? Math.min(100, Math.floor(100 * received / total)) : undefined;
+  const transferLabel = percent !== undefined ? `${percent}%` : received > 0 ? `${(received / 1048576).toFixed(1)} MB` : '下载中';
+  const downloadLabel = downloaded ? '已下载' : downloading ? `正在下载${transferLabel === '下载中' ? '' : ` ${transferLabel}`}` : '下载档案';
+  const showDownload = detailActions.includes('download');
   useEffect(() => {
     currentDownloadOwner.active = true;
-    setDownloading(false);
     return () => { currentDownloadOwner.active = false; };
   }, [currentDownloadOwner]);
+  useEffect(() => {
+    if (!serverId || serverOwner !== readingIdentity || !showDownload || !favoritePageActive) return;
+    let active = true;
+    let timer: number | undefined;
+    let request = 0;
+    let lastKnownRunning = false;
+    const refresh = async () => {
+      const token = ++request;
+      window.clearTimeout(timer);
+      const result = await repository.archiveDownloadStatus(serverId, archiveId);
+      if (!active || token !== request) return;
+      if (result.ok) {
+        lastKnownRunning = result.value.downloading;
+        setDownloadSnapshot({ owner: currentDownloadOwner, status: result.value });
+      }
+      else setDownloadSnapshot(previous => previous?.owner === currentDownloadOwner ? { ...previous } : { owner: currentDownloadOwner });
+      if (isArchiveDownloadPending(serverId, archiveId) || (result.ok ? result.value.downloading : lastKnownRunning)) {
+        timer = window.setTimeout(refresh, 650);
+      }
+    };
+    const invalidate = (event: Event) => {
+      if ((event as CustomEvent<{ prefix?: string }>).detail?.prefix === 'downloads:') void refresh();
+    };
+    void refresh();
+    window.addEventListener('focus', refresh);
+    window.addEventListener('yomika:route-cache-invalidated', invalidate);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('yomika:route-cache-invalidated', invalidate);
+    };
+  }, [serverId, archiveId, currentDownloadOwner, favoritePageActive, showDownload, serverOwner, readingIdentity]);
   const { open: openMenu, menu } = useArchiveContextMenu({
     hiddenActions: detailActions.filter(action => action !== 'clearProgress' || progress.hasProgress),
     onMembershipChange: (id, list, next) => {
@@ -391,20 +452,19 @@ detailBasePath?: string | undefined }) {
         {/* Long-press opens incognito. It used to be a button of its own beside
             阅读, which spent a permanent toolbar slot on a rare choice and put a
             second reading entry point next to the real one. */}
-        {detailActions.includes('read') && <Link
-          className="secondary-action"
+        {detailActions.includes('read') && <DetailReadAction
+          ready={readReady}
+          pageIndex={progress.pageIndex}
           to={`/reader/${archiveId}${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`}
-          aria-label="阅读"
-          aria-disabled={!readReady}
-          title="阅读（长按进入无痕阅读）"
+          longPressHint
           onPointerDown={startIncognitoPress}
           onPointerUp={cancelIncognitoPress}
           onPointerLeave={cancelIncognitoPress}
           onPointerCancel={cancelIncognitoPress}
-          onClick={(event) => { if (!readReady) { event.preventDefault(); return; } if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
+          onClick={(event) => { if (incognitoPrompted.current) { event.preventDefault(); incognitoPrompted.current = false; } }}
           onContextMenu={(event) => event.preventDefault()}
-        ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>}
-        {detailActions.includes('readingList') && <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
+        />}
+        {detailActions.includes('readingList') && (actionsHaveMetadata && membershipReady ? <button className="secondary-action" type="button" disabled={!scopeId || readingBusy} aria-busy={readingBusy} aria-pressed={inReadingList} onClick={() => {
           if (!scopeId || readingOwner.current.busy) return;
           const identity = readingIdentity;
           const generation = ++readingOwner.current.generation;
@@ -420,8 +480,8 @@ detailBasePath?: string | undefined }) {
           <StateIcon name="bookmark" selected={inReadingList} />
           <span className="archive-action-label">{inReadingList ? '移出待看' : '待看'}</span>
           {inReadingList && <span className="archive-action-label-short" aria-hidden="true">待看</span>}
-        </button>}
-        {detailActions.includes('favorites') && <button disabled={!favoriteReady || favoriteBusy} className="secondary-action" type="button" aria-pressed={favorite} onClick={() => {
+        </button> : <DetailActionSkeleton />)}
+        {detailActions.includes('favorites') && (actionsHaveMetadata && favoriteSettled ? <button disabled={!favoriteReady || favoriteBusy} className="secondary-action" type="button" aria-pressed={favorite} onClick={() => {
           if (!serverId) return;
           const identity = favoriteIdentity;
           const generation = ++favoriteOwner.current.generation;
@@ -433,21 +493,36 @@ detailBasePath?: string | undefined }) {
             if (failed) setMessage('未能更新服务器收藏夹');
             else setFavorite(next);
           }).finally(() => { if (ownsMutation()) setFavoriteBusy(false); });
-        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><StateIcon name="heart" selected={favorite} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span>{favorite && <span className="archive-action-label-short" aria-hidden="true">收藏</span>}</button>}
-        {detailActions.includes('download') && <button className="secondary-action" type="button" aria-label="下载档案" title="下载档案" disabled={!serverId || downloading} aria-busy={downloading} onClick={() => {
-          if (!serverId || currentDownloadOwner.busy || !currentDownloadOwner.active) return;
-          currentDownloadOwner.busy = true;
-          setDownloading(true);
-          showToast('正在下载档案', 'info');
-          void repository.downloadArchive(serverId, archiveId).then((result) => {
-            if (downloadOwner.current !== currentDownloadOwner || !currentDownloadOwner.active) return;
-            showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');
-          }).finally(() => {
-            currentDownloadOwner.busy = false;
-            if (downloadOwner.current === currentDownloadOwner && currentDownloadOwner.active) setDownloading(false);
-          });
-        }}><Download aria-hidden="true" /><span className="archive-action-label">下载</span></button>}
-        {detailActions.includes('edit') && <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button>}
+        }} aria-label={favorite ? '取消收藏' : '收藏'} title={favorite ? '取消收藏' : '收藏'}><StateIcon name="heart" selected={favorite} /><span className="archive-action-label">{favorite ? '取消收藏' : '收藏'}</span>{favorite && <span className="archive-action-label-short" aria-hidden="true">收藏</span>}</button> : <DetailActionSkeleton />)}
+        {showDownload && (actionsHaveMetadata && currentSnapshot ? <button
+          className="secondary-action archive-download-action"
+          type="button"
+          aria-label={downloadLabel}
+          title={downloadLabel}
+          disabled={!serverId || downloading || downloaded}
+          aria-busy={downloading}
+          data-downloaded={downloaded}
+          onClick={() => {
+            if (!serverId || currentDownloadOwner.busy || !currentDownloadOwner.active || downloaded) return;
+            currentDownloadOwner.busy = true;
+            setPendingDownload(currentDownloadOwner);
+            showToast('正在下载档案', 'info');
+            void repository.downloadArchive(serverId, archiveId).then((result) => {
+              if (downloadOwner.current !== currentDownloadOwner || !currentDownloadOwner.active) return;
+              if (result.ok && result.value.status === 'completed') {
+                setDownloadSnapshot({ owner: currentDownloadOwner, status: { downloaded: true, downloading: false, receivedBytes: 0, totalBytes: null } });
+              }
+              showToast(result.ok ? downloadResultMessage(result.value, title) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');
+            }).finally(() => {
+              currentDownloadOwner.busy = false;
+              setPendingDownload(owner => owner === currentDownloadOwner ? undefined : owner);
+            });
+          }}
+        >
+          {downloaded ? <ArchiveDownloadedIcon /> : downloading ? <LoaderCircle className="archive-download-spinner" aria-hidden="true" /> : <Download aria-hidden="true" />}
+          <span className="archive-action-label" data-transfer={downloading ? (percent === undefined && received > 0 ? 'bytes' : 'percent') : undefined}>{downloaded ? '已下载' : downloading ? transferLabel : '下载'}</span>
+        </button> : <DetailActionSkeleton />)}
+        {detailActions.includes('edit') && (actionsHaveMetadata && serverId ? <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button> : <DetailActionSkeleton />)}
 
         {detailActions.includes('clearProgress') && progress.hasProgress && <button className="secondary-action" type="button" aria-label="清除阅读进度" title="清除阅读进度" disabled={progress.busy} aria-busy={progress.busy} onClick={() => { void progress.clear(); }}><RotateCcw aria-hidden="true" /><span className="archive-action-label">清除进度</span><span className="archive-action-label-short" aria-hidden="true">清除</span></button>}
         {serverId && detailActions.includes('delete') && (
@@ -497,13 +572,11 @@ detailBasePath?: string | undefined }) {
       {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} detailBasePath={detailBasePath} />}
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
-        <section className="archive-page-thumbnails" aria-label="页面缩略图">
-          <VirtualPageGrid count={metadata.pageCount} className="archive-page-thumbnails-grid" minWidth={DETAIL_THUMBNAIL_WIDTH} footerHeight={DETAIL_THUMBNAIL_FOOTER}>
+        <DetailPageThumbnailGrid count={metadata.pageCount}>
             {(index) => (
               <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)} />
             )}
-          </VirtualPageGrid>
-        </section>
+        </DetailPageThumbnailGrid>
       )}
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
@@ -561,22 +634,26 @@ const RECOMMENDATION_SEED_PAGES = 3;
 /** 服务端联系不上时改问镜像，这是给一个种子在镜像上留的额度。 */
 const RECOMMENDATION_SEED_LIMIT = 100;
 
+function withRecommendationProgress(archives: ArchiveRecord[], progress?: ReadonlyMap<string, number>): ArchiveRecord[] {
+  return progress ? archives.map(archive => ({ ...archive, readPages: progress.get(archive.archiveId) ?? 0 })) : archives;
+}
+
 function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBasePath }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[]; detailBasePath: string }) {
   const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
   const snapshot = useMemo(() => readRecommendationSnapshot(snapshotKey, serverId), [snapshotKey, serverId]);
   // 这次进来用哪个种子：抖动靠它决定，同一次挂载内部（含后台补搜后的重排）保持稳定。
-  const [seed] = useState(createRecommendationSeed);
+  const [seed, setSeed] = useState(createRecommendationSeed);
   const [similarPool, setSimilarPool] = useState<ArchiveRecord[]>(snapshot?.similarPool ?? []);
   const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
   // 面板上摆的是池子按本次种子重排后的前几张：池子里的分数带抖动，顺序因此每次不
   // 一样；池子本身不受影响，所以「每次都看到的还是这一批」不会变成看不到新东西。
+  const [progress, setProgress] = useState<ReadonlyMap<string, number>>();
   const similar = useMemo(
-    () => rankRecommendations(tags, similarPool, RECOMMENDATION_VISIBLE_LIMIT, { seed }),
-    [seed, similarPool, tags],
+    () => rankRecommendations(tags, withRecommendationProgress(similarPool, progress), RECOMMENDATION_VISIBLE_LIMIT, { seed }),
+    [progress, seed, similarPool, tags],
   );
-  const [loading, setLoading] = useState(tags.length > 0 && !snapshot);
+  const [loading, setLoading] = useState(tags.length > 0 && !snapshot?.complete);
   const [tab, setTab] = useState<RecommendationTab>('similar');
-  const [reloadToken, setReloadToken] = useState(0);
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onDeleted: (archiveId) => {
       setSimilarPool((current) => current.filter((archive) => archive.archiveId !== archiveId));
@@ -588,15 +665,15 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
   useEffect(() => {
     if (tags.length === 0) return undefined;
     let active = true;
-    const loadProgress = async () => {
-      const result = await repository.listHistory(scopeId);
-      if (!result.ok) return new Map<string, number>();
-      return new Map(result.value.map((item) => [item.archiveId, item.pageIndex + 1]));
-    };
-    const addProgress = (archives: readonly ArchiveRecord[], progress: ReadonlyMap<string, number>) => archives.map((archive) => ({
-      ...archive,
-      readPages: progress.get(archive.archiveId) ?? 0,
-    }));
+    let availableProgress: ReadonlyMap<string, number> | undefined;
+    const history = repository.listCachedHistory(scopeId).then((result) => {
+      if (active && result.ok) {
+        const pages = new Map(result.value.map((item) => [item.archiveId, item.pageIndex + 1]));
+        availableProgress = pages;
+        setProgress(pages);
+        return pages;
+      }
+    }).catch(() => undefined);
     /** 服务端联系不上时改问镜像：它只有同步过的那部分，但总比空白强。一问镜像就等于
      * 承认这次答案是短的，`complete` 因此恒为 false。 */
     const mirrorSeed = async (seed: string): Promise<{ items: ArchiveRecord[]; complete: boolean }> => {
@@ -620,12 +697,21 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       }
       return { items, complete: true };
     };
+    const seedRequests = new Map<string, ReturnType<typeof searchSeed>>();
+    const loadSeed = (tag: string) => {
+      const key = tag.trim().toLowerCase();
+      const pending = seedRequests.get(key);
+      if (pending) return pending;
+      const request = searchSeed(tag);
+      seedRequests.set(key, request);
+      return request;
+    };
     const searchByTags = async (seeds: readonly string[]) => {
       const found = new Map<string, ArchiveRecord>();
       let complete = true;
       if (seeds.length === 0) return { found, complete };
       // 四路并发：一打种子串行要付一打 RTT，推荐栏才出得来。
-      const searchOne = async (seed: string) => ({ seed, ...(await searchSeed(seed)) });
+      const searchOne = async (seed: string) => ({ seed, ...(await loadSeed(seed)) });
       for (let index = 0; index < seeds.length; index += 4) {
         if (!active) return { found, complete: false };
         const responses = await Promise.all(seeds.slice(index, index + 4).map(searchOne));
@@ -644,101 +730,84 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       }
       return { found, complete };
     };
-    const runSearch = async (progress: ReadonlyMap<string, number>) => {
+    const runSearch = async () => {
       // 问哪几个标签也由种子决定：从前的种子集是固定的，同一份标签每次都问同样几个。
-      const seeds = pickSeedTags(tags, undefined, createSeededShuffle(seed));
-      // 相似与同作者两条搜索互不依赖，并行。
-      const [candidates, creatorMatches] = await Promise.all([
-        searchByTags(seeds),
-        searchByTags(creator.tags),
-      ]);
-      if (!active) return undefined;
-      const ranked = rankRecommendations(tags, addProgress([...candidates.found.values()], progress), Number.MAX_SAFE_INTEGER, { seed });
-      const byCreator = sortSameCreatorRecommendations(addProgress([...creatorMatches.found.values()], progress));
-      // Verify each rail independently. The native verifier intentionally caps
-      // one pass, so a large similarity result must not consume the budget and
-      // leave the creator rail's first cards unchecked.
-      const [missingSimilar, missingCreator] = await Promise.all([
-        findMissingArchives(serverId, ranked.map((archive) => archive.archiveId)),
-        findMissingArchives(serverId, byCreator.map((archive) => archive.archiveId)),
-      ]);
-      if (!active) return undefined;
-      return {
-        similarPool: ranked.filter((archive) => !missingSimilar.has(archive.archiveId)).slice(0, RECOMMENDATION_POOL_LIMIT),
-        sameCreator: byCreator.filter((archive) => !missingCreator.has(archive.archiveId)).slice(0, RECOMMENDATION_VISIBLE_LIMIT),
-        complete: candidates.complete && creatorMatches.complete,
+      const seeds = pickPopularSeedTags(tags, seed);
+      const loadRail = async (railTags: readonly string[], isCreator: boolean) => {
+        const result = await searchByTags(railTags);
+        const select = async (pages?: ReadonlyMap<string, number>) => {
+          const candidates = withRecommendationProgress([...result.found.values()], pages);
+          const ranked = isCreator ? sortSameCreatorRecommendations(candidates)
+            : rankRecommendations(tags, candidates, Number.MAX_SAFE_INTEGER, { seed });
+          const limit = isCreator ? RECOMMENDATION_VISIBLE_LIMIT : RECOMMENDATION_POOL_LIMIT;
+          // Verify the retained pool and a small reserve for confirmed deletions.
+          const shortlist = ranked.slice(0, limit + 8);
+          const missing = await findMissingArchives(serverId, shortlist.map(archive => archive.archiveId));
+          const items = shortlist.filter(archive => !missing.has(archive.archiveId)).slice(0, limit);
+          if (active) {
+            if (isCreator) setSameCreator(items);
+            else setSimilarPool(items);
+          }
+          return items;
+        };
+        const initial = availableProgress;
+        let items = await select(initial);
+        // Show search results immediately, then select again before caching if
+        // history arrived after the first shortlist was chosen.
+        if (!initial) {
+          const pages = await history;
+          if (active && pages) items = await select(pages);
+        }
+        return { items, complete: result.complete };
       };
+      const [similar, creatorMatches] = await Promise.all([
+        loadRail(seeds, false),
+        loadRail(creator.tags, true),
+      ]);
+      return { similarPool: similar.items, sameCreator: creatorMatches.items, complete: similar.complete && creatorMatches.complete };
     };
 
     const cached = readRecommendationSnapshot(snapshotKey, serverId);
-    if (cached) {
-      setLoading(false);
-      void (async () => {
-        const progress = await loadProgress();
-        if (!active) return;
-        const cachedSimilar = addProgress(cached.similarPool, progress);
-        const cachedCreator = sortSameCreatorRecommendations(addProgress(cached.sameCreator, progress));
-        setSimilarPool(cachedSimilar);
-        setSameCreator(cachedCreator);
-        // A cached recommendation can outlive the remote archive. Revalidate the
-        // ids before the next visit writes the stale card back to the DOM.
+    setLoading(!cached?.complete);
+    void (async () => {
+      if (cached) {
         const [missingSimilar, missingCreator] = await Promise.all([
-          findMissingArchives(serverId, cachedSimilar.map((archive) => archive.archiveId)),
-          findMissingArchives(serverId, cachedCreator.map((archive) => archive.archiveId)),
+          findMissingArchives(serverId, cached.similarPool.map((archive) => archive.archiveId)),
+          findMissingArchives(serverId, cached.sameCreator.map((archive) => archive.archiveId)),
         ]);
         if (!active) return;
-        const nextSimilar = cachedSimilar.filter((archive) => !missingSimilar.has(archive.archiveId));
-        const nextCreator = cachedCreator.filter((archive) => !missingCreator.has(archive.archiveId));
-        setSimilarPool(nextSimilar);
-        setSameCreator(nextCreator);
-        writeRouteCache(snapshotKey, { similarPool: nextSimilar, sameCreator: nextCreator, complete: cached.complete === true } satisfies RecommendationSnapshot);
-        // Only network-partial or mirror results need background recovery.
-        // Successful bounded samples stay cached until expiry or explicit refresh.
-        if (cached.complete === true) return;
-        const fresh = await runSearch(progress);
-        if (!active || !fresh) return;
-        setSimilarPool(fresh.similarPool);
-        setSameCreator(fresh.sameCreator);
-        writeRouteCache(snapshotKey, { similarPool: fresh.similarPool, sameCreator: fresh.sameCreator, complete: fresh.complete } satisfies RecommendationSnapshot);
-      })();
-      return () => { active = false; };
-    }
-    setLoading(true);
-    void (async () => {
-      const progress = await loadProgress();
-      if (!active) return;
-      const fresh = await runSearch(progress);
+        const next = {
+          similarPool: cached.similarPool.filter((archive) => !missingSimilar.has(archive.archiveId)),
+          sameCreator: cached.sameCreator.filter((archive) => !missingCreator.has(archive.archiveId)),
+          complete: cached.complete === true,
+        } satisfies RecommendationSnapshot;
+        setSimilarPool(next.similarPool);
+        setSameCreator(next.sameCreator);
+        writeRouteCache(snapshotKey, next);
+        if (next.complete) return;
+      }
+      const fresh = await runSearch();
       if (!active || !fresh) return;
-      setSimilarPool(fresh.similarPool);
-      setSameCreator(fresh.sameCreator);
-      setLoading(false);
-      writeRouteCache(snapshotKey, {
-        similarPool: fresh.similarPool,
-        sameCreator: fresh.sameCreator,
-        complete: fresh.complete,
-      } satisfies RecommendationSnapshot);
-    })();
+      writeRouteCache(snapshotKey, fresh);
+    })().catch(() => {}).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [creator, currentArchiveId, scopeId, serverId, seed, snapshotKey, tags, reloadToken]);
+  }, [creator, currentArchiveId, scopeId, serverId, seed, snapshotKey, tags]);
 
   // One rail with tabs instead of two stacked rails: the section used to take
   // two full card rows before the page thumbnails were even reachable.
   const creatorLabel = creator.namespace === 'cosplayer' ? '同 Coser' : '同作者';
   const hasSimilar = similar.length > 0;
   const hasCreator = sameCreator.length > 0;
-  // 推荐 is what the strip reads by default and it never leaves; the creator
-  // segment only exists once there is something behind it. A tab whose list came
-  // back empty must not be the one on screen either, or the whole rail vanished
-  // while the other tab had matches.
-  const activeTab: RecommendationTab = tab === 'creator' && hasCreator ? 'creator'
-    : tab === 'similar' && hasSimilar ? 'similar'
-      : hasCreator ? 'creator' : 'similar';
-  const visible = activeTab === 'creator' ? sameCreator : similar;
+  // Cached results, a refresh and the two searches can resolve independently.
+  // Keep the user's selection independent of whether either rail has results.
+  const activeTab = tab;
+  const orderedCreator = useMemo(() => sortSameCreatorRecommendations(withRecommendationProgress(sameCreator, progress)), [progress, sameCreator]);
+  const visible = activeTab === 'creator' ? orderedCreator : similar;
   // The rail draws the panel, so the tabs go inside it as its heading. Rendered
   // as a sibling above, they floated outside the component they belonged to.
   const tabs = (
-    <div className={`archive-recommendations-tabs${hasCreator ? ' has-creator' : ''}`} role="tablist" aria-label="推荐分组">
-      <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} disabled={!hasSimilar && hasCreator} onClick={() => setTab('similar')}>推荐</button>
+    <div className={`archive-recommendations-tabs${hasCreator || activeTab === 'creator' ? ' has-creator' : ''}`} role="tablist" aria-label="推荐分组">
+      <button type="button" role="tab" aria-selected={activeTab === 'similar'} className={activeTab === 'similar' ? 'is-active' : ''} onClick={() => setTab('similar')}>推荐</button>
       {/* In the DOM from the start, collapsed to nothing: the segment grows out of
           the strip rather than popping in and shoving the heading sideways.
           `role="presentation"` 不是装饰：这个 span 是 tablist 的直接子节点，不加这一条
@@ -749,9 +818,9 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
         type="button"
         role="tab"
         aria-selected={activeTab === 'creator'}
-        aria-hidden={!hasCreator}
-        tabIndex={hasCreator ? 0 : -1}
-        disabled={!hasCreator}
+        aria-hidden={!hasCreator && activeTab !== 'creator'}
+        tabIndex={hasCreator || activeTab === 'creator' ? 0 : -1}
+        disabled={!hasCreator && activeTab !== 'creator'}
         className={`archive-recommendations-tab-creator${activeTab === 'creator' ? ' is-active' : ''}`}
         onClick={() => setTab('creator')}
       >{creatorLabel}</button>
@@ -768,13 +837,15 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     <ArchiveThumbnailRail
       title="推荐"
       archives={visible}
-      loading={loading}
+      {...(progress && { progressByArchiveId: progress })}
+      loading={loading && visible.length === 0}
+      {...(!visible.length && { emptyMessage: activeTab === 'similar' ? '暂无推荐档案' : `暂无${creatorLabel}档案` })}
       refreshing={loading}
       skeletonCount={6}
       scopeId={scopeId}
       serverId={serverId}
       headingContent={tabs}
-      onRefresh={() => { invalidateRouteCache(snapshotKey); setReloadToken((value) => value + 1); }}
+      onRefresh={() => { invalidateRouteCache(snapshotKey); setSeed(createRecommendationSeed()); }}
       onArchiveContextMenu={openContextMenu}
       detailBasePath={detailBasePath}
     />
@@ -818,17 +889,19 @@ function ArchivePageThumbnail({
         handle = loaded;
         setSrc(loaded.url);
         setState('ready');
-      }).catch(() => {
-        if (!controller.signal.aborted) {
-          setState('error');
-          if (retry < 2) retryTimer = window.setTimeout(() => setRetry((value) => value + 1), 1200 * (retry + 1));
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setState('error');
+        if (retry === 0 && error instanceof RenditionError && error.retryable
+          && error.code !== 'INVALID_RESPONSE') {
+          const delay = error.code === 'REMOTE_RATE_LIMIT' ? 6000 : 3000;
+          retryTimer = window.setTimeout(() => setRetry(1), delay + Math.random() * 1000);
         }
       });
     };
-    // Browser loading="lazy" only delays decoding an existing URL. Delay the
-    // native IPC request as well — but generously: 1200px 约等于视口下方
-    // 好几行，正常滚动时缩略图总是先到一步，而不是滚到跟前才出现骨架。
-    const stopObserving = observeOnceInScroll(node, load, '1200px');
+    // Delay native IPC as well as image decoding. Prefetch nearby rows without
+    // making several off-screen rows compete with the visible page thumbnails.
+    const stopObserving = observeOnceInScroll(node, load, '320px');
     return () => {
       stopObserving();
       controller.abort();

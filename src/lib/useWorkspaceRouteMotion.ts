@@ -57,7 +57,9 @@ export function useWorkspaceRouteMotion(location: Location, compact: boolean, di
       // The restored page settles underneath the departing, opaque surface.
       // Animate the sibling only: transforming an ancestor of a fixed outgoing
       // detail would change its containing block and make the coordinates jump.
-      if (underneath?.animate) backdrop = underneath.animate([
+      // Only zoom the home page revealed by a shortcut return. A tab
+      // destination should keep its natural size beneath the outgoing page.
+      if (location.pathname === '/' && underneath?.animate) backdrop = underneath.animate([
         { transform: 'scale(1.025)' }, { transform: 'scale(1)' },
       ], { duration: DETAIL_EXIT_MS, easing: 'cubic-bezier(.2, .8, .2, 1)' });
       animation = animateDetail(detail, true, target);

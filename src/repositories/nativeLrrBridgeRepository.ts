@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { invokeCommand } from '../bridge/invoke';
 import { err, ok, type CommandResult } from '../domain/result';
 import type { ReadingProgress, ReadingHistoryRecord, WatchlistRecord } from '../domain/library';
@@ -11,6 +12,7 @@ const ProgressSchema = z.object({
 export const LrrBridgeStateSchema = z.object({
   archiveId: z.string().min(1), version: integer, generation: integer,
   progress: ProgressSchema.nullable(), historyAt: z.string().nullable(), watchlistAt: z.string().nullable(),
+  historyPageIndex: integer.optional(), historyRemovedAt: z.string().optional(),
 }).strict();
 export type LrrBridgeState = z.infer<typeof LrrBridgeStateSchema>;
 export const LrrBridgeConfigSchema = z.object({
@@ -19,7 +21,7 @@ export const LrrBridgeConfigSchema = z.object({
 export type LrrBridgeConfig = z.infer<typeof LrrBridgeConfigSchema>;
 const envelope = { protocol: z.literal(1), serverId: z.string().min(1), epoch: z.string().min(1), version: integer };
 const StatesSchema = z.object({ ...envelope, states: z.array(LrrBridgeStateSchema) });
-const ListSchema = StatesSchema.extend({ total: integer });
+const ListSchema = StatesSchema.extend({ total: integer, historyDelta: z.boolean().optional(), offline: z.boolean().optional(), pendingStates: z.array(LrrBridgeStateSchema).optional() });
 const ApplySchema = z.object({ state: LrrBridgeStateSchema, queued: z.boolean(), conflict: z.boolean().optional() });
 const WorkspaceSchema = z.object({ ...envelope,
   workspace: z.object({ key: z.string(), version: integer, value: z.unknown() }),
@@ -32,6 +34,25 @@ export const BridgeCollectionRecordSchema = z.object({
 export type BridgeCollectionRecord = z.infer<typeof BridgeCollectionRecordSchema>;
 export type BridgeCollection = BridgeCollectionRecord['collection'];
 const configurations = new Map<string, Promise<CommandResult<LrrBridgeConfig>>>();
+type HistorySnapshot = Pick<z.infer<typeof ListSchema>, 'serverId' | 'epoch' | 'version'> & { states: LrrBridgeState[] };
+const HISTORY_SNAPSHOT_PREFIX = 'bridge-history:v1:';
+const historySnapshotKey = (scopeId: string) => `${HISTORY_SNAPSHOT_PREFIX}${encodeURIComponent(scopeId)}:`;
+function saveHistorySnapshot(scopeId: string, snapshot: HistorySnapshot) {
+  writeRouteCache(historySnapshotKey(scopeId), snapshot, { persist: true });
+}
+const pendingHistory = new Map<string, Promise<CommandResult<LrrBridgeState[]>>>();
+function mergeHistory(target: Map<string, LrrBridgeState>, changes: LrrBridgeState[]) {
+  for (const state of changes) {
+    if (state.historyAt === null) target.delete(state.archiveId);
+    else target.set(state.archiveId, state);
+  }
+}
+function sortedHistory(states: Map<string, LrrBridgeState>): LrrBridgeState[] {
+  return [...states.values()].sort((a, b) => (b.historyAt ?? '').localeCompare(a.historyAt ?? ''));
+}
+function staleHistoryRequest(): CommandResult<LrrBridgeState[]> {
+  return err('REMOTE_CONFLICT', '历史同步配置已变更，请重新读取。', true);
+}
 export const LRR_BRIDGE_CHANGED_EVENT = 'yomika:lrr-bridge-write';
 function notifyBridge(scopeId: string, kind: string) {
   if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(LRR_BRIDGE_CHANGED_EVENT, { detail: { scopeId, kind } }));
@@ -44,8 +65,15 @@ export async function getEnabledLrrBridgeScopes(): Promise<string[]> {
   return entries.filter((scopeId): scopeId is string => scopeId !== null);
 }
 export function invalidateLrrBridgeConfig(scopeId?: string) {
-  if (scopeId === undefined) configurations.clear();
-  else configurations.delete(scopeId);
+  if (scopeId === undefined) {
+    configurations.clear();
+    invalidateRouteCache(HISTORY_SNAPSHOT_PREFIX);
+    pendingHistory.clear();
+  } else {
+    configurations.delete(scopeId);
+    invalidateRouteCache(historySnapshotKey(scopeId));
+    pendingHistory.delete(scopeId);
+  }
 }
 
 export function bridgeProgress(scopeId: string, state: LrrBridgeState): ReadingProgress | null {
@@ -57,7 +85,7 @@ export function bridgeWatchlist(scopeId: string, state: LrrBridgeState): Watchli
     revision: Math.max(1, state.version), deleted: state.watchlistAt === null, deletedAt: state.watchlistAt === null ? at : null };
 }
 export function bridgeHistory(scopeId: string, state: LrrBridgeState): ReadingHistoryRecord {
-  return { scopeId, archiveId: state.archiveId, pageIndex: state.progress?.pageIndex ?? 0,
+  return { scopeId, archiveId: state.archiveId, pageIndex: state.historyPageIndex ?? state.progress?.pageIndex ?? 0,
     visitedAt: state.historyAt!, deviceId: 'lrr-bridge', revision: Math.max(1, state.version) };
 }
 
@@ -91,6 +119,11 @@ export class NativeLrrBridgeRepository {
   }
   detect(scopeId: string) {
     return invokeCommand('lrr_bridge_request', { scopeId, action: 'hello', input: {} }, z.object(envelope));
+  }
+  pluginStatus(scopeId: string) {
+    return invokeCommand('lrr_bridge_request', { scopeId, action: 'plugin_status', input: {} }, z.object({
+      available: z.boolean(), version: z.string().min(1).nullish().transform(value => value ?? undefined),
+    }));
   }
   async flush(scopeId: string) {
     const result = await invokeCommand('lrr_bridge_flush', { scopeId }, LrrBridgeConfigSchema);
@@ -136,18 +169,84 @@ export class NativeLrrBridgeRepository {
     }
     return ok(states);
   }
-  async list(scopeId: string, kind: 'watchlist' | 'history'): Promise<CommandResult<LrrBridgeState[]>> {
+  list(scopeId: string, kind: 'watchlist' | 'history'): Promise<CommandResult<LrrBridgeState[]>> {
+    if (kind !== 'history') return this.readList(scopeId, kind);
+    const pending = pendingHistory.get(scopeId);
+    if (pending) return pending;
+    const isCurrent = () => pendingHistory.get(scopeId) === request;
+    const request: Promise<CommandResult<LrrBridgeState[]>> = this.readHistory(scopeId, isCurrent).finally(() => {
+      if (pendingHistory.get(scopeId) === request) pendingHistory.delete(scopeId);
+    });
+    pendingHistory.set(scopeId, request);
+    return request;
+  }
+
+  private async readHistory(scopeId: string, isCurrent: () => boolean): Promise<CommandResult<LrrBridgeState[]>> {
+    const previous = readRouteCache<HistorySnapshot>(historySnapshotKey(scopeId), Infinity);
+    if (previous) delta: for (let attempt = 0; attempt < 2; attempt++) {
+      let states: Map<string, LrrBridgeState> | undefined;
+      let stamp: number | undefined;
+      for (let offset = 0; offset < 1_000_000;) {
+        const result = await invokeCommand('lrr_bridge_request', {
+          scopeId, action: 'history_changes', input: { since: previous.version, offset, limit: 100 },
+        }, ListSchema.nullable());
+        if (!isCurrent()) return staleHistoryRequest();
+        if (!result.ok || !result.value) break delta;
+        const page = result.value;
+        if (page.serverId !== previous.serverId || page.epoch !== previous.epoch || page.version < previous.version) break delta;
+        if (page.offline) {
+          if (!page.pendingStates?.length) return ok(previous.states);
+          const view = new Map(previous.states.map(state => [state.archiveId, state]));
+          mergeHistory(view, page.pendingStates);
+          return ok(sortedHistory(view));
+        }
+        // A server write during pagination invalidates the offsets, but the
+        // last complete cursor can still serve as the base for a new delta.
+        if (stamp !== undefined && stamp !== page.version) continue delta;
+        stamp = page.version;
+        if (page.states.length) {
+          states ??= new Map(previous.states.map(state => [state.archiveId, state]));
+          mergeHistory(states, page.states);
+        }
+        offset += page.states.length;
+        if (offset >= page.total) {
+          const authoritative = states ? sortedHistory(states) : previous.states;
+          if (page.version !== previous.version) {
+            saveHistorySnapshot(scopeId, { serverId: page.serverId, epoch: page.epoch, version: page.version, states: authoritative });
+          }
+          if (!page.pendingStates?.length) return ok(authoritative);
+          const view = states ?? new Map(authoritative.map(state => [state.archiveId, state]));
+          mergeHistory(view, page.pendingStates);
+          return ok(sortedHistory(view));
+        }
+        if (!page.states.length) break delta;
+      }
+    }
+    return this.readList(scopeId, 'history', isCurrent);
+  }
+
+  private async readList(scopeId: string, kind: 'watchlist' | 'history', isCurrent?: () => boolean): Promise<CommandResult<LrrBridgeState[]>> {
     for (let attempt = 0; attempt < 2; attempt++) {
       const states = new Map<string, LrrBridgeState>();
       let snapshot: string | undefined;
+      let canCacheHistory = kind === 'history';
       for (let offset = 0; ;) {
         const result = await invokeCommand('lrr_bridge_request', { scopeId, action: 'list', input: { kind, offset, limit: 100 } }, ListSchema);
+        if (isCurrent && !isCurrent()) return staleHistoryRequest();
         if (!result.ok) { if (attempt === 0 && result.error.code === 'REMOTE_CONFLICT') break; return result; }
         const identity = JSON.stringify([result.value.serverId, result.value.epoch, result.value.version]);
         if (snapshot !== undefined && identity !== snapshot) break;
         snapshot = identity;
+        canCacheHistory &&= result.value.historyDelta === true && result.value.offline !== true;
         result.value.states.forEach(state => states.set(state.archiveId, state));
-        if (offset + result.value.states.length >= result.value.total) return ok([...states.values()]);
+        if (offset + result.value.states.length >= result.value.total) {
+          const next = [...states.values()];
+          if (canCacheHistory) {
+            const { serverId, epoch, version } = result.value;
+            saveHistorySnapshot(scopeId, { serverId, epoch, version, states: next });
+          } else if (kind === 'history' && !result.value.offline) invalidateRouteCache(historySnapshotKey(scopeId));
+          return ok(next);
+        }
         if (result.value.states.length === 0) break;
         if (offset >= 1_000_000) return err('INVALID_RESPONSE', '托管列表分页无效', false);
         offset += result.value.states.length;

@@ -748,7 +748,11 @@ async fn app_security_unlock_biometric_impl(
 #[cfg(windows)]
 fn cover_webview(app: &AppHandle, covered: bool) {
     if let Some(window) = app.get_webview_window("main") {
+        let owner = window.clone();
         let _ = window.with_webview(move |webview| unsafe {
+            if let Ok(parent) = owner.hwnd() {
+                crate::native_reader::cover_window(&owner, windows::Win32::Foundation::HWND(parent.0), covered);
+            }
             let _ = webview.controller().SetIsVisible(!covered);
         });
     }

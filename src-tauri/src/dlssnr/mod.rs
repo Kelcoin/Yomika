@@ -90,6 +90,14 @@ pub mod commands {
         ))
     }
 
+    #[tauri::command]
+    pub async fn dlssnr_apply_page_file(
+        _input: serde_json::Value,
+        _reader_session: u32,
+    ) -> Result<CommandResult<Option<crate::commands::library::ReaderCachedFile>>, String> {
+        Ok(CommandResult::failure("PLATFORM_UNAVAILABLE", "DLSSNR 只在 Windows 桌面端可用", false))
+    }
+
     /// 非 Windows 上没有任何工作区可交回，报 0 份（形状与 Windows 那份一致：
     /// 同样收一个 `AppHandle`，虽然这里用不上）。
     #[tauri::command]

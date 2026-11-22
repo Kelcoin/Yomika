@@ -41,6 +41,8 @@ describe('server setup dialog', () => {
     render(<ServerSetupDialog onSave={onSave} />);
 
     await user.click(screen.getByRole('button', { name: '添加服务器' }));
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    expect(screen.getByLabelText('名称')).not.toHaveFocus();
     await user.type(screen.getByLabelText('名称'), 'Home');
     await user.type(screen.getByLabelText('服务器地址'), 'https://example.com');
     await user.click(screen.getByRole('button', { name: '保存服务器' }));
@@ -242,18 +244,14 @@ describe('server setup dialog', () => {
     expect(screen.queryByText('删除「Home」的配置？')).not.toBeInTheDocument();
   });
 
-  it('puts the caret at the end of the name instead of selecting it whole', async () => {
+  it('opens the editor without focusing a text input', async () => {
     const user = userEvent.setup();
     render(<ServerSetupDialog onSave={async ({ identity }) => ok(identity)} server={homeServer} />);
 
     await user.click(screen.getByRole('button', { name: '编辑 Home' }));
-    const name = (await screen.findByLabelText('名称')) as HTMLInputElement;
-
-    // Radix 打开对话框时会聚焦第一个文本框并全选内容，编辑服务器时等于替用户选中了名字，
-    // 一敲键盘就把名字整段替换掉。光标应该落在末尾。
-    expect(document.activeElement).toBe(name);
-    expect(name.value).toBe('Home');
-    expect(name.selectionStart).toBe(name.value.length);
-    expect(name.selectionEnd).toBe(name.value.length);
+    expect(screen.getByRole('dialog')).toHaveFocus();
+    expect(screen.getByLabelText('名称')).toHaveValue('Home');
+    await user.tab();
+    expect(screen.getByLabelText('名称')).toHaveFocus();
   });
 });

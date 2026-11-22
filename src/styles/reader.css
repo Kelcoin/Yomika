@@ -1,3 +1,10 @@
+/* Android draws the ready page underneath the WebView controls. */
+html:has(.reader-screen [data-native-reader-visible]),
+body:has(.reader-screen [data-native-reader-visible]),
+.reader-screen:has([data-native-reader-visible]) {
+  background: transparent;
+}
+
 .reader-screen {
   position: relative;
   display: grid;
@@ -22,11 +29,11 @@
   box-shadow: none;
 }
 
-/* Readoshi's thin countdown, kept below the safe inset and above both bars.
+/* Draw the passive countdown at the top edge, above both bars.
    Only transform animates: no per-frame React state or width/layout updates. */
 .reader-auto-turn-progress {
   position: absolute;
-  top: max(var(--safe-top), var(--safe-overlay-top));
+  top: 0;
   inset-inline: 0;
   z-index: calc(var(--z-reader-chrome) + 1);
   height: 2px;
@@ -59,18 +66,15 @@
   top: 50%;
   right: max(calc(28px + var(--safe-right)), var(--reader-exit-midpoint));
   display: grid;
-  justify-items: center;
-  gap: var(--space-1);
-  width: 56px;
-  padding: var(--space-3) var(--space-2);
-  border-radius: var(--radius-pill);
+  place-items: center;
+  box-sizing: border-box;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  overflow: hidden;
   pointer-events: none;
   background: var(--reader-surface-raised);
   color: var(--reader-ink);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-semibold);
-  line-height: var(--leading-tight);
-  text-align: center;
   border: 1px solid var(--reader-border);
   opacity: 0;
   visibility: hidden;
@@ -85,9 +89,21 @@
 .reader-exit-hint[data-visible='true'] {
   opacity: clamp(0, calc(var(--reader-exit-progress) * 2), 1);
   visibility: visible;
-  transition: background-color var(--motion-fast), color var(--motion-fast);
+  transition: none;
 }
-.reader-exit-hint[data-ready='true'] { background: var(--reader-primary); color: var(--reader-canvas); }
+/* Clip the fill and its high-contrast icon together at the live drag height. */
+.reader-exit-hint-fill {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--reader-primary);
+  color: var(--reader-canvas);
+  clip-path: inset(0 calc((1 - var(--reader-exit-progress)) * 100%) 0 0);
+}
+.reader-exit-hint[data-side='right'] .reader-exit-hint-fill {
+  clip-path: inset(0 0 0 calc((1 - var(--reader-exit-progress)) * 100%));
+}
 .reader-exit-hint-icon { width: 20px; height: 20px; }
 .reader-exit-hint[data-side='left'] .reader-exit-hint-icon { transform: scaleX(-1); }
 
@@ -116,6 +132,9 @@
    The track carries the drag offset, so a neighbour slides in from exactly where
    it will land — the gesture used to drag the page off an empty background. */
 .reader-track {
+  /* The paged canvas owns both axes. Keep WebView from taking over a
+     vertical pan between the first and second fingers of a pinch. */
+  touch-action: none;
   grid-area: 1 / 1;
   /* Layout containment only: `paint` clipped every descendant to the track's
      own box, and the swipe-neighbour frames live at translateX(±100%) — they
@@ -127,17 +146,11 @@
   height: 100%;
 }
 
-/* 只在拖动 / 翻页动画期间提升这一层。常驻的 `will-change: transform` 意味着一屏里
-   三个大图层（本页 + 两侧各一页）永远占着显存，而低端设备上合成开销就花在这上面。 */
-.reader-track.is-moving {
-  will-change: transform;
-}
-
 .reader-frame {
   position: absolute;
   inset: 0;
   /* 帧自己的 transform 是固定的（`translateX(±100%)`，内联写死），提升它只是白占
-     一层；跟着动的是轨道那一层，由上面的 `is-moving` 负责。 */
+     一层；跟着动的是始终使用 3D transform 的轨道。 */
   backface-visibility: hidden;
 }
 
@@ -167,7 +180,8 @@
   align-items: center;
 }
 
-.reader-spread > .reader-slot { grid-row: 1; }
+.reader-spread-web { display: contents; }
+:is(.reader-spread, .reader-spread-web) > .reader-slot { grid-row: 1; }
 
 .reader-spread .reader-slot:first-child { justify-self: end; }
 .reader-spread .reader-slot:last-child { justify-self: start; }
@@ -229,8 +243,7 @@
 .reader-deriving .loading-indicator { color: var(--reader-ink); }
 
 /* Keep the incoming and outgoing pages visually identical at the handoff. */
-.reader-single.is-dragging,
-.reader-spread.is-dragging {
+.reader-track:active {
   cursor: grabbing;
 }
 
@@ -242,6 +255,10 @@
   /* The reader compensates measured heights itself; native scroll anchoring
      must not also shift the viewport as virtual spacers change. */
   overflow-anchor: none;
+}
+
+.reader-webtoon[data-native-touch-scroll] {
+  touch-action: pan-x;
 }
 
 .reader-webtoon-spacer { flex: none; width: 100%; }
@@ -737,8 +754,7 @@
   bottom: 0;
   left: 0;
   display: grid;
-  grid-template-columns: auto auto auto;
-  justify-content: center;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: var(--space-2);
   height: calc(var(--reader-toolbar-height) + var(--safe-bottom));
@@ -790,12 +806,11 @@
   padding: 0;
 }
 
-/* 三列各就各位：左=布局，中=页码，右=画面处理。DOM 顺序就是这三段。
-   列已经是内容宽，所以这里没有 `justify-self`——留一条就会把那一组推回自己那一列的
-   边上，又变成「离中心远」的那颗钉子。 */
-.reader-toolbar-layout { grid-column: 1; }
+/* Equal side tracks center the page count, even when the action counts differ.
+   Keep both side groups close to the page controls on wide screens. */
+.reader-toolbar-layout { grid-column: 1; justify-self: end; }
 .reader-toolbar-pages { grid-column: 2; }
-.reader-toolbar-processing { grid-column: 3; }
+.reader-toolbar-processing { grid-column: 3; justify-self: start; }
 
 /* M3 disabled: the icon drops to on-surface at 38%. */
 .reader-toolbar button:disabled {
@@ -807,16 +822,21 @@
   .reader-toolbar button:disabled:hover { background: transparent; }
 }
 
-/* M3 label-medium: 12sp at weight 500. Monospace is the project's rule for
-   numbers (page counts, sizes), so the role is carried by size and weight. */
-.reader-toolbar span {
-  flex: 0 0 auto;
-  min-width: 64px;
+/* The page count is a read-only label on a tonal surface. */
+.reader-toolbar-counter {
+  display: grid;
+  place-items: center;
+  min-inline-size: 64px;
+  min-block-size: 32px;
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-container-high);
   color: var(--on-surface);
-  font-family: var(--font-utility);
+  font-family: var(--font-body);
   font-size: var(--text-xs);
   font-weight: var(--weight-medium);
-  text-align: center;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .reader-toolbar button {
@@ -988,7 +1008,8 @@
 .reader-overview-stats dd { margin: 0; white-space: nowrap; font-family: var(--font-utility); font-size: var(--text-xs); }
 /* Grouped like the detail page's tag list, so a namespace is legible at a glance
    rather than being one run of identical chips. */
-.reader-overview-tags { display: grid; gap: var(--space-2); max-height: 180px; overflow-y: auto; }
+.reader-overview-tags { max-height: 180px; overflow-y: auto; scrollbar-gutter: stable; }
+.reader-overview-tag-rows { display: grid; gap: var(--space-2); }
 .reader-overview-tags .tag-group { display: grid; gap: 4px; }
 /* 命名空间的标题就是那枚带色芯片（`.tag-group h3`），所以这里不能再写颜色：这条
    规则的特异性 (0,2,1) 压得住 `.tag-group-artist h3` 那几条 (0,1,1)，一写就把芯片
@@ -1022,16 +1043,66 @@
   min-width: 0;
   padding: 0;
   overflow: hidden;
-  border: 1px solid var(--outline-variant);
+  isolation: isolate;
+  box-sizing: border-box;
+  border: 2px solid var(--outline-variant);
   border-radius: var(--radius-control);
   background: var(--surface-container);
   color: inherit;
   cursor: pointer;
 }
 
-/* M3: selected is the scheme's primary. It was --brand-cyan, whose light-theme
-   value is a deep teal — invisible against the panel it sits on. */
-.reader-overview-thumbnails button[aria-current="true"] { border-color: var(--primary); }
+/* Keep the artwork inside the same clip and border at every selection state. */
+.reader-overview-thumbnails button[aria-current="true"] {
+  border-color: var(--primary);
+}
+.reader-overview-thumbnail-scroll-area {
+  position: relative;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  padding-right: 24px;
+  min-height: 0;
+  min-width: 0;
+}
+.reader-overview-thumbnails {
+  overflow-anchor: none;
+  scrollbar-width: none;
+}
+.reader-overview-thumbnails::-webkit-scrollbar { display: none; }
+.reader-overview-thumbnail-scrollbar {
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 24px;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.reader-overview-thumbnail-scrollbar[data-dragging='true'] { cursor: grabbing; }
+.reader-overview-thumbnail-scrollbar-thumb {
+  width: 6px;
+  margin-inline: auto;
+  border-radius: var(--radius-pill);
+  background: var(--outline);
+  opacity: 0;
+  transition: opacity 220ms ease-in;
+}
+.reader-overview-thumbnail-scrollbar:is([data-scrolling='true'], [data-dragging='true'], :focus-visible) > .reader-overview-thumbnail-scrollbar-thumb {
+  opacity: 1;
+  transition: opacity 140ms ease-out;
+}
+@media (hover: hover) {
+  .reader-overview-thumbnail-scrollbar:hover > .reader-overview-thumbnail-scrollbar-thumb { opacity: 1; transition: opacity 140ms ease-out; }
+}
+@media (hover: none) {
+  .reader-overview-thumbnail-scrollbar:is(.is-pressed, :active) > .reader-overview-thumbnail-scrollbar-thumb { opacity: 1; transition: opacity 140ms ease-out; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .reader-overview-thumbnail-scrollbar > .reader-overview-thumbnail-scrollbar-thumb { transition: none !important; }
+}
+@media (forced-colors: active) {
+  .reader-overview-thumbnail-scrollbar-thumb { forced-color-adjust: none; background: CanvasText; opacity: 1; }
+}
 /* Preview mode (opened from the duplicate workspace): the grid is reference
    only, and it must not look like a control that will turn the page. */
 .reader-overview-thumbnails.is-preview button { cursor: default; }
@@ -1074,24 +1145,20 @@
   .reader-screen { --reader-toolbar-height: 64px; }
   .reader-toolbar {
     display: grid;
-    grid-template-columns: auto auto auto;
     grid-template-rows: minmax(0, 1fr);
-    justify-content: center;
     gap: var(--space-1);
   }
   .reader-toolbar-group { min-height: 44px; gap: 0; padding-inline: 0; }
-  .reader-toolbar-pages { justify-content: center; }
   .reader-toolbar button,
   .reader-chrome-top .reader-icon-button { width: 36px; min-width: 36px; flex-basis: 36px; }
   .reader-chrome-actions { gap: 0; }
-  .reader-toolbar span:not(.reader-toolbar-turn) { min-width: 58px; }
 }
 
 @media (max-width: 380px) {
   .reader-toolbar { gap: 2px; }
   .reader-toolbar button,
   .reader-chrome-top .reader-icon-button { width: 30px; min-width: 30px; flex-basis: 30px; }
-  .reader-toolbar span:not(.reader-toolbar-turn) { min-width: 52px; font-size: var(--text-xs); }
+  .reader-toolbar-counter { min-inline-size: 56px; padding-inline: 4px; }
   .reader-toolbar svg,
   .reader-chrome-top .reader-icon-button svg { width: 22px; height: 22px; }
 }

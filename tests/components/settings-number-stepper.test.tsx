@@ -26,6 +26,26 @@ describe('numeric slider', () => {
     fireEvent.change(slider, { target: { value: '1.31' } });
     expect(slider).toHaveValue('1.3');
   });
+  it('shows the value bubble only while pressed and follows the snapped thumb', async () => {
+    render(<Harness />);
+    const slider = await open();
+    const track = slider.closest('.settings-number-track')!;
+    const bubble = track.querySelector('.settings-number-bubble')!;
+    expect(track.previousElementSibling).toHaveTextContent('0 倍');
+    expect(track.nextElementSibling).toHaveTextContent('2 倍');
+    expect(track).not.toHaveAttribute('data-pressed');
+    expect(track.querySelector('.settings-number-ticks')).toBeNull();
+    fireEvent.pointerDown(slider);
+    expect(track).toHaveAttribute('data-pressed', 'true');
+    fireEvent.change(slider, { target: { value: '2' } });
+    expect(bubble).toHaveTextContent('2 倍');
+    expect(track.parentElement?.style.getPropertyValue('--slider-progress')).toBe('100%');
+    fireEvent.pointerCancel(window);
+    expect(track).not.toHaveAttribute('data-pressed');
+    fireEvent.pointerDown(slider);
+    fireEvent.pointerUp(window);
+    expect(track).not.toHaveAttribute('data-pressed');
+  });
   it('retains bounds and anchors integer steps at a nonzero minimum', async () => {
     render(<Harness initial={128} min={64} max={8192} step={64} />);
     const slider = await open();

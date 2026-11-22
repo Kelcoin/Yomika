@@ -10,6 +10,7 @@ import type {
 } from '../domain/compute';
 import type { CommandResult } from '../domain/result';
 import { decodeImageStrict } from './decodeImage';
+import { canDecodeReaderLease } from './readerNativeTiles';
 import { peekCachedImage, type ImageHandle, type UnifiedImageCache } from './unifiedImageCache';
 
 /** 阅读器那条超分阶段的 id（宿主 `src-tauri/src/compute/reader.rs` 的 `UPSCALE_STAGE_ID`）。
@@ -26,7 +27,7 @@ export interface ReaderComputedPageBridge {
   cancel(jobId: string, subscriptionId: number): Promise<CommandResult<ComputeCancelOutcome>>;
   jobGet(jobId: string): Promise<CommandResult<ComputeJobSnapshot | null>>;
   jobArtifacts(jobId: string): Promise<CommandResult<ComputeArtifactRecord[]>>;
-  acquireArtifact(jobId: string, artifactId: string): Promise<CommandResult<ComputedImageLease>>;
+  acquireArtifact(jobId: string, artifactId: string, readerSession?: number): Promise<CommandResult<ComputedImageLease>>;
   releaseArtifact(leaseId: string): Promise<CommandResult<void>>;
 }
 
@@ -214,7 +215,10 @@ export async function loadReaderComputedPage(
       picked.add(newest.artifactId);
 
       phase = '租借处理结果';
-      const acquired = await repository.acquireArtifact(id, newest.artifactId);
+      const session = claim.identity.readerSession;
+      const acquired = await (session === undefined
+        ? repository.acquireArtifact(id, newest.artifactId)
+        : repository.acquireArtifact(id, newest.artifactId, session));
       if (cancelled || done) {
         if (acquired.ok) void repository.releaseArtifact(acquired.value.leaseId).catch(() => {});
         return;
@@ -232,7 +236,9 @@ export async function loadReaderComputedPage(
       try {
         // 必须用**不吞失败**的那一版：取图地址打不开时（scheme 形状不对、租借过期、
         // 文件被清）要让下面的 catch 真的接住，页面留在手上那一版，而不是换上一张破图。
-        await decodeImageStrict(lease.url);
+        // ReaderPageImage waits for the real decoder's ready signal and retains
+        // its predecessor on failure. Avoid a second full-resolution decode.
+        if (!canDecodeReaderLease(lease.mime, lease.estimatedDecodedBytes)) await decodeImageStrict(lease.url);
       } catch (error) {
         // 解不开就不认领：已经显示的那一版留着（宁可旧，也不要黑闪或白图）。
         releasePending(lease.leaseId);
@@ -261,6 +267,8 @@ export async function loadReaderComputedPage(
       // separately: a tiny compressed page can still decode to hundreds of MiB.
       const handle = cache.adopt(claim.identity, {
         url: lease.url,
+        contentHash: newest.contentHash,
+        leaseId: lease.leaseId,
         bytes: lease.byteLength,
         estimatedDecodedBytes: lease.estimatedDecodedBytes,
         release: () => { void repository.releaseArtifact(lease.leaseId); },

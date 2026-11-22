@@ -244,6 +244,93 @@ pub fn apply_with_dll_bucket(
     super::device::with_context_at(data_dir, dll, |context| run(context, image, &settings, cancel, forced))
 }
 
+// A whole 8K frame can produce a large scene-wide color cast in NGX.
+// Bound both axes and total area, then transfer only the enhancement back.
+fn evaluation_size(width: u32, height: u32) -> (u32, u32) {
+    const MAX_EDGE: f64 = 3840.0;
+    const MAX_PIXELS: f64 = 3840.0 * 2160.0;
+    let scale = (MAX_EDGE / f64::from(width.max(height)))
+        .min((MAX_PIXELS / (f64::from(width) * f64::from(height))).sqrt())
+        .min(1.0);
+    let edge = |value: u32| ((f64::from(value) * scale).floor() as u32).max(MIN_EDGE);
+    (edge(width), edge(height))
+}
+
+/// Treat a still page as a single image at bounded inference resolution. The
+/// original pixels and alpha are retained as the base for the filtered delta.
+pub fn apply_still_with_token(
+    data_dir: &Path,
+    mut original: DlssnrImage,
+    settings: &DlssnrSettings,
+    cancel: &CancelToken,
+) -> Result<DlssnrImage, String> {
+    if original.width < MIN_EDGE || original.height < MIN_EDGE || cancel.cancelled() {
+        return apply_with_token(data_dir, &original, settings, cancel);
+    }
+    let (width, height) = evaluation_size(original.width, original.height);
+    if (width, height) == (original.width, original.height) {
+        return apply_with_token(data_dir, &original, settings, cancel);
+    }
+    let source = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+        original.width, original.height, original.rgba.as_slice(),
+    ).expect("validated DLSSNR image");
+    let reduced = image::imageops::resize(&source, width, height, image::imageops::FilterType::Triangle);
+    let reduced = DlssnrImage::new(width, height, reduced.into_raw())?;
+    let filtered = apply_with_token(data_dir, &reduced, settings, cancel)?;
+    composite_residual(&mut original, &reduced, &filtered, cancel)?;
+    Ok(original)
+}
+
+fn composite_residual(
+    original: &mut DlssnrImage,
+    reduced: &DlssnrImage,
+    filtered: &DlssnrImage,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    // Veyra's edge-guided residual transfer, applied in the image's encoded
+    // RGB space. At each native pixel prefer low-res samples of similar color.
+    let axis_map = |full: u32, low: u32| {
+        (0..full).map(|position| {
+            let coordinate = ((position as f32 + 0.5) * low as f32 / full as f32 - 0.5)
+                .clamp(0.0, (low - 1) as f32);
+            let first = coordinate as usize;
+            let fraction = coordinate - first as f32;
+            [(first, 1.0 - fraction), ((first + 1).min(low as usize - 1), fraction)]
+        }).collect::<Vec<_>>()
+    };
+    let columns = axis_map(original.width, reduced.width);
+    let rows = axis_map(original.height, reduced.height);
+    let low_stride = reduced.width as usize * 4;
+    for (row, neighbors_y) in original.rgba.chunks_exact_mut(original.width as usize * 4).zip(rows) {
+        if cancel.cancelled() {
+            return Err(CANCELLED.to_string());
+        }
+        for (base, neighbors_x) in row.chunks_exact_mut(4).zip(&columns) {
+            let mut sum = [0.0; 3];
+            let mut weights = 0.0;
+            for (y, vertical) in neighbors_y {
+                for &(x, horizontal) in neighbors_x {
+                    let offset = y * low_stride + x * 4;
+                    let low = &reduced.rgba[offset..offset + 3];
+                    let output = &filtered.rgba[offset..offset + 3];
+                    let distance = 0.2126 * f32::from(base[0].abs_diff(low[0]))
+                        + 0.7152 * f32::from(base[1].abs_diff(low[1]))
+                        + 0.0722 * f32::from(base[2].abs_diff(low[2]));
+                    let weight = vertical * horizontal / (1.0 + distance * (16.0 / 255.0));
+                    for channel in 0..3 {
+                        sum[channel] += weight * (f32::from(output[channel]) - f32::from(low[channel]));
+                    }
+                    weights += weight;
+                }
+            }
+            for channel in 0..3 {
+                base[channel] = (f32::from(base[channel]) + sum[channel] / weights).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 测试用：读全局上下文上「建过几个工作区 / 建过几次 feature」的计数。
 ///
 /// 同一进程里所有 GPU 测试共用这个上下文（GPU 侧本来就串行），所以差值是个上界。
@@ -558,6 +645,25 @@ mod acceptance_tests {
     /// 这是用户那一页（3000×4000）消失的直接原因：真机产物缓存里那一份 242,617 字节的
     /// `dlssnr:v3` 产物 alpha 全 0、亮度 0，而它每次都从缓存里被端回来。纯函数、不碰 GPU
     /// ——判据要在一台没有 DLSSNR 片段的机器上也守得住。
+    #[test]
+    fn oversized_pages_fit_the_inference_budget_without_changing_aspect() {
+        assert_eq!(evaluation_size(7680, 4320), (3840, 2160));
+        assert_eq!(evaluation_size(4320, 7680), (2160, 3840));
+        assert_eq!(evaluation_size(1440, 2160), (1440, 2160));
+        let (width, height) = evaluation_size(6000, 6000);
+        assert_eq!(width, height);
+        assert!(u64::from(width) * u64::from(height) <= 3840 * 2160);
+    }
+
+    #[test]
+    fn residual_preserves_native_detail_and_alpha() {
+        let mut full = DlssnrImage::new(2, 2, vec![40, 45, 50, 255, 60, 65, 70, 128, 80, 85, 90, 255, 20, 25, 30, 255]).unwrap();
+        let low = DlssnrImage::new(1, 1, vec![50, 55, 60, 224]).unwrap();
+        let filtered = DlssnrImage::new(1, 1, vec![52, 60, 68, 0]).unwrap();
+        composite_residual(&mut full, &low, &filtered, &CancelToken::default()).unwrap();
+        assert_eq!(full.rgba, [42, 50, 58, 255, 62, 70, 78, 128, 82, 90, 98, 255, 22, 30, 38, 255]);
+    }
+
     #[test]
     fn a_fully_transparent_product_is_blank_and_a_visible_one_is_not() {
         let invisible = DlssnrImage::new(2, 2, vec![0; 2 * 2 * 4]).unwrap();

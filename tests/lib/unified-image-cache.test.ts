@@ -34,6 +34,25 @@ function repository(bytes = new Uint8Array([1, 2, 3])): ImageCacheRepository & {
 afterEach(() => vi.restoreAllMocks());
 
 describe('UnifiedImageCache', () => {
+  it('keeps original and processed file leases inside their reader session', () => {
+    const urls = blobUrlFactory();
+    const cache = new UnifiedImageCache(repository(), { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024 });
+    const first = { scopeId: 'server', archiveId: 'archive', pageIndex: 2, rendition: 'remote' as const, readerSession: 1 };
+    const second = { ...first, readerSession: 2 };
+    const releaseFirst = vi.fn();
+    const releaseSecond = vi.fn();
+    const oldHandle = cache.adopt(first, { url: 'lease:old', bytes: 1, release: releaseFirst });
+    expect(cache.peekUrl(second)).toBeUndefined();
+    const newHandle = cache.adopt(second, { url: 'lease:new', bytes: 1, release: releaseSecond });
+    expect(newHandle.url).toBe('lease:new');
+    cache.release(oldHandle);
+    expect(releaseFirst).toHaveBeenCalledOnce();
+    expect(releaseSecond).not.toHaveBeenCalled();
+    expect(cache.peekUrl(second)).toBe(newHandle.url);
+    cache.release(newHandle);
+    expect(releaseSecond).toHaveBeenCalledOnce();
+  });
+
   it('bounds disk reads and lets the newest visible page overtake queued prefetch', async () => {
     const urls = blobUrlFactory();
     const reads: number[] = [];
@@ -464,6 +483,25 @@ describe('UnifiedImageCache accounts for images it did not create', () => {
     expect(first).not.toHaveBeenCalled();
     cache.release(again);
     expect(first).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reuse a rejected native rendition while it is retained for handover', () => {
+    const urls = blobUrlFactory();
+    const cache = new UnifiedImageCache(repository(), { createObjectURL: urls.create, revokeObjectURL: urls.revoke, maxBytes: 1024 });
+    const identity = { scopeId: 's', archiveId: 'a', pageIndex: 0, rendition: 'remote' as const };
+    const oldRelease = vi.fn();
+    const newRelease = vi.fn();
+    const rejected = cache.adopt(identity, { url: 'yomika-image://assets/rejected', bytes: 40, release: oldRelease });
+    cache.invalidate(rejected);
+    expect(cache.peek(identity)).toBeUndefined();
+    expect(oldRelease).not.toHaveBeenCalled();
+    const fresh = cache.adopt(identity, { url: 'yomika-image://assets/fresh', bytes: 40, release: newRelease });
+    expect(fresh.url).not.toBe(rejected.url);
+    cache.release(rejected);
+    expect(oldRelease).toHaveBeenCalledTimes(1);
+    expect(newRelease).not.toHaveBeenCalled();
+    cache.release(fresh);
+    expect(newRelease).toHaveBeenCalledTimes(1);
   });
 
   it('lets a later load of the same page hit the adopted image without fetching it', async () => {

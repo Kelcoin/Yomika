@@ -37,7 +37,7 @@ use yomika_compute_protocol::messages::{EngineReport, GrantedFile, Precision};
 
 use crate::engine::{Engine, StageError, StageOutput, StageRequest, StageSink};
 use crate::stage_io::{
-    check_cancelled, encode_png, probe_dimensions, PASSTHROUGH_ENGINE_ID, RESOURCE_LIMIT_CODE,
+    check_cancelled, encode_png_with_icc, probe_dimensions, PASSTHROUGH_ENGINE_ID, RESOURCE_LIMIT_CODE,
 };
 
 /// 片段装不起来、或者 NGX 跑不起来。它是**环境**的问题，不是这一页的问题：同一份授权在
@@ -354,7 +354,25 @@ impl Engine for DlssnrEngine {
 
         // 静态：一层（或多层）参数走一遍。尺寸**不变**（DLSSNR 不是放大），所以宿主拿到
         // 手的那份还能盖回原来那一页的位置上。
-        let decoded = image::load_from_memory(&source)
+        use image::ImageDecoder;
+        let mut decoder = image::ImageReader::new(std::io::Cursor::new(&source))
+            .with_guessed_format()
+            .map_err(|error| StageError::input_invalid(format!("认不出这是什么图：{error}")))?
+            .into_decoder()
+            .map_err(|error| StageError::input_invalid(format!("解不开这张图：{error}")))?;
+        // NGX filters the encoded RGB samples without converting their color space.
+        // Keep the original profile so the viewer interprets those samples correctly.
+        let profile = match decoder.icc_profile() {
+            Ok(Some(profile)) if profile.get(16..20) == Some(b"RGB ") => Some(profile),
+            Ok(None) => None,
+            // An RGB PNG cannot describe its pixels using a Gray or CMYK profile.
+            _ => return self.hand_back(&request, &source),
+        };
+        let mut limits = image::Limits::default();
+        limits.reserve(decoder.total_bytes())
+            .and_then(|()| decoder.set_limits(limits))
+            .map_err(|error| StageError::input_invalid(format!("图片超过解码限制：{error}")))?;
+        let decoded = image::DynamicImage::from_decoder(decoder)
             .map_err(|error| StageError::input_invalid(format!("解不开这张图：{error}")))?;
         let (width, height) = (decoded.width(), decoded.height());
         let rgba = decoded.into_rgba8().into_raw();
@@ -364,7 +382,7 @@ impl Engine for DlssnrEngine {
         (request.progress)(40);
         let image = DlssnrImage::new(width, height, rgba)
             .map_err(|error| StageError::input_invalid(format!("这一页的像素装不进画布：{error}")))?;
-        let processed = match filter::apply_with_token(&data_dir, &image, &settings, request.cancel) {
+        let processed = match filter::apply_still_with_token(&data_dir, image, &settings, request.cancel) {
             Ok(processed) => processed,
             Err(error) if error == filter::CANCELLED => return Err(StageError::cancelled()),
             // 与动图那条同源：原样交回与「什么都没写出来」都算这一页没算过。
@@ -379,7 +397,7 @@ impl Engine for DlssnrEngine {
             }
         };
         (request.progress)(92);
-        let encoded = encode_png(&processed.rgba, processed.width, processed.height)?;
+        let encoded = encode_png_with_icc(&processed.rgba, processed.width, processed.height, profile)?;
         self.write(
             &request,
             &encoded,
@@ -637,7 +655,12 @@ mod tests {
             settings: staged(&root, "ab/settings.json", SETTINGS),
         };
         // 一张高频噪声页：DLSSNR 要真有东西可做，尺寸在 DLL 的下限（32×32）之上。
-        let page = noise_png(192, 256);
+        let source_path = std::env::var_os("YOMIKA_DLSSNR_TEST_PAGE");
+        let page = match source_path {
+            Some(path) => std::fs::read(path).expect("read the supplied test page"),
+            None => noise_png(192, 256),
+        };
+        let dimensions = probe_dimensions(&page).expect("test page dimensions");
         let page_path = root.join("ab/page.png");
         std::fs::write(&page_path, &page).expect("摆一页进去");
         let input = StageInput::Granted {
@@ -653,8 +676,7 @@ mod tests {
             "引擎 = {}，设备 = {}，产物 {} 字节（源 {} 字节）",
             output.engine.id, output.engine.device_id, output.byte_length, page.len()
         );
-        assert_eq!(output.width, 192);
-        assert_eq!(output.height, 256);
+        assert_eq!((output.width, output.height), dimensions);
         // 片段真的按 NGX 要的名字落下来了，而且是那一份的字节。
         let installed =
             yomika_compute_core::dlssnr::dll_path(&root.join("staging").join(DATA_DIR_NAME));
@@ -669,8 +691,16 @@ mod tests {
         match output.engine.id.as_str() {
             DLSSNR_ENGINE_ID => {
                 assert_ne!(written, page, "报告说算过了，产物却与源逐字节相同");
+                fn profile(bytes: &[u8]) -> Option<Vec<u8>> {
+                    use image::ImageDecoder;
+                    image::ImageReader::new(std::io::Cursor::new(bytes))
+                        .with_guessed_format().unwrap().into_decoder().unwrap()
+                        .icc_profile().unwrap()
+                }
+                assert!(profile(&written) == profile(&page), "DLSSNR dropped the source ICC profile");
             }
             PASSTHROUGH_ENGINE_ID => {
+                assert!(std::env::var_os("YOMIKA_DLSSNR_TEST_PAGE").is_none(), "supplied test page must exercise the GPU output encoder");
                 assert_eq!(
                     written, page,
                     "报告说没算过，产物却不是源字节：那两份对不上"
@@ -771,6 +801,6 @@ mod tests {
             let byte = (state >> 33) as u8;
             rgba.extend_from_slice(&[byte, byte.wrapping_add(85), byte.wrapping_add(170), 255]);
         }
-        encode_png(&rgba, width, height).expect("编一张噪声图")
+        crate::stage_io::encode_png(&rgba, width, height).expect("编一张噪声图")
     }
 }

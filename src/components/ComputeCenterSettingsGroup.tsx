@@ -39,25 +39,24 @@ function DeviceGlyph({ kind }: { kind?: string | null | undefined }) {
   return <MonitorSmartphone aria-hidden="true" />;
 }
 
-/** 设备行：左边一枚类型图标，中间名字一行、地址一行，右边（当前连上的那一台）挂一排
- *  「它现在能做什么」的胶囊。`.settings-device-option` 是三列网格，所以三处设备列表都
- *  得是这个形状，不然名字和地址会被摆成并排的两列。 */
-function DeviceRowBody({ name, address, kind }: { name: string; address: string; kind?: string | null | undefined }) {
+function DeviceRowBody({ name, address, kind, capabilities }: {
+  name: string;
+  address: string;
+  kind?: string | null | undefined;
+  capabilities?: RemoteCapabilities['capabilities'] | undefined;
+}) {
   return <>
     <span className="settings-device-icon" aria-hidden="true"><DeviceGlyph kind={kind} /></span>
     <span className="settings-device-copy">
-      <span className="settings-device-name">{name}</span>
-      <span className="settings-device-address">{address}</span>
+      <span className="settings-device-heading">
+        <span className="settings-device-name" title={name}>{name}</span>
+        {capabilities?.length ? <CapabilityChips capabilities={capabilities} /> : null}
+      </span>
+      <span className="settings-device-address" title={address}>{address}</span>
     </span>
   </>;
 }
 
-/** 「对面现在能做什么」：三枚小标签，能用的亮着，不能用的压暗但仍显示（`title` 里是它
- *  自己报上来的细节，比如「还没有装好的超分模型」）。
- *
- *  它只出现在**当前连上的那一台**的设备行里。从前这里的两份摆法各有一半：设置组里铺一
- *  行、二级菜单底下再念一遍（`settings-menu-desc`），同一个清单在一页里出现两次，用户
- *  报「去掉图 1 和图 2 里的远端处理能力，以胶囊形式放到图 2 的设备名右侧」。 */
 function CapabilityChips({ capabilities }: { capabilities: RemoteCapabilities['capabilities'] }) {
   return (
     <span className="settings-device-capabilities" role="group" aria-label="远端可用服务">
@@ -81,7 +80,7 @@ interface Props {
  *
  * 远端这一档只有「用不用」和「配过哪些设备」两件事：处理方式由**对面**那份设置决定，
  * 本机不存 op / 模型 / 倍数 / 层参数（从前存过，见 `RemoteOpsSchema` 的注释）。这一组
- * 只把那台设备**能做什么**用最小面积显示出来——就是设备行右边那三枚小标签，而且只在
+ * 只把那台设备**能做什么**用最小面积显示出来——就是设备行右边的小标签，而且只在
  * 二级菜单里那一台上（见 `CapabilityChips`）——让用户知道开起来会得到什么；至于具体怎么
  * 算，去对面那台机器上设。 */
 export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobile = false }: Props) {
@@ -422,11 +421,8 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             {remoteOps.pairedDevices.map((device) => <SettingsOption key={device.address} align="start" active={preferences.remoteComputeUrl === device.address} 
               onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}
             >
-                <DeviceRowBody name={device.name} address={device.address} />
-                {/* 清单属于**这一台**：`remoteAddress` 记着最近一次问出来的是谁，`remote`
-                    只在同一台重探时留着（keep-last-good，见 `connectRemote`），所以它此刻
-                    描述的就是被选中的那一行。 */}
-                {remote && preferences.remoteComputeUrl === device.address && <CapabilityChips capabilities={remote.capabilities} />}
+                <DeviceRowBody name={device.name} address={device.address}
+                  capabilities={preferences.remoteComputeUrl === device.address ? remote?.capabilities : undefined} />
               </SettingsOption>)}
             {remoteOps.pairedDevices.length === 0 && <p className="settings-choice-empty">还没有配对过的设备</p>}
           </div>

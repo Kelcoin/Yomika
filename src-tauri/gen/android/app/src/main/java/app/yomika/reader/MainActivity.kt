@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager.LayoutParams
 import android.webkit.WebView
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -20,12 +21,21 @@ import org.json.JSONObject
 import java.io.File
 
 class MainActivity : TauriActivity() {
+  private var readerTiles: ReaderTiles? = null
+  internal fun prepareReaderSlot(slot: Int, page: Int, fd: Int, rightFd: Int, aspect: Float, session: Long, animationFd: Int, rightAnimationFd: Int): Boolean =
+    readerTiles?.prepareLeased(slot, page, fd, rightFd, aspect, session, animationFd, rightAnimationFd) ?: false
+  override fun dispatchTouchEvent(event: android.view.MotionEvent): Boolean =
+    readerTiles?.dispatch(event) { super.dispatchTouchEvent(it) } ?: super.dispatchTouchEvent(event)
+
   override fun onDestroy() {
+    readerTiles?.destroy()
+    readerTiles = null
     NativeAppSecurity.destroy(this)
     super.onDestroy()
   }
 
   override fun onPause() {
+    readerTiles?.pause()
     NativeAppSecurity.pause(this)
     super.onPause()
   }
@@ -44,12 +54,14 @@ class MainActivity : TauriActivity() {
     super.onResume()
     val root = findViewById<View>(android.R.id.content)
     NativeAppSecurity.resume(this, root?.let { appWebView(it) })
+    readerTiles?.resume()
   }
 
   private var workspaceBackCallback: OnBackPressedCallback? = null
 
   override fun onWebViewCreate(webView: WebView) {
     super.onWebViewCreate(webView)
+    readerTiles = ReaderTiles(webView)
     // WebView vibrates for native long presses even when the page suppresses
     // contextmenu (blank canvas and reader images have no long-press action).
     // Real app actions use MobileHost.vibrate, independently of View feedback.
@@ -127,6 +139,24 @@ class MainActivity : TauriActivity() {
   }
 
   private val pageInsets = PageInsetsBridge()
+  private var workspaceSoftInputMode: Int? = null
+
+  fun setReaderKeyboardOverlay(enabled: Boolean) {
+    val previous = workspaceSoftInputMode
+    if (enabled == (previous != null)) return
+    val content = findViewById<View>(android.R.id.content)
+    if (enabled) {
+      val mode = window.attributes.softInputMode
+      workspaceSoftInputMode = mode
+      window.setSoftInputMode((mode and LayoutParams.SOFT_INPUT_MASK_ADJUST.inv()) or LayoutParams.SOFT_INPUT_ADJUST_NOTHING)
+      if (content.paddingBottom != 0) content.setPadding(0, 0, 0, 0)
+    } else if (previous != null) {
+      workspaceSoftInputMode = null
+      // setSoftInputMode(0) clears the override but leaves the current attributes in place.
+      window.attributes = window.attributes.apply { softInputMode = previous }
+    }
+    ViewCompat.requestApplyInsets(content)
+  }
 
   private fun applyInsets(view: View, windowInsets: WindowInsetsCompat): WindowInsetsCompat {
     val bars = windowInsets.getInsets(
@@ -141,7 +171,8 @@ class MainActivity : TauriActivity() {
     val density = resources.displayMetrics.density
     val top = Math.round(bars.top / density)
     val bottom = Math.round(bars.bottom / density)
-    if (view.paddingBottom != ime.bottom) view.setPadding(0, 0, 0, ime.bottom)
+    val keyboardPadding = if (workspaceSoftInputMode == null) ime.bottom else 0
+    if (view.paddingBottom != keyboardPadding) view.setPadding(0, 0, 0, keyboardPadding)
     SystemBars.top = top
     SystemBars.bottom = bottom
     val overlayBars = windowInsets.getInsetsIgnoringVisibility(

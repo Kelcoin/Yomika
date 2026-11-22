@@ -132,7 +132,8 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     const parsed = LibrarySnapshotSchema.safeParse(readRouteCache<unknown>(librarySnapshotKey(serverParam), Infinity));
     return parsed.success ? parsed.data : undefined;
   }, [serverParam]);
-  const cachedPage = requestedQuery === undefined || requestedQuery === snapshot?.searchQuery ? snapshot : undefined;
+  const cachedPage = snapshot?.archives.length && (requestedQuery === undefined || requestedQuery === snapshot.searchQuery)
+    ? snapshot : undefined;
   const [archives, setArchives] = useState<ArchiveRecord[]>(cachedPage?.archives ?? []);
   /** 这一轮后台刷新才第一次出现的档案：交给列表给它们播一段入场动画。
    *  只在这一层算得出来——后台刷新拿到的是一个全新的数组，列表自己分不出新旧。 */
@@ -173,6 +174,8 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
    * 校正。镜像按服务器分开（?server= 未指定时归入 default）。 */
   const persistedCategories = useMemo(() => readPersistedCategories(serverParam), [serverParam]);
   const [categories, setCategories] = useState<import('../repositories/nativeLibraryRepository').Category[]>(snapshot?.categories ?? persistedCategories ?? []);
+  const categorySnapshot = useRef(categories);
+  categorySnapshot.current = categories;
   const [categoriesLoading, setCategoriesLoading] = useState(!(snapshot?.categories?.length || persistedCategories?.length));
   /** 只要下拉上有可显示的分类，本 effect 的每一次重跑（刷新、换服务器）都
    * 静默进行；骨架只保留给第一无所知的加载。 */
@@ -578,8 +581,28 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     // 它抹掉，用户只剩一个转不完的骨架和一条几秒后消失的 toast，无从知道发生了什么。
     const hasListOnScreen = initialArchivesLoaded.current;
     if (!options.background || hasListOnScreen) setError(undefined);
-    if (options.clear) setArchives([]);
+    let remoteSettled = false;
+    if (options.clear) {
+      setArchives([]);
+      setHasMoreArchives(false);
+      setTotalArchives(0);
+      // Show locally indexed static members while the server resolves canonical
+      // ordering and pagination. A late mirror read cannot replace that result.
+      const category = categorySnapshot.current.find(item => item.id === categoryFilter);
+      if (!searchQuery.trim() && category?.archives.length && !category.search?.trim()) {
+        void repository.listArchivesPage(currentServerId, 0, OFFLINE_PAGE_SIZE, {
+          categoryId: category.id, sortBy: sortMode, order: sortOrder,
+        }).then(cached => {
+          if (remoteSettled || request !== pageRequest.current || !cached.ok || !cached.value.items.length) return;
+          setArchives(cached.value.items);
+          setTotalArchives(cached.value.total);
+          setLoading(false);
+          setPageLoading(false);
+        }).catch(() => {});
+      }
+    }
     const result = await fetchArchivePage(currentServerId, 0);
+    remoteSettled = true;
     if (request !== pageRequest.current) return false;
     if (!result.ok) {
       // A silent load is the pull's refresh, and a background one is the entry
@@ -624,7 +647,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     setLoading(false);
     setPageLoading(false);
     return true;
-  }, [collectFreshArchiveIds, fetchArchivePage, listQueryKey]);
+  }, [categoryFilter, collectFreshArchiveIds, fetchArchivePage, listQueryKey, searchQuery, sortMode, sortOrder]);
 
   const refreshVisiblePage = useCallback(async (currentServerId: string) => {
     // A refresh re-reads the page on screen: one LANraragi request, list in
@@ -742,9 +765,21 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     [readingHistory],
   );
 
+  const updateSearchQuery = (value: string) => {
+    if (!value.trim() && searchQuery.trim()) {
+      // Persist the clear before requesting the next page. Rows from the old
+      // query must never be restored under the empty search on restart.
+      writeRouteCache(librarySnapshotKey(serverParam), {
+        archives: [], fetchedCount: 0, categories, selectedArchiveId: undefined,
+        totalArchives: 0, hasMoreArchives: false, searchQuery: '', sortMode, sortOrder, categoryFilter,
+      } satisfies LibrarySnapshot, { persist: true });
+    }
+    setSearchQuery(value);
+  };
+
   // Keep the snapshot current so the next visit renders instantly.
   useEffect(() => {
-    if (archives.length === 0) return;
+    if (archives.length === 0 || settledQueryKey.current !== listQueryKey) return;
     writeRouteCache(librarySnapshotKey(serverParam), {
       archives,
       fetchedCount: fetchedCount.current,
@@ -757,7 +792,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
       sortOrder,
       categoryFilter,
     } satisfies LibrarySnapshot, { persist: true });
-  }, [archives, categories, categoryFilter, hasMoreArchives, searchQuery, selectedArchiveId, serverParam, sortMode, sortOrder, totalArchives]);
+  }, [archives, categories, categoryFilter, hasMoreArchives, listQueryKey, searchQuery, selectedArchiveId, serverParam, sortMode, sortOrder, totalArchives]);
 
   // The categories' own durable mirror. The route snapshot is durable too now, but
   // it is one entry with a size cap; the dropdown is the one control that must not
@@ -837,7 +872,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
         listLoading={loading || pageLoading || (archives.length === 0 && !error && !initialArchivesLoaded.current)}
         onLoadMore={loadMoreArchives}
         searchQuery={searchQuery}
-        onSearchQueryChange={setSearchQuery}
+        onSearchQueryChange={updateSearchQuery}
         sortMode={sortMode}
         onSortModeChange={setSortMode}
         sortOrder={sortOrder}

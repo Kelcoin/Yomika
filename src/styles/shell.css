@@ -18,6 +18,7 @@ body::-webkit-scrollbar,
 *::-webkit-scrollbar { display: none; }
 
 .app-shell {
+  --archive-row-inset: 4px;
   display: grid;
   /* Windows: the app-drawn title bar spans the full width above the two
      columns; elsewhere the grid is just the columns. */
@@ -41,6 +42,11 @@ body::-webkit-scrollbar,
    under a notch or a system status bar (0 on Windows, where there is neither). */
 .titlebar {
   grid-area: titlebar;
+  /* Radix modal layers may suppress pointer events on body. System window
+     controls remain reachable above the clipped workspace. */
+  position: relative;
+  z-index: var(--z-sticky);
+  pointer-events: auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -462,8 +468,8 @@ body::-webkit-scrollbar,
    `width` 放宽到 1680px，`.workspace` 的 `margin: 0 auto` 与 `clamp()` 左右内边距
    还在：1920px 的窗口里首页左右各留 168px，而档案库只有 16px——这就是「首页左右
    两侧的空隙与档案库等页面不一致」。上间距同样交还给外壳（书架/档案库也是这么来的，
-   再由 `.library-shell-list .first-run-page` 给引导页补回同一格）；下间距不留（见
-   `.workspace` 的规则：任何尾部留白都会让「刚好放满」的首页多滚一格）。
+   再由 `.library-shell-list .first-run-page` 给引导页补回同一格）；底栏避让由
+   `.workspace` 统一处理。
    `:not([hidden])` is load-bearing: every visited route stays mounted in its own
    `route-cache-panel`, so a plain `:has(.workspace-home)` also matched after
    leaving home — and clamped every other page to 1680px, left-aligned, with the
@@ -472,7 +478,8 @@ body::-webkit-scrollbar,
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 0;
+  padding-block-start: 0;
+  padding-inline: 0;
 }
 
 /* 详情一开，首页就不能再「随内容长高」了。
@@ -1462,6 +1469,7 @@ body::-webkit-scrollbar,
 .settings-row-action { display: flex; flex: none; align-items: center; gap: var(--space-2); }
 .settings-switch-row.is-disabled .settings-row-label,
 .settings-switch-row.is-disabled .settings-row-hint { color: var(--ink-faint); }
+.server-bridge-settings .settings-row-hint { color: var(--on-surface-variant); }
 
 .settings-choice-option {
   display: flex;
@@ -2315,6 +2323,18 @@ body::-webkit-scrollbar,
 .archive-detail-facts dt { display: flex; flex: 0 0 18px; color: var(--on-surface-variant); }
 .archive-detail-facts dt svg { width: 18px; height: 18px; }
 .archive-detail-facts dd { min-width: 0; flex: 1; margin: 0; font-size: var(--text-sm); overflow-wrap: anywhere; }
+/* A time that wraps falls below this one-line clip. Flex uses the actual
+   glyph widths, so resizing and font changes need no fixed breakpoint. */
+.archive-detail-fact-time {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: .25em;
+  line-height: var(--leading-snug);
+  block-size: 1lh;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
 .archive-detail-tag-section { width: 100%; min-width: 0; margin-top: 20px; }
 
 /* Share one row; label visibility follows each button's available width,
@@ -2380,6 +2400,65 @@ body::-webkit-scrollbar,
   min-width: 0;
   padding: 0 var(--space-1);
 }
+
+.archive-detail-route-actions > .archive-action-skeleton {
+  pointer-events: none;
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-elevated);
+  border-color: transparent;
+}
+.archive-action-skeleton::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--ink-secondary) 24%, transparent), transparent);
+  animation: archive-action-shimmer var(--duration-shimmer) var(--ease-pulse) infinite;
+}
+@keyframes archive-action-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .archive-action-skeleton::after { animation: none; background: none; }
+}
+
+@container detail-action (max-width: 150px) {
+  .archive-resume-label { display: none; }
+  .archive-resume-label + .archive-action-label-short { display: block; }
+}
+@container detail-action (40px <= width <= 60px) {
+  :is(.archive-read-action, .archive-download-action) > svg { display: none; }
+  :is(.archive-read-action, .archive-download-action) > .archive-action-label:not(.archive-resume-label),
+  .archive-read-action > .archive-resume-label + .archive-action-label-short { display: block; }
+}
+@container detail-action (width < 40px) {
+  .archive-read-action > .archive-resume-label + .archive-action-label-short { display: none; }
+}
+
+.archive-download-action { position: relative; overflow: hidden; }
+.archive-download-action[aria-busy='true'] > .archive-download-spinner { display: block; flex-shrink: 0; }
+@container detail-action (width <= 60px) {
+  .archive-download-action [data-transfer] { font-size: var(--text-xs); }
+}
+.archive-download-spinner { animation: archive-download-spin var(--duration-spin) linear infinite; }
+.archive-download-action [data-transfer] {
+  flex: 0 0 auto;
+  inline-size: 3.25em;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.archive-download-action [data-transfer='bytes'] { inline-size: 6em; }
+@keyframes archive-download-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .archive-download-action[aria-busy='true'] > .archive-download-spinner { display: block; flex-shrink: 0; }
+@container detail-action (width <= 60px) {
+  .archive-download-action [data-transfer] { font-size: var(--text-xs); }
+}
+.archive-download-spinner { animation: none; }
+}
+.archive-download-action[aria-busy='true'],
+.archive-download-action[data-downloaded='true'] { opacity: 1; }
 
 .archive-detail-panel-tabs {
   display: grid;
@@ -3013,7 +3092,7 @@ body::-webkit-scrollbar,
   border-radius: var(--radius-pill);
   background: var(--surface-container-highest);
   color: var(--on-surface-variant);
-  box-shadow: var(--shadow-menu);
+  box-shadow: 0 2px 5px color-mix(in srgb, var(--on-surface) 25%, transparent), var(--shadow-menu);
   opacity: 0;
   transform: translate(-50%, -6px) scale(0.85);
   transition: opacity var(--motion-fast), transform var(--motion-fast);
@@ -3155,7 +3234,8 @@ body::-webkit-scrollbar,
   outline-color: var(--primary);
 }
 
-.archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-media { height: 220px; }
+.archive-list.is-thumbnail .archive-thumb-card { --archive-rail-cover-height: 220px; }
+.archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-media { height: var(--archive-rail-cover-height); }
 /* Two 18px title lines + 48 tags + 18 meta + 2x4 gap = 110;
    the 130px body still has 114px inside its padding. */
 .archive-list.is-thumbnail .archive-thumb-card .archive-thumb-card-body {
@@ -3258,7 +3338,7 @@ body::-webkit-scrollbar,
    day's first card. 20px bar + 8px gap = ARCHIVE_DAY_DIVIDER_HEIGHT. */
 .archive-day-divider { display: none; }
 .archive-list.is-wide .archive-row {
-  margin-block: 4px;
+  margin-block: var(--archive-row-inset);
   display: grid;
   /* No trailing chevron column: the whole row is the button, so the arrow only
      stole width from the tag area. */
@@ -3820,6 +3900,12 @@ button.archive-page-thumbnail { cursor: pointer; }
    The strip reads 推荐 by default and grows a second segment once the archive has
    a creator worth searching by, so it is a grid whose second column animates from
    nothing — the heading used to be swapped for a different label outright. */
+.archive-rail-empty {
+  margin: var(--space-3) 0;
+  color: var(--on-surface-variant);
+  font-size: var(--text-sm);
+}
+
 .archive-recommendations-tabs {
   display: inline-grid;
   grid-template-columns: auto minmax(0, 0fr);
@@ -3851,8 +3937,13 @@ button.archive-page-thumbnail { cursor: pointer; }
      用户看到的就是「加载中的切换栏明显不对」。 */
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color var(--motion-standard), color var(--motion-standard);
+  transition: background-color var(--motion-standard), color var(--motion-standard), scale var(--motion-fast);
 }
+
+@media (prefers-reduced-motion: no-preference) {
+  .archive-recommendations-tabs button:is(.is-pressed, :active):not(:disabled) { scale: .96; }
+}
+
 
 /* Collapsed into a zero-width column, the button has to give up its min-content
    width or it holds the track open — and that min-content includes the horizontal
@@ -3876,7 +3967,7 @@ button.archive-page-thumbnail { cursor: pointer; }
   padding-inline: 0;
   overflow: hidden;
   opacity: 0;
-  transition: opacity var(--motion-standard), padding-inline var(--motion-standard);
+  transition: background-color var(--motion-standard), color var(--motion-standard), scale var(--motion-fast), opacity var(--motion-standard), padding-inline var(--motion-standard);
 }
 
 .archive-recommendations-tabs.has-creator .archive-recommendations-tab-creator {
@@ -4578,30 +4669,28 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 .archive-thumb-card.is-skeleton .archive-thumb-card-title .skeleton-line { height: 100%; }
 .archive-thumb-card.is-skeleton .archive-thumb-card-meta .skeleton-line { width: 60%; height: 100%; }
-.archive-thumb-card-media { height: 210px; overflow: hidden; background: var(--surface-container); }
+.archive-thumb-card-media { position: relative; height: 210px; overflow: hidden; background: var(--surface-container); }
 .archive-thumb-card-media img, .archive-thumb-card-skeleton { display: block; width: 100%; height: 100%; object-fit: cover; }
 .archive-thumb-card-body { position: relative; display: grid; align-content: start; grid-template-columns: minmax(0, 1fr); grid-template-rows: 36px 48px 15px; gap: 6px; box-sizing: border-box; min-width: 0; height: 135px; padding: var(--space-3); }
-/* 进度条压在封面与正文的接缝上，读的是「这张卡读到哪儿了」。
-   两端都顶到卡片内边缘、外边不带圆角：左侧留白会让 1% 的进度看起来是一枚悬空的
-   圆点，而画满时右侧的圆角会在卡片边缘留下一小块轨道底色——两种都不像这张卡
-   自己的东西。前缘的圆头只留给「还在读」的那一段（它到不了边缘，圆角就不会和
-   边缘打架），画满时由 .is-complete 收成直角。
-
-   高度是 6px（inset 的 -5px 不变）：接缝下方多压住 1px，并抬到卡片内容之上。
-   缩略图卡 hover 时会 translateY(-2px)，那一瞬卡片被提成合成层，封面在设备像素
-   取整上会贴着媒体下沿越出一线，正好落在进度条下沿——用户报的「鼠标移上去时
-   进度条底部闪出一丝封面」。多盖 1px 与抬 z-index 各挡一个方向：正文给不出这块
-   遮挡（块级背景画在内联替换内容之下）。宽行档把 height 覆写成 4px，不受影响。 */
 .archive-card-progress { position: absolute; inset: -5px 0 auto; z-index: 1; display: block; height: 6px; overflow: hidden; background: color-mix(in srgb, var(--on-surface) 12%, transparent); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); box-shadow: var(--shadow-progress); pointer-events: none; }
-.archive-thumb-card > .archive-card-progress {
-  inset: calc(var(--archive-rail-cover-height, 210px) - 5px) 0 auto;
-}
 /* 轨道底色不能用 `--surface-container-highest`：设置菜单里的选项行悬停时**正是**填这个色
    （`.settings-choice-option:hover`），于是鼠标一移上去，轨道与行的悬停底融成一片、只剩
    填充那一段——用户 2026-10-18 报「鼠标移上去就会消失」。改成一层由正文色兑出来的半透明
    灰：压在任何底色上都还看得见，亮暗两档各自成立。 */
 .archive-card-progress-fill { display: block; height: 100%; border-radius: 0 var(--radius-pill) var(--radius-pill) 0; background: var(--primary); transition: width var(--motion-standard); }
 .archive-card-progress.is-complete .archive-card-progress-fill { border-radius: 0; }
+@media (prefers-reduced-motion: no-preference) {
+  .archive-card-progress.is-reading-progress-entering {
+    animation: reading-progress-enter var(--motion-standard) both;
+  }
+  .archive-card-progress.is-reading-progress-entering > .archive-card-progress-fill {
+    transform-origin: left;
+    animation: reading-progress-fill var(--motion-standard) both;
+  }
+}
+@keyframes reading-progress-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes reading-progress-fill { from { scale: 0 1; } to { scale: 1; } }
+
 .archive-row-copy { position: relative; }
 /* 宽行列表：进度条贴卡片自己的底边（--radius-card = 12px），靠卡片的
    overflow: hidden + border-radius 把横条两端削成与卡片下缘一致的圆角。
@@ -4624,6 +4713,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
       862px 的行上约 8.6px，全落在 12px 的圆角弧内，被卡片裁成一条上宽（≈5.5px）
       下窄（0.6px）的楔形，最底那 0.5px 完全没有红，右侧圆头也缩成 2px——用户说的
       「1% 时看不出进度」。 */
+.archive-thumb-card > .archive-card-progress,
 .archive-list.is-wide .archive-row > .archive-card-progress {
   inset: auto 0 0;
   display: block;
@@ -5417,13 +5507,14 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
   /* Only the visible floating bar needs clearance. When it parks off-screen,
      retain the system safe area without leaving an empty navigation-sized tail. */
-.app-shell.is-floating-nav .workspace,
+  .app-shell.is-floating-nav .workspace,
   .app-shell.is-floating-nav .workspace.is-library-workspace {
-    padding-bottom: calc(var(--safe-bottom) + 80px);
+    --workspace-floating-nav-clearance: calc(var(--safe-bottom) + 80px);
+    padding-bottom: var(--workspace-floating-nav-clearance);
   }
   .app-shell.is-floating-nav[data-compact-nav-hidden] .workspace,
   .app-shell.is-floating-nav[data-compact-nav-hidden] .workspace.is-library-workspace {
-    padding-bottom: var(--safe-bottom);
+    --workspace-floating-nav-clearance: var(--safe-bottom);
   }
 
   /* Native compact flow has one scroller: only workspace clears the nav.
@@ -5843,75 +5934,109 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   font-variant-numeric: tabular-nums;
 }
 
-.settings-number-slider {
-  padding: var(--space-2) var(--space-3);
+/* The slider already reserves room for the value bubble below its title. */
+.settings-choice-panel:has(> .settings-menu-body > .settings-menu-content > .settings-number-slider:only-child) > .settings-choice-title {
+  margin-block-end: 0;
 }
 
-.settings-number-value {
-  display: block;
-  text-align: center;
-  color: var(--primary);
-  font-size: var(--text-lg);
-  font-weight: var(--weight-semibold);
-  font-variant-numeric: tabular-nums;
-  margin-bottom: var(--space-2);
+.settings-number-slider {
+  --slider-thumb: 22px;
+  --slider-hit-height: 44px;
+  --slider-bubble-padding: 4px;
+  --slider-bubble-line: calc(var(--text-sm) * 1.25);
+  --slider-bubble-offset: calc(var(--slider-thumb) / 2 + 8px);
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline: var(--space-2);
+  /* Keep the entire bubble inside the scrolling body, below the title. */
+  padding-block-start: calc(var(--slider-bubble-line) + 2 * var(--slider-bubble-padding) + var(--slider-bubble-offset) - var(--slider-hit-height) / 2 + 2px);
 }
 
 .settings-number-track { position: relative; }
-
-.settings-number-track input {
+.settings-number-travel {
+  position: absolute;
+  inset: 0 calc(var(--slider-thumb) / 2);
+  pointer-events: none;
+}
+.settings-number-rail {
+  position: absolute;
+  inset: 50% 0 auto;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  transform: translateY(-50%);
+  background: linear-gradient(to right, color-mix(in srgb, var(--primary) 72%, var(--surface-container-high)) 0 var(--slider-progress), color-mix(in srgb, var(--on-surface) 30%, var(--surface-container-high)) var(--slider-progress) 100%);
+}
+.settings-number-bubble {
+  position: absolute;
+  left: var(--slider-progress);
+  bottom: calc(50% + var(--slider-bubble-offset));
+  transform: translate(-50%, 4px) scale(.94);
+  opacity: 0;
+  padding: var(--slider-bubble-padding) 9px;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: var(--on-primary);
+  font-size: var(--text-sm);
+  line-height: var(--slider-bubble-line);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: opacity var(--motion-fast), transform var(--motion-fast);
+}
+.settings-number-track[data-pressed] .settings-number-bubble {
+  transform: translateX(-50%);
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-number-bubble { transition: none; }
+}
+.settings-number-track input[type='range'] {
+  position: relative;
   display: block;
   width: 100%;
-  height: 44px;
+  height: var(--slider-hit-height);
   margin: 0;
   padding: 0;
   appearance: none;
   -webkit-appearance: none;
   background: transparent;
   border: 0;
+  outline: none;
   box-shadow: none;
   cursor: ew-resize;
   touch-action: pan-y;
+  direction: ltr;
 }
-
-.settings-number-track input::-webkit-slider-runnable-track {
-  height: 8px;
-  border-radius: 999px;
-  background: linear-gradient(to right, var(--primary) 0 var(--slider-progress), var(--surface-container-highest) var(--slider-progress) 100%);
-}
-
-.settings-number-track input::-moz-range-track {
-  height: 8px;
-  border-radius: 999px;
-  background: linear-gradient(to right, var(--primary) 0 var(--slider-progress), var(--surface-container-highest) var(--slider-progress) 100%);
-}
-
+.settings-number-track input::-webkit-slider-runnable-track { height: 6px; background: transparent; }
+.settings-number-track input::-moz-range-track { height: 6px; background: transparent; }
 .settings-number-track input::-webkit-slider-thumb {
   appearance: none;
   -webkit-appearance: none;
-  width: 22px;
-  height: 22px;
-  margin-top: -7px;
-  border: 3px solid var(--surface);
+  width: var(--slider-thumb);
+  height: var(--slider-thumb);
+  margin-top: calc((6px - var(--slider-thumb)) / 2);
+  border: 0;
   border-radius: 50%;
   background: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
 }
-
 .settings-number-track input::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  border: 3px solid var(--surface);
+  width: var(--slider-thumb);
+  height: var(--slider-thumb);
+  border: 0;
   border-radius: 50%;
   background: var(--primary);
-  box-shadow: 0 0 0 1px var(--primary);
 }
-
-.settings-number-track input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 8px; }
-.settings-number-ticks { position: absolute; inset: auto 11px 1px; height: 5px; pointer-events: none; }
-.settings-number-ticks i { position: absolute; width: 2px; height: 5px; border-radius: 1px; background: var(--outline); transform: translateX(-50%); }
-.settings-number-limits { display: flex; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-1); color: var(--on-surface-variant); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
-
+.settings-number-track input:focus-visible::-webkit-slider-thumb { background: color-mix(in srgb, var(--primary) 76%, var(--on-surface)); }
+.settings-number-track input:focus-visible::-moz-range-thumb { background: color-mix(in srgb, var(--primary) 76%, var(--on-surface)); }
+.settings-number-limit {
+  white-space: nowrap;
+  color: var(--on-surface-variant);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  font-variant-numeric: tabular-nums;
+}
 .settings-menu-actions {
   display: flex;
   flex-wrap: wrap;
@@ -6144,11 +6269,32 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 
 .search-preset-empty {
   display: grid;
-  place-content: center;
-  min-height: 80px;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-3);
   text-align: center;
+}
+
+.search-preset-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-pill);
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+}
+
+.search-preset-empty-icon svg { width: 24px; height: 24px; }
+
+.search-preset-empty strong {
+  color: var(--on-surface);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.search-preset-empty p {
   margin: 0;
-  padding: var(--space-2) var(--space-3);
   color: var(--on-surface-variant);
   font-size: var(--text-sm);
 }
@@ -7230,52 +7376,13 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .settings-port-input::-webkit-inner-spin-button,
 .settings-port-input::-webkit-outer-spin-button { margin: 0; appearance: none; }
 
-/* 远端能提供哪些处理服务（超分 / DLSSNR）：两枚小标签，这就是「远端可用服务」
-    的全部面积——从前这一整块摆的是 op 选择、模型列表和放大倍数输入框，而那三样都由对面
-    那份设置决定，摆在本机只是让人以为选了有用。能用的标签亮着（`is-ready`），不能用的
-    压暗但仍显示：用户要知道对面有这一档、只是现在没装好。
- *
- * 这一排不再单独占设置组里的一行，而是挂到二级菜单里**当前那台设备**的行尾（见
- * `.settings-device-capabilities`）：同一个清单在设置页与菜单里各摆一份，用户报「去掉
- * 图 1 和图 2 里的远端处理能力，以胶囊形式放到图 2 的设备名右侧」。 */
-.settings-capability-chip {
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  padding: 2px var(--space-3);
-  font-size: var(--text-xs);
-  color: var(--ink-faint);
-  white-space: nowrap;
-}
-
-.settings-capability-chip.is-ready {
-  border-color: var(--primary);
-  background: color-mix(in srgb, var(--primary) 12%, transparent);
-  color: var(--on-surface);
-}
-
-/* 设备行：左边一枚设备类型的图标（手机 / 平板 / 桌面），中间名字一行、地址一行，右边
-    （只有当前连上的那一台）挂一排能力胶囊。长地址不会再把名字挤变形，地址也不会被折成
-   两行；窄屏上胶囊折回名字下面（见文件末尾 `max-width: 640px` 那块）。 */
+/* Two-line device list item. Capabilities share the title's row at every width. */
 .settings-device-option {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: var(--space-3);
-  justify-items: start;
-}
-
-.settings-device-capabilities {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-1);
-}
-
-/* 窄屏（手机）上这层菜单只有两三百像素宽：胶囊硬跟在名字右边会把名字挤成一条竖排。
-   折回名字下面一行——仍然是「这一台能做什么」，只是不再和名字争宽度。 */
-@media (max-width: 640px) {
-  .settings-device-option { grid-template-columns: auto minmax(0, 1fr); }
-  .settings-device-capabilities { grid-column: 2; justify-content: flex-start; }
+  padding-block: var(--space-2);
 }
 
 .settings-device-icon {
@@ -7289,11 +7396,30 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 
 .settings-device-icon svg { width: 17px; height: 17px; }
+.settings-device-copy { display: grid; gap: var(--space-1); min-width: 0; }
+.settings-device-heading { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
+.settings-device-name, .settings-device-address { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-device-name { font-weight: var(--weight-semibold); line-height: var(--leading-tight); }
+.settings-device-address { font-size: var(--text-sm); font-variant-numeric: tabular-nums; color: var(--on-surface-variant); line-height: var(--leading-tight); }
+.settings-device-capabilities { flex: none; display: inline-flex; gap: var(--space-1); }
 
-.settings-device-copy { display: grid; gap: 2px; min-width: 0; }
+.settings-capability-chip {
+  box-sizing: border-box;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--radius-pill);
+  padding-inline: var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  color: var(--on-surface-variant);
+  white-space: nowrap;
+}
 
-.settings-device-name { font-weight: var(--weight-semibold); }
-.settings-device-address { font-size: var(--text-sm); font-variant-numeric: tabular-nums; color: var(--on-surface-variant); }
+.settings-capability-chip.is-ready {
+  border-color: transparent;
+  background: var(--secondary-container);
+  color: var(--on-secondary-container);
+}
 
 /* 一层 DLSSNR 是一小组：给一段分界线，参数才有「这是第几层」的归属感。层名只说一次
    ——菜单标题就是「第 N 层」，组里再写一行只是重复。 */
@@ -7388,23 +7514,51 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 .compact-nav[data-nav-indicator-ready] .nav-drag-indicator { opacity: 1; }
 .nav-icon-pair { position: relative; display: block; flex: none; width: 19px; height: 19px; }
-.nav-icon-pair > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.nav-icon-pair > span { position: absolute; inset: -5px; pointer-events: none; }
+.nav-icon-pair > span > svg { position: absolute; inset: 5px; width: 19px; height: 19px; }
+.compact-nav.is-floating { overflow: visible; }
 .nav-icon-pair .nav-icon-filled { visibility: hidden; }
 .is-active .nav-icon-pair .nav-icon-outline { visibility: hidden; }
 .is-active .nav-icon-pair .nav-icon-filled { visibility: visible; }
-/* Both paths stay at identical coordinates. The capsule reveals the filled
-   path only where it actually covers the glyph, including partial overlap. */
-.compact-nav[data-nav-indicator-ready] .nav-icon-pair .nav-icon-outline {
+/* Both layers share the capsule's screen-space mask. Scaling the glyph inside
+   its mask keeps the arc aligned even as the glyph grows. */
+.compact-nav[data-nav-indicator-ready] .nav-icon-pair {
+  --nav-mask-center-x: calc(50% + var(--nav-mask-x, 0px));
+  --nav-mask-center-y: calc(50% + var(--nav-mask-y, 0px));
+  --nav-mask-offset-x: calc(var(--nav-mask-span-x) / 2);
+  --nav-mask-offset-y: calc(var(--nav-mask-span-y) / 2);
+  --nav-mask-feather: 2px;
+  --nav-mask-body-width: var(--nav-mask-span-x);
+  --nav-mask-body-height: calc(2 * var(--nav-mask-ry));
+  --nav-mask-direction: to bottom;
+  --nav-capsule-mask:
+    radial-gradient(ellipse var(--nav-mask-rx) var(--nav-mask-ry) at
+      calc(var(--nav-mask-center-x) - var(--nav-mask-offset-x)) calc(var(--nav-mask-center-y) - var(--nav-mask-offset-y)),
+      black calc(100% - var(--nav-mask-feather)), transparent 100%),
+    radial-gradient(ellipse var(--nav-mask-rx) var(--nav-mask-ry) at
+      calc(var(--nav-mask-center-x) + var(--nav-mask-offset-x)) calc(var(--nav-mask-center-y) + var(--nav-mask-offset-y)),
+      black calc(100% - var(--nav-mask-feather)), transparent 100%),
+    linear-gradient(var(--nav-mask-direction), transparent, black var(--nav-mask-feather),
+      black calc(100% - var(--nav-mask-feather)), transparent) var(--nav-mask-center-x) var(--nav-mask-center-y) /
+      var(--nav-mask-body-width) var(--nav-mask-body-height) no-repeat;
+}
+.compact-nav[data-nav-mask-vertical] .nav-icon-pair {
+  --nav-mask-body-width: calc(2 * var(--nav-mask-rx));
+  --nav-mask-body-height: var(--nav-mask-span-y);
+  --nav-mask-direction: to right;
+}
+.compact-nav[data-nav-indicator-ready] .nav-icon-outline {
   visibility: visible;
   color: var(--ink-secondary);
-  -webkit-mask-image: linear-gradient(to right, var(--on-surface) 0 var(--nav-icon-start, 0%), transparent var(--nav-icon-start, 0%) var(--nav-icon-end, 0%), var(--on-surface) var(--nav-icon-end, 0%) 100%);
-  mask-image: linear-gradient(to right, var(--on-surface) 0 var(--nav-icon-start, 0%), transparent var(--nav-icon-start, 0%) var(--nav-icon-end, 0%), var(--on-surface) var(--nav-icon-end, 0%) 100%);
+  mask: linear-gradient(black, black), var(--nav-capsule-mask);
+  mask-composite: subtract, add, add;
 }
-.compact-nav[data-nav-indicator-ready] .nav-icon-pair .nav-icon-filled {
+.compact-nav[data-nav-indicator-ready] .nav-icon-filled {
   visibility: visible;
   color: var(--on-primary-container);
-  clip-path: inset(0 calc(100% - var(--nav-icon-end, 0%)) 0 var(--nav-icon-start, 0%));
+  mask: var(--nav-capsule-mask);
 }
+.compact-nav.is-floating[data-nav-indicator-ready] .nav-icon-filled > svg { scale: var(--nav-icon-scale, 1); }
 .compact-nav[data-nav-dragging] .nav-drag-indicator { transition: none; will-change: transform; }
 .compact-nav[data-nav-indicator-ready] .nav-link:is(.is-active, .is-pressed),
 .compact-nav[data-nav-dragging] .nav-link.is-pointer-hovered { background: transparent; }
@@ -7419,7 +7573,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 /* Keep the revoke action alongside its device, including narrow settings menus. */
 .settings-paired-client { flex-wrap: nowrap; gap: var(--space-2); padding-block: var(--space-2); }
-.settings-paired-client .settings-device-option { grid-template-columns: auto minmax(0, 1fr); }
+.settings-paired-client .settings-device-option { padding-block: 0; }
 .settings-revoke-action { flex: none; margin-inline-end: var(--space-2); white-space: nowrap; }
 
 .archive-thumb-card[aria-current='page'] {
@@ -7520,25 +7674,40 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .settings-menu-body .settings-row { border-radius: var(--radius-card); }
 
 /* Mobile home chrome is a separate grid row: content bounces beneath it. */
-.app-main.has-home-topbar { grid-template-rows: auto minmax(0, 1fr); }
+.app-main.has-home-topbar {
+  --home-section-gap: var(--space-6);
+  --home-topbar-height: 64px;
+  --home-brand-mark-size: 30px;
+  grid-template-rows: auto minmax(0, 1fr);
+}
 .mobile-home-topbar {
   display: flex;
   align-items: center;
   gap: var(--space-3);
   min-width: 0;
-  min-height: 64px;
+  min-height: var(--home-topbar-height);
   padding: var(--space-2) max(var(--space-4), var(--safe-right)) var(--space-2) max(var(--space-4), var(--safe-left));
   background: var(--surface-panel);
 }
 .mobile-home-brand { display: flex; align-items: center; gap: var(--space-2); flex: 0 0 auto; font-size: var(--text-lg); font-weight: var(--weight-semibold); color: var(--on-surface); }
-.mobile-home-brand .yomika-mark { flex-shrink: 0; }
+.mobile-home-brand .yomika-mark {
+  width: var(--home-brand-mark-size);
+  height: var(--home-brand-mark-size);
+  flex-shrink: 0;
+}
 .mobile-home-shortcuts { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-1); flex: 1 1 0; min-width: 0; }
 .mobile-home-shortcuts-scroll { display: flex; align-items: center; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; touch-action: pan-x; }
 .mobile-home-shortcuts .icon-button { width: 44px; min-width: 44px; height: 44px; flex: 0 0 44px; }
 .mobile-home-settings { flex-shrink: 0; }
 
-/* One rhythm from the fixed header through every home component. */
-.app-main.has-home-topbar .library-shell-list { padding-block-start: var(--space-6); }
-.app-main.has-home-topbar .workspace-home { display: grid; gap: var(--space-6); }
+/* Count the space already below the centered brand mark toward the first gap. */
+.app-main.has-home-topbar .library-shell-list {
+  padding-block-start: calc(var(--home-section-gap) - (var(--home-topbar-height) - var(--home-brand-mark-size)) / 2);
+}
+.app-main.has-home-topbar .workspace-home { display: grid; gap: var(--home-section-gap); }
+/* Match the visible bottom edge of the last wide card in Favorites. */
+.app-shell.is-floating-nav:not([data-compact-nav-hidden]) .app-main.has-home-topbar .route-cache-panel:not([hidden]) .workspace-home {
+  padding-block-end: var(--archive-row-inset);
+}
 .app-main.has-home-topbar .workspace-home > .archive-rail { margin-block: 0; }
 .app-main.has-home-topbar .workspace-home > .first-run-page { padding-block-start: 0; }

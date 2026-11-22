@@ -4,18 +4,22 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useStableVirtualRows } from '../lib/useStableVirtualRows';
 import { ArchiveCardTags } from './CardTagRows';
 import * as Dialog from '@radix-ui/react-dialog';
-import { ArrowDown, ArrowLeft, ArrowUp, BookOpen, Download, FolderOpen, MoreVertical, Pause, Play, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowUp, Download, FolderOpen, MoreVertical, Pause, Play, Trash2, X } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import type { Layout } from 'react-resizable-panels';
 import { Group, Panel, Separator, useDefaultLayout } from 'react-resizable-panels';
 
 import { LocalArchiveCover, useLocalArchiveCover } from './LocalArchiveCover';
 import { LocalArchiveContextMenu, type LocalArchiveContextMenuTarget } from './ArchiveContextMenu';
 import { ArchiveDetailCover, ArchiveDetailFacts, ArchiveDetailTagSection, detailPageCount, useDetailTagGroups, useSingleLineTitle } from './ArchiveDetailSections';
-import { useArchiveReadingProgress } from './useArchiveReadingProgress';
+import { downloadResultMessage } from '../lib/downloadResult';
+import { DetailReadAction } from './DetailReadAction';
+import { DetailPageThumbnailGrid, DetailPageThumbnail } from './DetailPageThumbnail';
+import { loadLocalArchiveManifest, loadLocalArchivePage, loadLocalArchiveProgress, localReaderUrl, type LocalArchiveManifest } from '../repositories/localArchiveReader';
 import { useDetailListScroll } from '../lib/useDetailListScroll';
 import { EmptyState } from './EmptyState';
+import { StatusLine } from './StatusLine';
 import { SearchPresetField } from './SearchPresetField';
 import { SelectField, type SelectOption } from './SelectField';
 import { ArchiveListSkeleton } from './ArchiveListSkeleton';
@@ -399,7 +403,7 @@ export function LocalArchivesWorkspace() {
         const result = await repository.resumeDownload(task.id);
         if (!result.ok) { showToast(result.error.message, 'error'); return; }
         const completed = result.value.status === 'completed';
-        if (completed) showToast('下载完成', 'success');
+        if (completed) showToast(downloadResultMessage(result.value, downloadTitle(task)), 'success');
         if (completed) await loadArchives();
       } else {
         const result = action === 'pause'
@@ -677,6 +681,7 @@ export function LocalArchivesWorkspace() {
       {detail && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="local-archives-detail" minSize="30">
         <section className="library-shell-detail" data-scroll-region>
           <LocalArchiveDetail
+            key={detail.path}
             archive={detail}
             onClose={closeDetail}
             onDelete={() => setDeletePaths([detail.path])}
@@ -692,8 +697,7 @@ export function LocalArchivesWorkspace() {
 /** 右侧那一页：这份本地文件的实情。结构和档案详情页（/library/:id）同构——返回
  * 钮 + 两行自适应标题的头部、封面加事实网格的概览、一条动作工具栏、按命名空间
  * 分组的标签墙，事实的顺序也和档案详情页一致（页数/体积/分类/时间）。差别只有
- * 内容：这一页说的是磁盘上的事（大小、下载时间），阅读走下载来源那台服务器，
- * 动作只有资源管理器定位（Windows）和本地删除。 */
+ * 内容：这一页的封面、页数和阅读位置都来自本机。 */
 function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }: {
   archive: LocalArchiveRecord;
   onClose: () => void;
@@ -709,16 +713,35 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
     });
   }, []);
   const { groups, colorFor } = useDetailTagGroups(archive.tags);
-  // 认得出下载来源时才能去阅读：阅读器按服务器档案出页，本地文件没有自己的
-  // 出页管道。侧放进来、认不出来源的文件不给这个按钮。
-  const serverCopy = archive.scopeId && archive.serverId && archive.archiveId
-    ? { scopeId: archive.scopeId, serverId: archive.serverId, archiveId: archive.archiveId }
-    : undefined;
-  const { cover, loading: coverLoading } = useLocalArchiveCover(archive.path, `${archive.fileSize}:${archive.addedAt}`);
+  const navigate = useNavigate();
+  const active = usePageActive();
+  const revision = `${archive.fileSize}:${archive.addedAt}`;
+  const { cover, loading: coverLoading } = useLocalArchiveCover(archive.path, revision);
   const titleRef = useSingleLineTitle(archive.title);
-  const readingProgress = useArchiveReadingProgress(serverCopy?.scopeId, serverCopy?.archiveId);
+  const [file, setFile] = useState<{ manifest?: LocalArchiveManifest; error?: string }>();
+  const [readingProgress, setReadingProgress] = useState<{ pageIndex: number | null }>();
+  useEffect(() => {
+    let current = true;
+    setFile(undefined);
+    void loadLocalArchiveManifest(archive.path).then(result => {
+      if (current) setFile(result.ok ? { manifest: result.value } : { error: result.error.message });
+    });
+    return () => { current = false; };
+  }, [archive.path, revision]);
+  useEffect(() => {
+    if (!active) return;
+    let current = true;
+    setReadingProgress(undefined);
+    void loadLocalArchiveProgress(archive.path).then(result => {
+      if (current) setReadingProgress(result.ok ? { pageIndex: result.value?.pageIndex ?? null } : { pageIndex: null });
+    });
+    return () => { current = false; };
+  }, [active, archive.path]);
+  const count = file?.manifest?.entries.length ?? 0;
+  const storedPage = readingProgress?.pageIndex ?? null;
+  const pageIndex = storedPage === null || !count ? null : Math.min(storedPage, count - 1);
   const facts = [
-    { kind: 'pages' as const, label: '页数', value: detailPageCount(archive.pageCount ?? 0, readingProgress.pageIndex, readingProgress.hasProgress) },
+    { kind: 'pages' as const, label: '页数', value: count ? detailPageCount(count, pageIndex, pageIndex !== null) : '—' },
     { kind: 'size' as const, label: '体积', value: formatByteSize(archive.fileSize) },
     { kind: 'category' as const, label: '分类', value: archiveCategoryLabel(archive) || '未知' },
     { kind: 'added' as const, label: '下载时间', value: formatArchiveDate(Math.floor(archive.addedAt / 1000)) || '未知' },
@@ -743,20 +766,13 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
         ><MoreVertical aria-hidden="true" /></button>
       </header>
       <div className="archive-detail-overview">
-        <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} serverId={serverCopy?.serverId} archiveId={serverCopy?.archiveId} />
+        <ArchiveDetailCover title={archive.title} cover={cover} loading={coverLoading} />
         <div className="archive-detail-overview-copy">
           <ArchiveDetailFacts facts={facts} />
         </div>
       </div>
       <div className="archive-detail-route-actions" role="toolbar" aria-label="本地档案操作">
-        {serverCopy && (
-          <Link
-            className="primary-action"
-            to={`/reader/${serverCopy.archiveId}?server=${encodeURIComponent(serverCopy.serverId)}`}
-            aria-label="阅读"
-            title="阅读"
-          ><BookOpen aria-hidden="true" /><span className="archive-action-label">阅读</span></Link>
-        )}
+        {!file?.error && <DetailReadAction ready={Boolean(file?.manifest && readingProgress)} pageIndex={pageIndex} to={localReaderUrl(archive.path)} />}
         {platform === 'windows' && (
           <button
             type="button"
@@ -775,9 +791,60 @@ function LocalArchiveDetail({ archive, onClose, onDelete, onMenu, onSelectTag }:
           <Trash2 aria-hidden="true" /><span className="archive-action-label">本地删除</span>
         </button>
       </div>
+      {file?.error && <StatusLine tone="error">{file.error}</StatusLine>}
+      {file?.manifest && <LocalDetailThumbnails
+        key={revision}
+        path={archive.path}
+        entries={file.manifest.entries}
+        onOpen={index => navigate(localReaderUrl(archive.path, index))}
+      />}
       {/* 标签芯片照存档详情那一套排（My Tags 优先、按命名空间分组），点下去筛的是这一页
           的列表：本地档案的标签来自下载时抓下的元数据，不去档案库搜。 */}
       <ArchiveDetailTagSection groups={groups} colorFor={colorFor} onSelect={(tag) => onSelectTag(tag.query.replace(/\$$/, ''))} />
     </main>
   );
+}
+
+function LocalDetailThumbnails({ path, entries, onOpen }: {
+  path: string;
+  entries: readonly number[];
+  onOpen: (index: number) => void;
+}) {
+  const active = usePageActive();
+  const [range, setRange] = useState({ start: 0, end: 0 });
+  const previews = useRef(new Map<number, string | null>());
+  const [, refresh] = useState(0);
+  const onRangeChange = useCallback((start: number, end: number) => {
+    setRange(previous => previous.start === start && previous.end === end ? previous : { start, end });
+  }, []);
+  useEffect(() => {
+    if (!active) return;
+    let current = true;
+    void (async () => {
+      for (let index = range.start; current && index < range.end; index++) {
+        const entry = entries[index];
+        if (entry === undefined || previews.current.has(index)) continue;
+        const url = await loadLocalArchivePage(path, entry);
+        if (!current) return;
+        const cache = previews.current;
+        cache.set(index, url ?? null);
+        // Keep the visible range and limit the memory used while browsing a large archive.
+        if (cache.size > Math.max(96, range.end - range.start)) {
+          for (const key of cache.keys()) {
+            if (key < range.start || key >= range.end) { cache.delete(key); break; }
+          }
+        }
+        refresh(version => version + 1);
+      }
+    })();
+    return () => { current = false; };
+  }, [active, path, entries, range]);
+  return <DetailPageThumbnailGrid count={entries.length} onRangeChange={onRangeChange}>
+    {index => {
+      const preview = previews.current.get(index);
+      return <DetailPageThumbnail key={index} page={index + 1} loading={preview === undefined} onOpen={() => onOpen(index)}>
+        {preview && <img src={preview} alt="" decoding="async" />}
+      </DetailPageThumbnail>;
+    }}
+  </DetailPageThumbnailGrid>;
 }

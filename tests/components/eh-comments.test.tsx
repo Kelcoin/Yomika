@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import * as preferences from '../../src/app/preferences';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { clearEhCommentsCacheForTests, EhComments } from '../../src/components/EhComments';
 import { ToastProvider } from '../../src/components/Toast';
@@ -31,6 +32,43 @@ const gallery = {
 };
 
 describe('E-Hentai comments', () => {
+  it('sorts by highest score by default and preserves the source order for ties', async () => {
+    setInvokeAdapterForTests(async () => ({ ok: true, value: [
+      { ...comment, id: '1', score: -2, body: 'Lowest score' },
+      { ...comment, id: '2', score: 8, body: 'First high score' },
+      { ...comment, id: '3', score: 8, body: 'Second high score' },
+    ] }));
+    render(<EhComments accountId="eh-a" galleryId="score-order" token="abc" />);
+    const list = await screen.findByRole('list');
+    expect(within(list).getAllByRole('listitem').map(item => item.textContent)).toEqual([
+      expect.stringContaining('First high score'),
+      expect.stringContaining('Second high score'),
+      expect.stringContaining('Lowest score'),
+    ]);
+  });
+
+  it.each([
+    ['score-desc', 'High score', 'Low score'],
+    ['score-asc', 'Low score', 'High score'],
+    ['gallery', 'Low score', 'High score'],
+  ] as const)('keeps uploader comments first in %s order', async (sort, first, second) => {
+    vi.spyOn(preferences, 'useEhCommentSort').mockReturnValue(sort);
+    setInvokeAdapterForTests(async () => ({ ok: true, value: [
+      { ...comment, id: '1', score: -2, body: 'Low score' },
+      { ...comment, id: '2', isUploader: true, score: -10, body: 'First uploader comment' },
+      { ...comment, id: '3', score: 8, body: 'High score' },
+      { ...comment, id: '4', isUploader: true, score: 20, body: 'Second uploader comment' },
+    ] }));
+    render(<EhComments accountId="eh-a" galleryId="pinned-uploader" token="abc" />);
+    const list = await screen.findByRole('list');
+    expect(within(list).getAllByRole('listitem').map(item => item.textContent)).toEqual([
+      expect.stringContaining('First uploader comment'),
+      expect.stringContaining('Second uploader comment'),
+      expect.stringContaining(first),
+      expect.stringContaining(second),
+    ]);
+  });
+
   it.each([-1, 0, 1])('draws only the current vote as filled (vote=%s)', async myVote => {
     setInvokeAdapterForTests(async () => ({ ok: true, value: [{ ...comment, myVote }] }));
     render(<EhComments accountId="eh-a" galleryId="vote-icons" token="abc" />);
@@ -324,21 +362,28 @@ describe('E-Hentai comments', () => {
     expect(within(region).getByRole('button', { name: '刷新 E-Hentai 评论' })).toBeEnabled();
   });
 
-  it('keeps cached comments visible while explaining a failed refresh and clears the error on retry', async () => {
+  it.each([
+    ['EH_GALLERY_COPYRIGHT_REMOVED', '画廊不可用'],
+    ['EH_UNAVAILABLE', '连接失败'],
+    ['EH_REAUTH_REQUIRED', '访问受限'],
+  ])('shows the %s title icon with cached comments, then restores the success icon', async (code, status) => {
     let requests = 0;
     setInvokeAdapterForTests(async () => ++requests === 2
-      ? { ok: false, error: { code: 'EH_GALLERY_COPYRIGHT_REMOVED', message: 'removed', retryable: false } }
+      ? { ok: false, error: { code, message: 'request failed', retryable: false } }
       : { ok: true, value: [comment] });
     render(<EhComments accountId="eh-a" galleryId="12345" token="abc" />);
     await screen.findByText('Useful comment');
     fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('版权要求被移除');
+    expect(await screen.findByRole('img', { name: `${status}，正在显示缓存评论` })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/正在显示缓存评论/, { selector: 'p' })).not.toBeInTheDocument();
     expect(screen.getByText('Useful comment')).toBeInTheDocument();
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '刷新 E-Hentai 评论' }));
     await vi.waitFor(() => expect(screen.getByRole('button', { name: '刷新 E-Hentai 评论' })).toBeEnabled());
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: '发表评论' })).toBeVisible();
+    expect(screen.getByRole('img', { name: '评论加载成功' })).toBeInTheDocument();
   });
 
   it('waits for an available comments response before showing the composer', async () => {

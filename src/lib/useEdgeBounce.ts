@@ -1,4 +1,4 @@
-import { useEffect, type RefObject } from 'react';
+import { useLayoutEffect, type RefObject } from 'react';
 import { EDGE_CLAIM_PX, EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from './motion';
 import { createWheelMotion, isDiscreteWheel } from './wheelMotion';
 
@@ -7,7 +7,7 @@ const MAX_BOUNCE_SURFACES = 16;
 
 /** Non-refresh pages share edge feedback; library lists keep their own pull owner. */
 export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const root = workspace.current;
     if (!root) return;
     let host: HTMLElement | undefined;

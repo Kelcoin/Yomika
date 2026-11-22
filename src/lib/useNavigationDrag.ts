@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, type RefObject } from 'react';
 import { advanceNavigationSpring } from './navigationSpring';
 
-type Tab = { node: HTMLAnchorElement; route: string; x: number; y: number; width: number; height: number; iconX: number; iconWidth: number };
+type Tab = { node: HTMLAnchorElement; route: string; x: number; y: number; width: number; height: number; iconX: number; iconY: number; iconWidth: number };
 type Gesture = { id: number; x: number; y: number; start: number; current: number; dragging: boolean };
 const DRAG_SLOP = 6;
 
@@ -31,15 +31,22 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     let tapRestore: ReturnType<typeof setTimeout> | undefined;
     const clearTapRestore = () => { clearTimeout(tapRestore); tapRestore = undefined; };
     const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
-    let bounds = nav.getBoundingClientRect();
+    const floating = nav.classList.contains('is-floating');
+    let bounds: DOMRect;
+    let width: number;
+    let height: number;
     const measure = () => {
       bounds = nav.getBoundingClientRect();
+      width = nav.clientWidth || bounds.width;
+      height = nav.clientHeight || bounds.height;
       tabs = Array.from(nav.querySelectorAll<HTMLAnchorElement>('[data-nav-route]')).map(node => {
         const box = node.getBoundingClientRect();
         const icon = node.querySelector('.nav-icon-pair')?.getBoundingClientRect();
         return { node, route: node.dataset.navRoute!, x: box.left - bounds.left - nav.clientLeft,
           y: box.top - bounds.top - nav.clientTop, width: box.width, height: box.height,
-          iconX: (icon?.left ?? box.left) - bounds.left - nav.clientLeft, iconWidth: icon?.width ?? box.width };
+          iconX: (icon ? icon.left + icon.width / 2 : box.left + box.width / 2) - bounds.left - nav.clientLeft,
+          iconY: (icon ? icon.top + icon.height / 2 : box.top + box.height / 2) - bounds.top - nav.clientTop,
+          iconWidth: icon?.width ?? box.width };
       });
     };
     const activeTab = () => tabs.find(tab => tab.route === active);
@@ -48,6 +55,9 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     const stretchTarget = () => {
       const speed = Math.min(1, Math.abs(spring.current?.velocity ?? 0) / (elastic ? 950 : 1200));
       const pressing = Boolean(gesture);
+      if (floating && !reducedMotion) {
+        return { x: 1 + (pressing ? 0.30 : 0) + speed * 0.19, y: 1 + (pressing ? 0.32 : 0) - speed * 0.13 };
+      }
       if (elastic && !reducedMotion) {
         return { x: 1 + (pressing ? 0.14 : 0) + speed * 0.19, y: 1 + (pressing ? 0.10 : 0) - speed * 0.13 };
       }
@@ -55,21 +65,47 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
         y: reducedMotion ? 1 : 1 + (pressing ? 0.08 : 0) - speed * 0.06 };
     };
     const render = (tab: Tab, x: number) => {
-      const scaleX = stretch.current.x.position;
-      const scaleY = stretch.current.y.position;
-      nav.style.setProperty('--nav-indicator-scale-x', String(scaleX));
-      nav.style.setProperty('--nav-indicator-scale-y', String(scaleY));
       const first = tabs[0];
       const last = tabs[tabs.length - 1];
-      const displayedX = Math.max((first?.x ?? x) - 6, Math.min((last?.x ?? x) + 6, x));
+      const minX = (first?.x ?? x) - 6;
+      const maxX = (last?.x ?? x) + 6;
+      const displayedX = floating
+        ? Math.max(minX, Math.min(maxX, x))
+        : Math.max(0, minX, Math.min(width - tab.width, maxX, x));
+      const maxScale = (start: number, size: number, extent: number) =>
+        Math.max(1, 1 + 2 * Math.min(start, extent - start - size) / size);
+      const scaleX = floating ? stretch.current.x.position : Math.min(stretch.current.x.position, maxScale(displayedX, tab.width, width));
+      const scaleY = floating ? stretch.current.y.position : Math.min(stretch.current.y.position, maxScale(tab.y, tab.height, height));
+      nav.style.setProperty('--nav-indicator-scale-x', String(scaleX));
+      nav.style.setProperty('--nav-indicator-scale-y', String(scaleY));
       nav.style.setProperty('--nav-indicator-x', `${displayedX}px`);
-      const left = displayedX - (scaleX - 1) * tab.width / 2;
-      const right = displayedX + tab.width + (scaleX - 1) * tab.width / 2;
+      // CSS normalizes the pill radius before applying the spring's stretch.
+      // Use that same ellipse and straight span for both glyph layers.
+      const radius = Math.min(tab.width, tab.height) / 2;
+      const rx = radius * scaleX;
+      const ry = radius * scaleY;
+      const spanX = (tab.width / 2 - radius) * scaleX;
+      const spanY = (tab.height / 2 - radius) * scaleY;
+      const centerX = displayedX + tab.width / 2;
+      const centerY = tab.y + tab.height / 2;
+      nav.style.setProperty('--nav-mask-rx', `${rx}px`);
+      nav.style.setProperty('--nav-mask-ry', `${ry}px`);
+      nav.style.setProperty('--nav-mask-span-x', `${2 * spanX}px`);
+      nav.style.setProperty('--nav-mask-span-y', `${2 * spanY}px`);
+      nav.toggleAttribute('data-nav-mask-vertical', spanY > 0);
       for (const item of tabs) {
-        const start = Math.max(0, Math.min(100, (left - item.iconX) / Math.max(1, item.iconWidth) * 100));
-        const end = Math.max(start, Math.min(100, (right - item.iconX) / Math.max(1, item.iconWidth) * 100));
-        item.node.style.setProperty('--nav-icon-start', `${start}%`);
-        item.node.style.setProperty('--nav-icon-end', `${end}%`);
+        const dx = centerX - item.iconX;
+        const dy = centerY - item.iconY;
+        item.node.style.setProperty('--nav-mask-x', `${dx}px`);
+        item.node.style.setProperty('--nav-mask-y', `${dy}px`);
+        if (!floating) continue;
+        const relativeY = Math.max(0, Math.abs(dy) - spanY) / Math.max(ry, 1);
+        const reach = spanX + rx * Math.sqrt(Math.max(0, 1 - relativeY * relativeY));
+        const halfIcon = item.iconWidth / 2;
+        const overlap = Math.min(halfIcon, dx + reach) - Math.max(-halfIcon, dx - reach);
+        const coverage = Math.max(0, Math.min(1, overlap / Math.max(item.iconWidth, 1)));
+        const eased = coverage * coverage * (3 - 2 * coverage);
+        item.node.style.setProperty('--nav-icon-scale', String(1 + (Math.max(1, scaleY) - 1) * eased));
       }
       const current = gesture && nearest(displayedX + tab.width / 2);
       if (preview !== current?.node) {

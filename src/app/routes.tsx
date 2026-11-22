@@ -8,7 +8,7 @@ import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, 
 import { RetainedPage, usePageActive } from './RetainedPage';
 import { useRouteDirection } from '../lib/useRouteDirection';
 import type { RouteDirection } from './RetainedPage';
-import type { RouteMotion } from '../lib/routeMotion';
+import { detailIdentity, type RouteMotion } from '../lib/routeMotion';
 import { useWorkspaceRouteMotion } from '../lib/useWorkspaceRouteMotion';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { EmptyState } from '../components/EmptyState';
@@ -28,6 +28,7 @@ import { MorePagesRoute } from '../components/MorePagesRoute';
  * batches; main shells stay eager, while tools/editors/readers only warm code. */
 export const lazyPages = {
   reader: () => import('../components/ReaderRoute'),
+  localReader: () => import('../components/LocalReaderRoute'),
   settings: () => import('../components/SettingsWorkspace'),
   localArchives: () => import('../components/LocalArchivesWorkspace'),
   eh: () => import('../components/EhRouteWorkspace'),
@@ -41,6 +42,7 @@ export const lazyPages = {
  * parsed bytes on boot even though they are one route deep. Upload and dedup
  * keep their real frame eager to avoid swapping an approximate cold fallback. */
 const ReaderRouteScreen = lazy(() => lazyPages.reader().then((module) => ({ default: module.ReaderRoute })));
+const LocalReaderRoute = lazy(() => lazyPages.localReader().then((module) => ({ default: module.LocalReaderRoute })));
 const SettingsWorkspace = lazy(() => lazyPages.settings().then((module) => ({ default: module.SettingsWorkspace })));
 const LocalArchivesWorkspace = lazy(() => lazyPages.localArchives().then((module) => ({ default: module.LocalArchivesWorkspace })));
 const EhRouteWorkspace = lazy(() => lazyPages.eh().then((module) => ({ default: module.EhRouteWorkspace })));
@@ -658,30 +660,42 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       setServerId(server.id);
       setScopeId(server.scopeId);
       const needsCategories = showShelfToolbar && (changedServer || name === 'watchlist' || categoriesRef.current === undefined);
-      // Dynamic category searches must not block favorites membership refresh.
-      if (needsCategories && name === 'watchlist') {
+      // The filters refresh independently of the shelf contents.
+      if (needsCategories) {
         void repository.listCategories(server.id).then(result => {
-          if (active) setCategories(result.ok ? result.value : []);
-        }).catch(() => { if (active) setCategories([]); });
+          if (active && result.ok) setCategories(result.value);
+        }).catch(() => {});
       }
-      const [shelf, categoryResult] = await Promise.all([
-        name === 'history'
-          ? shelfRead(`history:${server.scopeId}`, () => repository.listHistory(server.scopeId))
-          : name === 'toRead'
-            ? shelfRead(`toRead:${server.scopeId}`, () => repository.listReadingList(server.scopeId))
-            : shelfRead(`favorites:${server.id}`, () => repository.readFavoritesCategory(server.id)),
-        needsCategories && name !== 'watchlist' ? repository.listCategories(server.id) : Promise.resolve(undefined),
-      ] as const);
+      const shelf = await (name === 'history'
+        ? shelfRead(`history:${server.scopeId}`, () => repository.listHistory(server.scopeId))
+        : name === 'toRead'
+          ? shelfRead(`toRead:${server.scopeId}`, () => repository.listReadingList(server.scopeId))
+          : shelfRead(`favorites:${server.id}`, () => repository.readFavoritesCategory(server.id)));
       if (!active) return;
-      if (categoryResult) setCategories(categoryResult.ok ? categoryResult.value : []);
       if (!shelf.ok) { setError(shelf.error.message); setLoading(false); return; }
       const favoriteIds = name === 'watchlist' ? (shelf.value as { archives: string[] } | null)?.archives ?? [] : [];
       const shelfIds = name === 'history'
         ? (shelf.value as ReadingHistoryRecord[]).map(item => item.archiveId)
         : name === 'watchlist' ? favoriteIds : (shelf.value as WatchlistRecord[]).filter(item => !item.deleted).map(item => item.archiveId);
+      const uniqueIds = [...new Set(shelfIds)];
+      const resolveArchives = () => shelfRead(`archives:${server.id}:${JSON.stringify(uniqueIds)}`,
+        () => repository.listArchivesByIds(server.id, uniqueIds));
+      const cachedHistoryArchives = name === 'history' && !snapshot && uniqueIds.length
+        ? await repository.listArchivesByIds(server.id, uniqueIds, { resolveMissing: false })
+        : undefined;
+      if (!active) return;
+      const completeHistory = cachedHistoryArchives?.ok && cachedHistoryArchives.value.length === uniqueIds.length;
+      if (cachedHistoryArchives?.ok && !completeHistory && cachedHistoryArchives.value.length) {
+        // Render cached cards while missing metadata is fetched. Persist the
+        // shelf after metadata resolution and the existence check finish.
+        setVerificationPending(true);
+        setHistory(shelf.value as ReadingHistoryRecord[]);
+        setArchives(cachedHistoryArchives.value);
+        setLoading(false);
+      }
       const archiveResult = name === 'watchlist'
-        ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds) }
-        : await shelfRead(`archives:${server.id}:${JSON.stringify([...new Set(shelfIds)])}`, () => repository.listArchivesByIds(server.id, [...new Set(shelfIds)]));
+        ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds, (shelf.value as { id: string } | null)?.id) }
+        : completeHistory ? cachedHistoryArchives : await resolveArchives();
       if (!active) return;
       if (!archiveResult.ok) setError(archiveResult.error.message);
       else {
@@ -698,7 +712,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
             favoritesSource: 'remote', favoritesCategoryPresent, history: [],
             watchlist: favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })),
             archives: archiveResult.value, serverId: server.id, scopeId: server.scopeId, query: '',
-            categories: categoryResult?.ok ? categoryResult.value : categoriesRef.current ?? [],
+            categories: categoriesRef.current ?? [],
           };
           writeRouteCache(cacheKey, value, { persist: true });
           writeRouteCache(favoriteFallbackKey, value, { persist: true });
@@ -1009,7 +1023,7 @@ export function WorkspaceRoutes({ direction: navigationDirection, motion: outerM
   visited.current.set(routeKey, location);
   if (preview && previewKey) visited.current.set(previewKey, preview);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedWorkspacePage key={key} saved={saved} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
+    <RetainedWorkspacePage key={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
   ))}</>;
 }
 
@@ -1024,8 +1038,8 @@ function WorkspaceRouteFallback({ path }: { path: string }) {
 
 /** Stable route elements keep unrelated retained pages out of navigation renders.
  * Active context still reaches consumers for freshness and scroll restoration. */
-const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, active, flow, direction, motion, surfaceRef }: {
-  saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
+const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, active, flow, compact, direction, motion, surfaceRef }: {
+  saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; compact: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
 }) {
   // Routes(location=...) still subscribes to the outer LocationContext. Isolate
   // that subscription too, otherwise every hidden useLocation consumer updates.
@@ -1054,8 +1068,13 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, activ
         </Routes>
       </Suspense>
   ), [saved]);
-  const transitionKey = saved.pathname === '/downloads' ? `${saved.pathname}:${new URLSearchParams(saved.search).get('path') ?? ''}` : saved.pathname;
-  return <RetainedPage active={active} motionSurface flow={flow} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey}>
+  const archiveKey = detailIdentity(saved);
+  const detailKey = archiveKey === undefined ? undefined : JSON.stringify([archiveKey, new URLSearchParams(saved.search).get('server')]);
+  const transitionKey = detailKey === undefined ? saved.pathname : JSON.stringify([saved.pathname, detailKey]);
+  // These compact routes scroll through the shared workspace. Animating the
+  // full card/detail columns in from outside the viewport spikes raster work.
+  const fadeEntry = compact && detailKey !== undefined;
+  return <RetainedPage active={active} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });
@@ -1069,6 +1088,7 @@ export function ReaderRoutes() {
   return (
     <Suspense fallback={<LoadingIndicator size="lg" label="正在加载页面" />}>
       <Routes>
+        <Route path="/reader/local/file" element={<LocalReaderRoute />} />
         <Route path="/reader/:archiveId" element={<ReaderRoute />} />
       </Routes>
     </Suspense>

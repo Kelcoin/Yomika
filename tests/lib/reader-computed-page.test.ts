@@ -329,6 +329,26 @@ describe('loadReaderComputedPage', () => {
     expect(b.releaseArtifact).toHaveBeenCalledWith('lease-artifact-1');
   });
 
+  it('hands a renderable Android file to the native reader without pre-decoding in WebView', async () => {
+    vi.stubGlobal('YomikaTiles', { postMessage: vi.fn() });
+    const decode = vi.fn(async () => {});
+    setImageDecoderForTests(decode);
+    const b = bridge({ artifacts: [artifact()] });
+    const { cache } = readonlyCache();
+    try {
+      const pending = load(b, cache);
+      await flush();
+      b.emit(snapshot('completed', 1));
+      const handle = await pending;
+      expect(handle?.url).toBe(lease('artifact-1').url);
+      expect(decode).not.toHaveBeenCalled();
+      cache.release(handle!);
+      expect(b.releaseArtifact).toHaveBeenCalledWith('lease-artifact-1');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('takes only the verified upscale artifact that really has a landing spot', async () => {
     // 同一个 job 的产物列表里可能出现别的阶段、没核验过的、以及只有 staging 没有落点的
     // 登记。挑错一个就等于把别的中间结果当成这一页。

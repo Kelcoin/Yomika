@@ -53,6 +53,12 @@ pub(crate) fn probe_dimensions(source: &[u8]) -> Result<(u32, u32), StageError> 
 }
 
 pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, StageError> {
+    encode_png_with_icc(rgba, width, height, None)
+}
+
+pub(crate) fn encode_png_with_icc(
+    rgba: &[u8], width: u32, height: u32, icc_profile: Option<Vec<u8>>,
+) -> Result<Vec<u8>, StageError> {
     use image::ImageEncoder;
     let expected = (width as usize).checked_mul(height as usize).and_then(|pixels| pixels.checked_mul(4));
     if width == 0 || height == 0 || expected != Some(rgba.len()) {
@@ -61,8 +67,12 @@ pub(crate) fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>
     let mut encoded = Vec::new();
     // Borrow the finished pixels: cloning a 4000×5646 RGBA page here alone
     // adds 86 MiB to the mobile peak, with no benefit to the encoder.
-    image::codecs::png::PngEncoder::new(&mut encoded)
-        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+    let mut encoder = image::codecs::png::PngEncoder::new(&mut encoded);
+    if let Some(profile) = icc_profile {
+        encoder.set_icc_profile(profile)
+            .map_err(|error| StageError::failed(ARTIFACT_INVALID_CODE, format!("PNG 色彩配置写入失败：{error}")))?;
+    }
+    encoder.write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
         .map_err(|error| StageError::failed(ARTIFACT_INVALID_CODE, format!("PNG 编码失败：{error}")))?;
     Ok(encoded)
 }

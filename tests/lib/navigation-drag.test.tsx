@@ -4,10 +4,10 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { useNavigationDrag } from '../../src/lib/useNavigationDrag';
 
 const navigate = vi.fn();
-function Harness({ active = '/', enabled = true, hidden = false }: { active?: string; enabled?: boolean; hidden?: boolean }) {
+function Harness({ active = '/', enabled = true, hidden = false, floating = false }: { active?: string; enabled?: boolean; hidden?: boolean; floating?: boolean }) {
   const ref = useRef<HTMLElement>(null);
   useNavigationDrag(ref, { enabled, hidden, active, onSelect: navigate });
-  return <nav ref={ref} aria-label="test"><span data-nav-indicator /><a href="#home" data-nav-route="/">首页</a><a href="#library" data-nav-route="/library">档案库</a><a href="#history" data-nav-route="/history">历史</a></nav>;
+  return <nav ref={ref} className={floating ? 'is-floating' : undefined} aria-label="test"><span data-nav-indicator /><a href="#home" data-nav-route="/"><span className="nav-icon-pair" />首页</a><a href="#library" data-nav-route="/library"><span className="nav-icon-pair" />档案库</a><a href="#history" data-nav-route="/history"><span className="nav-icon-pair" />历史</a></nav>;
 }
 let frame: FrameRequestCallback | undefined;
 let time = 0;
@@ -20,7 +20,11 @@ beforeEach(() => {
   vi.stubGlobal('cancelAnimationFrame', vi.fn(() => { frame = undefined; }));
   vi.stubGlobal('ResizeObserver', class { constructor(callback: ResizeObserverCallback) { resized = callback; } observe() {} disconnect() {} });
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
-    const x = this.dataset.navRoute === '/library' ? 100 : this.dataset.navRoute === '/history' ? 200 : 0;
+    const route = this.closest<HTMLElement>('[data-nav-route]')?.dataset.navRoute;
+    const x = route === '/library' ? 100 : route === '/history' ? 200 : 0;
+    if (this.classList.contains('nav-icon-pair')) {
+      return { x: x + 40, y: 10, left: x + 40, top: 10, right: x + 60, bottom: 30, width: 20, height: 20, toJSON() {} };
+    }
     return { x, y: 0, left: x, top: 0, right: x + 100, bottom: 60, width: this.tagName === 'NAV' ? 300 : 100, height: 60, toJSON() {} };
   });
   HTMLElement.prototype.setPointerCapture = vi.fn();
@@ -193,21 +197,29 @@ it('does not read layout during pointer movement', () => {
   expect(measure).not.toHaveBeenCalled();
 });
 
-it('reveals filled icons by the rendered capsule coverage before committing a route', () => {
-  render(<Harness />);
-  const home = screen.getByText('首页');
-  const library = screen.getByText('档案库');
-  expect(home.style.getPropertyValue('--nav-icon-end')).toBe('100%');
-  expect(library.style.getPropertyValue('--nav-icon-end')).toBe('0%');
+it('aligns the soft icon mask to the stretched capsule and ramps scale before route selection', () => {
+  render(<Harness floating />);
+  const nav = screen.getByRole('navigation');
+  const origin = screen.getByText('首页');
+  const destination = screen.getByText('档案库');
+  const value = (element: HTMLElement, name: string) => parseFloat(element.style.getPropertyValue(name));
   pointer('pointerdown', 50);
-  pointer('pointermove', 150);
-  flush();
-  const offset = parseFloat(screen.getByRole('navigation').style.getPropertyValue('--nav-indicator-x'));
-  const scale = parseFloat(screen.getByRole('navigation').style.getPropertyValue('--nav-indicator-scale-x'));
-  const covered = parseFloat(library.style.getPropertyValue('--nav-icon-end'));
-  expect(covered).toBeCloseTo(offset + (scale - 1) * 50);
-  expect(covered).toBeGreaterThan(0);
-  expect(covered).toBeLessThan(100);
+  settle();
+  expect(value(origin, '--nav-icon-scale')).toBeCloseTo(1.32);
+  expect(value(destination, '--nav-icon-scale')).toBe(1);
+  pointer('pointermove', 87);
+  settle();
+  const x = value(nav, '--nav-indicator-x');
+  const scaleX = value(nav, '--nav-indicator-scale-x');
+  const scaleY = value(nav, '--nav-indicator-scale-y');
+  expect(value(nav, '--nav-mask-rx')).toBeCloseTo(30 * scaleX);
+  expect(value(nav, '--nav-mask-ry')).toBeCloseTo(30 * scaleY);
+  expect(value(nav, '--nav-mask-span-x')).toBeCloseTo(40 * scaleX);
+  expect(value(destination, '--nav-mask-x')).toBeCloseTo(x - 100);
+  expect(value(destination, '--nav-mask-y')).toBe(10);
+  expect(value(destination, '--nav-icon-scale')).toBeGreaterThan(1);
+  expect(value(destination, '--nav-icon-scale')).toBeLessThan(scaleY);
+  expect(destination).not.toHaveAttribute('data-nav-preview');
   expect(navigate).not.toHaveBeenCalled();
 });
 
@@ -238,14 +250,25 @@ it('honors reduced motion without a spring or deformation', () => {
   expect(navigate).toHaveBeenCalledExactlyOnceWith('/library');
 });
 
-it('returns the pressed shape through a spring rather than snapping its size on release', () => {
+it('keeps the full fixed indicator inside the bar at its edge', () => {
   render(<Harness />);
   pointer('pointerdown', 50);
   settle();
+  const style = screen.getByRole('navigation').style;
+  expect(style.getPropertyValue('--nav-indicator-scale-x')).toBe('1');
+  expect(style.getPropertyValue('--nav-indicator-scale-y')).toBe('1');
+  expect(style.getPropertyValue('--nav-icon-scale')).toBe('');
+});
+
+it('springs the enlarged floating indicator and icon back on release', () => {
+  render(<Harness floating />);
+  pointer('pointerdown', 50);
+  settle();
   const nav = screen.getByRole('navigation');
-  expect(parseFloat(nav.style.getPropertyValue('--nav-indicator-scale-x'))).toBeCloseTo(1.12);
+  expect(parseFloat(nav.style.getPropertyValue('--nav-indicator-scale-x'))).toBeCloseTo(1.30);
+  expect(parseFloat(screen.getByText('首页').style.getPropertyValue('--nav-icon-scale'))).toBeCloseTo(1.32);
   pointer('pointerup', 50);
-  expect(parseFloat(nav.style.getPropertyValue('--nav-indicator-scale-x'))).toBeCloseTo(1.12);
+  expect(parseFloat(nav.style.getPropertyValue('--nav-indicator-scale-x'))).toBeCloseTo(1.30);
   flush();
   expect(parseFloat(nav.style.getPropertyValue('--nav-indicator-scale-x'))).toBeGreaterThan(1);
   settle();

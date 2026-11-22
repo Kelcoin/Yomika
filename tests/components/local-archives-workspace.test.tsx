@@ -455,7 +455,7 @@ describe('local archives workspace', () => {
     await act(async () => { finish!({ ok: true, value: { status: 'paused', path: '', taskId: 'task-1' } }); });
   });
 
-  it('resumes an interrupted download and reports where it landed', async () => {
+  it('resumes an interrupted download and reports the archive name', async () => {
     const user = userEvent.setup();
     const adapter = vi.fn(async (command: string) => {
       if (command === 'list_local_archives') return { ok: true, value: [] };
@@ -470,7 +470,7 @@ describe('local archives workspace', () => {
 
     await user.click(await screen.findByRole('button', { name: '恢复demo.cbz' }));
     expect(adapter).toHaveBeenCalledWith('resume_download', { taskId: 'task-1' });
-    expect(await screen.findByText('下载完成')).toBeInTheDocument();
+    expect(await screen.findByText('demo.cbz 下载完成')).toBeInTheDocument();
   });
 
   it('ranks and trims the row tags exactly like a library row', async () => {
@@ -566,13 +566,16 @@ describe('local archives workspace', () => {
     expect(screen.getByText('测试档案')).toBeInTheDocument();
   });
 
-  it('reads a local file through the server copy it was downloaded from', async () => {
+  it('uses the local file for thumbnails and reading progress, including archives with no download source', async () => {
     const user = userEvent.setup();
     const noSource = { ...localFile, path: 'E:\\Downloads\\bbb-另一份.zip', title: '另一份', archiveId: null, serverId: null, scopeId: null };
-    const adapter = vi.fn(async (command: string) => {
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'list_local_archives') return { ok: true, value: [localFile, noSource] };
       if (command === 'list_search_presets' || command === 'list_tasks') return { ok: true, value: [] };
       if (command === 'platform_capabilities') return { ok: true, value: { platform: 'windows', native: true, secureStorage: true, fileSystem: true, backgroundTasks: false, nativeInference: true } };
+      if (command === 'load_local_archive_manifest') return { ok: true, value: { title: '本地档案', tags: [], sizeBytes: 100, entries: [0, 2, 1] } };
+      if (command === 'local_archive_progress') return { ok: true, value: args?.path === localFile.path ? { pageIndex: 1, continuous: false } : null };
+      if (command === 'load_local_archive_page' || command === 'load_local_archive_cover') return { ok: true, value: 'data:image/jpeg;base64,YQ==' };
       if (command === 'reveal_in_file_manager') return { ok: true, value: null };
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -583,14 +586,15 @@ describe('local archives workspace', () => {
     renderPage();
 
     await user.click(await screen.findByText('测试档案'));
-    // 认得出下载来源：阅读走档案详情页同一个入口，按服务器档案出页。
-    expect(screen.getByRole('link', { name: '阅读' })).toHaveAttribute('href', `/reader/${archiveId}?server=server-a`);
+    const localHref = (path: string) => `/reader/local/file?${new URLSearchParams({ file: path })}`;
+    expect(await screen.findByRole('link', { name: '从第 2 页继续' })).toHaveAttribute('href', localHref(localFile.path));
+    expect(screen.getByRole('button', { name: '查看第 3 页' })).toBeInTheDocument();
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('load_local_archive_page', { path: localFile.path, entry: 2 }));
+    expect(adapter.mock.calls.some(([command]) => command === 'load_reading_progress' || command === 'load_reader_manifest')).toBe(false);
 
     await user.click(screen.getByRole('button', { name: '返回列表' }));
     await user.click(await screen.findByText('另一份'));
-    // 侧放进来、认不出来源的文件没有阅读去处，按钮不摆；资源管理器定位只看
-    // 本机文件（Windows 一律有），并真的把路径交给原生命令。
-    expect(screen.queryByRole('link', { name: '阅读' })).not.toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: '阅读' })).toHaveAttribute('href', localHref(noSource.path));
     await user.click(await screen.findByRole('button', { name: '在资源管理器中打开' }));
     expect(adapter).toHaveBeenCalledWith('reveal_in_file_manager', { path: noSource.path });
     delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;

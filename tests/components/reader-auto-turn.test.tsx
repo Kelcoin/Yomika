@@ -42,10 +42,13 @@ describe('reader auto turn', () => {
     for (const layout of ['single', 'double'] as const) {
       const view = mount(direction, layout);
       readyImages(view.container);
-      act(() => vi.advanceTimersByTime(5_000));
+      const interval = layout === 'double' ? 10_000 : 5_000;
+      act(() => vi.advanceTimersByTime(interval - 1));
+      expect(view.progress).toHaveBeenLastCalledWith(0, { layout, direction });
+      act(() => vi.advanceTimersByTime(1));
       expect(view.progress).toHaveBeenLastCalledWith(1, { layout, direction });
       readyImages(view.container);
-      act(() => vi.advanceTimersByTime(5_000));
+      act(() => vi.advanceTimersByTime(interval));
       expect(view.progress).toHaveBeenLastCalledWith(layout === 'double' ? 3 : 2, { layout, direction });
       view.unmount();
     }
@@ -85,7 +88,7 @@ describe('reader auto turn', () => {
     act(() => vi.advanceTimersByTime(5_000));
     expect(view.progress).toHaveBeenLastCalledWith(1, expect.anything());
     readyImages(view.container);
-    act(() => vi.advanceTimersByTime(5_000));
+    act(() => vi.advanceTimersByTime(10_000));
     expect(view.progress).toHaveBeenLastCalledWith(3, expect.anything());
   });
 
@@ -113,7 +116,7 @@ describe('reader auto turn', () => {
     const view = mount();
     readyImages(view.container);
     act(() => vi.advanceTimersByTime(4_000));
-    fireEvent.click(screen.getByRole('button', { name: '下一页' }));
+    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
     readyImages(view.container);
     fireEvent.click(screen.getByRole('button', { name: '从左到右' }));
     act(() => vi.advanceTimersByTime(1_000));

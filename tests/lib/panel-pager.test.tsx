@@ -50,6 +50,25 @@ describe('panel gesture lifecycle', () => {
     expect(screen.getByTestId('details').hidden).toBe(false);
   });
 
+  it('keeps the scroll position when switching while the tabs are visible', () => {
+    render(<div data-testid="scrollport" style={{ overflowY: 'auto' }}><Pager /></div>);
+    const host = screen.getByTestId('scrollport');
+    const stage = screen.getByTestId('stage');
+    vi.spyOn(host, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 768, height: 768 } as DOMRect);
+    vi.spyOn(stage, 'getBoundingClientRect').mockImplementation(() => ({ top: 300 - host.scrollTop, height: 6000 } as DOMRect));
+    vi.spyOn(screen.getByTestId('details'), 'scrollHeight', 'get').mockReturnValue(6000);
+    vi.spyOn(screen.getByTestId('comments'), 'scrollHeight', 'get').mockReturnValue(600);
+    host.scrollTop = 1500;
+    fireEvent.click(screen.getByRole('button', { name: 'Comments' }));
+    host.scrollTop = 100;
+    const comments = screen.getByTestId('comments');
+    fireEvent.touchStart(comments, { touches: [touch(150)] });
+    fireEvent.touchMove(comments, { touches: [touch(240)] });
+    fireEvent.touchEnd(comments, { touches: [] });
+    expect(screen.getByTestId('selected')).toHaveTextContent('details');
+    expect(host.scrollTop).toBe(100);
+  });
+
   it('maps a deep visit into a short panel and restores each panel independently', () => {
     expect(mapPanelDepth(1800, 3000, 900, 600)).toBe(225);
     expect(mapPanelDepth(1800, 3000, 400, 600)).toBe(0);

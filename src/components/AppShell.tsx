@@ -69,8 +69,8 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
             title={label}
           >
             {({ isActive }) => <>{compact ? <span className="nav-icon-pair" aria-hidden="true">
-              <StateIcon name={icon} className="nav-icon-outline" />
-              <StateIcon name={icon} selected className="nav-icon-filled" />
+              <span className="nav-icon-outline"><StateIcon name={icon} /></span>
+              <span className="nav-icon-filled"><StateIcon name={icon} selected /></span>
             </span> : <StateIcon name={icon} selected={navEntryActive(to, isActive, location.pathname)} />}<span>{label}</span></>}
           </NavLink>
         ))}

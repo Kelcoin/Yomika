@@ -330,7 +330,7 @@ describe('design system contract', () => {
     // 悬浮胶囊盖在内容上，滚动容器才需要补出它那 80px；整条 fixed 的底栏本来就占
     // 一行（.app-main 的高度里减掉了），再补出来的只是一块同色空带——手机上就是
     // 底栏之上那一大块「遮挡」。
-    const [padded] = shell.split('padding-bottom: calc(var(--safe-bottom) + 80px)');
+    const [padded] = shell.split('--workspace-floating-nav-clearance: calc(var(--safe-bottom) + 80px)');
     expect(padded!.trimEnd()).toMatch(/\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{$/);
     // 收不收底栏由悬浮和自动收起两个开关决定：没开悬浮时它有自己的行，不该被滚动带走。
     expect(app).toMatch(/if \(autoHideFloatingNav\) \{\s*setCompactNavHidden/);
@@ -906,6 +906,19 @@ describe('design system contract', () => {
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
     expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.workspace-home\)/);
     expect(shell).not.toMatch(/\.workspace:has\(\.workspace-home\)/);
+    expect(shell).toMatch(/\.workspace:has\(> \.route-cache-panel:not\(\[hidden\]\) \.workspace-home\)\s*\{[^}]*padding-block-start: 0;\s*padding-inline: 0;\s*\}/);
+    expect(shell).toMatch(/\[data-compact-nav-hidden\][^{}]*\{\s*--workspace-floating-nav-clearance: var\(--safe-bottom\);/);
+  });
+
+  it('aligns the mobile home header and rails and leaves bottom clearance to the workspace', () => {
+    const shell = read('src/styles/shell.css');
+    const list = ruleBody(shell, '.app-main.has-home-topbar .library-shell-list');
+    const home = ruleBody(shell, '.app-main.has-home-topbar .workspace-home');
+    expect(list).toContain('calc(var(--home-section-gap) - (var(--home-topbar-height) - var(--home-brand-mark-size)) / 2)');
+    expect(list).not.toMatch(/padding-(?:bottom|block-end)/);
+    expect(home).toMatch(/gap:\s*var\(--home-section-gap\)/);
+    const floatingHome = ruleBody(shell, '.app-shell.is-floating-nav:not([data-compact-nav-hidden]) .app-main.has-home-topbar .route-cache-panel:not([hidden]) .workspace-home');
+    expect(floatingHome).toMatch(/padding-block-end:\s*var\(--archive-row-inset\)/);
   });
 
   it('lets each home column scroll on its own once the detail is open', () => {
@@ -1207,8 +1220,10 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.archive-thumb-card-body\s*\{[\s\S]*grid-template-rows:\s*36px 48px 15px[\s\S]*height:\s*135px/);
     const railCard = ruleBody(shell, '.archive-rail-item > .archive-thumb-card');
     expect(railCard).toMatch(/transform-origin:\s*center/);
-    const railProgress = ruleBody(shell, '.archive-thumb-card > .archive-card-progress');
-    expect(railProgress).toMatch(/inset:\s*calc\(var\(--archive-rail-cover-height, 210px\) - 5px\) 0 auto/);
+    expect(shell).toMatch(/\.archive-thumb-card > \.archive-card-progress,\s*\.archive-list\.is-wide \.archive-row > \.archive-card-progress/);
+    const railProgress = ruleBody(shell, '.archive-list.is-wide .archive-row > .archive-card-progress');
+    expect(railProgress).toMatch(/inset:\s*auto 0 0/);
+    expect(railProgress).toMatch(/height:\s*4px/);
     expect(railProgress).not.toMatch(/(?:transform|translate|scale|transition)\s*:/);
     expect(shell).toMatch(/\.archive-thumb-card-tags\s*\{[\s\S]*align-items:\s*flex-start[\s\S]*align-content:\s*flex-start/);
     // The rail card and the library grid share one tag geometry: a 20px chip in a
@@ -1268,6 +1283,25 @@ describe('design system contract', () => {
   it('draws the enhancement switches in both states wherever they appear', () => {
     expect(read('src/components/SettingsWorkspace.tsx')).toMatch(/icon=\{<UpscaleIcon enabled=\{upscaleOn\} \/>\}/);
     expect(read('src/components/DlssnrSettingsGroup.tsx')).toMatch(/icon=\{<DlssnrIcon enabled=\{preferences\.dlssnrEnabled\} \/>\}/);
+  });
+
+  it('centers the reader toolbar counter across action counts and screen sizes', () => {
+    const reader = read('src/styles/reader.css');
+    const toolbar = ruleBody(reader, '.reader-toolbar');
+    // Equal side tracks anchor the counter to the viewport. Align both groups
+    // toward the middle so wide windows keep the controls close together.
+    expect(toolbar).toMatch(/display:\s*grid/);
+    expect(toolbar).toMatch(/grid-template-columns:\s*minmax\(0, 1fr\) auto minmax\(0, 1fr\)/);
+    expect(ruleBody(reader, '.reader-toolbar-layout')).toMatch(/justify-self:\s*end/);
+    expect(ruleBody(reader, '.reader-toolbar-pages')).toMatch(/grid-column:\s*2/);
+    expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/justify-self:\s*start/);
+    const counter = ruleBody(reader, '.reader-toolbar-counter');
+    expect(counter).toMatch(/background:\s*var\(--surface-container-high\)/);
+    expect(counter).toMatch(/border-radius:\s*var\(--radius-pill\)/);
+    expect(counter).toMatch(/font-variant-numeric:\s*tabular-nums/);
+
+    expect(ruleBody(reader, '@media (max-width: 610px)')).not.toMatch(/grid-template-columns/);
+    expect(read('src/components/ReaderScreen.tsx')).toContain('<span className="reader-toolbar-counter">');
   });
 
   it('gives the reader chrome the Material 3 app-bar geometry and roles', () => {
@@ -1349,28 +1383,11 @@ describe('design system contract', () => {
     expect(toolbar).not.toMatch(/color-mix|transparent/);
     expect(toolbar).not.toMatch(/var\(--reader-surface\)/);
 
-    // 三段式网格：三列都按内容宽（`auto`），整排再 `justify-content: center`——左右两组
-    // 因此**向中间靠拢**，页码仍然按网格落在栏的正中。这一条曾经是
-    // `minmax(0, 1fr) auto minmax(0, 1fr)` 加两侧各自的 `justify-self: start/end`：宽窗口下
-    // 两组被推到栏的两端，离中间那枚页码最远（user report:「底栏左右两侧按钮离中心太远」）。
-    // `justify-content` 在这里必须留成 `center`——上一轮 ≤900px 的那条查询把它压成
-    // `flex-start`，窗口一窄，页码就从中间滑到左边。
-    expect(toolbar).toMatch(/display:\s*grid/);
-    expect(toolbar).toMatch(/grid-template-columns:\s*auto auto auto/);
-    expect(toolbar).toMatch(/justify-content:\s*center/);
-    // 两侧不再贴边：任何 `justify-self` 都会把那一组推回自己那一列的边上，又变成「离中心远」。
-    expect(ruleBody(reader, '.reader-toolbar-layout')).toMatch(/grid-column:\s*1/);
-    expect(ruleBody(reader, '.reader-toolbar-layout')).not.toMatch(/justify-self/);
-    expect(ruleBody(reader, '.reader-toolbar-pages')).toMatch(/grid-column:\s*2/);
-    expect(ruleBody(reader, '.reader-toolbar-processing')).toMatch(/grid-column:\s*3/);
-    expect(ruleBody(reader, '.reader-toolbar-processing')).not.toMatch(/justify-self/);
-
     // Phones preserve the same single row; shrink controls instead of wrapping.
     const phone = ruleBody(reader, '@media (max-width: 610px)');
     expect(phone).toMatch(/display:\s*grid/);
     expect(phone).toMatch(/grid-template-rows:\s*minmax\(0, 1fr\)/);
     expect(phone).not.toMatch(/flex-wrap:\s*wrap|width:\s*100%/);
-    expect(phone).toMatch(/\.reader-toolbar-pages\s*\{[^}]*justify-content:\s*center/);
     // 900px 那一档只收组内间距，不再动对齐。
     expect(ruleBody(reader, COMPACT_LAYOUT)).not.toMatch(/justify-content/);
 
@@ -1648,7 +1665,8 @@ describe('design system contract', () => {
     // stretches to the wrap — runs unbroken from one row to the next.
     expect(wrap).not.toMatch(/padding-block/);
     const row = ruleBody(shell, '.archive-list.is-wide .archive-row');
-    expect(row).toMatch(/margin-block:\s*4px/);
+    expect(ruleBody(shell, '.app-shell')).toMatch(/--archive-row-inset:\s*4px/);
+    expect(row).toMatch(/margin-block:\s*var\(--archive-row-inset\)/);
     // The edge is an inner outline, not a border: a border inside the fixed
     // border-box height stole 2px and clipped the second tag row.
     expect(row).toMatch(/outline:\s*1px solid var\(--outline-variant\)/);
@@ -1961,10 +1979,10 @@ describe('design system contract', () => {
     expect(flowPanel, '长高的面板自己不补尾').not.toMatch(/padding/);
     expect(flowPanel, '也不靠 min-height 伪装成留白').not.toMatch(/min-height/);
     // 首页自己那条也不补尾（否则「刚好放满」的首页照样多滚一格）。
-    expect(shell).toMatch(/\.workspace-home\) \{[\s\S]{0,200}?padding: 0;/);
+    expect(shell).toMatch(/\.workspace-home\) \{[^}]*padding-block-start: 0;\s*padding-inline: 0;\s*\}/);
     // 被**遮挡**的那一格是例外：悬浮底栏浮在内容之上，滚到底必须能把最后一屏从栏底下
     // 拉出来，所以这一格照旧留在滚动容器上（`is-floating-nav` 那一对选择器）。
-    expect(shell).toMatch(/\.app-shell\.is-floating-nav \.workspace,\s*\n\s*\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{\s*padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\);\s*\}/);
+    expect(shell).toMatch(/\.app-shell\.is-floating-nav \.workspace,\s*\n\s*\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{\s*--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ 80px\);\s*padding-bottom: var\(--workspace-floating-nav-clearance\);\s*\}/);
   });
 
   it('reads the comment author above the body, with the timestamp in its own column', () => {
@@ -2683,7 +2701,7 @@ ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     // Compact panels now flow inside the workspace scroll surface. Reserve the
     // floating bar once there; padding retained nested lists doubles the gap.
     const shell = read('src/styles/shell.css');
-    expect(shell.match(/padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\)/g)).toHaveLength(1);
+    expect(shell.match(/--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ 80px\)/g)).toHaveLength(1);
     expect(shell).not.toMatch(/\.app-shell\.is-floating-nav \.library-shell-list,[^}]*padding-bottom/);
   });
 
@@ -3080,21 +3098,13 @@ ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     expect(source).not.toContain('settings-row-note');
   });
 
-  it('hangs the capability chips on the device row itself, never on a row of their own', () => {
-    // 用户报的：「去掉图 1 和图 2 里的远端处理能力，以胶囊形式放到图 2 的设备名右侧」。
-    // 同一个清单从前在设置组里铺一行、二级菜单底下再念一遍，现在只出现在二级菜单里
-    // **当前连上的那一台**的行尾。几何那一半由无头 Edge 量过：菜单在 390px 宽时两列
-    // 会让胶囊压在地址上 67.25px，三列 + 640px 折行后是 0。
+  it('keeps compact capability badges inline with the device name on narrow screens', () => {
     const shell = read('src/styles/shell.css').replace(/\/\*[\s\S]*?\*\//g, '');
     const source = read('src/components/ComputeCenterSettingsGroup.tsx');
-    expect(shell).not.toMatch(/\.settings-capability-row\s*\{/);
-    expect(source).not.toContain('settings-capability-row');
-    expect(shell).toMatch(/\.settings-device-option\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\)\s*auto/);
-    expect(shell).toMatch(/\.settings-device-capabilities\s*\{[^}]*justify-content:\s*flex-end/);
-    expect(shell).toMatch(/@media \(max-width: 640px\)\s*\{\s*\.settings-device-option\s*\{\s*grid-template-columns:\s*auto minmax\(0,\s*1fr\)/);
-    expect(shell).toMatch(/@media \(max-width: 640px\)[\s\S]*?\.settings-device-capabilities\s*\{\s*grid-column:\s*2/);
-    expect(source).toMatch(/className="settings-device-capabilities" role="group" aria-label="远端可用服务"/);
-    // 菜单底下那行「DESKTOP-PC · 超分、DLSS5」整行去掉，别再有人捡回来。
+    expect(shell).toMatch(/\.settings-device-option\s*\{[^}]*grid-template-columns:\s*auto minmax\(0,\s*1fr\);/);
+    expect(shell).toMatch(/\.settings-device-heading\s*\{[^}]*display:\s*flex/);
+    expect(shell).toMatch(/\.settings-device-capabilities\s*\{[^}]*flex:\s*none/);
+    expect(source).toMatch(/className="settings-device-heading">\s*<span className="settings-device-name"[^>]*>\{name\}<\/span>\s*\{capabilities[^}]*<CapabilityChips/);
     expect(source).not.toMatch(/<p className="settings-menu-desc">\{remote\.name\}/);
   });
 
@@ -3404,8 +3414,7 @@ it('keeps 仅历史记录 scoped to the two places the setting means', () => {
   expect(card, '「有进度」仍要先成立').toMatch(/const read = typeof page === 'number' && page >= 1;/);
 
   const workspace = read('src/components/LibraryWorkspace.tsx');
-  expect(workspace, '档案库列表里两处进度条都要带上位置').toMatch(/scope=\{progressScope\} cornerAware/);
-  expect(workspace).toMatch(/progressScope=\{progressScope\}/);
+  expect(workspace.match(/scope=\{progressScope\} cornerAware/g), '档案库列表里两处进度条都要带上位置').toHaveLength(2);
 });
 
 describe('the 2026-10-17 UI batch', () => {
@@ -3539,7 +3548,7 @@ describe('移动端：软键盘、卡片高亮、底部留白、底栏避让', (
       /\.library-shell-list,\s*\.library-shell-detail \{ padding: var\(--space-4\) var\(--space-4\) 0;/,
     );
     expect(shell, '遮挡格仍只由唯一的滚动容器补：悬浮底栏那一格').toMatch(
-      /\.app-shell\.is-floating-nav \.workspace,[\s\S]{0,160}padding-bottom: calc\(var\(--safe-bottom\) \+ 80px\);/,
+      /\.app-shell\.is-floating-nav \.workspace,[\s\S]{0,160}--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ 80px\);/,
     );
   });
 

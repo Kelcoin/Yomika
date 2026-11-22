@@ -1,7 +1,8 @@
 import { RetainedPage } from './RetainedPage';
 import { AppShell } from '../components/AppShell';
 import { AppSecurityGate } from '../components/AppSecurityGate';
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
+import { setReaderKeyboardOverlay } from '../bridge/platform';
 import { Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { preloadLazyPages, ReaderRoutes, WorkspaceRoutes } from './routes';
 import { PreferencesProvider, usePreferences } from './preferences';
@@ -58,6 +59,17 @@ export function App() {
   const foregroundPath = useRef(pathname);
   foregroundPath.current = pathname;
   const reading = pathname.startsWith('/reader/');
+  useLayoutEffect(() => {
+    if (!reading) return;
+    const viewport = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    const original = viewport?.content;
+    if (viewport && original) viewport.content = original.replace('interactive-widget=resizes-content', 'interactive-widget=overlays-content');
+    void setReaderKeyboardOverlay(true);
+    return () => {
+      if (viewport && original) viewport.content = original;
+      void setReaderKeyboardOverlay(false);
+    };
+  }, [reading]);
   const workspaceLocation = useRef<typeof location | undefined>(reading ? undefined : location);
   if (!reading) workspaceLocation.current = location;
   const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
@@ -66,7 +78,7 @@ export function App() {
   const workspaceTransition = useWorkspaceRouteMotion(workspaceLocation.current ?? location, compact, direction, !reading);
   const readers = useRef(new Map<string, typeof location>());
   const readerParams = new URLSearchParams(location.search);
-  const readerKey = `${pathname}:${readerParams.get('server') ?? ''}:${readerParams.get('incognito') ?? ''}`;
+  const readerKey = `${pathname}:${readerParams.get('server') ?? ''}:${readerParams.get('incognito') ?? ''}:${readerParams.get('file') ?? ''}`;
   if (reading) {
     // 重进已有的档案要挪到最近端（delete 再 set 才改得动 Map 的顺序），
     // 这样下面淘汰的总是「最久没读的那一个」。

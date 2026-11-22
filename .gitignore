@@ -97,3 +97,4 @@ NVIDIA Corporation/
 
 # Codex 侧的浏览器探针产物（Edge 配置档、截图、一次性脚本），不随仓库走。
 /.codex-artifacts/
+!/docs/superpowers/plans/2026-11-21-native-reader.md

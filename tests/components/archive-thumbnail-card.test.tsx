@@ -132,6 +132,16 @@ describe('archive thumbnail card', () => {
 });
 
 describe('ArchiveProgressBar', () => {
+  it('animates progress that first arrives after the card mounts', () => {
+    const { rerender } = render(<ArchiveProgressBar pageCount={100} visibility="all" />);
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    rerender(<ArchiveProgressBar page={25} pageCount={100} visibility="all" />);
+    const progress = screen.getByRole('progressbar');
+    expect(progress).toHaveClass('is-reading-progress-entering');
+    rerender(<ArchiveProgressBar page={30} pageCount={100} visibility="all" />);
+    expect(screen.getByRole('progressbar')).toBe(progress);
+  });
+
   it('writes the fill as a length so a narrowing column animates', () => {
     // 打开详情页会让档案库的列变窄。填充只有写成绝对长度，`transition: width` 才有得
     // 插值——百分比的计算值就是百分比自己，列宽变化时前后一模一样，CSS 过渡直接跳过
@@ -206,12 +216,13 @@ it('keeps rail snap targets outside the cards that animate on press', () => {
   expect(card.parentElement?.parentElement?.parentElement).toHaveClass('archive-rail-grid');
 });
 
-it('keeps the cover and rail progress track inside one card scale layer', () => {
+it('pins the rail reading progress below the card body', () => {
   const archive = { serverId: 'server', archiveId: 'rail-progress', title: 'Rail progress', pageCount: 100, updatedAt: '', tags: [] };
   const { container } = render(<MemoryRouter><ArchiveThumbnailRail title="Rail" archives={[archive]} scopeId="scope" serverId="server" progressByArchiveId={new Map([[archive.archiveId, 45]])} progressVisibility="all" /></MemoryRouter>);
   const card = container.querySelector('.archive-thumb-card')!;
   const progress = screen.getByRole('progressbar', { name: '阅读进度' });
   expect(progress.parentElement).toBe(card);
+  expect(card.lastElementChild).toBe(progress);
   expect(card.querySelector('.archive-thumb-card-media')?.parentElement).toBe(card);
   expect(card.parentElement?.querySelector(':scope > .archive-card-progress')).toBeNull();
   expect(progress).toHaveAttribute('aria-valuenow', '45');

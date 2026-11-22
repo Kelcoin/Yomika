@@ -617,6 +617,7 @@ pub async fn compute_artifact_acquire(
     webview: tauri::WebviewWindow,
     job_id: String,
     artifact_id: String,
+    reader_session: Option<u32>,
 ) -> Result<CommandResult<ComputedImageLease>, String> {
     let Some(manager) = state.get() else {
         return Ok(unavailable());
@@ -692,6 +693,13 @@ pub async fn compute_artifact_acquire(
             record.artifact_id, cache_relative
         );
     }
+    let file = match std::fs::File::open(&record.path) {
+        Ok(file) => file,
+        Err(error) => {
+            unpin_all(&database, &cache_relative);
+            return Ok(CommandResult::failure(leases::ARTIFACT_INVALID_CODE, error.to_string(), true));
+        }
+    };
     let spec = LeaseSpec {
         artifact_id: record.artifact_id.clone(),
         job_id: record.job_id.clone(),
@@ -704,7 +712,11 @@ pub async fn compute_artifact_acquire(
         pipeline_revision: record.pipeline_revision.clone(),
         webview_label: webview.label().to_string(),
     };
-    match state.leases().acquire(spec, Instant::now()) {
+    let reader_page = reader_session.and_then(|session| {
+        state.renditions().find(&record.job_id, &record.stage_id)
+            .map(|identity| (session, identity.page_index))
+    });
+    match state.leases().acquire_file(spec, file, reader_page, Instant::now()) {
         Ok(acquired) => {
             // 开租借时顺手清掉的过期租借要在这里放开，否则过期只是「读不到」，
             // 配额却一直被它们占着。
@@ -794,6 +806,7 @@ fn pin(database: &crate::db::Database, relative: &str) -> Result<usize, String> 
 }
 
 fn unpin_all(database: &crate::db::Database, relative: &str) {
+    if relative.is_empty() { return; }
     match database.connection.lock() {
         Ok(connection) => {
             if let Err(error) = crate::cache::unpin_cache_path(&connection, relative) {
@@ -804,7 +817,7 @@ fn unpin_all(database: &crate::db::Database, relative: &str) {
     }
 }
 
-fn unpin_leases(database: &crate::db::Database, expired: &[LeaseView]) {
+pub(crate) fn unpin_leases(database: &crate::db::Database, expired: &[LeaseView]) {
     if expired.is_empty() {
         return;
     }
@@ -812,6 +825,7 @@ fn unpin_leases(database: &crate::db::Database, expired: &[LeaseView]) {
     match database.connection.lock() {
         Ok(connection) => {
             for view in expired {
+                if view.cache_relative.is_empty() { continue; }
                 if let Err(error) = crate::cache::unpin_cache_path(&connection, &view.cache_relative)
                 {
                     eprintln!("yomika: 放开过期租借失败（{}）：{error}", view.cache_relative);

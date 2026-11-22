@@ -1,4 +1,4 @@
-import { BookmarkPlus, Pencil, Plus, Trash2 } from 'lucide-react';
+import { Bookmark, BookmarkPlus, Pencil, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 
 import type { SearchPreset } from '../repositories/nativeLibraryRepository';
@@ -66,8 +66,14 @@ export function SearchPresetField({ presets, onApply, onSave, onEdit, onDelete }
                     )}
                   </div>
                 ))
-                : <p className="search-preset-empty">还没有预设</p>}
-              <div className="search-preset-separator" role="none" />
+                : (
+                  <div className="search-preset-empty" role="none">
+                    <span className="search-preset-empty-icon" aria-hidden="true"><Bookmark /></span>
+                    <strong>还没有预设</strong>
+                    <p>保存当前检索条件，下次可直接套用。</p>
+                  </div>
+                )}
+              {Boolean(presets?.length) && <div className="search-preset-separator" role="none" />}
               <button type="button" role="menuitem" className="search-preset-add" onClick={() => { setOpen(false); onSave(); }}>
                 <Plus aria-hidden="true" />
                 <span>新增预设</span>

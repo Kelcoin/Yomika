@@ -120,6 +120,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
     (32, include_str!("../../migrations/0032_dedup_manual_save.sql")),
     (33, include_str!("../../migrations/0033_retire_cloud_sync.sql")),
+    (34, include_str!("../../migrations/0034_local_archive_progress.sql")),
 ];
 
 fn run_migrations(connection: &mut Connection, path: &Path) -> Result<(), String> {
@@ -296,7 +297,7 @@ mod tests {
                     local_archive_metadata_columns
                 ),
                 (
-                    33,
+                    34,
                     1,
                     "servers",
                     "reading_resets",
@@ -408,7 +409,7 @@ mod tests {
         {
             let connection = database.connection.lock().expect("database lock");
             let (version, marker) = version_and_marker(&connection);
-            assert_eq!(version, 33, "升完该是这一版的档位");
+            assert_eq!(version, 34, "升完该是这一版的档位");
             assert_eq!(marker, left_over, "那台机器上的数据要跟着一起升上来");
         }
         drop(database);

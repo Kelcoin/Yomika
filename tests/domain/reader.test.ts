@@ -7,6 +7,7 @@ import {
   createReaderState,
   createZoomState,
   doubleTapZoomAt,
+  readerDoubleTapProfile,
   effectiveReaderLayout,
   filterArchivesByQuery,
   fitPageSize,
@@ -16,15 +17,18 @@ import {
   pickDerivedEvictionVictim,
   resolveReaderLayout,
   settleZoom,
+  elasticPinchScale,
   shouldCommitPageTurn,
   sortArchivesByTitle,
   sweepOrder,
   toggleDoubleTapZoom,
   toggleReaderChrome,
+  webtoonPageOffsets,
   webtoonWindow,
   zoomByWheel,
   zoomAtPoint,
   panZoom,
+  pageTurnDuration,
 } from '../../src/domain/reader';
 import type { PageShape, ReaderState } from '../../src/domain/reader';
 
@@ -38,8 +42,19 @@ describe('reader domain', () => {
     expect((imageY + after.panY) * after.scale).toBeCloseTo(-100);
   });
 
+  it('keeps a visible landing animation after a fast page flick', () => {
+    expect(pageTurnDuration(600, 10)).toBeGreaterThanOrEqual(160);
+    expect(pageTurnDuration(20, 10)).toBeLessThan(pageTurnDuration(600, 10));
+    expect(pageTurnDuration(20, 10, true)).toBeGreaterThanOrEqual(140);
+  });
+
   it('pans in screen pixels and bounds movement at the enlarged viewport edges', () => {
     expect(panZoom({ scale: 2, panX: 0, panY: 0 }, 100, -60, 1000, 800)).toEqual({ scale: 2, panX: 50, panY: -30 });
+    const nearEdge = { scale: 2, panX: 249, panY: -199 };
+    expect(panZoom(nearEdge, 0, 0, 1000, 800)).toEqual(nearEdge);
+    expect(panZoom(nearEdge, 1, -1, 1000, 800)).toEqual({ scale: 2, panX: 249.5, panY: -199.5 });
+    expect(panZoom(nearEdge, 2, -2, 1000, 800)).toEqual({ scale: 2, panX: 250, panY: -200 });
+    expect(panZoom(nearEdge, -1, 1, 1000, 800)).toEqual({ scale: 2, panX: 248.5, panY: -198.5 });
     expect(panZoom({ scale: 2, panX: 0, panY: 0 }, 5000, -5000, 1000, 800)).toEqual({ scale: 2, panX: 250, panY: -200 });
     expect(zoomAtPoint({ scale: 2, panX: 250, panY: -200 }, 1, 200, 100)).toEqual(createZoomState());
   });
@@ -148,15 +163,15 @@ describe('reader domain', () => {
     // with an enhancement enabled, one ONNX run each. That is the freeze.
     const heights = Array.from({ length: 200 }, () => 1000);
 
-    const top = webtoonWindow({ scrollTop: 0, viewportHeight: 800, heights, overscan: 1 });
+    const top = webtoonWindow({ scrollTop: 0, viewportHeight: 800, offsets: webtoonPageOffsets(heights), overscan: 1 });
     expect(top).toEqual({ first: 0, last: 1 });
 
     // Page 40 spans 40000..41000 and is the only one the viewport touches.
-    const middle = webtoonWindow({ scrollTop: 40200, viewportHeight: 800, heights, overscan: 2 });
+    const middle = webtoonWindow({ scrollTop: 40200, viewportHeight: 800, offsets: webtoonPageOffsets(heights), overscan: 2 });
     expect(middle).toEqual({ first: 38, last: 42 });
 
     // Overscan cannot run off either end.
-    expect(webtoonWindow({ scrollTop: 199_500, viewportHeight: 800, heights, overscan: 3 }))
+    expect(webtoonWindow({ scrollTop: 199_500, viewportHeight: 800, offsets: webtoonPageOffsets(heights), overscan: 3 }))
       .toEqual({ first: 196, last: 199 });
   });
 
@@ -165,13 +180,13 @@ describe('reader domain', () => {
     // scroller, so the offset can briefly exceed the content. Unmounting
     // everything there would throw away the measurements that fix it.
     const heights = [100, 100];
-    expect(webtoonWindow({ scrollTop: 9000, viewportHeight: 800, heights, overscan: 0 }))
+    expect(webtoonWindow({ scrollTop: 9000, viewportHeight: 800, offsets: webtoonPageOffsets(heights), overscan: 0 }))
       .toEqual({ first: 1, last: 1 });
-    expect(webtoonWindow({ scrollTop: 0, viewportHeight: 800, heights: [], overscan: 1 }))
+    expect(webtoonWindow({ scrollTop: 0, viewportHeight: 800, offsets: [0], overscan: 1 }))
       .toEqual({ first: 0, last: -1 });
     // A page of unknown height still occupies a row rather than collapsing the
     // whole window onto index 0.
-    expect(webtoonWindow({ scrollTop: -50, viewportHeight: Number.NaN, heights: [0, 0, 0], overscan: 0 }))
+    expect(webtoonWindow({ scrollTop: -50, viewportHeight: Number.NaN, offsets: webtoonPageOffsets([0, 0, 0]), overscan: 0 }))
       .toEqual({ first: 0, last: 0 });
   });
 
@@ -325,39 +340,33 @@ describe('reader domain', () => {
       expect(clampZoom(-1)).toBe(1);
     });
 
-    it('sends a double tap back to 1x from any scale, not only from the target', () => {
+    it('cycles ordinary images through the PhotoView scale levels', () => {
       const initial = createZoomState();
-      const zoomed = toggleDoubleTapZoom(initial);
-      expect(zoomed.scale).toBe(2);
-      expect(zoomed.panX).toBe(0);
-      expect(zoomed.panY).toBe(0);
-
-      const back = toggleDoubleTapZoom(zoomed);
-      expect(back.scale).toBe(1);
-      expect(back.panX).toBe(0);
-      expect(back.panY).toBe(0);
-
-      // Anything the wheel left in between used to be enlarged further, so
-      // getting back to 100% took two more gestures.
-      expect(toggleDoubleTapZoom({ scale: 1.4, panX: 20, panY: 8 })).toEqual({ scale: 1, panX: 0, panY: 0 });
-      expect(toggleDoubleTapZoom({ scale: 0.7, panX: 0, panY: 0 }).scale).toBe(1);
+      const middle = toggleDoubleTapZoom(initial);
+      expect(middle.scale).toBe(1.75);
+      const maximum = toggleDoubleTapZoom(middle);
+      expect(maximum.scale).toBe(3);
+      expect(toggleDoubleTapZoom(maximum)).toEqual(initial);
+      expect(toggleDoubleTapZoom({ scale: 1.4, panX: 20, panY: 8 }).scale).toBe(1.75);
     });
 
-    // 用户报的：双击缩放和滚轮缩放不是同一种——滚轮以指针为锚点（`zoomAtPoint`），
-    // 双击却只翻倍率、再把 pan 归零，于是双击画面左上角的人物，那一块被甩到正中。
-    // 这一条钉住的是「两个手势共用同一套数学」，不是某一次算出来的具体数字。
-    it('anchors a double tap on the point it landed on, the way the wheel does', () => {
-      const anchored = doubleTapZoomAt(createZoomState(), -100, 40);
-      expect(anchored.scale).toBe(2);
-      // 屏上位置 = scale·(内容点 + pan)：锚点自己缩放前后都该停在原处。
-      const screen = (content: number, pan: number, scale: number) => scale * (content + pan);
-      expect(screen(-100, anchored.panX, anchored.scale)).toBe(-100);
-      expect(screen(40, anchored.panY, anchored.scale)).toBe(40);
-      // 同一个落点、同一个倍率：双击与滚轮给出同一个 pan。
-      expect(anchored).toEqual(zoomAtPoint(createZoomState(), 2, -100, 40));
+    it('uses fit-to-cover and the native threshold for large images', () => {
+      const image = { width: 7680, height: 4320 };
+      const viewport = { width: 576, height: 922 };
+      const profile = readerDoubleTapProfile(image, viewport);
+      expect(profile).toMatchObject({ large: true, duration: 300 });
+      const zoomed = doubleTapZoomAt(createZoomState(), 0, 0, profile);
+      expect(zoomed.scale).toBeCloseTo((922 / 4320) / (576 / 7680));
+      expect(doubleTapZoomAt({ ...zoomed, scale: zoomed.scale * 0.89 }, 0, 0, profile).scale).toBe(zoomed.scale);
+      expect(doubleTapZoomAt({ ...zoomed, scale: zoomed.scale * 0.91 }, 0, 0, profile)).toEqual(createZoomState());
+      expect(readerDoubleTapProfile({ ...image, animated: true }, viewport).large).toBe(false);
+    });
 
-      // 回到 1 倍时 pan 仍然归零——不管从哪个比例、哪个落点回去。
-      expect(doubleTapZoomAt({ scale: 1.4, panX: 20, panY: 8 }, -100, 40)).toEqual({ scale: 1, panX: 0, panY: 0 });
+    it('anchors a double tap on the point it landed on', () => {
+      const anchored = doubleTapZoomAt(createZoomState(), -100, 40);
+      expect(anchored.scale).toBe(1.75);
+      expect(anchored.scale * (-100 + anchored.panX)).toBeCloseTo(-100);
+      expect(anchored.scale * (40 + anchored.panY)).toBeCloseTo(40);
     });
   });
 
@@ -399,11 +408,13 @@ describe('reader domain', () => {
 
       // Coming back within the snap tolerance lands exactly on 100%, pan cleared.
       expect(zoomByWheel({ scale: 1.03, panX: 12, panY: 8 }, 1)).toEqual({ scale: 1, panX: 0, panY: 0 });
+      expect(zoomByWheel({ scale: 1.03, panX: 12, panY: 8 }, 1, 3, false).scale).toBeGreaterThan(1);
       let fineWheel = start;
       for (let step = 0; step < 40; step++) fineWheel = zoomByWheel(fineWheel, -2);
       expect(fineWheel.scale).toBeCloseTo(Math.exp(.12), 10);
 
       // Gestures may overshoot the hard limits...
+      expect(zoomByWheel({ scale: 5, panX: 0, panY: 0 }, -120, 6).scale).toBeGreaterThan(5);
       const overshot = zoomByWheel({ scale: 2.9, panX: 0, panY: 0 }, -600);
       expect(overshot.scale).toBeGreaterThan(3);
       expect(overshot.scale).toBeLessThanOrEqual(4);
@@ -460,4 +471,20 @@ describe('reader spread plan reuse', () => {
     // 那一槽上，而不是被当成「没找到」退回第一槽。
     expect(getVisiblePageIndexes({ ...six, pageCount: 8, pageIndex: 7, shapes: plain })).toEqual([7]);
   });
+});
+
+
+test('pinch overshoots both limits even with a large-image zoom maximum', () => {
+  const above = elasticPinchScale(7, 6);
+  const below = elasticPinchScale(0.5, 6);
+  expect(above).toBeGreaterThan(6);
+  expect(below).toBeLessThan(1);
+  expect(elasticPinchScale(2, 6)).toBe(2);
+  expect(settleZoom({ scale: above, panX: 0, panY: 0 }, 6).scale).toBe(6);
+  expect(settleZoom({ scale: below, panX: 0, panY: 0 }, 6).scale).toBe(1);
+});
+
+it.each(['ltr', 'rtl'] as const)('keeps the original progress when turning past the last spread in %s', (direction) => {
+  const state = createReaderState({ archiveId: 'last', pageCount: 3, pageIndex: 2, layout: 'double', direction });
+  expect(advanceReader(state, direction === 'ltr' ? 'next' : 'previous').pageIndex).toBe(2);
 });

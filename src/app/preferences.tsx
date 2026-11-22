@@ -212,6 +212,10 @@ export function usePreferences(): PreferencesContextValue {
   return value;
 }
 
+export function useEhCommentSort(): PreferenceSnapshot['ehCommentSort'] {
+  return useContext(PreferencesContext)?.preferences.ehCommentSort ?? DEFAULT_PREFERENCES.ehCommentSort;
+}
+
 export function useProgressBarVisibility(): PreferenceSnapshot['progressBarVisibility'] | undefined {
   return useContext(PreferencesContext)?.preferences.progressBarVisibility;
 }

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
+import { ComputedImageLeaseSchema } from '../domain/compute';
 import type { CommandResult } from '../domain/result';
 
 /** 一台能用的 N 卡（DLSSNR 的显卡信息）。 */
@@ -231,5 +232,12 @@ export class NativeDlssnrRepository {
     priority?: 'foreground' | 'background';
   }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('dlssnr_apply_page', { input });
+  }
+
+  applyPageFile(input: Parameters<NativeDlssnrRepository['applyPage']>[0], readerSession: number) {
+    return invokeCommand('dlssnr_apply_page_file', { input, readerSession }, z.object({
+      lease: ComputedImageLeaseSchema,
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }).nullable());
   }
 }

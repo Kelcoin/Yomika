@@ -5,6 +5,7 @@ import {
   createRecommendationSeed,
   createSeededShuffle,
   pickSeedTags,
+  pickPopularSeedTags,
   rankRecommendations,
   sameCreatorTags,
   scoreCandidate,
@@ -22,6 +23,18 @@ afterEach(() => {
 });
 
 describe('recommendation rules', () => {
+  it('samples popular matching tags without using metadata tags or losing variety', () => {
+    const common = 'female:common';
+    const rare = 'female:rare';
+    const tags = [common, rare, 'language:chinese', 'category:manga', 'uploader:name', 'artist:name'];
+    installTagCounts([[common, 500_000], [rare, 5], ['language:chinese', 1_000_000]]);
+    expect(new Set(pickPopularSeedTags([...tags, ' Female:COMMON '], 10))).toEqual(new Set([common, rare]));
+    const draws = Array.from({ length: 200 }, (_, seed) => pickPopularSeedTags(tags, seed + 1, 1)[0]);
+    expect(draws.filter(tag => tag === common).length).toBeGreaterThan(130);
+    expect(draws).toContain(rare);
+    expect(pickPopularSeedTags(tags, 10)).toEqual(pickPopularSeedTags(tags, 10));
+  });
+
   it('discounts large low-coverage tag catalogues and counts duplicate tags once', () => {
     const source = normalizeSourceTags(['female:glasses', 'female:yuri']);
     const focused = { archiveId: 'focused', tags: ['female:glasses', 'female:yuri'] };
@@ -86,6 +99,14 @@ describe('recommendation rules', () => {
     expect(sameCreatorTags(['cosplayer:someone', 'artist:preferred'])).toEqual({ namespace: 'artist', tags: ['artist:preferred'] });
     expect(sameCreatorTags(['artist:a', 'group:b', 'female:glasses'])).toEqual({ namespace: 'artist', tags: ['artist:a', 'group:b'] });
     expect(sameCreatorTags(['female:glasses'])).toEqual({ namespace: 'artist', tags: [] });
+  });
+
+  it('fills from unfinished matches before completed same-category matches', () => {
+    const tags = ['category:manga', 'artist:a'];
+    const pool = [{ archiveId: 'finished', tags, readPages: 8, pageCount: 8 },
+      { archiveId: 'unfinished', tags: ['artist:a'], readPages: 2, pageCount: 8 }];
+    expect(rankRecommendations(tags, pool, 1)).toEqual([pool[1]]);
+    expect(rankRecommendations(tags, pool, 2)).toEqual([pool[1], pool[0]]);
   });
 
   it('puts completed creator matches last and sorts each group by archive title', () => {

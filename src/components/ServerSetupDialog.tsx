@@ -53,9 +53,8 @@ function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action'
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
-  // 打开编辑时 Radix 会聚焦第一个输入框并全选内容，等于替用户选中了整个名称：
-  // 随手敲一个字就把名字换掉了。用 ref 在自动聚焦时把光标放到末尾。
-  const nameRef = useRef<HTMLInputElement>(null);
+  // Focus the dialog without opening the mobile keyboard.
+  const dialogRef = useRef<HTMLDivElement>(null);
   const apiKeyEdited = useRef(false);
   const pendingRef = useRef(false);
   // 保存失败（地址不通、凭据库写不进去、API Key 太长……）由 toast 说，不再在表单
@@ -160,24 +159,13 @@ function ServerSetupDialogContent({ onSave, server, onDelete, variant = 'action'
         >{server ? <Pencil aria-hidden="true" /> : '添加服务器'}</button></Dialog.Trigger>
       )}
       
-        <DialogSurface
-          
-          onOpenAutoFocus={(event) => {
-            // Radix 的自动聚焦会选中第一个文本框的全部内容；编辑服务器时那正是
-            // 名称，光标应该落在末尾，免得一次击键抹掉整个名字。
-            event.preventDefault();
-            const input = nameRef.current;
-            if (!input) return;
-            input.focus();
-            input.setSelectionRange(input.value.length, input.value.length);
-          }}
-        >
+        <DialogSurface ref={dialogRef} onOpenAutoFocus={(event) => { event.preventDefault(); dialogRef.current?.focus({ preventScroll: true }); }}>
           {/* 标题直接落在对话框里：这一层原本存在的理由是给右上角那个 ✕ 让位，
               而 ✕ 已经去掉了——关闭走点空白处、Esc 与返回手势。顶部也不再挂说明
               小字：连接信息存哪里不影响用户做决定，地址框自己会说话。 */}
           <DialogHeading icon={<Server aria-hidden="true" />}>{server ? '更新 LANraragi' : '添加 LANraragi'}</DialogHeading>
           <form className="server-form" onSubmit={handleSubmit}>
-            <label>名称（可选）<input disabled={pending} ref={nameRef} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
+            <label>名称（可选）<input disabled={pending} aria-label="名称" name="name" value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" placeholder="留空则使用服务器名称" /></label>
             <label>服务器地址<input disabled={pending} name="baseUrl" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} required type="url" inputMode="url" placeholder="https://library.example.com/…" autoComplete="url" spellCheck={false} /></label>
             <label>API Key<input disabled={pending} name="apiKey" value={apiKey} onChange={(event) => { apiKeyEdited.current = true; setApiKey(event.target.value); }} type="password" autoComplete="off" spellCheck={false} required /></label>
             {open && server && <LrrBridgeSettings key={server.scopeId} scopeId={server.scopeId} disabled={pending || name !== server.name || baseUrl !== server.baseUrl || apiKeyEdited.current} />}

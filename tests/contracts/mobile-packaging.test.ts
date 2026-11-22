@@ -255,3 +255,21 @@ describe('mobile packaging', () => {
     expect(verifier).toContain('ort-sys crate could not link to ONNX Runtime');
   });
 });
+
+// Native Android owns the visual settle. Updating the React page window on
+// release lets its slot cleanup interrupt the animation that's still drawing it.
+it('publishes a native reader turn only when its visual settle finishes', () => {
+  const reader = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/ReaderTiles.kt');
+  const settle = reader.split('private fun finishSwipe(')[1]!.split('private fun tryTurn(')[0]!;
+  const turn = reader.split('private fun tryTurn(')[1]!.split('private fun forward(')[0]!;
+  expect(settle).toMatch(/view\.translationX = 0f[\s\S]+pair\.onSettled\?\.invoke\(\)/);
+  expect(turn).toMatch(/requestPresentation\(id\)[\s\S]+onSettled = publishTurn[\s\S]+animateSwipe\([\s\S]+else \{\s+publishTurn\(\)/);
+  expect(reader).toMatch(/MotionEvent\.ACTION_DOWN -> \{[\s\S]+?finishSwipe\("touch"\)[\s\S]+?down = MotionEvent\.obtain\(e\)/);
+});
+
+// The old slot's cleanup can run before React selects the newly shown slot.
+it('moves Android gesture ownership in the same transaction as a ready same-page replacement', () => {
+  const reader = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/ReaderTiles.kt');
+  const present = reader.split('private fun updateUnderlay()')[1]!.split('private fun staticTileSize(')[0]!;
+  expect(present).toMatch(/underlay = next[\s\S]*?if \(next != null && id != null\)[\s\S]*?if \(previous != null && slots\[selected\] === previous && previous\.tag == next\.tag\) \{\s+selected = id[\s\S]*?yomika-reader-tile-presented/);
+});

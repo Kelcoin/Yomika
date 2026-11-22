@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { ComputedImageLeaseSchema } from '../domain/compute';
 
 import { invokeBinaryCommand, invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import {
@@ -30,6 +31,13 @@ import { NativeLrrBridgeRepository, bridgeProgress, bridgeWatchlist, bridgeHisto
 import { ok, err } from '../domain/result';
 import type { ServerIdentity } from '../domain/server';
 const lrrBridge = new NativeLrrBridgeRepository();
+const pendingArchiveDownloads = new Map<string, number>();
+const archiveDownloadKey = (serverId: string, archiveId: string) => `${serverId}\0${archiveId}`;
+
+export function isArchiveDownloadPending(serverId: string, archiveId: string) {
+  return pendingArchiveDownloads.has(archiveDownloadKey(serverId, archiveId));
+}
+
 function invalidateShelves<T>(result: CommandResult<T>): CommandResult<T> {
   if (result.ok) {
     invalidateRouteCache('home:');
@@ -52,8 +60,29 @@ type NewProgress = Omit<ReadingProgress, 'updatedAt' | 'revision'> & { allowProg
  * 传 `run` 而不是已经发出去的 promise，是因为第二个参数接的是**拒绝**路径：前一次写入
  * 失败（桥断了、响应读不出来）不该把后一次一起吞掉。
  */
+function sharePendingRead<T>(reads: Map<string, Promise<T>>, key: string, load: () => Promise<T>): Promise<T> {
+  const existing = reads.get(key);
+  if (existing) return existing;
+  const read = load().finally(() => { if (reads.get(key) === read) reads.delete(key); });
+  reads.set(key, read);
+  return read;
+}
+
+const pendingStates = new Map<string, ReturnType<typeof lrrBridge.states>>();
+const pendingFavorites = new Map<string, Promise<CommandResult<{ id: string; archives: string[] } | null>>>();
+const pendingCategories = new Map<string, Promise<CommandResult<Category[]>>>();
+const membershipKey = (scopeId: string, archiveId: string) => `${scopeId}\0${archiveId}`;
+const readArchiveState = (scopeId: string, archiveId: string) =>
+  sharePendingRead(pendingStates, membershipKey(scopeId, archiveId), () => lrrBridge.states(scopeId, [archiveId]));
+
+function invalidateCategoryReads(serverId: string) {
+  pendingFavorites.delete(serverId);
+  pendingCategories.delete(serverId);
+}
+
 const pendingWrites = new Map<string, Promise<unknown>>();
 function queuedWrite<T>(key: string, run: () => Promise<T>): Promise<T> {
+  if (key.startsWith('progress\0') || key.startsWith('reading-list\0')) pendingStates.delete(key.slice(key.indexOf('\0') + 1));
   const prior = pendingWrites.get(key);
   const write = (prior ?? Promise.resolve()).then(run, run);
   pendingWrites.set(key, write);
@@ -206,9 +235,11 @@ export class NativeLibraryRepository {
     const config = await lrrBridge.config(scopeId);
     if (!config.ok) return config;
     if (config.value.enabled) {
-      const states = await lrrBridge.states(scopeId, [archiveId]);
+      const [states, local] = await Promise.all([
+        readArchiveState(scopeId, archiveId),
+        invokeCommand('get_archive_membership', { scopeId, archiveId }, z.object({ reading: z.boolean(), favorites: z.boolean() })),
+      ]);
       if (!states.ok) return states;
-      const local = await invokeCommand('get_archive_membership', { scopeId, archiveId }, z.object({ reading: z.boolean(), favorites: z.boolean() }));
       return local.ok ? ok({ ...local.value, reading: states.value[0]?.watchlistAt != null }) : local;
     }
     return invokeCommand('get_archive_membership', { scopeId, archiveId }, z.object({ reading: z.boolean(), favorites: z.boolean() }));
@@ -247,11 +278,15 @@ export class NativeLibraryRepository {
       return result.ok ? ok({ ...mapPreset(scopeId, result.value), ...(old ? { name: old.name, query: old.query, sortBy: old.sortBy, sortOrder: old.sortOrder, categoryId: old.categoryId } : {}) }) : result;
     });
   }
+  /** Optional shelf decorations can use the mirror already populated by progress sync. */
+  listCachedHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
+    return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));
+  }
   async listHistory(scopeId: string): Promise<CommandResult<ReadingHistoryRecord[]>> {
     await waitForProgress(scopeId);
     const config = await lrrBridge.config(scopeId);
     if (!config.ok) return config;
-    if (!config.value.enabled) return invokeCommand('list_reading_history', { scopeId }, z.array(ReadingHistoryRecordSchema));
+    if (!config.value.enabled) return this.listCachedHistory(scopeId);
     const result = await lrrBridge.list(scopeId, 'history');
     return result.ok ? ok(result.value.filter(state => state.historyAt !== null).map(state => bridgeHistory(scopeId, state))) : result;
   }
@@ -301,7 +336,8 @@ export class NativeLibraryRepository {
    * `listCategories` 的话，缓存一过期就要为每条动态分类各跑一次不分页的全库搜索
    * （见 `read_favorites_category`）。 */
   readFavoritesCategory(serverId: string): Promise<CommandResult<{ id: string; archives: string[] } | null>> {
-    return invokeCommand('read_favorites_category', { serverId }, z.object({ id: z.string(), archives: z.array(z.string()) }).nullable());
+    return sharePendingRead(pendingFavorites, serverId, () =>
+      invokeCommand('read_favorites_category', { serverId }, z.object({ id: z.string(), archives: z.array(z.string()) }).nullable()));
   }
 
   loadArchiveMetadata(serverId: string, archiveId: string): Promise<CommandResult<z.infer<typeof ArchiveMetadataSchema>>> {
@@ -311,8 +347,24 @@ export class NativeLibraryRepository {
     return invokeCommand('delete_archive', { serverId, archiveId }, z.null()).then(invalidateShelves);
   }
   /** 一次性把这份档案收下来。暂停和中止不是失败：结果里带着最终状态。 */
-  downloadArchive(serverId: string, archiveId: string): Promise<CommandResult<DownloadResult>> {
-    return invokeCommand('download_archive', { serverId, archiveId }, DownloadResultSchema);
+  archiveDownloadStatus(serverId: string, archiveId: string) {
+    return invokeCommand('archive_download_status', { serverId, archiveId }, z.object({
+      downloaded: z.boolean(), downloading: z.boolean(),
+      receivedBytes: z.number().nonnegative(), totalBytes: z.number().nonnegative().nullable(),
+    }));
+  }
+  async downloadArchive(serverId: string, archiveId: string): Promise<CommandResult<DownloadResult>> {
+    const key = archiveDownloadKey(serverId, archiveId);
+    pendingArchiveDownloads.set(key, (pendingArchiveDownloads.get(key) ?? 0) + 1);
+    invalidateRouteCache('downloads:');
+    try {
+      return await invokeCommand('download_archive', { serverId, archiveId }, DownloadResultSchema);
+    } finally {
+      const remaining = (pendingArchiveDownloads.get(key) ?? 1) - 1;
+      if (remaining) pendingArchiveDownloads.set(key, remaining);
+      else pendingArchiveDownloads.delete(key);
+      invalidateRouteCache('downloads:');
+    }
   }
   /** 接着收：从 `.part` 已有的字节往后要。失败过的任务也走这里。 */
   resumeDownload(taskId: string): Promise<CommandResult<DownloadResult>> {
@@ -333,7 +385,10 @@ export class NativeLibraryRepository {
   }
   /** 删除本地文件，服务器上的那份档案不动。 */
   deleteLocalArchives(paths: string[]): Promise<CommandResult<number>> {
-    return invokeCommand('delete_local_archives', { paths }, z.number().int().nonnegative());
+    return invokeCommand('delete_local_archives', { paths }, z.number().int().nonnegative()).then(result => {
+      if (result.ok) invalidateRouteCache('downloads:');
+      return result;
+    });
   }
   createTask(input: { kind: 'download' | 'sync' | 'inference' | 'maintenance'; label: string }): Promise<CommandResult<TaskRecord>> {
     return invokeCommand('create_task', { task: input }, TaskRecordSchema);
@@ -367,7 +422,8 @@ export class NativeLibraryRepository {
    * `/api/search` each). Leave it off for navigation: the native side serves a
    * persisted snapshot instead. */
   listCategories(serverId: string, force = false): Promise<CommandResult<Category[]>> {
-    return invokeCommand('list_categories', { serverId, force }, z.array(CategorySchema));
+    const load = () => invokeCommand('list_categories', { serverId, force }, z.array(CategorySchema));
+    return force ? load() : sharePendingRead(pendingCategories, serverId, load);
   }
   /** 镜像写：本机那张收藏表由 `setWatchlist` 先写，服务器上这条静态分类随后才落地。
    *
@@ -376,10 +432,16 @@ export class NativeLibraryRepository {
    * 分类快照还在，读回来的是**加收藏之前**的名单，并且被写进 localStorage 快照自己
    * 续命下去。所以症状是单向的：移出收藏夹立刻正确（那条有作废），加进去却不出现。 */
   addArchiveToCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateFavorites);
+    return invokeCommand('add_archive_to_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(result => {
+      if (result.ok) invalidateCategoryReads(serverId);
+      return invalidateFavorites(result);
+    });
   }
   removeArchiveFromCategory(serverId: string, categoryId: string, archiveId: string): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
-    return invokeCommand('remove_archive_from_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(invalidateFavorites);
+    return invokeCommand('remove_archive_from_category', { serverId, categoryId, archiveId }, OperationResultSchema).then(result => {
+      if (result.ok) invalidateCategoryReads(serverId);
+      return invalidateFavorites(result);
+    });
   }
   updateArchiveMetadata(serverId: string, archiveId: string, metadata: { title?: string; tags?: string; summary?: string }): Promise<CommandResult<z.infer<typeof OperationResultSchema>>> {
     return invokeCommand('update_archive_metadata', { serverId, archiveId, metadata }, OperationResultSchema).then(invalidateShelves);
@@ -400,6 +462,13 @@ export class NativeLibraryRepository {
   }
   loadReaderManifest(serverId: string, archiveId: string): Promise<CommandResult<z.infer<typeof ReaderManifestSchema>>> {
     return invokeCommand('load_reader_manifest', { serverId, archiveId }, ReaderManifestSchema);
+  }
+
+  openReaderPageFile(serverId: string, archiveId: string, pageIndex: number, path: string, taskId: string, readerSession: number) {
+    return invokeCommand('reader_open_page_file', { serverId, archiveId, pageIndex, path, taskId, readerSession }, z.object({
+      lease: ComputedImageLeaseSchema,
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }).nullable());
   }
 
   async loadReaderPage(serverId: string, archiveId: string, pageIndex: number, path: string, taskId?: string): Promise<CommandResult<ArrayBuffer>> {
@@ -623,7 +692,7 @@ export class NativeLibraryRepository {
     const config = await lrrBridge.config(scopeId);
     if (!config.ok) return config;
     if (!config.value.enabled) return invokeCommand('load_reading_progress', { scopeId, archiveId }, ReadingProgressSchema.nullable());
-    const result = await lrrBridge.states(scopeId, [archiveId]);
+    const result = await readArchiveState(scopeId, archiveId);
     return result.ok ? ok(result.value[0] ? bridgeProgress(scopeId, result.value[0]) : null) : result;
   }
 }

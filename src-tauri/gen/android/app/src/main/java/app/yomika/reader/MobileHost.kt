@@ -57,6 +57,18 @@ class ClipboardTextArgs {
 }
 
 @InvokeArg
+class PrepareReaderSlotArgs {
+  var fd: Int = -1
+  var rightFd: Int = -1
+  var animationFd: Int = -1
+  var rightAnimationFd: Int = -1
+  var aspect: Float = 1f
+  var slot: Int = 0
+  var page: Int = 0
+  var session: Long = 0
+}
+
+@InvokeArg
 class ToastArgs {
   lateinit var text: String
 }
@@ -81,6 +93,11 @@ class SystemBarStyleArgs {
 @InvokeArg
 class StatusBarVisibilityArgs {
   var visible: Boolean = true
+}
+
+@InvokeArg
+class ReaderKeyboardOverlayArgs {
+  var enabled: Boolean = false
 }
 
 @InvokeArg
@@ -164,6 +181,15 @@ fun applySystemBarAppearance(activity: Activity, dark: Boolean, background: Stri
 @TauriPlugin
 class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
   @Command
+  fun prepareReaderSlot(invoke: Invoke) {
+    val prepared = runCatching {
+      val args = invoke.parseArgs(PrepareReaderSlotArgs::class.java)
+      (hostActivity as? MainActivity)?.prepareReaderSlot(args.slot, args.page, args.fd, args.rightFd, args.aspect, args.session, args.animationFd, args.rightAnimationFd) == true
+    }.getOrDefault(false)
+    invoke.resolve(JSObject().apply { put("prepared", prepared) })
+  }
+
+  @Command
   fun securityStatus(invoke: Invoke) { invoke.resolve(NativeAppSecurity.status(hostActivity)) }
   @Command
   fun securityConfigure(invoke: Invoke) {
@@ -211,6 +237,13 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
       invoke.reject(error.message ?: "切换状态栏失败")
     }
   }
+  @Command
+  fun setReaderKeyboardOverlay(invoke: Invoke) {
+    val args = invoke.parseArgs(ReaderKeyboardOverlayArgs::class.java)
+    (hostActivity as MainActivity).setReaderKeyboardOverlay(args.enabled)
+    invoke.resolve()
+  }
+
   private companion object {
     /** 读 Cookie 的三个域，与 Rust 侧 `COOKIE_ORIGINS` 同一份名单。 */
     val COOKIE_URLS = listOf(

@@ -33,7 +33,12 @@ export function startLrrBridgeLifecycle(dependencies = {
     const generation = writeGeneration;
     let failed = false;
     try {
-      for (const scopeId of await scopes()) {
+      const enabledScopes = await scopes();
+      if (generation === writeGeneration) {
+        const enabledSet = new Set(enabledScopes);
+        for (const scopeId of dirty) if (!enabledSet.has(scopeId)) dirty.delete(scopeId);
+      }
+      for (const scopeId of enabledScopes) {
         if (stopped) break;
         const result = await bridge.flush(scopeId);
         if (!result.ok) { dirty.add(scopeId); failed = true; }
@@ -92,7 +97,10 @@ export function startLrrBridgeLifecycle(dependencies = {
   function onWrite(event: Event) {
     const detail = (event as CustomEvent<{ scopeId?: string; kind?: string }>).detail;
     writeGeneration++;
-    if (detail?.scopeId) dirty.add(detail.scopeId);
+    if (detail?.scopeId) {
+      dirty.add(detail.scopeId);
+      if (detail.kind === 'config') revisions.delete(detail.scopeId);
+    }
     scheduleFlush(detail?.kind === 'progress' ? BRIDGE_PROGRESS_FLUSH_MS : 0);
   }
   function onVisibility() {

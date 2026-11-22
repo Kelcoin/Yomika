@@ -223,7 +223,11 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       for (const [id, node] of nodes.current) {
         if (id === current.from) { verticalOffsets.current.set(id, 0); continue; }
         const height = node.scrollHeight || node.getBoundingClientRect().height || viewport;
-        const target = mapPanelDepth(offset, sourceHeight, height, viewport, positions.current.get(id));
+        // If the stage starts below the sticky header, restoring a deep
+        // panel position would scroll the still-visible tab strip offscreen.
+        const target = geometry.current.stageTop > geometry.current.viewportTop
+          ? 0
+          : mapPanelDepth(offset, sourceHeight, height, viewport, positions.current.get(id));
         verticalOffsets.current.set(id, offset - target);
       }
       mapped.current = true;

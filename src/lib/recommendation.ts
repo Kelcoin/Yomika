@@ -96,17 +96,21 @@ export function createRecommendationSeed(): number {
   return Math.floor(Math.random() * 0x7fffffff);
 }
 
-/** 按种子洗牌：推荐栏问哪几个标签也要每次不一样，但同一种子必须给出同一结果。 */
+function seededRandom(seed: number): () => number {
+  let state = (seed | 0) || 1;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Repeatable random order for a recommendation visit. */
 export function createSeededShuffle(seed: number): <T>(items: T[]) => T[] {
   return <T,>(items: T[]): T[] => {
-    let state = (seed | 0) || 1;
-    const next = () => {
-      state = (state + 0x6d2b79f5) | 0;
-      let value = state;
-      value = Math.imul(value ^ (value >>> 15), value | 1);
-      value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-      return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-    };
+    const next = seededRandom(seed);
     const copy = [...items];
     for (let index = copy.length - 1; index > 0; index -= 1) {
       const swap = Math.floor(next() * (index + 1));
@@ -147,6 +151,17 @@ export function pickSeedTags(tags: readonly string[], limit?: number, shuffle: <
   if (base.length === 0) return [];
   const budget = limit ?? (tags.length > 40 ? 7 : tags.length > 20 ? 5 : 3);
   return shuffle([...base]).slice(0, Math.min(budget, base.length));
+}
+
+/** Weighted sampling without replacement. Logarithmic weighting gives frequent
+ * tags an advantage while leaving less common or offline tags a chance. */
+export function pickPopularSeedTags(tags: readonly string[], seed: number, limit = 3): string[] {
+  const next = seededRandom(seed);
+  const eligible = [...new Set(pickSeedTags(tags.map(tag => tag.trim().toLowerCase()), tags.length))];
+  return eligible.map(tag => {
+    const weight = 1 + Math.log10(1 + (getTagFrequency(tag) ?? 0));
+    return { tag, draw: -Math.log(1 - next()) / weight };
+  }).sort((a, b) => a.draw - b.draw).slice(0, limit).map(item => item.tag);
 }
 
 function identity<T>(items: T[]): T[] {
@@ -191,7 +206,7 @@ export function scoreCandidate(
   // coverage. Zero-weight bookkeeping tags do not dilute a recommendation.
   score *= Math.sqrt(matched / relevant) / Math.sqrt(1 + Math.max(0, relevant - 20) / 20);
   // A finished archive is a weaker suggestion than an unread one.
-  if (candidate.pageCount && candidate.readPages && candidate.readPages >= candidate.pageCount) score *= 0.5;
+  if (isFinished(candidate)) score *= 0.5;
   return score;
 }
 
@@ -209,15 +224,14 @@ export function rankRecommendations<T extends RecommendationCandidate>(
 ): T[] {
   const normalized = normalizeSourceTags(sourceTags);
   const sourceCategories = new Set([...normalized].filter((tag) => namespaceOf(tag) === 'category'));
+  const categoryMatch = (candidate: T) => (candidate.tags ?? []).some(tag => sourceCategories.has(tag.trim().toLowerCase()));
   const scored = candidates
-    .map((candidate) => ({ candidate, score: scoreCandidate(normalized, candidate, options) }))
+    .map((candidate) => ({ candidate, finished: isFinished(candidate), sameCategory: categoryMatch(candidate), score: scoreCandidate(normalized, candidate, options) }))
     .filter((entry) => entry.score > 0)
-    .sort((left, right) => right.score - left.score || left.candidate.archiveId.localeCompare(right.candidate.archiveId));
-  if (sourceCategories.size === 0) return scored.slice(0, limit).map((entry) => entry.candidate);
-
-  const sameCategory = scored.filter(({ candidate }) => (candidate.tags ?? []).some((tag) => sourceCategories.has(tag.trim().toLowerCase())));
-  const otherCategory = scored.filter(({ candidate }) => !(candidate.tags ?? []).some((tag) => sourceCategories.has(tag.trim().toLowerCase())));
-  return [...sameCategory, ...otherCategory].slice(0, limit).map((entry) => entry.candidate);
+    .sort((left, right) => Number(left.finished) - Number(right.finished)
+      || Number(right.sameCategory) - Number(left.sameCategory)
+      || right.score - left.score || left.candidate.archiveId.localeCompare(right.candidate.archiveId));
+  return scored.slice(0, limit).map(entry => entry.candidate);
 }
 
 /** Cosplay sets are grouped by cosplayer; everything else by artist/group. */
@@ -230,12 +244,16 @@ export function sameCreatorTags(tags: readonly string[]): { namespace: 'cosplaye
   return { namespace: 'artist', tags: tags.filter((tag) => ['artist', 'group'].includes(namespaceOf(tag))) };
 }
 
+function isFinished(candidate: RecommendationCandidate): boolean {
+  return Boolean(candidate.pageCount && (candidate.readPages ?? 0) >= candidate.pageCount);
+}
+
 /** Creator matches stay easy to scan: unfinished work first, then
  * completed work, with archive title as the only user-facing ordering key. */
 export function sortSameCreatorRecommendations<T extends RecommendationCandidate>(candidates: readonly T[]): T[] {
   return [...candidates].sort((left, right) => {
-    const leftFinished = Boolean(left.pageCount && left.readPages !== undefined && left.readPages >= left.pageCount);
-    const rightFinished = Boolean(right.pageCount && right.readPages !== undefined && right.readPages >= right.pageCount);
+    const leftFinished = isFinished(left);
+    const rightFinished = isFinished(right);
     if (leftFinished !== rightFinished) return leftFinished ? 1 : -1;
     return (left.title ?? '').localeCompare(right.title ?? '', undefined, { sensitivity: 'base' })
       || left.archiveId.localeCompare(right.archiveId);

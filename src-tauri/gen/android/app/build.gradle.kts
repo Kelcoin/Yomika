@@ -82,6 +82,7 @@ rust {
 
 dependencies {
     implementation("androidx.biometric:biometric:1.1.0")
+    implementation("com.davemorrissey.labs:subsampling-scale-image-view-androidx:3.10.0")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")

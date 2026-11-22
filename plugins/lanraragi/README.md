@@ -11,6 +11,16 @@
 
 升级时暂停写入、备份、替换同路径文件、重启并检查 `hello`。不要删除 `YOMIKA_BRIDGE_V1:*` 键来“刷新插件”。卸载文件不会自动删除阅读数据。备份和恢复应保留整个命名空间，包括 operations 和 meta；只恢复部分数据会破坏幂等与版本关系。回滚到不兼容协议前应恢复匹配的完整备份。
 
+## 历史增量刷新
+
+插件 1.2.3 支持按服务器版本拉取变更。客户端拿到初始快照后，刷新只请求后续更新和删除记录。旧版插件仍可全量分页读取。
+
+## 导入其他客户端的阅读历史
+
+在插件页面开启并保存 `Include reading recorded by LANraragi or other clients in Yomika history`，并在 Yomika 对应服务器启用 Bridge 托管。Bridge 读取 LANraragi 服务端记录的 `lastreadtime` 和 `progress`。网页阅读时如启用了「仅在浏览器保存进度」，请改用服务端进度。如果服务器要求登录才能写入进度，请在网页登录后打开档案并翻一页。
+
+可以在插件的请求框运行 `{"protocol":1,"action":"hello"}`，检查 `capabilities.importExternalHistory` 是否为 `true`。如果已启用但某一档案仍缺失，检查该档案在 LANraragi 的 `GET /api/archives/{id}/metadata` 返回的 `lastreadtime` 是否随翻页更新。
+
 ## 调用与协议
 
 入口是 `POST /api/plugins/use?plugin=yomikabridge&arg=<经过百分号编码的 JSON>`；在部署子路径后使用相应 base URL。使用 LANraragi 标准 API 认证：`Authorization: Bearer <Base64(API key)>`。参数确实位于 query，不是 JSON body。密钥只交给客户端的安全凭据存储；不要将完整 URL、认证头或工作区内容打印到日志。

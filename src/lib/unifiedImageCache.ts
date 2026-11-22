@@ -1,5 +1,11 @@
+import { canPresentNativePage, rememberTileSource, forgetTileSource } from './readerNativeTiles';
 import { createImageCacheKey, type ImageCacheIdentity } from '../domain/cache';
 import { createSemaphore, type Semaphore } from './concurrency';
+
+function memoryKey(identity: ImageCacheIdentity): string {
+  const key = createImageCacheKey(identity);
+  return identity.readerSession === undefined ? key : `${key}:reader:${identity.readerSession}`;
+}
 
 export interface CachedImageData {
   /** 图片字节。类型写成 `ArrayBuffer` 而不是 `ArrayBufferLike`：这些字节一定来自真的
@@ -29,6 +35,12 @@ export function imageResidentBytes(handle: ImageHandle): number {
   return Math.max(handle.bytes, handle.estimatedDecodedBytes ?? 0);
 }
 
+/** The session holds a lease URL. Decoded native surfaces have their own slot
+ * and tile limits, and are released independently when a frame leaves view. */
+export function readerDerivedRetainedBytes(handle: ImageHandle): number {
+  return canPresentNativePage(handle.url) ? handle.bytes : imageResidentBytes(handle);
+}
+
 /** 认领来的图：URL 由别处持有，丢掉它的时候要按**它的**规矩还，而不是撤一个本进程的
  * blob URL。
  *
@@ -39,6 +51,8 @@ export interface AdoptedImage {
   url: string;
   bytes: number;
   estimatedDecodedBytes?: number;
+  contentHash?: string;
+  leaseId?: string;
   release(): void;
 }
 
@@ -104,6 +118,7 @@ export class UnifiedImageCache {
   }
 
   private readonly memory = new Map<string, MemoryEntry>();
+  private readonly invalidated = new Map<string, MemoryEntry>();
   private readonly pending = new Map<string, PendingEntry>();
   private memoryBytes = 0;
 
@@ -119,7 +134,9 @@ export class UnifiedImageCache {
   }
 
   private forget(entry: MemoryEntry): void {
-    this.memory.delete(entry.key);
+    forgetTileSource(entry.url);
+    if (this.memory.get(entry.key) === entry) this.memory.delete(entry.key);
+    this.invalidated.delete(entry.url);
     this.memoryBytes -= entry.bytes;
     // 认领来的条目不是本进程 `createObjectURL` 出来的：该还的是它的 `release`（当前是
     // 宿主那条租借 pin）。对那个 URL 调 `revokeObjectURL` 既是错的，也漏掉了真正要还的
@@ -129,7 +146,7 @@ export class UnifiedImageCache {
   }
 
   async load(identity: ImageCacheIdentity, options: ImageLoadOptions = {}): Promise<ImageHandle> {
-    const key = createImageCacheKey(identity);
+    const key = memoryKey(identity);
     // Check the signal before the memory fast path: a consumer that already
     // aborted never receives the handle, so it can never release the extra
     // reference and the entry would be pinned in memory for good.
@@ -171,6 +188,7 @@ export class UnifiedImageCache {
     // 它的存储，视图的部分用不上第二份。
     const blob = new Blob([data.bytes], { type: data.mime || 'application/octet-stream' });
     const url = this.options.createObjectURL(blob);
+    if (['reader-page', 'remote', 'dlssnr'].includes(identity.rendition)) rememberTileSource(url, blob, data.bytes);
     const entry: MemoryEntry = { key, url, bytes: data.bytes.byteLength, refs: 1, retain: Boolean(options.retain) };
     this.memory.set(key, entry);
     this.memoryBytes += entry.bytes;
@@ -191,7 +209,7 @@ export class UnifiedImageCache {
    * 同一身份已经有条目时**不替换**：把刚拿到的这张当场还掉（否则第二次认领就等于多留一个
    * 宿主的 pin），再按命中处理（引用 +1，返回已有条目）。 */
   adopt(identity: ImageCacheIdentity, image: AdoptedImage, options: ImageAdoptOptions = {}): ImageHandle {
-    const key = createImageCacheKey(identity);
+    const key = memoryKey(identity);
     const existing = this.memory.get(key);
     if (existing) {
       image.release();
@@ -199,6 +217,9 @@ export class UnifiedImageCache {
       this.touch(existing);
       return { key, url: existing.url, bytes: existing.bytes, ...(existing.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: existing.estimatedDecodedBytes }) };
     }
+    if (image.contentHash) rememberTileSource(image.url, image.leaseId
+      ? { contentHash: image.contentHash, leaseId: image.leaseId, ...(image.estimatedDecodedBytes === undefined ? {} : { decodedBytes: image.estimatedDecodedBytes }) }
+      : image.contentHash);
     const entry: MemoryEntry = {
       key,
       url: image.url,
@@ -214,9 +235,24 @@ export class UnifiedImageCache {
     return { key, url: entry.url, bytes: entry.bytes, ...(entry.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: entry.estimatedDecodedBytes }) };
   }
 
-  release(handle: ImageHandle): void {
+  /** Stop serving a rejected URL to new consumers without disrupting a view
+   * that still owns it. A replacement can be adopted under the same key. */
+  invalidate(handle: ImageHandle): void {
     const entry = this.memory.get(handle.key);
-    if (!entry) return;
+    if (!entry || entry.url !== handle.url) return;
+    if (entry.refs === 0) {
+      this.forget(entry);
+      return;
+    }
+    this.memory.delete(entry.key);
+    entry.retain = false;
+    this.invalidated.set(entry.url, entry);
+  }
+
+  release(handle: ImageHandle): void {
+    const current = this.memory.get(handle.key);
+    const entry = current?.url === handle.url ? current : this.invalidated.get(handle.url);
+    if (!entry || entry.key !== handle.key) return;
     entry.refs = Math.max(0, entry.refs - 1);
     if (entry.refs === 0 && !entry.retain) {
       this.forget(entry);
@@ -234,7 +270,7 @@ export class UnifiedImageCache {
    * 存在的理由只有一个：重新挂载的第一帧要能同步拿到已经有的一图，而不是先渲染骨架
    * 再等一次 Promise。取图入口仍然是异步的 `load`。 */
   peek(identity: ImageCacheIdentity): ImageHandle | undefined {
-    const entry = this.memory.get(createImageCacheKey(identity));
+    const entry = this.memory.get(memoryKey(identity));
     if (!entry) return undefined;
     this.touch(entry);
     return { key: entry.key, url: entry.url, bytes: entry.bytes, ...(entry.estimatedDecodedBytes === undefined ? {} : { estimatedDecodedBytes: entry.estimatedDecodedBytes }) };
@@ -247,7 +283,7 @@ export class UnifiedImageCache {
    * 一张图——渲染可能被丢弃（StrictMode 双跑、并发渲染里被放弃的那一版），多出来的
    * 引用就永远没人还，条目被钉死在表里。 */
   peekUrl(identity: ImageCacheIdentity): string | undefined {
-    return this.memory.get(createImageCacheKey(identity))?.url;
+    return this.memory.get(memoryKey(identity))?.url;
   }
 
   inFlightCount(): number {

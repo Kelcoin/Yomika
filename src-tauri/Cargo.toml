@@ -46,6 +46,7 @@ rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 keyring = { version = "3", features = ["windows-native"] }
 url = "2"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 scraper = "0.24"
 sha2 = "0.10"
 blake3 = "1"
@@ -77,6 +78,7 @@ yomika-compute-protocol = { path = "crates/compute-protocol" }
 # 命名管道传输（重叠 IO 的读写两端）。宿主用它的服务端一半接 worker；不经过 worker 的
 # 库，免得把 worker 的引擎/执行器拉进主进程的依赖图（docs/71 §5.2）。
 yomika-compute-transport = { path = "crates/compute-transport" }
+unarc-rs = { version = "0.8.1", default-features = false }
 
 [features]
 # Tauri tells production builds apart from development ones with this feature:
@@ -90,12 +92,15 @@ custom-protocol = ["tauri/custom-protocol"]
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 yomika-compute-worker = { path = "worker" }
 
+[target.'cfg(any(windows, target_os = "ios"))'.dependencies]
+png = "0.18"
+
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSNotification", "NSOperation", "NSString", "NSError", "block2"] }
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext", "LABiometryType", "block2"] }
 block2 = "0.6"
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIView", "UIColor", "UIResponder", "objc2-core-foundation"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIView", "UIColor", "UIResponder", "UIImage", "UIImageView", "UIGestureRecognizer", "UIPanGestureRecognizer", "UIPinchGestureRecognizer", "objc2-core-foundation"] }
 
 # 测试二进制仍然链 ONNX Runtime。
 #
@@ -105,6 +110,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "
 # 它们等于把证据一起删掉。resolver = "2" 让 bin 构建不激活这一段，所以「证据」与
 # 「宿主无 ORT」可以同时成立。
 [dev-dependencies]
+png = "0.18"
 yomika-compute-core = { path = "crates/compute-core", features = ["cpu"] }
 
 # Native clipboard write: the webview API prompts WebView2 users for clipboard
@@ -119,7 +125,7 @@ arboard = "3"
 # 自带这个 feature，不用多拉一个依赖。
 # Win32_System_Console 只为了 `GetConsoleWindow`：判据要问「这一路拉起的子进程有没有
 # 控制台窗口」（`tests/console_window_contract.rs`），宿主自己不建控制台，量不到别的。
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_System_Environment", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging", "Security_Credentials_UI", "Win32_System_WinRT"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Imaging", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_IO", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_SystemInformation", "Win32_System_Threading", "Win32_System_RemoteDesktop", "Win32_System_Environment", "Win32_System_Com", "Win32_UI_Shell", "Win32_Graphics_Direct3D", "Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Diagnostics_Debug", "Win32_UI_WindowsAndMessaging", "Security_Credentials_UI", "Win32_System_WinRT"] }
 windows-future = "0.3"
 windows-service = "0.8"
 # DLSSNR 引擎（8-g④）：`docs/71` Task 8 的出口要求宿主不再持有 NGX 资源，而 NGX 只能

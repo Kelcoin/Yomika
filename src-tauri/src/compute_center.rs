@@ -754,7 +754,8 @@ fn plan_revision(
     engine_policy: &str,
 ) -> String {
     let canonical = serde_json::json!({
-        "revision": 3, // Native model processing; delivery is capped at 2x.
+        // Version 4 preserves the embedded color profile in DLSSNR output.
+        "revision": if steps.iter().any(|step| step == "dlssnr") { 5 } else { 3 },
         "protocol": PROTOCOL_VERSION,
         "steps": steps,
         "model": model_id,
@@ -2764,7 +2765,44 @@ pub async fn remote_compute_process(
         remote_process_cached_page(&database, &data, &input).await
     })
     .await?;
+    let result = match result {
+        CommandResult::Success { value, .. } => CommandResult::success(value.0),
+        CommandResult::Failure { ok, error } => CommandResult::Failure { ok, error },
+    };
     Ok(crate::domain::result::into_binary_response(result))
+}
+
+#[tauri::command]
+pub async fn remote_compute_process_file(
+    input: RemoteProcessInput,
+    reader_session: Option<u32>,
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+) -> Result<CommandResult<Option<crate::commands::library::ReaderCachedFile>>, String> {
+    let data = crate::data_paths::data_dir(&app).map_err(|error| error.to_string())?;
+    if input.expected_revision.as_deref().unwrap_or_default().is_empty() {
+        return Ok(CommandResult::success(None));
+    }
+    let priority = crate::inference::HeavyPriority::parse(input.priority.as_deref());
+    let database = app.state::<crate::db::Database>();
+    let compute = app.state::<crate::compute::ComputeHandle>();
+    crate::inference::run_remote(priority, input.task_id.clone(), async {
+        match remote_process_cached_page(&database, &data, &input).await {
+            CommandResult::Success { value: (bytes, Some(identity)), .. } => {
+                let hash = blake3::hash(&bytes).to_hex();
+                let location = crate::cache::cached_blob_location(&database, &data, &identity)?;
+                if let Some(location) = location.filter(|location| location.content_hash == hash.as_str()) {
+                    crate::commands::library::lease_cached_reader_file(
+                        &database, &compute, webview.label(), "reader-remote", location, reader_session.map(|session| (session, identity.page_index)),
+                    )
+                } else {
+                    Ok(CommandResult::success(None))
+                }
+            }
+            CommandResult::Success { .. } => Ok(CommandResult::success(None)),
+            CommandResult::Failure { ok, error } => Ok(CommandResult::Failure { ok, error }),
+        }
+    }).await?
 }
 
 // Remote outputs share the reader-session cache and quota with local outputs.
@@ -2786,7 +2824,7 @@ async fn remote_process_cached_page(
     database: &crate::db::Database,
     data_dir: &std::path::Path,
     input: &RemoteProcessInput,
-) -> CommandResult<Vec<u8>> {
+) -> CommandResult<(Vec<u8>, Option<crate::cache::CacheImageIdentity>)> {
     use crate::cache::CacheImageIdentity;
 
     if input.page_index < 0 {
@@ -2824,7 +2862,7 @@ async fn remote_process_cached_page(
     }
     let output_identity = remote_output_identity(input, &page.bytes);
     if let Some(bytes) = output_identity.as_ref().and_then(|identity| crate::inference::cached_derived(database, data_dir, identity)) {
-        return CommandResult::success(bytes);
+        return CommandResult::success((bytes, output_identity));
     }
 
     match remote_process_cancellable(
@@ -2843,11 +2881,13 @@ async fn remote_process_cached_page(
             CommandResult::failure("INFERENCE_CANCELLED", "这一页的处理已取消", false)
         }
         Ok(bytes) => {
-            let bytes = if let Some(identity) = output_identity {
+            if let Some(identity) = &output_identity {
                 let mime = crate::cache::sniff_image_mime("", &bytes).unwrap_or_else(|| "image/png".into());
-                crate::inference::finish_derived(database, data_dir, "inference.remote.cache", &identity, &mime, bytes)
-            } else { bytes };
-            CommandResult::success(bytes)
+                let bytes = crate::inference::finish_derived(database, data_dir, "inference.remote.cache", identity, &mime, bytes);
+                CommandResult::success((bytes, output_identity))
+            } else {
+                CommandResult::success((bytes, None))
+            }
         }
         // 远端那一步的失败带着自己的码：超时是可重试的（本地可以退到本机那一版
         // 继续读），4xx 是我们发错了、不该原样重试。
@@ -2889,7 +2929,11 @@ mod tests {
         };
         server.join().unwrap(); // No listening server remains: a second fetch must use disk.
         let CommandResult::Success { value: second, .. } = remote_process_cached_page(&database, temp.path(), &input).await else { panic!("disk cache missed") };
-        assert_eq!(first, second);
+        assert_eq!(first.0, second.0);
+        let first_identity = first.1.unwrap();
+        assert_eq!(first_identity.revision, second.1.unwrap().revision);
+        let location = crate::cache::cached_blob_location(&database, temp.path(), &first_identity).unwrap().unwrap();
+        assert_eq!(location.content_hash, blake3::hash(&first.0).to_hex().as_str());
         input.expected_revision = Some("plan-b".into());
         assert!(matches!(remote_process_cached_page(&database, temp.path(), &input).await, CommandResult::Failure { .. }));
         input.expected_revision = Some("plan-a".into());

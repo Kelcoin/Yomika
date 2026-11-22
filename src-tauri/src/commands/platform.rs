@@ -145,6 +145,22 @@ pub async fn set_status_bar_visible(app: tauri::AppHandle, visible: bool) -> Com
     }
 }
 
+#[tauri::command]
+pub async fn set_reader_keyboard_overlay(app: tauri::AppHandle, enabled: bool) -> CommandResult<()> {
+    #[cfg(target_os = "android")]
+    {
+        match crate::mobile_host::set_reader_keyboard_overlay(&app, enabled).await {
+            Ok(()) => CommandResult::success(()),
+            Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, enabled);
+        CommandResult::success(())
+    }
+}
+
 /// 触感反馈：手机的**长按**用它确认「按住了」（`src/lib/haptics.ts` 是唯一的调用点）。
 ///
 /// 桌面上是**空操作**而不是失败：前端只有一条路径，不必在每个长按处再判一次平台，而

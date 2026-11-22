@@ -19,6 +19,13 @@ impl<T> CommandResult<T> {
         Self::Success { ok: true, value }
     }
 
+    pub(crate) fn map<U>(self, f: impl FnOnce(T) -> U) -> CommandResult<U> {
+        match self {
+            Self::Success { ok, value } => CommandResult::Success { ok, value: f(value) },
+            Self::Failure { ok, error } => CommandResult::Failure { ok, error },
+        }
+    }
+
     #[allow(dead_code)]
     pub fn failure(code: &'static str, message: impl Into<String>, retryable: bool) -> Self {
         Self::Failure {

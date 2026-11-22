@@ -1,8 +1,9 @@
+import { useEhCommentSort } from '../app/preferences';
 import { PositionedMenu } from './PositionedMenu';
 import { ContentSkeleton } from './ContentSkeleton';
 import { AutoTextarea } from './AutoTextarea';
 import { RefreshIcon as RefreshCw } from './RefreshIcon';
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { MessageCircle, MessageCircleOff, Send } from 'lucide-react';
 import { z } from 'zod';
@@ -21,6 +22,32 @@ import { readableCommentText } from '../lib/commentText';
 import { useLoadingReveal } from '../lib/useLoadingReveal';
 import { SvgIcon } from './SvgIcon';
 import { StateIcon } from './StateIcon';
+
+const commentBubblePath = 'M20.5 11.5a8.5 8.5 0 0 1-8.5 8.5 8.4 8.4 0 0 1-3.5-.75L4 20.5l1.25-4.5A8.5 8.5 0 1 1 20.5 11.5Z';
+
+type CommentLoadError = { code: string; message: string };
+
+function commentLoadGlyph(loading: boolean, error?: CommentLoadError): { label: string; path: string } {
+  if (loading) return { label: '正在加载评论', path: `${commentBubblePath} M8.5 11.5h.01m3.49 0h.01m3.49 0h.01` };
+  if (!error) return { label: '评论加载成功', path: commentBubblePath };
+
+  switch (error.code) {
+    case 'NETWORK':
+    case 'EH_UNAVAILABLE':
+      return { label: '连接失败', path: 'm3 3 18 18M2 8.5a16 16 0 0 1 2.4-1.7m4.2-1.7A16 16 0 0 1 22 8.5M5 12a11 11 0 0 1 3.3-2m4.8-.7A11 11 0 0 1 19 12M8.5 15.5a5 5 0 0 1 4.9-1.15M12 19h.01' };
+    case 'EH_GALLERY_DELETED':
+    case 'EH_GALLERY_COPYRIGHT_REMOVED':
+      return { label: '画廊不可用', path: 'm3 3 18 18M9.5 3.4a8.5 8.5 0 0 1 10.6 10.7M16.75 18.55A8.5 8.5 0 0 1 8.5 19.25L4 20.5l1.25-4.5a8.5 8.5 0 0 1 .2-8.25' };
+    case 'EH_UNAUTHORIZED':
+    case 'EH_REAUTH_REQUIRED':
+    case 'EH_ACCESS_BLOCKED':
+    case 'EH_CONTENT_WARNING':
+    case 'EH_CLOUDFLARE':
+      return { label: '访问受限', path: `${commentBubblePath} M9 11h6v4H9z M10 11V9a2 2 0 0 1 4 0v2` };
+    default:
+      return { label: '评论加载失败', path: `${commentBubblePath} M12 8v4m0 3h.01` };
+  }
+}
 
 function GalleryDestinationGlyph({ local = false }: { local?: boolean }) {
   return <SvgIcon>
@@ -122,11 +149,20 @@ export function EhComments(props: EhCommentsProps) {
 function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, serverId, onOpenArchive }: EhCommentsProps) {
   const { showToast } = useToast();
   const [comments, setComments] = useState<EhComment[]>([]);
+  const sort = useEhCommentSort();
+  const orderedComments = useMemo(() => {
+    const direction = sort === 'score-desc' ? -1 : 1;
+    return [...comments].sort((a, b) => {
+      if (a.isUploader !== b.isUploader) return a.isUploader ? -1 : 1;
+      if (a.isUploader || sort === 'gallery') return 0;
+      return direction * (a.score - b.score);
+    });
+  }, [comments, sort]);
   const [loading, setLoading] = useState(true);
   const sectionRef = useRef<HTMLElement>(null);
   useLoadingReveal(sectionRef, loading);
   const [error, setError] = useState<string>();
-  const [loadError, setLoadError] = useState<string>();
+  const [loadError, setLoadError] = useState<CommentLoadError>();
   const [reload, setReload] = useState(0);
   const [body, setBody] = useState('');
   const [posting, setPosting] = useState(false);
@@ -198,7 +234,7 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
       if (result.ok) setComments(result.value);
       else {
         if (result.cachedComments) setComments(result.cachedComments);
-        setLoadError(presentEhError(result.error.code, result.error.message));
+        setLoadError({ code: result.error.code, message: presentEhError(result.error.code, result.error.message) });
       }
       setLoading(false);
     });
@@ -253,19 +289,30 @@ function EhCommentsPanel({ accountId, galleryId, token, prefetch = false, server
   };
 
   if (prefetch) return null;
+  const loadGlyph = commentLoadGlyph(loading, loadError);
+  const loadLabel = loadError && comments.length > 0 ? `${loadGlyph.label}，正在显示缓存评论` : loadGlyph.label;
+
   return (
     <section ref={sectionRef} className="eh-comments" aria-label="E-Hentai 评论">
       <div className="eh-comments-heading">
-        <h2><MessageCircle aria-hidden="true" />E-Hentai 评论</h2>
+        <h2>
+          <SvgIcon role="img" aria-hidden={false} aria-label={loadLabel}>
+            <title>{loadError ? `${loadLabel}。${loadError.message}` : loadLabel}</title>
+            <path d={loadGlyph.path} />
+          </SvgIcon>
+          E-Hentai 评论
+        </h2>
         <button className="icon-action" type="button" onClick={refresh} disabled={loading} aria-label="刷新 E-Hentai 评论" title="刷新评论"><RefreshCw aria-hidden="true" className={loading ? 'is-spinning' : undefined} /></button>
       </div>
       <div className="eh-comments-content">
-        {loadError && <div className="eh-comments-unavailable" role="alert"><EmptyState compact icon={MessageCircleOff} title={loadError} /></div>}
+        {loadError && comments.length === 0 && <div className="eh-comments-unavailable" role="alert">
+          <EmptyState compact icon={MessageCircleOff} title={loadError.message} />
+        </div>}
         {error && <StatusLine tone="error">{error}</StatusLine>}
         {loading && comments.length === 0
           ? <ContentSkeleton label="正在读取评论" variant="comments" rows={2} />
           : !loadError && comments.length === 0 ? <EmptyState compact icon={MessageCircle} title="暂无评论" /> : null}
-        {comments.length > 0 && <ul className="eh-comments-list">{comments.map((comment) => (
+        {comments.length > 0 && <ul className="eh-comments-list">{orderedComments.map((comment) => (
           <li key={comment.id} className={comment.isUploader ? 'is-uploader' : undefined}>
             <div className="eh-comment-meta">
               <span><strong>{readableCommentText(comment.author) || '匿名用户'}</strong>{comment.isUploader && <small>上传者</small>}</span>

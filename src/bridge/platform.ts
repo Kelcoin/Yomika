@@ -44,6 +44,11 @@ export async function setStatusBarVisible(visible: boolean): Promise<CommandResu
   return invokeCommand('set_status_bar_visible', { visible }, VoidResponseSchema);
 }
 
+export async function setReaderKeyboardOverlay(enabled: boolean): Promise<CommandResult<void>> {
+  if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return ok(undefined);
+  return invokeCommand('set_reader_keyboard_overlay', { enabled }, VoidResponseSchema);
+}
+
 /** 在资源管理器里定位一个本机文件。仅 Windows 实现；别的平台返回失败，
  * 调用方应当按平台先藏掉入口。 */
 export function revealInFileManager(path: string): Promise<CommandResult<void>> {

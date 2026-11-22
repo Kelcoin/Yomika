@@ -1,3 +1,4 @@
+import { logError } from '../lib/errorLog';
 import { YomikaMark } from './YomikaMark';
 import { WindowGlyph, useWindowControls, useWindowDrag, useWindowMaximized } from './WindowControls';
 
@@ -40,7 +41,7 @@ export function TitleBar() {
         <button className="titlebar-control" type="button" aria-label={maximized ? '还原' : '最大化'} title={maximized ? '还原' : '最大化'} onClick={() => { void api?.toggleMaximize().catch(() => {}); }}>
           <WindowGlyph kind={maximized ? 'restore' : 'maximize'} />
         </button>
-        <button className="titlebar-control is-close" type="button" aria-label="关闭" title="关闭" onClick={() => { void api?.close().catch(() => {}); }}>
+        <button className="titlebar-control is-close" type="button" aria-label="关闭" title="关闭" onClick={() => { void api?.close().catch((error: unknown) => logError('window.close', error)); }}>
           <WindowGlyph kind="close" />
         </button>
       </div>

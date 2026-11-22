@@ -36,6 +36,19 @@ describe('remote favorites authority', () => {
     expect((await loadFavoriteArchives('s', ['missing', 'valid'])).map(a => a.archiveId)).toEqual(['valid']);
     vi.restoreAllMocks();
   });
+  it('hydrates a cold shelf with category pages in membership order', async () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const record = (archiveId: string) => ({ serverId: 's', archiveId, title: archiveId, pageCount: 3, tags: [], updatedAt: '' });
+    vi.spyOn(NativeLibraryRepository.prototype, 'listArchivesByIds').mockResolvedValue({ ok: true, value: [] });
+    const pages = vi.spyOn(NativeLibraryRepository.prototype, 'searchArchivesPage')
+      .mockResolvedValueOnce({ ok: true, value: { items: ['f', 'd', 'e', 'stale'].map(record), total: 7, hasMore: true } })
+      .mockResolvedValueOnce({ ok: true, value: { items: ['c', 'a', 'b'].map(record), total: 7, hasMore: false } });
+    const metadata = vi.spyOn(NativeLibraryRepository.prototype, 'loadArchiveMetadata');
+    expect((await loadFavoriteArchives('s', ids, 'fav')).map(item => item.archiveId)).toEqual(ids);
+    expect(pages).toHaveBeenLastCalledWith('s', 4, { categoryId: 'fav' });
+    expect(metadata).not.toHaveBeenCalled();
+    vi.restoreAllMocks();
+  });
   it('limits metadata requests to four at once', async () => {
     vi.spyOn(NativeLibraryRepository.prototype, 'listArchivesByIds').mockResolvedValue({ ok: true, value: [] });
     let active = 0, peak = 0;

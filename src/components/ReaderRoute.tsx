@@ -1,3 +1,5 @@
+import { createSemaphore } from '../lib/concurrency';
+import { allocateNativeReaderSession, hasNativeReaderTiles } from '../lib/readerNativeTiles';
 import { ReaderTitle } from './ReaderTitle';
 import { usePageActive } from '../app/RetainedPage';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -7,6 +9,7 @@ import { z } from 'zod';
 
 import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository';
 import { NativeCacheRepository } from '../repositories/nativeCacheRepository';
+import { NativeInferenceRepository } from '../repositories/nativeInferenceRepository';
 import { getNativeComputeRepository } from '../repositories/nativeComputeRepository';
 import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import { ReaderScreen, useReaderChrome } from './ReaderScreen';
@@ -15,7 +18,7 @@ import { LoadingIndicator } from './LoadingIndicator';
 import { RETRYABLE_COMPUTE_ERROR_CODES } from '../domain/compute';
 import { getPrefetchPages, pickDerivedEvictionVictim, sweepOrder, type ReaderLayoutPreference, type ReadingDirection } from '../domain/reader';
 import { pickServer } from '../domain/server';
-import { dlssnrTransform, getNativeImageCache, remoteTransform, renditionErrorCode, type DlssnrSource } from '../lib/nativeImageCache';
+import { dlssnrTransform, getNativeImageCache, loadDlssnrReaderPage, loadRemoteReaderPage, remoteTransform, renditionErrorCode, type DlssnrSource } from '../lib/nativeImageCache';
 import { checkDlssnrAvailability } from '../lib/dlssnrGate';
 import { logError } from '../lib/errorLog';
 import { useToast } from './Toast';
@@ -24,7 +27,7 @@ import { NativeComputeCenterRepository, parseRemoteOps, remoteServiceReady, type
 import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/nativeDlssnrRepository';
 import { loadLocalRenditions, type ReaderPageEngine, type ReaderPageFailure } from '../lib/readerComputedPage';
 import type { ImageCacheIdentity } from '../domain/cache';
-import { imageResidentBytes, type ImageHandle } from '../lib/unifiedImageCache';
+import { readerDerivedRetainedBytes, type ImageHandle } from '../lib/unifiedImageCache';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
@@ -34,6 +37,8 @@ const repository = new NativeLibraryRepository();
 const imageCache = getNativeImageCache();
 const computeRepository = getNativeComputeRepository();
 const cacheRepository = new NativeCacheRepository();
+const inferenceRepository = new NativeInferenceRepository();
+const readerFileGate = createSemaphore(2);
 
 /** 清掉这次阅读会话留在盘上的「成品」（超分 / DLSSNR 的产物）。
  *
@@ -102,6 +107,7 @@ const WORKSPACE_IDLE_RELEASE_MS = 30_000;
 
 interface ReaderContext {
   generation: number;
+  readerSession: number;
   serverId: string;
   scopeId: string;
   archiveId: string;
@@ -128,6 +134,8 @@ const DERIVED_SESSION_BUDGET_BYTES = 64 * 1024 * 1024;
  * 下限（字节预算先到），单页很大的档案才吃到它；硬上限保证那种档案也不撑爆会话。 */
 const DERIVED_MIN_RESIDENT_PAGES = 4;
 const DERIVED_SESSION_CEILING_BYTES = 256 * 1024 * 1024;
+// Leave lease capacity for original pages and recent rendition handoffs.
+const DERIVED_SESSION_MAX_PAGES = 24;
 
 /** 一页派生结果的三档，顺序就是优先级。
  *
@@ -146,7 +154,7 @@ type DerivedJob = { pageIndex: number; generation: number; upscaleModel: string;
  *
  * 这一支还没有 `ReaderState`，所以「有没有被唤出」就放在这里的 `useState` 里：共享件
  * 只吃一个布尔，不关心它从哪来。初值 `false`——进阅读模式的第一眼不该顶着一排控件。 */
-function ReaderRouteChromeShell({ className, title, goBack, children }: { className: string; title: string; goBack: () => void; children: ReactNode }) {
+export function ReaderRouteChromeShell({ className, title, goBack, children }: { className: string; title: string; goBack: () => void; children: ReactNode }) {
   // 保留页在后台时不走表，和阅读态同一个理由。
   const pageActive = usePageActive();
   const coarsePointer = useMediaQuery(COARSE_POINTER_QUERY);
@@ -392,6 +400,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   const [readingDirection, setReadingDirection] = useState<ReadingDirection>('ltr');
   const [title, setTitle] = useState('阅读器');
   const [pages, setPages] = useState<string[]>([]);
+  const [readerSession, setReaderSession] = useState(0);
   const [error, setError] = useState<string>();
   const [retryToken, setRetryToken] = useState(0);
   /** Cover, tags and byte size for the overview panel. Fetched once alongside
@@ -520,11 +529,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (existing === handle) return;
     if (existing) {
       held.delete(pageIndex);
-      derivedBytesRef.current -= imageResidentBytes(existing);
+      derivedBytesRef.current -= readerDerivedRetainedBytes(existing);
     }
     held.set(pageIndex, handle);
-    derivedBytesRef.current += imageResidentBytes(handle);
-    derivedPeakBytesRef.current = Math.max(derivedPeakBytesRef.current, imageResidentBytes(handle));
+    derivedBytesRef.current += readerDerivedRetainedBytes(handle);
+    derivedPeakBytesRef.current = Math.max(derivedPeakBytesRef.current, readerDerivedRetainedBytes(handle));
     const dropped: number[] = [];
     const visible = visiblePagesRef.current;
     const budget = Math.min(
@@ -534,7 +543,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         derivedPeakBytesRef.current * (visible.size + DERIVED_MIN_RESIDENT_PAGES),
       ),
     );
-    while (derivedBytesRef.current > budget && held.size > 1) {
+    while (held.size > DERIVED_SESSION_MAX_PAGES || (derivedBytesRef.current > budget && held.size > 1)) {
       // 丢「离正在读的那一页最远」的那一页，不是「最早算出来的」那一页：预扫是从
       // 当前页往后由近到远灌进来的，最早进来的正好是马上要翻到的（见
       // `pickDerivedEvictionVictim`）。
@@ -544,7 +553,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       const evicted = held.get(victim);
       held.delete(victim);
       if (!evicted) break;
-      derivedBytesRef.current -= imageResidentBytes(evicted);
+      derivedBytesRef.current -= readerDerivedRetainedBytes(evicted);
       imageCache.release(evicted);
       const retired = retiredDerivedRef.current.get(victim);
       if (retired) {
@@ -563,8 +572,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       for (const index of dropped) next.delete(index);
       return next;
     });
-    // The image component decodes the new URL before swapping its src. Keep the
-    // previous URL alive until that swap has actually loaded in the DOM.
+    // Keep the previous URL alive until the replacement is committed in the DOM
+    // or the Android host has acknowledged its native presentation.
     if (existing) {
       const retired = retiredDerivedRef.current.get(pageIndex) ?? [];
       retired.push(existing);
@@ -694,20 +703,55 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     pendingPageAbortsRef.current.set(pageIndex, controller);
     const timeout = window.setTimeout(abort, 30_000);
     const promise = (async () => {
-      const handle = await imageCache.load({
+      const identity = {
         scopeId: context.scopeId,
         serverId: context.serverId,
         archiveId: context.archiveId,
         pageIndex,
-        rendition: 'reader-page',
+        rendition: 'reader-page' as const,
         sourcePath: path,
-      }, {
-        signal: controller.signal,
-        priority: () => {
-          const visible = [...visiblePagesRef.current];
-          return visible.length ? 1000 - Math.min(...visible.map(index => Math.abs(index - pageIndex))) : 0;
-        },
-      });
+        ...(hasNativeReaderTiles() ? { readerSession: context.readerSession } : {}),
+      };
+      const priority = () => {
+        const visible = [...visiblePagesRef.current];
+        return visible.length ? 1000 - Math.min(...visible.map(index => Math.abs(index - pageIndex))) : 0;
+      };
+      const loadOptions = { signal: controller.signal, priority };
+      let handle = imageCache.peek(identity);
+      if (!handle && hasNativeReaderTiles()) {
+        const opened = await readerFileGate.run(async () => {
+          const taskId = `reader-file:${crypto.randomUUID()}`;
+          const cancelNative = () => { void inferenceRepository.cancelPage(taskId).catch(() => undefined); };
+          controller.signal.addEventListener('abort', cancelNative, { once: true });
+          try {
+            return await repository.openReaderPageFile(context.serverId, context.archiveId, pageIndex, path, taskId, context.readerSession);
+          } finally {
+            controller.signal.removeEventListener('abort', cancelNative);
+          }
+        }, loadOptions);
+        if (controller.signal.aborted && (!opened.ok || !opened.value)) return undefined;
+        // The native file path optimizes presentation. A retryable source
+        // error there still gets one chance through the regular image loader.
+        if (!opened.ok && !opened.error.retryable
+            && !['COMPUTE_RESOURCE_LIMIT', 'UNKNOWN', 'INVALID_RESPONSE'].includes(opened.error.code)) return undefined;
+        if (opened.ok && opened.value) {
+          const { lease, contentHash } = opened.value;
+          const release = () => { void computeRepository.releaseArtifact(lease.leaseId).catch(() => undefined); };
+          if (controller.signal.aborted || contextRef.current?.generation !== context.generation) {
+            release();
+            return undefined;
+          }
+          handle = imageCache.adopt(identity, {
+            url: lease.url,
+            bytes: lease.byteLength,
+            estimatedDecodedBytes: lease.estimatedDecodedBytes,
+            contentHash,
+            leaseId: lease.leaseId,
+            release,
+          });
+        }
+      }
+      handle ??= await imageCache.load(identity, loadOptions);
       const current = contextRef.current;
       if (!mountedRef.current || !current || current.generation !== context.generation || controller.signal.aborted) {
         imageCache.release(handle);
@@ -765,8 +809,10 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 设置换了、新的一轮还没算出来，屏幕上不该先白一下（旧 URL 还能继续显示）。
    * `dropVisible` 用在没有屏幕可闪的场合——阅读器已经被切到后台了，留着这一页
    * 21–27 MB 的派生结果没有任何人能看见（501 页的实测案例就这样攒到 2.9 GB）。 */
+  const retriedPresentationRef = useRef(new Set<number>());
   const releaseDerived = useCallback((options?: { dropVisible?: boolean }) => {
     derivedGenerationRef.current += 1;
+    retriedPresentationRef.current.clear();
     if (derivedRetryTimerRef.current !== undefined) clearTimeout(derivedRetryTimerRef.current);
     derivedRetryTimerRef.current = undefined;
     derivedBackgroundRetryAtRef.current = 0;
@@ -976,7 +1022,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
          * 「谁落地了」），失败只从 `onFailure` 这一条路出来，所以这里得自己接住。 */
         let jobFailure: ReaderPageFailure | undefined;
         try {
-          const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex };
+          const identity = { scopeId: context.scopeId, serverId: context.serverId, archiveId: context.archiveId, pageIndex,
+            ...(hasNativeReaderTiles() ? { readerSession: context.readerSession } : {}),
+          };
           // Fixed-scale models always run their native graph; the worker caps display at 2x.
           const outputScale = 0;
           // Remote owns the complete chain: upload the original once and only
@@ -1007,7 +1055,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
           }
           if (remoteOnline) {
             setDerivingStage('remote');
-            derived = await imageCache.load({
+            derived = await loadRemoteReaderPage({
               ...identity,
               rendition: 'remote',
               transform: remoteTransform({
@@ -1020,7 +1068,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               }),
               priority,
               taskId: `${taskBase}:remote`,
-            }, { signal: controller.signal }).catch((error: unknown) => {
+            }, controller.signal).catch((error: unknown) => {
               const code = renditionErrorCode(error);
               remotePlanChanged = code === 'REMOTE_PLAN_CHANGED';
               if (code === 'REMOTE_PLAN_CHANGED' && mountedRef.current
@@ -1095,7 +1143,9 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               continue;
             }
             derived = enhanced;
-            if (enhanced && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current) {
+            const showIntermediate = job.engine !== 'dlssnr' || visiblePagesRef.current.has(pageIndex);
+            const publishedEnhanced = enhanced && showIntermediate && mountedRef.current && contextRef.current?.generation === context.generation && job.generation === derivedGenerationRef.current;
+            if (enhanced && publishedEnhanced) {
               retainDerived(pageIndex, enhanced);
             }
 
@@ -1104,7 +1154,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
             if (job.engine === 'dlssnr') {
               setDerivingStage('dlssnr');
               const baseRendition: DlssnrSource = enhanced ? 'enhanced' : 'reader-page';
-              const processed = await imageCache.load({
+              const processed = await loadDlssnrReaderPage({
                 ...identity,
                 rendition: 'dlssnr',
                 transform: dlssnrTransform(baseRendition, serializeDlssnrPasses(
@@ -1113,7 +1163,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
                 ...(job.upscaleModel ? { modelId: job.upscaleModel, outputScale } : {}),
                 priority,
                 taskId: `${taskBase}:dlssnr`,
-              }, { signal: controller.signal }).catch((error: unknown) => {
+              }, controller.signal).catch((error: unknown) => {
                 const code = renditionErrorCode(error);
                 if (code !== undefined) {
                   jobFailure = error instanceof Error ? { code, message: error.message } : { code };
@@ -1131,9 +1181,13 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
               });
               if (controller.signal.aborted) {
                 if (processed) imageCache.release(processed);
+                if (enhanced && !publishedEnhanced) imageCache.release(enhanced);
                 continue;
               }
-              if (processed) derived = processed;
+              if (processed) {
+                if (enhanced && !publishedEnhanced) imageCache.release(enhanced);
+                derived = processed;
+              }
               else if (visiblePagesRef.current.has(pageIndex)) noticeStageFailure('dlssnr', 'dlssnr', dlssnrFailureRef.current);
             }
           }
@@ -1419,6 +1473,30 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     if (queued || derivedQueueRef.current.length > 0) void runDerivedQueue();
   }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, preferences.upscaleBackend, remoteUsable, remoteCapabilities, remoteAddress, runDerivedQueue, upscaleEnabled]);
 
+  const rejectDerivedPresentation = useCallback((pageIndex: number, url: string) => {
+    const handle = derivedHandlesRef.current.get(pageIndex);
+    if (!handle || handle.url !== url || !pageActiveRef.current) return;
+    imageCache.invalidate(handle);
+    derivedHandlesRef.current.delete(pageIndex);
+    derivedBytesRef.current -= readerDerivedRetainedBytes(handle);
+    imageCache.release(handle);
+    setDerivedPages((current) => {
+      if (current.get(pageIndex) !== url) return current;
+      const next = new Map(current);
+      next.delete(pageIndex);
+      return next;
+    });
+    if (retriedPresentationRef.current.has(pageIndex)) {
+      logError('reader/compute', '处理后的图片无法显示', { page: pageIndex + 1 });
+      if (visiblePagesRef.current.has(pageIndex)) showToast('处理后的图片无法显示', 'error');
+      return;
+    }
+    retriedPresentationRef.current.add(pageIndex);
+    derivedAttemptedRef.current.delete(pageIndex);
+    derivedWarmedRef.current.delete(pageIndex);
+    requestDerived([...visiblePagesRef.current]);
+  }, [requestDerived, showToast]);
+
   // A switch above the canvas changed what the derived renditions would be, so
   // everything held under the old answer is dropped and re-requested.
   useLayoutEffect(() => {
@@ -1478,6 +1556,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
       const context: ReaderContext = {
         generation,
+        readerSession: allocateNativeReaderSession(),
         serverId: server.id,
         scopeId: server.scopeId,
         archiveId,
@@ -1547,6 +1626,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       }
       const pageSources = Array<string>(manifest.value.pages.length).fill('');
       pageSources[firstPage] = firstSource;
+      setReaderSession(context.readerSession);
       setPages(pageSources);
     })();
 
@@ -1604,6 +1684,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   }
   return (
     <ReaderScreen
+      key={readerSession}
+      readerSession={readerSession}
       archiveId={archiveId}
       title={title}
       pages={pages}
@@ -1632,6 +1714,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       derivingLabel={derivingLabel}
       onVisiblePages={requestDerived}
       onDerivedDisplayed={releaseDisplayedPredecessors}
+      onDerivedRejected={rejectDerivedPresentation}
       onProgress={(pageIndex, reading) => {
         if (!scopeId || incognito) return;
         const progress = {

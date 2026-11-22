@@ -29,6 +29,8 @@ describe('preset save recovery', () => {
     });
     render(<MemoryRouter initialEntries={[path]}><App /></MemoryRouter>);
     await user.click(await screen.findByRole('button', { name: '检索预设' }));
+    expect(screen.getByText('还没有预设')).toBeInTheDocument();
+    expect(screen.getByText('保存当前检索条件，下次可直接套用。')).toBeInTheDocument();
     await user.click(screen.getByRole('menuitem', { name: '新增预设' }));
     const dialog = await screen.findByRole('dialog', { name: '存为预设' });
     const input = within(dialog).getByRole('textbox', { name: '预设名称' });

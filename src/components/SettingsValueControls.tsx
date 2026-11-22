@@ -220,7 +220,7 @@ function snapNumber(value: number, min: number, max: number, step: number): numb
 }
 
 /** Shared numeric adjustment: native pointer/keyboard handling, discrete steps,
- * bounded visual tick count and touch-only selection feedback. */
+ * and touch-only selection feedback. */
 export function SettingsNumber({ icon, label, hint, value, min, max, step = 1, format, onChange, disabled }: {
   icon?: ReactNode;
   label: string;
@@ -252,6 +252,7 @@ function SettingsNumberSlider({ label, value, min, max, step, format, onChange }
   const lastValue = useRef(preview);
   const touch = useRef(false);
   const dragging = useRef(false);
+  const [pressed, setPressed] = useState(false);
   const lastHaptic = useRef(-Infinity);
   useEffect(() => {
     if (dragging.current) return;
@@ -260,21 +261,39 @@ function SettingsNumberSlider({ label, value, min, max, step, format, onChange }
     setPreview(next);
   }, [value, min, max, step]);
   const display = (number: number) => format ? format(number) : String(number);
-  const intervals = Math.max(1, Math.round((max - min) / step));
-  // Dense settings still snap on every real step; the ruler only shows major
-  // ticks to avoid crowding small screens with hundreds of marks.
-  const stride = Math.max(1, Math.ceil(intervals / 20));
-  const ticks = Array.from({ length: Math.floor(intervals / stride) + 1 }, (_, i) => Math.min(max, min + i * stride * step));
-  if (ticks[ticks.length - 1] !== max) ticks.push(max);
+  useEffect(() => {
+    if (!pressed) return;
+    const finish = () => {
+      dragging.current = false;
+      touch.current = false;
+      setPressed(false);
+    };
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    window.addEventListener('blur', finish);
+    return () => {
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finish);
+    };
+  }, [pressed]);
   const progress = max > min ? (preview - min) / (max - min) * 100 : 0;
   return <div className="settings-number-slider" style={{ '--slider-progress': `${progress}%` } as CSSProperties}>
-    <output className="settings-number-value" aria-live="off">{display(preview)}</output>
-    <div className="settings-number-track">
+    <span className="settings-number-limit" aria-hidden="true">{display(min)}</span>
+    <div className="settings-number-track" data-pressed={pressed || undefined}>
+      <div className="settings-number-travel" aria-hidden="true">
+        <div className="settings-number-rail" />
+        <span className="settings-number-bubble">{display(preview)}</span>
+      </div>
       <input type="range" aria-label={label} aria-valuetext={display(preview)} min={min} max={max} step={step} value={preview}
-        onPointerDown={(event) => { dragging.current = true; touch.current = event.pointerType === 'touch'; lastHaptic.current = -Infinity; }}
-        onPointerUp={() => { dragging.current = false; touch.current = false; }}
-        onPointerCancel={() => { dragging.current = false; touch.current = false; }}
-        onBlur={() => { dragging.current = false; touch.current = false; }}
+        onPointerDown={(event) => {
+          if (event.button > 0) return;
+          dragging.current = true;
+          touch.current = event.pointerType === 'touch';
+          lastHaptic.current = -Infinity;
+          setPressed(true);
+        }}
+        onBlur={() => { dragging.current = false; touch.current = false; setPressed(false); }}
         onChange={(event) => {
           const next = snapNumber(Number(event.target.value), min, max, step);
           if (next === lastValue.current) return;
@@ -286,9 +305,8 @@ function SettingsNumberSlider({ label, value, min, max, step, format, onChange }
           }
           onChange(next);
         }} />
-      <div className="settings-number-ticks" aria-hidden="true">{ticks.map((tick, index) => <i key={index} style={{ left: `${max > min ? (tick - min) / (max - min) * 100 : 0}%` }} />)}</div>
     </div>
-    <div className="settings-number-limits" aria-hidden="true"><span>{display(min)}</span><span>{display(max)}</span></div>
+    <span className="settings-number-limit" aria-hidden="true">{display(max)}</span>
   </div>;
 }
 

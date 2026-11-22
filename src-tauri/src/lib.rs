@@ -47,6 +47,7 @@ mod inference;
 // 还不一定收。见该模块顶部。
 mod memory;
 mod model_release;
+mod native_reader;
 #[cfg(target_os = "android")]
 mod mobile_host;
 #[cfg(target_os = "ios")]
@@ -68,18 +69,21 @@ use cache::{
 };
 use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, get_eh_gallery, get_eh_gallery_image, set_eh_gallery_favorite, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
 use commands::legacy::{import_legacy_export, import_worker_export};
-use commands::local_cover::load_local_archive_cover;
+use commands::local_cover::{
+    load_local_archive_cover, load_local_archive_manifest, load_local_archive_original, open_local_archive_reader_file,
+    load_local_archive_page, local_archive_progress,
+};
 use error_log::{error_log_append, error_log_append_batch, error_log_clear, error_log_export, error_log_read};
 use commands::library::{
     add_archive_to_category, cancel_download, check_server_status, create_task, delete_archive,
-    delete_local_archives, delete_search_preset, delete_server, download_archive, download_url, list_archive_identities,
+    archive_download_status, delete_local_archives, delete_search_preset, delete_server, download_archive, download_url, list_archive_identities,
     list_archives,
     list_archives_by_ids,
     list_archives_page, list_categories, list_local_archives, list_metadata_plugins,
     clear_reading_progress, delete_history_records, list_reading_history, read_favorites_category,
     get_archive_membership, list_reading_list, list_search_presets, list_servers, list_tasks, list_watchlist,
     load_archive_metadata, load_archive_page_thumbnail, load_archive_thumbnail,
-    load_reader_manifest, load_reader_page, load_reading_progress, pause_download,
+    load_reader_manifest, load_reader_page, load_reading_progress, pause_download, reader_open_page_file,
     probe_new_archives,
     prune_dangling_records, prune_history,
     read_server_api_key, refresh_archives, remove_archive_from_category, replace_archives,
@@ -125,12 +129,12 @@ use model_release::{
 };
 use settings::{import_legacy_preferences, load_preferences, save_preferences};
 use dlssnr::commands::{
-    dlssnr_activate_variant, dlssnr_apply_page, dlssnr_catalog, dlssnr_download_variant,
+    dlssnr_activate_variant, dlssnr_apply_page, dlssnr_apply_page_file, dlssnr_catalog, dlssnr_download_variant,
     dlssnr_import_dll, dlssnr_probe, dlssnr_release_workspaces, dlssnr_status,
 };
 use compute_center::{
     compute_center_configure, compute_center_revoke_pairing, compute_center_status, compute_discover, compute_pair_request,
-    compute_pair_confirm, remote_compute_capabilities, remote_compute_process,
+    compute_pair_confirm, remote_compute_capabilities, remote_compute_process, remote_compute_process_file,
 };
 // 重计算编排的命令层（`docs/71` §6.6 的前半：提交 / 查询 / 取消 / 晋级）。
 use compute::commands::{
@@ -312,6 +316,19 @@ pub fn run() {
                 .ok_or_else(|| std::io::Error::other("Main window configuration unavailable"))?;
             let builder = tauri::WebviewWindowBuilder::from_config(app, config)?
                 .initialization_script(commands::app_security::bootstrap_script(app.handle()).map_err(std::io::Error::other)?);
+            // Native reader artwork is available on normal desktop/iOS routes.
+            // Keep the original renderer selectable for platform diagnostics.
+            #[cfg(any(windows, target_os = "ios"))]
+            let builder = if std::env::var_os("YOMIKA_NATIVE_READER_PREVIEW").as_deref() != Some(std::ffi::OsStr::new("0")) {
+                let builder = builder.initialization_script("window.__yomikaNativeReaderPreview = true;");
+                #[cfg(target_os = "ios")]
+                let builder = builder.initialization_script("window.__yomikaNativeContinuousInput = 'touch'; window.__yomikaNativePinchInput = true;");
+                #[cfg(windows)]
+                let builder = builder.initialization_script("window.__yomikaNativeContinuousInput = 'wheel'; window.__yomikaNativeWheelZoom = true;");
+                builder
+            } else {
+                builder
+            };
             // Windows draws its own themed title bar (TitleBar.tsx); other
             // desktop platforms keep their native window chrome. `decorations`
             // only exists in Tauri's desktop build — the mobile runtime has no
@@ -407,6 +424,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            #[cfg(windows)]
+            native_reader::window_event(window, event);
+            #[cfg(target_os = "ios")]
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                native_reader::retire_ios_window(window.label());
+            }
             #[cfg(desktop)]
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Focused(true)) {
                 commands::app_security::foreground(window.app_handle());
@@ -431,8 +454,6 @@ pub fn run() {
                     // 不拦：默认那一下就是关窗（应用没有别的可见窗口，于是整个退出）。
                     return;
                 }
-                api.prevent_close();
-                MAIN_WINDOW_READY.store(true, std::sync::atomic::Ordering::Release);
                 // 这里**不能**去读库：`prevent_close()` 之后窗口还活着，等库锁或等阻塞
                 // 线程池的这段时间里用户还能去点最小化，随后迟到的 `hide()` 就会把已经
                 // 收进任务栏的窗口再收进托盘——用户看到的是「关闭按钮有时失效，接着点
@@ -445,10 +466,15 @@ pub fn run() {
                 // 工作集：那份 165MB 的 DLL 与 240MB 的 ONNX 下次还要用）。
                 // 工作区在 worker 进程里，所以是请它交回；这条路**不等**回信——
                 // 用户要的是窗口马上消失，而且没有会话/正忙着时它就是白等。
+                if let Err(error) = window.hide() {
+                    eprintln!("failed to hide main window: {error}");
+                    return;
+                }
+                api.prevent_close();
+                MAIN_WINDOW_READY.store(true, std::sync::atomic::Ordering::Release);
                 if let Some(manager) = crate::compute::manager_from_app(&window.app_handle()) {
                     manager.release_idle_async();
                 }
-                let _ = window.hide();
             }
             #[cfg(not(target_os = "windows"))]
             let _ = (window, event);
@@ -472,6 +498,7 @@ pub fn run() {
             system_insets,
             set_system_bar_style,
             commands::platform::set_status_bar_visible,
+            commands::platform::set_reader_keyboard_overlay,
             // 长按的触感确认：手机上有马达才震，其余平台是空操作（见 `commands::platform`）。
             haptic_feedback,
             load_preferences,
@@ -495,6 +522,20 @@ pub fn run() {
             search_random_archives,
             load_reader_manifest,
             load_reader_page,
+            reader_open_page_file,
+            native_reader::reader_prepare_native_slot,
+            #[cfg(any(windows, target_os = "ios"))]
+            native_reader::reader_native_slot_message,
+            #[cfg(any(windows, target_os = "ios"))]
+            native_reader::reader_native_view_transform,
+            #[cfg(any(windows, target_os = "ios"))]
+            native_reader::reader_native_continuous_layout,
+            #[cfg(any(windows, target_os = "ios"))]
+            native_reader::reader_native_continuous_input,
+            #[cfg(target_os = "ios")]
+            native_reader::reader_native_pinch_input,
+            #[cfg(windows)]
+            native_reader::reader_native_wheel_zoom,
             list_archives,
             list_archive_identities,
             list_archives_by_ids,
@@ -505,12 +546,18 @@ pub fn run() {
             load_archive_thumbnail,
             load_archive_page_thumbnail,
             delete_archive,
+            archive_download_status,
             download_archive,
             pause_download,
             resume_download,
             cancel_download,
             list_local_archives,
             load_local_archive_cover,
+            load_local_archive_manifest,
+            load_local_archive_page,
+            load_local_archive_original,
+            open_local_archive_reader_file,
+            local_archive_progress,
             delete_local_archives,
             create_task,
             list_tasks,
@@ -558,6 +605,7 @@ pub fn run() {
             dlssnr_download_variant,
             dlssnr_activate_variant,
             dlssnr_apply_page,
+            dlssnr_apply_page_file,
             dlssnr_release_workspaces,
             compute_center_status,
             compute_center_configure,
@@ -568,6 +616,7 @@ pub fn run() {
             compute_pair_confirm,
             remote_compute_capabilities,
             remote_compute_process,
+            remote_compute_process_file,
             // 重计算编排：只入队 / 只读小状态（见 `src/command_dispatch.rs` 的不变量）。
             compute_submit,
             // 阅读器那条来路：身份（settingsId / sourceRevision / 管线）由宿主铸。

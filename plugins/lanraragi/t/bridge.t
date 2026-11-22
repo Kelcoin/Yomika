@@ -33,7 +33,7 @@ like($@,qr/BRIDGE_INVALID_REQUEST/,'invalid count rejected');
 
 # Optional real Redis integration: independent instance only, never a LANraragi server.
 SKIP: {
-    skip 'Set YOMIKA_TEST_REDIS_PORT for real Redis Lua integration', 95 unless $ENV{YOMIKA_TEST_REDIS_PORT};
+    skip 'Set YOMIKA_TEST_REDIS_PORT for real Redis Lua integration', 103 unless $ENV{YOMIKA_TEST_REDIS_PORT};
     require IO::Socket::INET;
     {
         package TestRedis;
@@ -76,6 +76,8 @@ SKIP: {
         $r->command('HSET',$native,'file','test.cbz','lastreadtime',$now-20,'progress',8,'pagecount',10);
         is($dispatch->($r,$r,$req,0)->{total},0,'switch off skips external reading');
         is($dispatch->($r,$r,{%$req,offset=>1},1)->{total},0,'pagination does not rescan');
+        my $hello = $dispatch->($r,$r,{protocol=>1,action=>'hello'},1);
+        is($hello->{version},1,'hello observes and versions native reading before polling the history list');
         my $imported = $dispatch->($r,$r,$req,1);
         is($imported->{total},1,'external LANraragi visit enters history');
         is($imported->{states}[0]{historyPageIndex},7,'native page converted to zero-based index');
@@ -92,6 +94,27 @@ SKIP: {
         $r->command('HDEL',$meta,'nativeHistoryCompletedAt');
         is($dispatch->($r,$r,$req,1)->{total},0,'any native visit before deletion stays deleted');
         $r->command('DEL',$native);
+    }
+    {
+        local $LANraragi::Plugin::Scripts::YomikaBridge::PREFIX = $LANraragi::Plugin::Scripts::YomikaBridge::PREFIX . 'large-native:';
+        my $archives = TestRedis->new;
+        $archives->command('SELECT', 15);
+        $archives->{real_archives} = 1;
+        my $seed = <<'LUA';
+for i=1,18000 do
+ local id=string.format('%040x',i)
+ redis.call('HSET',id,'file','test.cbz')
+ if i%1000==0 then redis.call('HSET',id,'progress',2,'pagecount',20,'lastreadtime',ARGV[1]) end
+end
+return 1
+LUA
+        $archives->eval($seed,0,time-1);
+        my $first_page = $dispatch->($r,$archives,{protocol=>1,action=>'list',kind=>'history',offset=>0,limit=>10},1);
+        is($first_page->{total},18,'first history request finds visits across a large archive database');
+        my $next_page = $dispatch->($r,$archives,{protocol=>1,action=>'list',kind=>'history',offset=>10,limit=>10},1);
+        is($next_page->{version},$first_page->{version},'later pages use the same history revision');
+        is(scalar @{$next_page->{states}},8,'later page contains the rest of native history');
+        $archives->eval("for i=1,18000 do redis.call('DEL',string.format('%040x',i)) end return 1",0);
     }
     my $conflict=$call->(action=>'apply',operation=>{%$operation,id=>'stale'});
     is($conflict->{errorCode},'BRIDGE_CONFLICT','Lua rejects stale concurrent writer');
@@ -137,7 +160,8 @@ SKIP: {
         package LANraragi::Model::Config;
         our $TEST_REDIS;
         sub get_redis_config {$TEST_REDIS}
-        sub get_redis {$TEST_REDIS}
+        our $TEST_ARCHIVES;
+        sub get_redis {$TEST_ARCHIVES // $TEST_REDIS}
     }
     local $INC{'LANraragi/Model/Config.pm'}=1;
     local $LANraragi::Model::Config::TEST_REDIS=$r;
@@ -146,6 +170,31 @@ SKIP: {
     is($failure{errorCode},'BRIDGE_ARCHIVE_NOT_FOUND','actual Script wrapper returns permanent validation code');
     is($failure{serverId},$hello->{serverId},'Script rejection retains identity envelope');
     $r->{missing}=0;
+    {
+        # LANraragi stores plugin settings and native archives in separate databases.
+        my $settings = TestRedis->new;
+        $settings->command('SELECT', 13);
+        my $archives = TestRedis->new;
+        $archives->command('SELECT', 14);
+        $archives->{real_archives} = 1;
+        local $LANraragi::Model::Config::TEST_REDIS = $settings;
+        local $LANraragi::Model::Config::TEST_ARCHIVES = $archives;
+        my $id = 'c' x 40;
+        my $config_key = 'LRR_PLUGIN_YOMIKABRIDGE';
+        my $list = {oneshot_param => JSON::PP->new->encode({protocol=>1,action=>'list',kind=>'history',offset=>0,limit=>10})};
+        $settings->command('HSET', $config_key, 'customargs', '["0"]', 'import_external_history', '1');
+        $archives->command('HSET', $id, 'file', 'native.cbz', 'progress', 6, 'lastreadtime', time-1);
+        # exec_script_plugin uses positional args when a stale customargs field is present.
+        my %legacy = $bridge->run_script($list, '0');
+        is($legacy{total}, 1, 'persisted named checkbox survives legacy positional dispatch');
+        is($legacy{states}[0]{historyPageIndex}, 5, 'timestamped forced progress works without pagecount');
+        $settings->command('HSET', $config_key, 'import_external_history', '');
+        my %hello = $bridge->run_script({oneshot_param => '{"protocol":1,"action":"hello"}'}, '1');
+        ok(!$hello{capabilities}{importExternalHistory}, 'stored off state overrides stale positional on');
+        ok(exists($hello{capabilities}{importExternalHistory}), 'hello reports the resolved plugin switch');
+        $settings->command('DEL', $config_key);
+        $archives->command('DEL', $id);
+    }
     ok($call->(action=>'hello')->{capabilities}{collections},'advertises hosted collections');
     my $preset={name=>'Saved search',query=>'artist:test',sortBy=>'added',sortOrder=>'desc',categoryId=>undef};
     my $cop={id=>'preset-create',collection=>'search_presets',key=>'preset-001',expectedVersion=>0,value=>$preset};

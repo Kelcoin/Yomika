@@ -1,5 +1,7 @@
 import type { ImageCacheIdentity } from '../domain/cache';
 import { NativeCacheRepository } from '../repositories/nativeCacheRepository';
+import { hasNativeReaderTiles } from './readerNativeTiles';
+import { getNativeComputeRepository } from '../repositories/nativeComputeRepository';
 import { NativeComputeCenterRepository } from '../repositories/nativeComputeCenterRepository';
 import { NativeDlssnrRepository, parseDlssnrPasses } from '../repositories/nativeDlssnrRepository';
 import { NativeInferenceRepository } from '../repositories/nativeInferenceRepository';
@@ -7,7 +9,7 @@ import { NativeLibraryRepository } from '../repositories/nativeLibraryRepository
 import { NativeSettingsRepository } from '../repositories/nativeSettingsRepository';
 import { logError } from './errorLog';
 import { detectImageMime } from './imageData';
-import type { CachedImageData, ImageCacheRepository } from './unifiedImageCache';
+import type { CachedImageData, ImageCacheRepository, ImageHandle } from './unifiedImageCache';
 import { UnifiedImageCache } from './unifiedImageCache';
 
 /** 阅读器那几版渲染：它们的失败**没有别的出口**——阅读器把每一页的错误都咽掉
@@ -25,7 +27,7 @@ const READER_RENDITIONS: readonly string[] = ['reader-page', 'enhanced', 'dlssnr
 export class RenditionError extends Error {
   readonly code: string;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, readonly retryable = true) {
     super(message);
     this.name = 'RenditionError';
     this.code = code;
@@ -118,48 +120,13 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
       // DLSSNR：起点由 `transform` 说明（本地超分跑过就从它的产物接着跑），
       // 层参数也在里面——它同时是缓存键的一部分，改参数就拿不到旧结果。起点是按
       // 「产出它的模型」存的，模型 id 一并送过去。
-      const { source, passes } = parseDlssnrTransform(identity.transform);
-      const processed = await this.dlssnr.applyPage({
-        scopeId: identity.scopeId,
-        archiveId: identity.archiveId,
-        pageIndex: identity.pageIndex,
-        source,
-        ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
-        ...(identity.outputScale !== undefined ? { upscaleOutputScale: identity.outputScale } : {}),
-        ...(identity.taskId ? { taskId: identity.taskId } : {}),
-        ...(identity.priority ? { priority: identity.priority } : {}),
-        settings: { passes: parseDlssnrPasses(passes) },
-      });
+      const processed = await this.dlssnr.applyPage(dlssnrPageRequest(identity));
       if (!processed.ok) throw new RenditionError(processed.error.code, processed.error.message);
       const bytes = new Uint8Array(processed.value);
       return { bytes, mime: detectImageMime(bytes) };
     }
     if (identity.rendition === 'remote') {
-      // 远端算力：地址与令牌是「这台机器怎么找到对面」，不进缓存键（键里放凭据
-      // 等于把它写进日志）；处理参数在 `transform` 里，键就跟着它走。
-      const remote = parseRemoteOpsTransform(identity.transform);
-      const loaded = await this.settings.load();
-      if (!loaded.ok) throw new RenditionError(loaded.error.code, loaded.error.message);
-      const processed = await this.compute.remoteProcess({
-        url: loaded.value.remoteComputeUrl,
-        token: loaded.value.remoteComputeToken,
-        // `op` 是 Rust 侧那个必填字段，拿串首顶上去；真正决定做哪几档的是 `chain`。
-        // 模型、放大倍数、DLSSNR 层参数一律不发：对面按自己的设置跑。
-        params: { op: remote.chain[0] ?? 'upscale', chain: remote.chain },
-        scopeId: identity.scopeId,
-        archiveId: identity.archiveId,
-        pageIndex: identity.pageIndex,
-        source: remote.source,
-        // 键里那一版身份也带过去：对面回包上会写明**这一次真正用的**是哪一版，两者不一样
-        // 就说明处理计划的身份在我们眼皮底下变了，这一份产物不能按老版本存下来（R11）。
-        ...(remote.revision ? { expectedRevision: remote.revision } : {}),
-        ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
-        ...(identity.outputScale !== undefined ? { upscaleOutputScale: identity.outputScale } : {}),
-        ...(identity.taskId ? { taskId: identity.taskId } : {}),
-        // 远端有自己的队列（不占本机 GPU 那一件），档位管的是远端任务之间谁先走：
-        // 当前页插到整本预扫前面。
-        ...(identity.priority ? { priority: identity.priority } : {}),
-      });
+      const processed = await this.compute.remoteProcess(await this.remoteRequest(identity));
       if (!processed.ok) throw new RenditionError(processed.error.code, processed.error.message);
       const bytes = new Uint8Array(processed.value);
       return { bytes, mime: detectImageMime(bytes) };
@@ -172,10 +139,97 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
           ? await this.library.loadReaderPage(identity.serverId, identity.archiveId, identity.pageIndex, identity.sourcePath, identity.taskId)
           : undefined;
     if (!result) throw new Error('Unsupported image request');
-    if (!result.ok) throw new RenditionError(result.error.code, result.error.message);
+    if (!result.ok) throw new RenditionError(result.error.code, result.error.message, result.error.retryable);
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const bytes = new Uint8Array(result.value);
     return { bytes, mime: detectImageMime(bytes) };
+  }
+
+  private async remoteRequest(identity: ImageCacheIdentity): Promise<Parameters<NativeComputeCenterRepository['remoteProcess']>[0]> {
+    // 远端算力：地址与令牌是「这台机器怎么找到对面」，不进缓存键（键里放凭据
+    // 等于把它写进日志）；处理参数在 `transform` 里，键就跟着它走。
+    const remote = parseRemoteOpsTransform(identity.transform);
+    const loaded = await this.settings.load();
+    if (!loaded.ok) throw new RenditionError(loaded.error.code, loaded.error.message);
+    return {
+      url: loaded.value.remoteComputeUrl,
+      token: loaded.value.remoteComputeToken,
+      // `op` 是 Rust 侧那个必填字段，拿串首顶上去；真正决定做哪几档的是 `chain`。
+      // 模型、放大倍数、DLSSNR 层参数一律不发：对面按自己的设置跑。
+      params: { op: remote.chain[0] ?? 'upscale', chain: remote.chain },
+      scopeId: identity.scopeId,
+      archiveId: identity.archiveId,
+      pageIndex: identity.pageIndex,
+      source: remote.source,
+      // 键里那一版身份也带过去：对面回包上会写明**这一次真正用的**是哪一版，两者不一样
+      // 就说明处理计划的身份在我们眼皮底下变了，这一份产物不能按老版本存下来（R11）。
+      ...(remote.revision ? { expectedRevision: remote.revision } : {}),
+      ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
+      ...(identity.outputScale !== undefined ? { upscaleOutputScale: identity.outputScale } : {}),
+      ...(identity.taskId ? { taskId: identity.taskId } : {}),
+      // 远端有自己的队列（不占本机 GPU 那一件），档位管的是远端任务之间谁先走：
+      // 当前页插到整本预扫前面。
+      ...(identity.priority ? { priority: identity.priority } : {}),
+    };
+  }
+
+  async loadRemoteFile(cache: UnifiedImageCache, identity: ImageCacheIdentity, signal: AbortSignal): Promise<ImageHandle | undefined> {
+    if (!hasNativeReaderTiles()) return undefined;
+    const request = await this.remoteRequest(identity);
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (!request.expectedRevision) return undefined;
+    const releaseArtifact = getNativeComputeRepository();
+    const cancelNative = () => {
+      if (request.taskId) void this.inference.cancelPage(request.taskId).catch(() => undefined);
+    };
+    signal.addEventListener('abort', cancelNative, { once: true });
+    try {
+      const result = await this.compute.remoteProcessFile(request, identity.readerSession);
+      if (!result.ok) {
+        if (result.error.code === 'COMPUTE_RESOURCE_LIMIT') return undefined;
+        throw new RenditionError(result.error.code, result.error.message, result.error.retryable);
+      }
+      if (!result.value) return undefined;
+      const { lease, contentHash } = result.value;
+      const release = () => { void releaseArtifact.releaseArtifact(lease.leaseId).catch(() => undefined); };
+      if (signal.aborted) {
+        release();
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      return cache.adopt(identity, {
+        url: lease.url, bytes: lease.byteLength, estimatedDecodedBytes: lease.estimatedDecodedBytes,
+        leaseId: lease.leaseId, contentHash, release,
+      });
+    } finally {
+      signal.removeEventListener('abort', cancelNative);
+    }
+  }
+
+  async loadDlssnrFile(cache: UnifiedImageCache, identity: ImageCacheIdentity, signal: AbortSignal): Promise<ImageHandle | undefined> {
+    const session = identity.readerSession;
+    if (session === undefined || !hasNativeReaderTiles()) return undefined;
+    const input = dlssnrPageRequest(identity);
+    const cancel = () => {
+      if (input.taskId) void this.inference.cancelPage(input.taskId).catch(() => undefined);
+    };
+    signal.addEventListener('abort', cancel, { once: true });
+    try {
+      const result = await this.dlssnr.applyPageFile(input, session);
+      if (!result.ok) throw new RenditionError(result.error.code, result.error.message, result.error.retryable);
+      if (!result.value) return undefined;
+      const { lease, contentHash } = result.value;
+      const release = () => { void getNativeComputeRepository().releaseArtifact(lease.leaseId).catch(() => undefined); };
+      if (signal.aborted) {
+        release();
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      return cache.adopt(identity, {
+        url: lease.url, bytes: lease.byteLength, estimatedDecodedBytes: lease.estimatedDecodedBytes,
+        leaseId: lease.leaseId, contentHash, release,
+      });
+    } finally {
+      signal.removeEventListener('abort', cancel);
+    }
   }
 
   store(_identity: ImageCacheIdentity, _data: CachedImageData): Promise<void> {
@@ -183,10 +237,38 @@ export class NativeImageCacheAdapter implements ImageCacheRepository {
   }
 }
 
+function dlssnrPageRequest(identity: ImageCacheIdentity): Parameters<NativeDlssnrRepository['applyPage']>[0] {
+  const { source, passes } = parseDlssnrTransform(identity.transform);
+  return {
+    scopeId: identity.scopeId,
+    archiveId: identity.archiveId,
+    pageIndex: identity.pageIndex,
+    source,
+    ...(identity.modelId ? { upscaleModel: identity.modelId } : {}),
+    ...(identity.outputScale !== undefined ? { upscaleOutputScale: identity.outputScale } : {}),
+    ...(identity.taskId ? { taskId: identity.taskId } : {}),
+    ...(identity.priority ? { priority: identity.priority } : {}),
+    settings: { passes: parseDlssnrPasses(passes) },
+  };
+}
+
+const readerCacheAdapter = new NativeImageCacheAdapter();
 let sharedCache: UnifiedImageCache | undefined;
 
+export async function loadRemoteReaderPage(identity: ImageCacheIdentity, signal: AbortSignal): Promise<ImageHandle> {
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  const cache = getNativeImageCache();
+  return cache.peek(identity) ?? await readerCacheAdapter.loadRemoteFile(cache, identity, signal) ?? await cache.load(identity, { signal });
+}
+
+export async function loadDlssnrReaderPage(identity: ImageCacheIdentity, signal: AbortSignal): Promise<ImageHandle> {
+  if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+  const cache = getNativeImageCache();
+  return cache.peek(identity) ?? await readerCacheAdapter.loadDlssnrFile(cache, identity, signal) ?? await cache.load(identity, { signal });
+}
+
 export function getNativeImageCache(): UnifiedImageCache {
-  sharedCache ??= new UnifiedImageCache(new NativeImageCacheAdapter(), {
+  sharedCache ??= new UnifiedImageCache(readerCacheAdapter, {
     createObjectURL: (blob) => URL.createObjectURL(blob),
     revokeObjectURL: (url) => URL.revokeObjectURL(url),
     maxBytes: 96 * 1024 * 1024,

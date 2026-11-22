@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { invokeBinaryCommand, invokeCommand } from '../bridge/invoke';
 import type { CommandResult } from '../domain/result';
+import { ComputedImageLeaseSchema } from '../domain/compute';
 
 /** 一项能力：移动端据此显示「对面有什么、能不能用」。 */
 export const ComputeCapabilitySchema = z.object({
@@ -198,5 +199,12 @@ export class NativeComputeCenterRepository {
     priority?: 'foreground' | 'background';
   }): Promise<CommandResult<ArrayBuffer>> {
     return invokeBinaryCommand('remote_compute_process', { input });
+  }
+
+  remoteProcessFile(input: Parameters<NativeComputeCenterRepository['remoteProcess']>[0], readerSession?: number) {
+    return invokeCommand('remote_compute_process_file', { input, readerSession }, z.object({
+      lease: ComputedImageLeaseSchema,
+      contentHash: z.string().regex(/^[a-f0-9]{64}$/),
+    }).nullable());
   }
 }

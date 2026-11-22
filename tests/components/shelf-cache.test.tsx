@@ -16,6 +16,36 @@ afterEach(() => {
 });
 
 describe('shelf snapshots', () => {
+
+  it('shows cached history cards while missing archive metadata is still downloading', async () => {
+    let finishMetadata!: () => void;
+    const pendingMetadata = new Promise<void>(resolve => { finishMetadata = resolve; });
+    const archive = (archiveId: string, title: string) => ({ serverId: 's', archiveId, title, pageCount: 8, updatedAt: 'now' });
+    const cached = archive('cached', 'Cached history archive');
+    const remote = archive('remote', 'Remote history archive');
+    let resolved = false;
+    const calls: string[] = [];
+    setInvokeAdapterForTests(async (command: string) => {
+      calls.push(command);
+      if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };
+      if (command === 'list_reading_history') return { ok: true, value: [cached, remote].map(({ archiveId }) => ({ scopeId: 's', archiveId, pageIndex: 7, visitedAt: '2026-11-14T10:00:00Z', deviceId: 'd', revision: 1 })) };
+      if (command === 'list_archives_by_ids') return { ok: true, value: resolved ? [cached, remote] : [cached] };
+      if (command === 'load_archive_metadata') {
+        await pendingMetadata;
+        resolved = true;
+        return { ok: true, value: { ...remote, filename: 'remote.cbz', tags: '', extension: 'cbz', progress: 0, lastReadTime: 0, size: 100 } };
+      }
+      return { ok: true, value: [] };
+    });
+    render(<MemoryRouter initialEntries={['/history']}><PreferencesProvider><WorkspaceRoutes /></PreferencesProvider></MemoryRouter>);
+    try {
+      await waitFor(() => expect(calls).toContain('load_archive_metadata'));
+      expect(await screen.findByText('Cached history archive')).toBeInTheDocument();
+    } finally {
+      finishMetadata();
+    }
+    expect(await screen.findByText('Remote history archive')).toBeInTheDocument();
+  });
   it('offers three labelled history actions and exits with the selection toggle', async () => {
     setInvokeAdapterForTests(async (command: string) => {
       if (command === 'list_servers') return { ok: true, value: [{ id: 's', scopeId: 's', name: 'Home', baseUrl: 'https://example.com' }] };

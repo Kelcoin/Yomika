@@ -14,8 +14,12 @@ describe('spatial navigation and detail depth', () => {
       for (let source = 0; source < NAVIGATION_ROUTES.length; source++) {
         for (let target = 0; target < NAVIGATION_ROUTES.length; target++) {
           if (source === target) continue;
+          if (NAVIGATION_ROUTES[target] === '/settings' || (NAVIGATION_ROUTES[source] === '/settings' && ['/library', '/history', '/watchlist', '/to-read'].includes(NAVIGATION_ROUTES[target]!))) {
+            expect(resolveRouteMotion(route(NAVIGATION_ROUTES[source]!), route(NAVIGATION_ROUTES[target]!), compact, -1).kind).toBe('fade');
+            continue;
+          }
           expect(resolveRouteMotion(route(NAVIGATION_ROUTES[source]!), route(NAVIGATION_ROUTES[target]!), compact, -1)).toEqual({
-            kind: 'slide', axis: compact ? 'x' : 'y', direction: target > source ? 1 : -1,
+            kind: 'slide', axis: compact || NAVIGATION_ROUTES[target] === '/' ? 'x' : 'y', direction: target > source ? 1 : -1,
           });
         }
       }
@@ -24,6 +28,14 @@ describe('spatial navigation and detail depth', () => {
   it.each([['/', '/home/a'], ['/library', '/library/a'], ['/history', '/history/a'], ['/watchlist', '/watchlist/a'], ['/to-read', '/to-read/a']])('zooms details within %s without sliding the list', (list, detail) => {
     expect(resolveRouteMotion(route(list), route(detail), true).kind).toBe('detail-open');
     expect(resolveRouteMotion(route(detail), route(list), false).kind).toBe('detail-close');
+  });
+  it.each(['/library', '/history', '/watchlist', '/to-read'])('slides the home tab in from the left when leaving %s', (path) => {
+    const homeTab = { ...route('/'), state: { navigationTab: true } };
+    for (const compact of [true, false]) {
+      expect(resolveRouteMotion({ ...route(path), state: { homeEntry: true } }, homeTab, compact)).toEqual({
+        kind: 'slide', axis: 'x', direction: -1,
+      });
+    }
   });
   it('handles local detail query routes but ignores filters, hashless same-page visits and startup', () => {
     expect(resolveRouteMotion(route('/downloads'), route('/downloads', '?path=book.zip'), true).kind).toBe('detail-open');
@@ -43,10 +55,12 @@ describe('spatial navigation and detail depth', () => {
       expect(resolveRouteMotion(shortcut, route('/'), true, -1).kind).toBe('page-close');
       for (const target of ['/', '/library', '/history', '/watchlist', '/to-read']) {
         if (target === path) continue;
-        expect(resolveRouteMotion(shortcut, { ...route(target), state: { navigationTab: true } }, true).kind).toBe('page-close');
+        const expected = target === '/' ? 'slide' : path === '/settings' ? 'fade' : 'page-close';
+        expect(resolveRouteMotion(shortcut, { ...route(target), state: { navigationTab: true } }, true).kind).toBe(expected);
       }
     }
-    expect(resolveRouteMotion(route('/'), route('/settings'), true).kind).toBe('slide');
+    expect(resolveRouteMotion(route('/'), { ...route('/library'), state: { homeEntry: true } }, true).kind).toBe('fade');
+    expect(resolveRouteMotion(route('/'), route('/settings'), true).kind).toBe('fade');
     expect(resolveRouteMotion({ ...route('/history/a'), state: { homeEntry: true } }, route('/history'), true, -1).kind).toBe('detail-close');
   });
 });
@@ -159,23 +173,45 @@ describe('detail exit lifecycle', () => {
     function Shortcut() {
       const actual = useLocation(); const navigate = useNavigate();
       const transition = useWorkspaceRouteMotion(actual, true, -1, true);
-      return <><button onClick={() => navigate(target, { state: { navigationTab: true } })}>Return home</button>
-        <button onClick={() => navigate('/settings?changed=true', { replace: true })}>Change query</button>
+      return <><button onClick={() => navigate(target, target === '/' ? undefined : { state: { navigationTab: true } })}>Return home</button>
+        <button onClick={() => navigate('/downloads?changed=true', { replace: true })}>Change query</button>
         <section ref={transition.surface}>{transition.location.pathname}</section>
         <span data-testid="preview">{transition.previewLocation?.pathname}</span></>;
     }
     try {
-      render(<MemoryRouter initialEntries={[{ pathname: '/settings', state: { homeEntry: true } }]}><Shortcut /></MemoryRouter>);
+      render(<MemoryRouter initialEntries={[{ pathname: '/downloads', state: { homeEntry: true } }]}><Shortcut /></MemoryRouter>);
       fireEvent.click(screen.getByText('Change query'));
       fireEvent.click(screen.getByText('Return home'));
-      expect(screen.getByText('/settings')).toHaveAttribute('data-page-return');
+      expect(screen.getByText('/downloads')).toHaveAttribute('data-page-return');
       expect(screen.getByTestId('preview')).toHaveTextContent(target);
       act(() => vi.advanceTimersByTime(20));
       act(() => animations.at(-1)?.onfinish?.(new Event('finish') as AnimationPlaybackEvent));
-      expect(screen.queryByText('/settings')).not.toBeInTheDocument();
+      expect(screen.queryByText('/downloads')).not.toBeInTheDocument();
       expect(document.querySelector('[data-page-return], [inert]')).toBeNull();
     } finally {
       if (descriptor) Object.defineProperty(HTMLElement.prototype, 'animate', descriptor);
     }
   });
+});
+
+it('resets the detail scroll before entry animation and preserves the split list', () => {
+  const view = (detailKey: string) => <div className="workspace">
+    <RetainedPage active detailKey={detailKey}>
+      <section className="library-shell-list" />
+      <section className="library-shell-detail" />
+    </RetainedPage>
+  </div>;
+  const { container, rerender } = render(view('server-a:archive-a'));
+  const workspace = container.querySelector<HTMLElement>('.workspace')!;
+  const detail = container.querySelector<HTMLElement>('.library-shell-detail')!;
+  const list = container.querySelector<HTMLElement>('.library-shell-list')!;
+  detail.scrollTop = 540;
+  workspace.scrollTop = 320;
+  list.scrollTop = 180;
+  rerender(view('server-a:archive-a'));
+  expect(detail.scrollTop).toBe(540);
+  rerender(view('server-a:archive-b'));
+  expect(workspace.scrollTop).toBe(0);
+  expect(detail.scrollTop).toBe(0);
+  expect(list.scrollTop).toBe(180);
 });

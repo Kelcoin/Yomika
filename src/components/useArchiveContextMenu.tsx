@@ -158,7 +158,7 @@ export function useArchiveContextMenu(options: {
       onDownload={(archive) => {
         showToast('正在下载档案', 'info');
         void repository.downloadArchive(archive.serverId, archive.archiveId).then((result) => {
-          showToast(result.ok ? downloadResultMessage(result.value) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');
+          showToast(result.ok ? downloadResultMessage(result.value, archive.title) : result.error.message, result.ok ? downloadResultTone(result.value) : 'error');
         });
       }}
       {...(options.readingListLabels ? { readingListLabels: options.readingListLabels } : {})}

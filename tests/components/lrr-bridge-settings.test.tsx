@@ -1,39 +1,38 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
-import { setInvokeAdapterForTests, resetInvokeAdapterForTests } from '../../src/bridge/invoke';
-import { invalidateLrrBridgeConfig } from '../../src/repositories/nativeLrrBridgeRepository';
 import { LrrBridgeSettings } from '../../src/components/LrrBridgeSettings';
+import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
+import { invalidateLrrBridgeConfig } from '../../src/repositories/nativeLrrBridgeRepository';
+
 afterEach(() => { resetInvokeAdapterForTests(); invalidateLrrBridgeConfig(); });
-it('requires successful detection and keeps mode disabled when enabling fails', async () => {
+
+const pluginStatus = { available: true, version: '1.2.2' };
+
+it('detects the installed plugin automatically and restores local data with the switch', async () => {
   const adapter = vi.fn(async (command: string) => {
-    if (command === 'lrr_bridge_config') return { ok: true, value: { enabled: false, pending: 0, conflicts: 0 } };
-    if (command === 'lrr_bridge_request') return { ok: true, value: { protocol: 1, serverId: 's', epoch: 'e', version: 0 } };
-    return { ok: false, error: { code: 'NETWORK', message: 'offline', retryable: true } };
+    if (command === 'lrr_bridge_request') return { ok: true, value: pluginStatus };
+    return { ok: true, value: { enabled: command === 'lrr_bridge_config', pending: 2, conflicts: 1 } };
   });
   setInvokeAdapterForTests(adapter);
   render(<LrrBridgeSettings scopeId="s" />);
-  expect(screen.getByRole('switch', { name: '服务器托管用户数据' })).toBeDisabled();
-  await waitFor(() => expect(screen.getByRole('button', { name: '检测已安装的插件' })).toBeEnabled());
-  expect(adapter).toHaveBeenCalledTimes(1);
-  fireEvent.click(screen.getByRole('button', { name: '检测已安装的插件' }));
-  await waitFor(() => expect(screen.getByRole('switch')).toBeEnabled());
-  fireEvent.click(screen.getByRole('switch'));
-  await screen.findByText(/无法更改托管模式/);
-  expect(screen.getByRole('switch')).toHaveAttribute('aria-checked', 'false');
-  expect(screen.getByText(/已有本机数据不会自动上传/)).toBeInTheDocument();
+  const toggle = screen.getByRole('switch', { name: '服务器托管用户数据' });
+  expect(toggle).toBeDisabled();
+  await screen.findByText('插件可用 · v1.2.2');
+  expect(toggle).toBeEnabled();
+  expect(screen.getAllByRole('switch')).toHaveLength(1);
+  expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
+  expect(adapter).toHaveBeenCalledWith('lrr_bridge_configure', { scopeId: 's', enabled: false });
 });
 
-it('requires explicit confirmation before abandoning offline modifications', async () => {
-  const actions: unknown[] = [];
-  setInvokeAdapterForTests(async (command, args) => {
-    if (command === 'lrr_bridge_config') return { ok: true, value: { enabled: true, pending: 2, conflicts: 0 } };
-    actions.push(args?.action);
-    return { ok: true, value: { enabled: false, pending: 0, conflicts: 0 } };
-  });
+it('keeps the existing setting locked when the plugin cannot be reached', async () => {
+  setInvokeAdapterForTests(async command => command === 'lrr_bridge_config'
+    ? { ok: true, value: { enabled: true, pending: 0, conflicts: 0 } }
+    : { ok: false, error: { code: 'INFERENCE_UNAVAILABLE', message: 'offline', retryable: true } });
   render(<LrrBridgeSettings scopeId="s" />);
-  fireEvent.click(await screen.findByRole('button', { name: '停用并恢复原本机数据' }));
-  expect(actions).toEqual([]);
-  fireEvent.click(screen.getByRole('button', { name: '放弃待提交修改并停用' }));
-  await screen.findByText('已停用托管并恢复原本机数据，服务器数据未改动。');
-  expect(actions).toEqual(['abandon_pending']);
+  await screen.findByText('插件不可用');
+  const toggle = screen.getByRole('switch');
+  expect(toggle).toBeDisabled();
+  expect(toggle).toHaveAttribute('aria-checked', 'true');
 });

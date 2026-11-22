@@ -80,6 +80,13 @@ async fn db<T: Send + 'static>(
     .await
     .map_err(|_| "Bridge database task failed".to_string())?
 }
+// Acquire the writer before reading versions and outbox state. A deferred WAL
+// snapshot cannot upgrade after a concurrent write, even with busy_timeout.
+fn write_transaction(c: &mut Connection) -> Result<rusqlite::Transaction<'_>, String> {
+    c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())
+}
+
 fn reply(result: Result<Value, String>) -> CommandResult<Value> {
     match result {
         Ok(v) => CommandResult::success(v),
@@ -98,7 +105,10 @@ fn reply(result: Result<Value, String>) -> CommandResult<Value> {
             } else {
                 "REMOTE_UNAVAILABLE"
             };
-            let retryable = e.contains("network") || e.contains("task failed");
+            let retryable = e.contains("network")
+                || e.contains("task failed")
+                || e.contains("database is locked")
+                || e.contains("database table is locked");
             CommandResult::failure(code, e, retryable)
         }
     }
@@ -178,7 +188,7 @@ async fn remote(
         reqwest::Method::POST,
         url.to_string(),
         key,
-        12,
+        if action == "states" { 5 } else { 12 },
     )
     .await
     .map_err(|_| "Bridge network request failed")?;
@@ -242,6 +252,28 @@ async fn remote(
     }
     Ok(data)
 }
+async fn installed_plugin_version(app: &tauri::AppHandle, scope: &str) -> Option<String> {
+    let scope = scope.to_owned();
+    let lookup = scope.clone();
+    let base: String = db(app, move |c| {
+        c.query_row("SELECT base_url FROM servers WHERE scope_id=?1", [lookup], |r| r.get(0))
+            .map_err(|e| e.to_string())
+    }).await.ok()?;
+    let key = tauri::async_runtime::spawn_blocking(move || SystemCredentialStore.get_server_api_key(&scope))
+        .await.ok()?.ok()?;
+    let url = format!("{}/api/plugins/script", base.trim_end_matches('/'));
+    let mut response = super::library::reader_request_with_timeout(reqwest::Method::GET, url, key, 5)
+        .await.ok()?.error_for_status().ok()?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if bytes.len() + chunk.len() > 256_000 { return None; }
+        bytes.extend_from_slice(&chunk);
+    }
+    let plugins: Vec<Value> = serde_json::from_slice(&bytes).ok()?;
+    plugins.iter().find(|plugin| plugin["namespace"] == "yomikabridge")?["version"]
+        .as_str().filter(|version| !version.is_empty() && version.len() <= 40).map(str::to_owned)
+}
+
 fn state(c: &Connection, scope: &str, id: &str) -> Result<Value, String> {
     let raw: Option<String> = c
         .query_row(
@@ -366,7 +398,7 @@ fn queue(c: &mut Connection, scope: &str, mut operation: Value) -> Result<Value,
     {
         return Err("Invalid progress preference".into());
     }
-    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let tx = write_transaction(c)?;
     if !enabled(&tx, scope) {
         return Err("LANraragi bridge is disabled".into());
     }
@@ -642,7 +674,7 @@ async fn refresh_missing_list_states(
         }
         let owned = scope.to_owned();
         db(app,move|c|{
-            let tx=c.transaction().map_err(|e|e.to_string())?;
+            let tx=write_transaction(c)?;
             for r in rows{let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![owned,r["archiveId"].as_str()],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&owned,&r)?;}}
             tx.commit().map_err(|e|e.to_string())?;Ok(())
         }).await?;
@@ -651,6 +683,10 @@ async fn refresh_missing_list_states(
 }
 
 fn cached(c: &Connection, scope: &str, action: &str, input: &Value) -> Result<Value, String> {
+    cached_list_view(c, scope, action, input, true)
+}
+
+fn cached_list_view(c: &Connection, scope: &str, action: &str, input: &Value, paginate: bool) -> Result<Value, String> {
     if !enabled(c, scope) {
         return Err("LANraragi bridge is disabled".into());
     }
@@ -693,7 +729,7 @@ fn cached(c: &Connection, scope: &str, action: &str, input: &Value) -> Result<Va
         states.sort_by(|a, b| b[key].as_str().cmp(&a[key].as_str()));
     }
     let total = states.len();
-    if action != "states" {
+    if paginate && action != "states" {
         states = states
             .into_iter()
             .skip(input["offset"].as_u64().unwrap_or(0) as usize)
@@ -703,6 +739,32 @@ fn cached(c: &Connection, scope: &str, action: &str, input: &Value) -> Result<Va
     Ok(
         json!({"protocol":1,"serverId":id,"epoch":serde_json::from_str::<Value>(&epoch).unwrap_or(json!(epoch)),"version":0,"states":states,"total":total,"offline":true}),
     )
+}
+
+fn pending_history_states(c: &Connection, scope: &str) -> Result<Vec<Value>, String> {
+    let mut statement = c.prepare(
+        "SELECT DISTINCT archive_id FROM lrr_bridge_outbox WHERE scope_id=?1 \
+         AND json_extract(operation,'$.kind') IN ('progress','history_delete','progress_clear')",
+    ).map_err(|error| error.to_string())?;
+    let ids = statement.query_map([scope], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+    ids.map(|id| state(c, scope, &id.map_err(|error| error.to_string())?)).collect()
+}
+
+fn cached_history_delta(c: &Connection, scope: &str, input: &Value) -> Result<Value, String> {
+    if !enabled(c, scope) {
+        return Err("LANraragi bridge is disabled".into());
+    }
+    let (id, epoch): (String, String) = c.query_row(
+        "SELECT server_id,epoch FROM lrr_bridge_config WHERE scope_id=?1", [scope],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|error| error.to_string())?;
+    let since = input["since"].as_u64().ok_or("Invalid history delta cursor")?;
+    Ok(json!({
+        "protocol": 1, "serverId": id, "epoch": serde_json::from_str::<Value>(&epoch).unwrap_or(json!(epoch)),
+        "version": since, "states": [], "total": 0, "offline": true,
+        "pendingStates": pending_history_states(c, scope)?,
+    }))
 }
 
 #[tauri::command]
@@ -715,9 +777,7 @@ fn configure_in(
     enabled: bool,
     hello: Option<Value>,
 ) -> Result<Value, String> {
-    if !enabled && config(c, &scope_id)?["pending"].as_i64().unwrap_or(0) > 0 {
-        return Err("Flush or resolve pending bridge operations before disabling".into());
-    }
+    let has_pending = config(c, &scope_id)?["pending"].as_i64().unwrap_or(0) > 0;
     let old = super::lrr_bridge::enabled(c, &scope_id);
     if old != enabled {
         for table in [
@@ -803,7 +863,7 @@ fn configure_in(
                 }
             }
         }
-        if enabled {
+        if enabled && !has_pending {
             c.execute(
                 "DELETE FROM lrr_bridge_collections WHERE scope_id=?1",
                 [&scope_id],
@@ -814,6 +874,27 @@ fn configure_in(
                 [&scope_id],
             )
             .map_err(|e| e.to_string())?;
+        }
+        if enabled && has_pending {
+            // Rebuild only the optimistic rows whose operations were suspended.
+            let mut stmt = c.prepare(
+                "SELECT state FROM lrr_bridge_states WHERE scope_id=?1 AND archive_id IN
+                   (SELECT archive_id FROM lrr_bridge_outbox WHERE scope_id=?1)
+                 UNION ALL
+                 SELECT record FROM lrr_bridge_collections WHERE scope_id=?1
+                   AND ('collection:' || collection || ':' || key) IN
+                     (SELECT archive_id FROM lrr_bridge_outbox WHERE scope_id=?1)",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&scope_id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+            for raw in rows {
+                let row: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                if row.get("collection").is_some() {
+                    collections::mirror(c, &scope_id, &row)?;
+                } else {
+                    mirror(c, &scope_id, &row)?;
+                }
+            }
         }
         if !enabled {
             c.execute(
@@ -832,13 +913,13 @@ fn configure_local(
     enabled: bool,
     hello: Option<Value>,
 ) -> Result<Value, String> {
-    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let tx = write_transaction(c)?;
     let value = configure_in(&tx, scope_id, enabled, hello)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(value)
 }
 fn abandon_pending(c: &mut Connection, scope: String) -> Result<Value, String> {
-    let tx = c.transaction().map_err(|e| e.to_string())?;
+    let tx = write_transaction(c)?;
     tx.execute("DELETE FROM lrr_bridge_outbox WHERE scope_id=?1", [&scope])
         .map_err(|e| e.to_string())?;
     configure_in(&tx, scope.clone(), false, None)?;
@@ -886,6 +967,13 @@ pub async fn lrr_bridge_request(
     action: String,
     input: Value,
 ) -> CommandResult<Value> {
+    if action == "plugin_status" {
+        let (hello, version) = tokio::join!(
+            remote(&app, &scope_id, "hello", json!({}), true),
+            installed_plugin_version(&app, &scope_id),
+        );
+        return reply(Ok(json!({"available": hello.is_ok(), "version": version})));
+    }
     if action == "collection_apply" {
         return reply(
             db(&app, move |c| {
@@ -902,9 +990,24 @@ pub async fn lrr_bridge_request(
             .await,
         );
     }
-    let _guard = gate().lock().await;
+    let _guard = if action == "history_changes" {
+        match gate().try_lock() {
+            Ok(guard) => guard,
+            Err(_) => return reply(db(&app, move |c| cached_history_delta(c, &scope_id, &input)).await),
+        }
+    } else if matches!(action.as_str(), "states" | "list") {
+        // The sync worker holds the gate across remote pages and outbox writes.
+        // A foreground read can use the same mirror as an offline request while
+        // the writer finishes, without reading or modifying its remote snapshot.
+        match tokio::time::timeout(std::time::Duration::from_millis(1500), gate().lock()).await {
+            Ok(guard) => guard,
+            Err(_) => return reply(db(&app, move |c| cached(c, &scope_id, &action, &input)).await),
+        }
+    } else {
+        gate().lock().await
+    };
     let result=async{
-        if !matches!(action.as_str(),"hello"|"list"|"states"|"export"|"workspace_get"|"workspace_put"|"collection_list"|"discard_conflicts"|"abandon_pending"){return Err("Unsupported bridge action".into());}
+        if !matches!(action.as_str(),"hello"|"list"|"history_changes"|"states"|"export"|"workspace_get"|"workspace_put"|"collection_list"|"discard_conflicts"|"abandon_pending"){return Err("Unsupported bridge action".into());}
         if action=="collection_list"{return collections::list(&app,&scope_id,input).await;}
         if action=="abandon_pending"{return db(&app,move|c|abandon_pending(c,scope_id)).await;}
         if action=="discard_conflicts"{
@@ -912,7 +1015,7 @@ pub async fn lrr_bridge_request(
             let mut reading_ids=Vec::new();
             for id in ids {if id.starts_with("collection:"){collections::discard(&app,&scope_id,&id).await?;}else{reading_ids.push(id);}}
             let ids=reading_ids;
-            if !ids.is_empty(){let authoritative=remote(&app,&scope_id,"states",json!({"ids":ids}),false).await?;let scope=scope_id.clone();db(&app,move|c|{let tx=c.transaction().map_err(|e|e.to_string())?;let states=authoritative["states"].as_array().ok_or("Invalid bridge states")?;if states.len()!=ids.len(){return Err("Incomplete conflict states".into());}for state in states{let id=state["archiveId"].as_str().ok_or("Invalid archive ID")?;if !ids.iter().any(|i|i==id){return Err("Unexpected conflict archive state".into());}tx.execute("DELETE FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2",params![scope,id]).map_err(|e|e.to_string())?;mirror(&tx,&scope,state)?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;}
+            if !ids.is_empty(){let authoritative=remote(&app,&scope_id,"states",json!({"ids":ids}),false).await?;let scope=scope_id.clone();db(&app,move|c|{let tx=write_transaction(c)?;let states=authoritative["states"].as_array().ok_or("Invalid bridge states")?;if states.len()!=ids.len(){return Err("Incomplete conflict states".into());}for state in states{let id=state["archiveId"].as_str().ok_or("Invalid archive ID")?;if !ids.iter().any(|i|i==id){return Err("Unexpected conflict archive state".into());}tx.execute("DELETE FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2",params![scope,id]).map_err(|e|e.to_string())?;mirror(&tx,&scope,state)?;}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;}
             return db(&app,move|c|config(c,&scope_id)).await;
         }
         if action=="list"{
@@ -925,17 +1028,62 @@ pub async fn lrr_bridge_request(
                     let version=page["version"].clone();if stamp.as_ref().is_some_and(|v|v!=&version){return Err("Bridge list changed during pagination; retry from first page".into());}stamp=Some(version.clone());let final_stamp=version;
                     let count=page["states"].as_array().ok_or("Invalid list states")?.len();let total=page["total"].as_u64().ok_or("Invalid list total")?;
                     refresh_missing_list_states(&app,&scope_id,&page_input,&page).await?;
-                    let scope=scope_id.clone();db(&app,move|c|{let tx=c.transaction().map_err(|e|e.to_string())?;reconcile_list(&tx,&scope,&page_input,&page)?;for s in page["states"].as_array().ok_or("Invalid states")?{let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope,s["archiveId"].as_str()],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&scope,s)?;}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;
-                    offset+=count as u64;if offset>=total{let scope=scope_id.clone();return db(&app,move|c|{let mut v=cached(c,&scope,"list",&input)?;v["offline"]=json!(false);v["version"]=final_stamp;Ok(v)}).await;}if count==0{return Err("Invalid bridge pagination".into());}
+                    let scope=scope_id.clone();db(&app,move|c|{let tx=write_transaction(c)?;reconcile_list(&tx,&scope,&page_input,&page)?;for s in page["states"].as_array().ok_or("Invalid states")?{let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope,s["archiveId"].as_str()],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&scope,s)?;}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;
+                    offset += count as u64;
+                    if offset >= total {
+                        // We just reconciled the complete list to overlay queued changes.
+                        // Send that single view back so each client page doesn't scan it again.
+                        let scope = scope_id.clone();
+                        return db(&app, move |c| {
+                            let mut view = cached_list_view(c, &scope, "list", &input, false)?;
+                            view["offline"] = json!(false);
+                            view["version"] = final_stamp;
+                            Ok(view)
+                        }).await;
+                    }
+                    if count == 0 { return Err("Invalid bridge pagination".into()); }
                 }
                 return Err("Bridge list exceeds bounded snapshot; flush pending operations first".into());
             }
+        }
+        if action == "history_changes" {
+            let mut data = match remote(&app, &scope_id, &action, input.clone(), false).await {
+                Ok(data) => data,
+                Err(error) if error == "Bridge network request failed" => {
+                    return db(&app, move |c| cached_history_delta(c, &scope_id, &input)).await;
+                }
+                Err(error) => return Err(error),
+            };
+            if !data["errorCode"].is_null() { return Ok(Value::Null); }
+            let rows = data["states"].as_array().ok_or("Invalid history delta")?.clone();
+            let total = data["total"].as_u64().ok_or("Invalid history delta total")?;
+            let at_end = input["offset"].as_u64().unwrap_or(0) + rows.len() as u64 >= total;
+            data["pendingStates"] = db(&app, move |c| {
+                let tx = write_transaction(c)?;
+                let pending = {
+                    let mut stmt = tx.prepare("SELECT DISTINCT archive_id FROM lrr_bridge_outbox WHERE scope_id=?1")
+                        .map_err(|e| e.to_string())?;
+                    let ids = stmt.query_map([&scope_id], |row| row.get::<_, String>(0))
+                        .map_err(|e| e.to_string())?;
+                    ids.collect::<Result<std::collections::HashSet<_>, _>>().map_err(|e| e.to_string())?
+                };
+                for row in &rows {
+                    validate_state(row)?;
+                    if !pending.contains(row["archiveId"].as_str().ok_or("Invalid archive ID")?) {
+                        mirror(&tx, &scope_id, row)?;
+                    }
+                }
+                let overlay = if at_end { pending_history_states(&tx, &scope_id)? } else { Vec::new() };
+                tx.commit().map_err(|e| e.to_string())?;
+                Ok(json!(overlay))
+            }).await?;
+            return Ok(data);
         }
         let request_input=input.clone();let list_action=action=="list";
         let mut data=match remote(&app,&scope_id,&action,input.clone(),action=="hello").await{Ok(v)=>v,Err(e)=>{if matches!(action.as_str(),"states"|"list"|"export") && e=="Bridge network request failed"{return db(&app,move|c|cached(c,&scope_id,&action,&input)).await;}return Err(e);}};
         if let Some(states)=data["states"].as_array_mut(){let scope=scope_id.clone();let copy=states.clone();*states=db(&app,move|c|{copy.into_iter().map(|v|{let id=v["archiveId"].as_str().ok_or("Invalid archive state")?;let pending:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope,id],|r|r.get(0)).map_err(|e|e.to_string())?;if pending{state(c,&scope,id)}else{Ok(v)}}).collect::<Result<Vec<_>,String>>()}).await?;}
         if list_action{refresh_missing_list_states(&app,&scope_id,&request_input,&data).await?;}
-        let copy=data.clone();db(&app,move|c|{let tx=c.transaction().map_err(|e|e.to_string())?;if let Some(states)=copy["states"].as_array(){if list_action{reconcile_list(&tx,&scope_id,&request_input,&copy)?;}for s in states{let id=s["archiveId"].as_str().ok_or("Invalid bridge state")?;let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope_id,id],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&scope_id,s)?;}}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;Ok(data)
+        let copy=data.clone();db(&app,move|c|{let tx=write_transaction(c)?;if let Some(states)=copy["states"].as_array(){if list_action{reconcile_list(&tx,&scope_id,&request_input,&copy)?;}for s in states{let id=s["archiveId"].as_str().ok_or("Invalid bridge state")?;let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope_id,id],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&scope_id,s)?;}}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;Ok(data)
     }.await;
     reply(result)
 }
@@ -945,7 +1093,7 @@ pub async fn lrr_bridge_flush(app: tauri::AppHandle, scope_id: String) -> Comman
     let result=async{
         let s=scope_id.clone();let cfg=db(&app,move|c|config(c,&s)).await?;if cfg["enabled"]!=true{return Ok(cfg);}
         for _ in 0..8{
-            let s=scope_id.clone();let next=db(&app,move|c|{let tx=c.transaction().map_err(|e|e.to_string())?;let next=tx.query_row("SELECT operation_id,operation FROM lrr_bridge_outbox WHERE scope_id=?1 AND conflict=0 AND archive_id NOT IN (SELECT archive_id FROM lrr_bridge_outbox WHERE scope_id=?1 AND conflict=1) ORDER BY seq LIMIT 1",[s],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional().map_err(|e|e.to_string())?;if let Some((ref id,_))=next{tx.execute("UPDATE lrr_bridge_outbox SET attempted=1 WHERE operation_id=?1",[id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(next)}).await?;
+            let s=scope_id.clone();let next=db(&app,move|c|{let tx=write_transaction(c)?;let next=tx.query_row("SELECT operation_id,operation FROM lrr_bridge_outbox WHERE scope_id=?1 AND conflict=0 AND archive_id NOT IN (SELECT archive_id FROM lrr_bridge_outbox WHERE scope_id=?1 AND conflict=1) ORDER BY seq LIMIT 1",[s],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional().map_err(|e|e.to_string())?;if let Some((ref id,_))=next{tx.execute("UPDATE lrr_bridge_outbox SET attempted=1 WHERE operation_id=?1",[id]).map_err(|e|e.to_string())?;}tx.commit().map_err(|e|e.to_string())?;Ok(next)}).await?;
             let Some((id,raw))=next else{break};let operation:Value=serde_json::from_str(&raw).map_err(|_|"Invalid queued operation")?;
             let action=if operation.get("collection").is_some(){"collection_apply"}else{"apply"};
             let mut data=match remote(&app,&scope_id,action,json!({"operation":operation}),false).await{Ok(v)=>v,Err(e)=>{if e.starts_with("Bridge plugin rejected request:"){let operation_id=id.clone();db(&app,move|c|{c.execute("UPDATE lrr_bridge_outbox SET conflict=1 WHERE operation_id=?1",[operation_id]).map_err(|e|e.to_string())?;Ok(())}).await?;break;}return Err(e);}};
@@ -962,7 +1110,7 @@ pub async fn lrr_bridge_flush(app: tauri::AppHandle, scope_id: String) -> Comman
                 }
             }
             if action=="collection_apply"{let s=scope_id.clone();db(&app,move|c|collections::acknowledge(c,&s,&id,&operation,&data)).await?;continue;}
-            let s=scope_id.clone();db(&app,move|c|{let tx=c.transaction().map_err(|e|e.to_string())?;if data["errorCode"]=="BRIDGE_CONFLICT"{tx.execute("UPDATE lrr_bridge_outbox SET conflict=1 WHERE operation_id=?1",[id]).map_err(|e|e.to_string())?;}else{validate_state(&data["state"])?;if data["state"]["archiveId"]!=operation["archiveId"]||data["state"]["version"].as_i64()!=operation["expectedVersion"].as_i64().map(|v|v+1)||data["state"]["generation"].as_i64()!=operation["generation"].as_i64().map(|v|v+if operation["kind"]=="progress_clear"{1}else{0}){return Err("Invalid bridge apply response".into());}tx.execute("DELETE FROM lrr_bridge_outbox WHERE operation_id=?1",[id]).map_err(|e|e.to_string())?;let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![s,data["state"]["archiveId"].as_str()],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&s,&data["currentState"])?;}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;
+            let s=scope_id.clone();db(&app,move|c|{let tx=write_transaction(c)?;if data["errorCode"]=="BRIDGE_CONFLICT"{tx.execute("UPDATE lrr_bridge_outbox SET conflict=1 WHERE operation_id=?1",[id]).map_err(|e|e.to_string())?;}else{validate_state(&data["state"])?;if data["state"]["archiveId"]!=operation["archiveId"]||data["state"]["version"].as_i64()!=operation["expectedVersion"].as_i64().map(|v|v+1)||data["state"]["generation"].as_i64()!=operation["generation"].as_i64().map(|v|v+if operation["kind"]=="progress_clear"{1}else{0}){return Err("Invalid bridge apply response".into());}tx.execute("DELETE FROM lrr_bridge_outbox WHERE operation_id=?1",[id]).map_err(|e|e.to_string())?;let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![s,data["state"]["archiveId"].as_str()],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&s,&data["currentState"])?;}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;
         }
         db(&app,move|c|config(c,&scope_id)).await
     }.await;
@@ -1061,6 +1209,38 @@ mod tests {
     fn progress(id: &str, page: i64) -> Value {
         json!({"id":id,"archiveId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"progress","progress":{"pageIndex":page,"pageCount":10,"layout":"paged","direction":"ltr"}})
     }
+    #[test]
+    fn queue_waits_for_competing_writer_before_reading_wal_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bridge.sqlite3");
+        let mut reader = Connection::open(&path).unwrap();
+        reader.execute_batch("PRAGMA journal_mode=WAL").unwrap();
+        reader.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
+        connection().backup(rusqlite::DatabaseName::Main, &path, None).unwrap();
+        let (ready, locked) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let writer = Connection::open(path).unwrap();
+            writer.execute_batch("BEGIN IMMEDIATE; UPDATE lrr_bridge_config SET enabled=1 WHERE scope_id='s';").unwrap();
+            ready.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            writer.execute_batch("COMMIT").unwrap();
+        });
+        locked.recv().unwrap();
+        let queued = queue(&mut reader, "s", progress("queued", 3));
+        writer.join().unwrap();
+        assert!(queued.is_ok(), "{queued:?}");
+        let pending: i64 = reader.query_row("SELECT COUNT(*) FROM lrr_bridge_outbox", [], |r| r.get(0)).unwrap();
+        assert_eq!(pending, 1);
+    }
+
+    #[test]
+    fn sqlite_lock_is_retryable() {
+        assert!(matches!(
+            reply(Err("database is locked".into())),
+            CommandResult::Failure { error, .. } if error.retryable
+        ));
+    }
+
     #[test]
     fn transient_plugin_storage_errors_preserve_retryable_queue_semantics() {
         assert_eq!(
@@ -1275,7 +1455,16 @@ mod tests {
             .unwrap();
         queue(&mut c, "s", progress("three", 5)).unwrap();
         assert_eq!(config(&c, "s").unwrap()["pending"], 2);
-        assert!(configure_local(&mut c, "s".into(), false, None).is_err());
+        let disabled = configure_local(&mut c, "s".into(), false, None).unwrap();
+        assert_eq!(disabled["enabled"], false);
+        assert_eq!(disabled["pending"], 2);
+        let page = |c: &Connection| {
+            c.query_row("SELECT page_index FROM reading_progress", [], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(page(&c), 2);
+        configure_local(&mut c, "s".into(), true, Some(json!({"serverId":"server","epoch":"epoch"}))).unwrap();
+        assert_eq!(page(&c), 5);
+        assert_eq!(config(&c, "s").unwrap()["pending"], 2);
         c.execute(
             "UPDATE lrr_bridge_config SET server_id='lost-server',epoch='lost-epoch'",
             [],

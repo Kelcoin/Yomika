@@ -6,7 +6,12 @@ export function useReaderImageHandover(active: boolean) {
   const [paused, setPaused] = useState(false);
   const busy = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
-  const canPromote = useCallback(() => !busy.current, []);
+  const nativeBusy = useRef(false);
+  const canPromote = useCallback(() => !busy.current && !nativeBusy.current, []);
+  const setNativeBusy = useCallback((value: boolean) => {
+    nativeBusy.current = value;
+    setPaused(value || busy.current);
+  }, []);
   const pause = useCallback(() => {
     clearTimeout(timer.current);
     busy.current = true;
@@ -16,12 +21,12 @@ export function useReaderImageHandover(active: boolean) {
     clearTimeout(timer.current);
     timer.current = setTimeout(() => {
       busy.current = false;
-      setPaused(false);
+      setPaused(nativeBusy.current);
     }, delay);
   }, []);
   useEffect(() => {
-    if (!active) { busy.current = false; setPaused(false); }
+    if (!active) { busy.current = false; nativeBusy.current = false; setPaused(false); }
     return () => clearTimeout(timer.current);
   }, [active]);
-  return { paused, canPromote, pause, resume };
+  return { paused, canPromote, pause, resume, setNativeBusy };
 }

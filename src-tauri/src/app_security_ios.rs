@@ -66,6 +66,7 @@ fn cover(visible: bool) {
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
+    crate::native_reader::cover_ios(visible);
     COVER.with(|slot| {
         if !visible {
             if let Some(view) = slot.borrow_mut().take() {

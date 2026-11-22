@@ -917,22 +917,29 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   // Thumbnail mode is a fixed-width grid, so the column count is measurable and
   // rows can be virtualized like the list modes. Without this the mode rendered
   // every loaded archive at once.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = scrollRef.current;
-    if (!element || typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver((entries) => {
-      const measured = entries[0]?.contentRect.width ?? element.clientWidth;
-      const measuredHeight = entries[0]?.contentRect.height ?? element.clientHeight;
-      if (measured > 0) {
-        setGridWidth((current) => getArchiveGridColumns(current || 720) === getArchiveGridColumns(measured)
-          ? current : measured);
+    if (!element || !pageActive) return;
+    const measure = (width: number, height: number) => {
+      if (width > 0) {
+        setGridWidth((current) => getArchiveGridColumns(current || 720) === getArchiveGridColumns(width)
+          ? current : width);
       }
-      // 高度只在「刻度上限会因此改变」时才写：每次缩放都写一次会重算整条轨道。
-      setRailPanelHeight((current) => (railTickCapFor(current) === railTickCapFor(measuredHeight) ? current : measuredHeight));
+      setRailPanelHeight((current) => railTickCapFor(current) === railTickCapFor(height) ? current : height);
+    };
+    // Pack the correct number of columns before the first paint. ResizeObserver
+    // takes over for later changes, using the same content box as the rows.
+    const style = getComputedStyle(element);
+    const padding = (value: string) => Number.parseFloat(value) || 0;
+    measure(element.clientWidth - padding(style.paddingLeft) - padding(style.paddingRight),
+      element.clientHeight - padding(style.paddingTop) - padding(style.paddingBottom));
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) measure(entry.contentRect.width, entry.contentRect.height);
     });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [compact, pageActive]);
+  }, [compact, displayMode, pageActive]);
   const gridColumns = getArchiveGridColumns(gridWidth || 720);
   const gridRows = useMemo(
     () => (displayMode === 'thumbnail'
@@ -1074,11 +1081,9 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
         <ArchiveThumbCardBody
           title={archive.title}
           tags={archive.tags}
-          progressPage={readingProgressByArchiveId?.get(archive.archiveId)}
-          progressScope={progressScope}
-          pageCount={archive.pageCount}
           meta={<><span>{formatArchivePageMeta(archive.pageCount, readingProgressByArchiveId?.get(archive.archiveId))}</span><span>{formatArchiveDate(archiveDateById?.get(archive.archiveId) ?? archive.addedAt)}</span></>}
         />
+        <ArchiveProgressBar page={readingProgressByArchiveId?.get(archive.archiveId)} pageCount={archive.pageCount} scope={progressScope} cornerAware />
       </button>
     ) : (
       <button
@@ -1153,7 +1158,7 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
               updateSearchQuery(searchDraft);
             }}
           />
-          {searchDraft.length > 0 && <button type="button" className="search-clear" aria-label="清除搜索" title="清除搜索" onClick={() => updateSearchQuery('')}><X aria-hidden="true" /></button>}
+          {searchDraft.length > 0 && <button type="button" className="search-clear" aria-label="清除搜索" title="清除搜索" onClick={() => editSearchDraft('')}><X aria-hidden="true" /></button>}
           {!searchScope && <TagSuggest inputValue={searchDraft} anchorRef={searchInputRef} onSelect={(tag) => updateSearchQuery(`${searchDraft.slice(0, searchDraft.lastIndexOf(',') + 1)}${searchDraft.includes(',') ? ' ' : ''}${tag}, `)} />}
         </label>
         {onSavePreset && (

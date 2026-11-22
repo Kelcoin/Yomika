@@ -15,7 +15,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+pub(crate) type ReaderFile = Arc<Mutex<std::fs::File>>;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -134,6 +136,8 @@ pub struct LeaseView {
 
 struct LeaseEntry {
     view: LeaseView,
+    file: Option<ReaderFile>,
+    reader_page: Option<(u32, i64)>,
     webview_label: String,
     expires_at: Instant,
 }
@@ -223,6 +227,26 @@ impl LeaseStore {
     }
 
     pub fn acquire(&self, spec: LeaseSpec, now: Instant) -> Result<AcquiredLease, LeaseError> {
+        self.acquire_inner(spec, None, None, now)
+    }
+
+    pub(crate) fn acquire_file(
+        &self,
+        spec: LeaseSpec,
+        file: std::fs::File,
+        reader_page: Option<(u32, i64)>,
+        now: Instant,
+    ) -> Result<AcquiredLease, LeaseError> {
+        self.acquire_inner(spec, Some(Arc::new(Mutex::new(file))), reader_page, now)
+    }
+
+    fn acquire_inner(
+        &self,
+        spec: LeaseSpec,
+        file: Option<ReaderFile>,
+        reader_page: Option<(u32, i64)>,
+        now: Instant,
+    ) -> Result<AcquiredLease, LeaseError> {
         if !is_allowed_image_mime(&spec.mime) {
             return Err(LeaseError::UnsupportedMime {
                 artifact_id: spec.artifact_id,
@@ -231,7 +255,7 @@ impl LeaseStore {
         }
         // 没有落到正式目录的产物不给 URL：staging 是 worker 能随便写的地方，
         // 还没核验过的东西不该出现在渲染器面前。
-        let Some(cache_relative) = spec.cache_relative.clone() else {
+        let Some(cache_relative) = spec.cache_relative.clone().or_else(|| file.as_ref().map(|_| String::new())) else {
             return Err(LeaseError::NotPublished {
                 artifact_id: spec.artifact_id,
             });
@@ -259,6 +283,8 @@ impl LeaseStore {
             lease_id.clone(),
             LeaseEntry {
                 view: view.clone(),
+                file,
+                reader_page,
                 webview_label: spec.webview_label,
                 expires_at,
             },
@@ -282,12 +308,22 @@ impl LeaseStore {
     }
 
     /// 查一张租借。窗口不对也算失败——租借号只在拿到它的那个窗口里有效。
+    #[cfg(test)]
     pub fn view(
         &self,
         lease_id: &str,
         webview_label: &str,
         now: Instant,
     ) -> Result<LeaseView, LeaseError> {
+        self.view_with_file(lease_id, webview_label, now).map(|(view, _)| view)
+    }
+
+    pub(crate) fn view_with_file(
+        &self,
+        lease_id: &str,
+        webview_label: &str,
+        now: Instant,
+    ) -> Result<(LeaseView, Option<ReaderFile>), LeaseError> {
         let entries = self.lock();
         let Some(entry) = entries.get(lease_id) else {
             return Err(LeaseError::Unknown {
@@ -304,7 +340,39 @@ impl LeaseStore {
                 lease_id: lease_id.to_string(),
             });
         }
-        Ok(entry.view.clone())
+        Ok((entry.view.clone(), entry.file.clone()))
+    }
+
+    /// Take a single snapshot for both sides of a spread. Once acquired, the
+    /// renderer owns these references even if either front-end lease is retired.
+    #[cfg(any(windows, target_os = "android", target_os = "ios", test))]
+    pub(crate) fn reader_files(
+        &self,
+        left: &str,
+        right: Option<&str>,
+        webview_label: &str,
+        session: u32,
+        page: i32,
+        now: Instant,
+    ) -> Option<(ReaderFile, Option<ReaderFile>)> {
+        let entries = self.lock();
+        let first_index = i64::from(page) - 1;
+        let entry_for = |id: &str| {
+            let entry = entries.get(id)?;
+            let (lease_session, page_index) = entry.reader_page?;
+            if entry.webview_label != webview_label || lease_session != session || entry.expires_at <= now {
+                return None;
+            }
+            Some((page_index, entry.file.as_ref()?))
+        };
+        let (left_index, left) = entry_for(left)?;
+        let Some(right) = right else {
+            return (left_index == first_index).then(|| (left.clone(), None));
+        };
+        let (right_index, right) = entry_for(right)?;
+        // Images arrive in visual order, while page identifies the first logical page.
+        let pages = (left_index.min(right_index), left_index.max(right_index));
+        (pages == (first_index, first_index + 1)).then(|| (left.clone(), Some(right.clone())))
     }
 
     /// 放掉一张租借。`None` = 本来就没有（重复释放、过期后清过）——重复释放不是错误，
@@ -387,6 +455,68 @@ mod tests {
             height: 32,
             pipeline_revision: "worker-v1:abcdef".to_string(),
             webview_label: "main".to_string(),
+        }
+    }
+
+    #[test]
+    fn reader_file_survives_path_replacement_and_release_during_read() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("page.bin");
+        std::fs::write(&path, b"first version").unwrap();
+        let mut spec = spec("page");
+        spec.path = path.clone();
+        let original = std::fs::File::open(&path).unwrap();
+        let window = spec.webview_label.clone();
+        let now = Instant::now();
+        let store = LeaseStore::new();
+        let lease = store.acquire_file(spec, original, None, now).unwrap().lease;
+        std::fs::rename(&path, dir.path().join("evicted.bin")).unwrap();
+        std::fs::write(&path, b"second version").unwrap();
+        assert!(store.view_with_file(&lease.lease_id, "other", now).is_err());
+        let (_, file) = store.view_with_file(&lease.lease_id, &window, now).unwrap();
+        store.release(&lease.lease_id);
+        assert!(store.view_with_file(&lease.lease_id, &window, now).is_err());
+        let mut result = Vec::new();
+        file.unwrap().lock().unwrap().read_to_end(&mut result).unwrap();
+        assert_eq!(result, b"first version");
+    }
+
+    #[test]
+    fn native_spread_acquires_both_exact_versions_for_the_requesting_window() {
+        use std::io::Read;
+
+        let now = Instant::now();
+        let store = LeaseStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let make = |name: &str, contents: &[u8], window: &str, session: u32, page_index: i64| {
+            let mut spec = spec(name);
+            spec.path = dir.path().join(name);
+            spec.webview_label = window.to_owned();
+            std::fs::write(&spec.path, contents).unwrap();
+            let file = std::fs::File::open(&spec.path).unwrap();
+            store.acquire_file(spec, file, Some((session, page_index)), now).unwrap().lease.lease_id
+        };
+        let first = make("first", b"original", "main", 5, 10);
+        let second = make("second", b"processed", "main", 5, 11);
+        let foreign = make("foreign", b"other reader", "other", 5, 11);
+        let stale = make("stale", b"previous session", "main", 4, 11);
+        assert!(store.reader_files(&first, Some(&foreign), "main", 5, 11, now).is_none());
+        assert!(store.reader_files(&first, Some(&stale), "main", 5, 11, now).is_none());
+        assert!(store.reader_files(&stale, None, "main", 5, 11, now).is_none());
+        let newer_first = make("newer-first", b"processed first", "main", 5, 10);
+        assert!(store.reader_files(&first, Some(&newer_first), "main", 5, 11, now).is_none());
+        assert!(store.reader_files(&second, None, "main", 5, 11, now).is_none());
+        assert!(store.reader_files(&second, Some(&first), "main", 5, 11, now).is_some());
+        let (left, right) = store.reader_files(&first, Some(&second), "main", 5, 11, now).unwrap();
+        store.release(&first);
+        store.release(&second);
+        assert!(store.reader_files(&first, Some(&second), "main", 5, 11, now).is_none());
+        for (file, expected) in [(left, b"original".as_slice()), (right.unwrap(), b"processed".as_slice())] {
+            let mut bytes = Vec::new();
+            file.lock().unwrap().read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, expected);
         }
     }
 

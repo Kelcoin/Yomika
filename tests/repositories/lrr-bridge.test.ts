@@ -1,3 +1,4 @@
+import { simulateRouteCacheRestartForTests } from '../../src/lib/routeCache';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resetInvokeAdapterForTests, setInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { NativeDedupRepository } from '../../src/repositories/nativeDedupRepository';
@@ -18,6 +19,25 @@ describe('optional LANraragi reading data', () => {
     await repo.loadProgress('s', 'a'); await repo.loadProgress('s', 'b');
     expect(commands).toEqual(['lrr_bridge_config', 'load_reading_progress', 'load_reading_progress']);
   });
+  it('shares a pending hosted state lookup between progress and membership', async () => {
+    let finish!: (value: unknown) => void;
+    const pending = new Promise(resolve => { finish = resolve; });
+    const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === 'lrr_bridge_config') return { ok: true, value: { enabled: true, pending: 0, conflicts: 0 } };
+      if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: true } };
+      if (args?.action === 'states') return pending;
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const repo = new NativeLibraryRepository();
+    const progress = repo.loadProgress('s', 'a');
+    const membership = repo.archiveMembership('s', 'a');
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('get_archive_membership', { scopeId: 's', archiveId: 'a' }));
+    expect(adapter.mock.calls.filter(([, args]) => args?.action === 'states')).toHaveLength(1);
+    finish({ ok: true, value: { ...metadata, states: [state] } });
+    expect(await progress).toMatchObject({ ok: true, value: { pageIndex: 3 } });
+    expect(await membership).toEqual({ ok: true, value: { reading: true, favorites: true } });
+  });
   it('maps hosted progress/history/watchlist through hosted commands', async () => {
     const commands: string[] = [];
     setInvokeAdapterForTests(async (command, args) => {
@@ -32,6 +52,107 @@ describe('optional LANraragi reading data', () => {
     expect((await repo.listWatchlist('s')).ok).toBe(true);
     expect((await repo.clearReadingProgress('s', 'a')).ok).toBe(true);
     expect(commands.every(command => command.startsWith('lrr_bridge_'))).toBe(true);
+  });
+  it('refreshes history with additions and tombstones since the last complete snapshot', async () => {
+    const recent = { ...state, archiveId: 'b', historyAt: '2026-11-21T12:00:00Z' };
+    const removed = { ...state, version: 5, historyAt: null };
+    const adapter = vi.fn(async (_command: string, args?: Record<string, unknown>) => {
+      if (args?.action === 'list') return { ok: true, value: { ...metadata, historyDelta: true, states: [state], total: 1 } };
+      if (args?.action === 'history_changes') {
+        const since = (args.input as { since: number }).since;
+        return { ok: true, value: { ...metadata, version: 6, states: since < 6 ? [removed, recent] : [], total: since < 6 ? 2 : 0 } };
+      }
+      throw new Error(`Unexpected action: ${args?.action}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    const repo = new NativeLrrBridgeRepository();
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state] });
+    simulateRouteCacheRestartForTests();
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [recent] });
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [recent] });
+    expect(adapter.mock.calls.map(([, args]) => [args?.action, (args?.input as { since?: number }).since])).toEqual([
+      ['list', undefined], ['history_changes', 4], ['history_changes', 6],
+    ]);
+  });
+
+  it('retries the delta from the last complete cursor when a write shifts the next page', async () => {
+    const partial = { ...state, archiveId: 'partial', historyAt: '2026-11-20T12:00:00Z' };
+    const newest = { ...state, archiveId: 'newest', historyAt: '2026-11-21T12:00:00Z' };
+    const actions: string[] = [];
+    const offsets: number[] = [];
+    setInvokeAdapterForTests(async (_command, args) => {
+      actions.push(String(args?.action));
+      if (args?.action === 'list') return { ok: true, value: { ...metadata, historyDelta: true, states: [state], total: 1 } };
+      if (args?.action !== 'history_changes') throw new Error(`Unexpected action: ${args?.action}`);
+      const { since, offset } = args.input as { since: number; offset: number };
+      expect(since).toBe(4);
+      offsets.push(offset);
+      if (offsets.length === 1) return { ok: true, value: { ...metadata, version: 5, states: [partial], total: 2 } };
+      return { ok: true, value: { ...metadata, version: 6, states: [newest], total: 1 } };
+    });
+    const repo = new NativeLrrBridgeRepository();
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state] });
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state, newest] });
+    expect(offsets).toEqual([0, 1, 0]);
+    expect(actions.filter(action => action === 'list')).toHaveLength(1);
+  });
+
+  it('shows queued history removals without persisting them as remote tombstones', async () => {
+    let pendingStates = [{ ...state, historyAt: null }];
+    setInvokeAdapterForTests(async (_command, args) => ({ ok: true, value: args?.action === 'history_changes'
+      ? { ...metadata, states: [], total: 0, pendingStates }
+      : { ...metadata, states: [state], total: 1, historyDelta: true } }));
+    const repo = new NativeLrrBridgeRepository();
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state] });
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [] });
+    pendingStates = [];
+    simulateRouteCacheRestartForTests();
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state] });
+  });
+
+  it('uses the last complete history and queued writes if a later delta page is offline', async () => {
+    const partial = { ...state, archiveId: 'partial', version: 6 };
+    const queued = { ...state, archiveId: 'queued' };
+    const adapter = vi.fn(async (_command: string, args?: Record<string, unknown>) => {
+      if (args?.action === 'list') return { ok: true, value: { ...metadata, states: [state], total: 1, historyDelta: true } };
+      const { offset } = args?.input as { offset: number };
+      return { ok: true, value: offset === 0
+        ? { ...metadata, states: [partial], total: 2, version: 6 }
+        : { ...metadata, states: [], total: 0, offline: true, pendingStates: [queued] } };
+    });
+    setInvokeAdapterForTests(adapter);
+    const repo = new NativeLrrBridgeRepository();
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state] });
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [state, queued] });
+    expect(adapter.mock.calls.map(([, args]) => args?.action)).toEqual(['list', 'history_changes', 'history_changes']);
+  });
+
+  it('does not publish a history snapshot after its scope was invalidated', async () => {
+    let release!: () => void;
+    const firstResponse = new Promise<void>(resolve => { release = resolve; });
+    const fresh = { ...state, archiveId: 'fresh' };
+    const adapter = vi.fn(async (_command: string, args?: Record<string, unknown>) => {
+      expect(args?.action).toBe('list');
+      const first = adapter.mock.calls.length === 1;
+      if (first) await firstResponse;
+      return { ok: true, value: { ...metadata, historyDelta: true, states: [first ? state : fresh], total: 1 } };
+    });
+    setInvokeAdapterForTests(adapter);
+    const repo = new NativeLrrBridgeRepository();
+    const stale = repo.list('s', 'history');
+    invalidateLrrBridgeConfig('s');
+    expect(await repo.list('s', 'history')).toEqual({ ok: true, value: [fresh] });
+    release();
+    expect((await stale).ok).toBe(false);
+  });
+
+  it('keeps external history pages and accepts removed history states', async () => {
+    const imported = { ...state, historyPageIndex: 7 };
+    const removed = { ...state, archiveId: 'b', historyAt: null, historyRemovedAt: '2026-11-19T09:00:00.000Z' };
+    setInvokeAdapterForTests(async (command) => ({ ok: true, value: command === 'lrr_bridge_config'
+      ? { enabled: true, pending: 0, conflicts: 0 }
+      : { ...metadata, states: [imported, removed], total: 2 } }));
+    expect(await new NativeLibraryRepository().listHistory('s')).toMatchObject({ ok: true, value: [{ archiveId: 'a', pageIndex: 7 }] });
   });
   it('paginates lists and rejects continuously changing snapshots', async () => {
     let version = 0;

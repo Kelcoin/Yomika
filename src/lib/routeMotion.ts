@@ -1,10 +1,10 @@
 import { NAVIGATION_ROUTES, navigationOwner } from './navigationOrder';
 
 export type RouteDirection = 1 | -1;
-export type RouteMotion = { kind: 'none' | 'slide' | 'detail-open' | 'detail-close' | 'page-open' | 'page-close'; axis: 'x' | 'y'; direction: RouteDirection };
+export type RouteMotion = { kind: 'none' | 'fade' | 'slide' | 'detail-open' | 'detail-close' | 'page-open' | 'page-close'; axis: 'x' | 'y'; direction: RouteDirection };
 type RouteAddress = { pathname: string; search: string; state?: { homeEntry?: boolean; navigationTab?: boolean } | null };
 
-function detailIdentity(location: RouteAddress): string | undefined {
+export function detailIdentity(location: RouteAddress): string | undefined {
   const match = location.pathname.match(/^\/(home|library|history|watchlist|to-read)\/([^/]+)$/);
   if (match) return match[2];
   if (location.pathname === '/downloads') return new URLSearchParams(location.search).get('path') || undefined;
@@ -23,7 +23,13 @@ export function resolveRouteMotion(from: RouteAddress | undefined, to: RouteAddr
   const targetDetail = detailIdentity(to);
   // The same destination can be a bottom tab or a home shortcut. Only the
   // latter pushes a page above home; route order alone cannot distinguish it.
-  if (from.pathname === '/' && to.state?.homeEntry && targetOwner !== '/') return { ...none, kind: 'page-open' };
+  if (from.pathname === '/' && to.state?.homeEntry && targetOwner !== '/') {
+    return { ...none, kind: to.pathname === '/library' ? 'fade' : 'page-open' };
+  }
+  if (to.pathname === '/settings' && sourceOwner !== '/settings') return { ...none, kind: 'fade' };
+  if (sourceOwner === '/settings' && !targetDetail
+    && ['/library', '/history', '/watchlist', '/to-read'].includes(to.pathname)) return { ...none, kind: 'fade' };
+  if (to.pathname === '/' && to.state?.navigationTab && sourceOwner !== '/') return { kind: 'slide', axis: 'x', direction: -1 };
   if (from.state?.homeEntry && sourceOwner !== targetOwner && (to.pathname === '/' || to.state?.navigationTab)) return { ...none, kind: 'page-close' };
   if (targetDetail && (sourceOwner !== targetOwner || sourceDetail !== targetDetail)) return { ...none, kind: 'detail-open' };
   if (sourceOwner === targetOwner && sourceDetail && !targetDetail) return { ...none, kind: 'detail-close' };
@@ -31,7 +37,7 @@ export function resolveRouteMotion(from: RouteAddress | undefined, to: RouteAddr
   const sourceIndex = NAVIGATION_ROUTES.findIndex(path => path === sourceOwner);
   const targetIndex = NAVIGATION_ROUTES.findIndex(path => path === targetOwner);
   if (sourceOwner !== targetOwner && sourceIndex >= 0 && targetIndex >= 0) {
-    return { kind: 'slide', axis, direction: targetIndex > sourceIndex ? 1 : -1 };
+    return { kind: 'slide', axis: targetOwner === '/' ? 'x' : axis, direction: targetIndex > sourceIndex ? 1 : -1 };
   }
   // Editors and tools are drill-down routes, independent of the navigation rail.
   return { kind: 'slide', axis: 'x', direction: historyDirection };

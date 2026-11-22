@@ -514,6 +514,57 @@ pub async fn dlssnr_apply_page(
             ))
         }
     };
+    let result = run_reader_dlssnr(input, app, data).await?;
+    Ok(crate::domain::result::into_binary_response(result.map(|(bytes, _)| bytes)))
+}
+
+#[tauri::command]
+pub async fn dlssnr_apply_page_file(
+    input: DlssnrPageInput,
+    reader_session: u32,
+    app: tauri::AppHandle,
+    webview: tauri::WebviewWindow,
+) -> Result<CommandResult<Option<crate::commands::library::ReaderCachedFile>>, String> {
+    let data = data_dir(&app)?;
+    let result = run_reader_dlssnr(input, app.clone(), data.clone()).await?;
+    let (bytes, identity) = match result {
+        CommandResult::Success { value, .. } => value,
+        CommandResult::Failure { ok, error } => return Ok(CommandResult::Failure { ok, error }),
+    };
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let database = app.state::<crate::db::Database>();
+    let compute = app.state::<crate::compute::ComputeHandle>();
+    let reader_page = Some((reader_session, identity.page_index));
+    if let Some(location) = crate::cache::cached_blob_location(&database, &data, &identity)?
+        .filter(|location| location.content_hash == hash)
+    {
+        return crate::commands::library::lease_cached_reader_file(
+            &database, &compute, webview.label(), "reader-dlssnr", location, reader_page,
+        );
+    }
+    // The cache may refuse a large result. Deliver the bytes already produced
+    // through an open temporary file so the reader need not run the filter again.
+    let (location, file) = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<_> {
+        use std::io::{Seek, Write};
+        let mut file = tempfile::tempfile_in(data)?;
+        file.write_all(&bytes)?;
+        file.rewind()?;
+        Ok((crate::cache::CachedBlobLocation {
+            path: PathBuf::new(),
+            content_hash: hash,
+            byte_length: bytes.len() as u64,
+        }, file))
+    }).await.map_err(|error| error.to_string())?.map_err(|error| error.to_string())?;
+    crate::commands::library::lease_open_reader_file(
+        &database, &compute, webview.label(), "reader-dlssnr", location, file, reader_page,
+    )
+}
+
+async fn run_reader_dlssnr(
+    input: DlssnrPageInput,
+    app: tauri::AppHandle,
+    data: PathBuf,
+) -> Result<CommandResult<(Vec<u8>, crate::cache::CacheImageIdentity)>, String> {
     let heavy = crate::inference::HeavyPriority::parse(input.priority.as_deref());
     // 两层优先级来回译的唯一一处：宿主这一页只负责**等**，排在哪一档是调度器的说法，
     // 而 heaviness 是宿主自己的说法（`HeavyPriority` 管的是「本进程里谁先跑」）。
@@ -526,12 +577,10 @@ pub async fn dlssnr_apply_page(
         .try_state::<crate::compute::ComputeHandle>()
         .and_then(|handle| handle.get().cloned());
     let task_id = input.task_id.clone();
-    let result = crate::inference::run_heavy(heavy, task_id, move || {
+    crate::inference::run_heavy(heavy, task_id, move || {
         let database = app.state::<crate::db::Database>();
-        apply_cached_page(&database, manager.as_deref(), priority, &data, &input)
-    })
-    .await?;
-    Ok(crate::domain::result::into_binary_response(result))
+        apply_cached_page_with_identity(&database, manager.as_deref(), priority, &data, &input)
+    }).await
 }
 
 /// 缓存页 → DLSSNR → PNG。抽出来是为了能在测试里直接调（不用起 Tauri）。
@@ -539,6 +588,7 @@ pub async fn dlssnr_apply_page(
 /// `manager` 是计算进程的手柄：`None` 表示编排没起来（或测试里没给），这时这一页**没有
 /// 人算**——宿主这边已经没有 NGX 了，所以那不是「退回家算」，是一条明确的失败。门控
 /// （`runtime_gate_with`）仍然排在它前面：用户拿到的第一条理由应当是「这台机器不行」。
+#[cfg(test)]
 fn apply_cached_page(
     database: &crate::db::Database,
     manager: Option<&crate::compute::manager::ComputeManager>,
@@ -546,6 +596,16 @@ fn apply_cached_page(
     data_dir: &std::path::Path,
     input: &DlssnrPageInput,
 ) -> CommandResult<Vec<u8>> {
+    apply_cached_page_with_identity(database, manager, priority, data_dir, input).map(|(bytes, _)| bytes)
+}
+
+fn apply_cached_page_with_identity(
+    database: &crate::db::Database,
+    manager: Option<&crate::compute::manager::ComputeManager>,
+    priority: crate::compute::scheduler::Priority,
+    data_dir: &std::path::Path,
+    input: &DlssnrPageInput,
+) -> CommandResult<(Vec<u8>, crate::cache::CacheImageIdentity)> {
     use crate::cache::CacheImageIdentity;
 
     if input.page_index < 0 {
@@ -606,7 +666,7 @@ fn apply_cached_page(
         // 它是同一个键，命中它这一页就还是那张静帧。按内容对一下，旧静帧自然落空
         // （下次重跑并覆盖），新编出来的 APNG 照旧命中。
         if animated == crate::cache::is_animated_image(&hit) {
-            return CommandResult::success(hit);
+            return CommandResult::success((hit, output));
         }
     }
     // 二次校验：前端那个布尔值只是「用户想用」，跑不跑得起来是这台机器此刻的
@@ -635,13 +695,16 @@ fn apply_cached_page(
     // 一百多兆的片段摆进只读输入根、起一趟计算之前就把「这张图不适用」说清楚。动图不在
     // 这里判——它的处理单位是每一帧，容器尺寸说明不了帧尺寸，判定留在 worker 那边。
     if !animated {
-        let decoded = match image::load_from_memory(&page.bytes) {
-            Ok(value) => value.to_rgba8(),
+        let (width, height) = match image::ImageReader::new(std::io::Cursor::new(&page.bytes))
+            .with_guessed_format()
+            .map_err(image::ImageError::IoError)
+            .and_then(image::ImageReader::into_dimensions)
+        {
+            Ok(size) => size,
             Err(error) => {
                 return CommandResult::failure("INVALID_RESPONSE", error.to_string(), false)
             }
         };
-        let (width, height) = (decoded.width(), decoded.height());
         edge = Some((width, height));
         if width < DLSSNR_MIN_EDGE || height < DLSSNR_MIN_EDGE {
             return CommandResult::failure(
@@ -715,7 +778,7 @@ fn apply_cached_page(
                 eprintln!("yomika: DLSSNR 原样交回没能写进错误日志：{log_error}");
             }
         }
-        return CommandResult::success(page.bytes);
+        return CommandResult::success((page.bytes, source));
     }
     // 产物落盘：这一页下次翻回来（或者重启应用之后）就是上面那条命中路径，整段计算与
     // 编码都不再走。取消掉的任务在上面就返回了，不会写。写不进去也照样把这一页交出去，
@@ -728,7 +791,7 @@ fn apply_cached_page(
         DLSSNR_MIME,
         outcome.bytes,
     );
-    CommandResult::success(encoded)
+    CommandResult::success((encoded, output))
 }
 
 /// `filter::MIN_EDGE` 的同一条下限（命令这一层用它给出人话）。

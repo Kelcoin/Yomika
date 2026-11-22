@@ -39,14 +39,17 @@ export function ArchiveProgressBar({ page, pageCount, visibility, scope = 'elsew
   // 路由（读 location、看组件树）都试过，猜错一次就是「改了设置没反应」这类毛病。
   const allowed = mode === 'all' || (mode === 'history' && scope === 'history');
   const visible = allowed && read;
+  const hadEmptyFrame = useRef(false);
+  useLayoutEffect(() => {
+    if (!visible) hadEmptyFrame.current = true;
+  }, [visible]);
   if (!visible) return null;
   const percent = pageCount > 0 ? Math.min(100, (page / pageCount) * 100) : 1;
-  return <CardProgressBar percent={percent} label="阅读进度" cornerAware={cornerAware} />;
+  return <CardProgressBar percent={percent} label="阅读进度" cornerAware={cornerAware} className={hadEmptyFrame.current ? 'is-reading-progress-entering' : ''} />;
 }
 
-export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL, progressPage, pageCount = 0, progressVisibility, progressScope }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number; progressPage?: number | null | undefined; pageCount?: number; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined }) {
+export function ArchiveThumbCardBody({ title, tags, meta, favorite = false, limit = CARD_TAG_LIMIT_THUMBNAIL }: { title: string; tags: readonly string[] | undefined; meta: ReactNode; favorite?: boolean; limit?: number }) {
   return <div className="archive-thumb-card-body">
-    <ArchiveProgressBar page={progressPage} pageCount={pageCount} visibility={progressVisibility} scope={progressScope} />
     <div className="archive-thumb-card-title"><strong>{title}</strong>{favorite && <StateIcon name="heart" selected />}</div>
     {/* fill: the two rows pack top-down and the rest of the (deliberately
         generous) tag list is dropped, so the slot reads full at any card
@@ -103,12 +106,11 @@ export function ArchiveThumbMeta({ children }: { children: ReactNode }) {
  * the slot the selection marker sits in (children). Every card that shows a
  * cover uses this one, so the duplicate workspace's member cards get the same
  * cache handling as the library grid instead of a second implementation. */
-export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio, children }: {
+export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio }: {
   scopeId: string;
   serverId: string;
   archiveId: string;
   onAspectRatio?: ((ratio: number) => void) | undefined;
-  children?: ReactNode;
 }) {
   /** 这一张封面在缓存里的身份。渲染期（第一帧要不要直接画图）和取图 effect 必须用同一份，
    * 所以在这里拼一次。 */
@@ -164,7 +166,6 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio,
     }} /> : failed ? <span className="archive-cover-retry" role="button" tabIndex={0} aria-label="重新加载封面" title="封面加载失败，点击重试" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }} onKeyDown={(event) => {
       if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }
     }}><RefreshCw aria-hidden="true" /></span> : <span className={`archive-thumb-card-skeleton${loadStarted ? '' : ' is-deferred'}`} aria-hidden="true" />}
-    {children}
   </div>;
 }
 
@@ -214,19 +215,15 @@ export function ArchiveThumbnailCard({ archive, scopeId, serverId, favorite = fa
       title={archive.title}
       tags={archive.tags}
       favorite={favorite}
-      progressPage={progressPage}
-      progressVisibility="none"
-      progressScope={progressScope}
-      pageCount={archive.pageCount}
       meta={<><span>{formatArchivePageMeta(archive.pageCount, progressPage)}</span><span>{formatArchiveDate(archive.addedAt)}</span></>}
     />
-    <ArchiveProgressBar page={progressPage} pageCount={archive.pageCount} visibility={progressVisibility} scope={progressScope} />
+    <ArchiveProgressBar page={progressPage} pageCount={archive.pageCount} visibility={progressVisibility} scope={progressScope} cornerAware />
   </Link>;
 }
 
-export function ArchiveThumbnailRail({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden = false, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined; resetScrollKey?: string | undefined }) {
+export function ArchiveThumbnailRail({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden = false, headingIcon, headingContent, emptyMessage, onRefresh, onArchiveContextMenu, refreshing = false, loading = false, skeletonCount = 6, detailBasePath = '/library' }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number>; progressVisibility?: 'none' | 'history' | 'all' | undefined; progressScope?: 'history' | 'elsewhere' | undefined; headingHidden?: boolean; /** Drawn before the rail's name: every rail gets one, so the headings read as one family. */ headingIcon?: ReactNode; headingContent?: ReactNode; emptyMessage?: string; onRefresh?: (() => void) | undefined; onArchiveContextMenu?: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing?: boolean; loading?: boolean; skeletonCount?: number; /** See `ArchiveThumbnailCard`: which page owns the detail these cards open. */ detailBasePath?: string | undefined; resetScrollKey?: string | undefined }) {
   // Keep the presence owner mounted when empty so the last card can finish its exit.
-  return <ArchiveThumbnailRailContent resetScrollKey={resetScrollKey} title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} progressScope={progressScope} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
+  return <ArchiveThumbnailRailContent resetScrollKey={resetScrollKey} title={title} archives={archives} scopeId={scopeId} serverId={serverId} progressByArchiveId={progressByArchiveId} progressVisibility={progressVisibility} progressScope={progressScope} headingHidden={headingHidden} headingIcon={headingIcon} headingContent={headingContent} emptyMessage={emptyMessage} onRefresh={onRefresh} onArchiveContextMenu={onArchiveContextMenu} refreshing={refreshing} loading={loading} skeletonCount={skeletonCount} detailBasePath={detailBasePath} />;
 }
 
 type RailItem = { archive: ArchiveRecord; phase: 'entering' | 'present' | 'leaving' };
@@ -261,10 +258,10 @@ function useRailItems(archives: ArchiveRecord[], scope: string) {
  * for callers that already label the rail. `headingContent` replaces the title
  * with arbitrary controls — the recommendation tabs used to sit in a sibling
  * above the rail, which put them visually outside the panel they belong to. */
-function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden, headingIcon, headingContent, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; progressScope: 'history' | 'elsewhere' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string; resetScrollKey: string | undefined }) {
+function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId, serverId, progressByArchiveId, progressVisibility, progressScope, headingHidden, headingIcon, headingContent, emptyMessage, onRefresh, onArchiveContextMenu, refreshing, loading, skeletonCount, detailBasePath }: { title: string; archives: ArchiveRecord[]; scopeId: string; serverId: string; progressByArchiveId?: ReadonlyMap<string, number> | undefined; progressVisibility: 'none' | 'history' | 'all' | undefined; progressScope: 'history' | 'elsewhere' | undefined; headingHidden: boolean; headingIcon: ReactNode; headingContent: ReactNode; emptyMessage: string | undefined; onRefresh: (() => void) | undefined; onArchiveContextMenu: ((archive: ArchiveRecord, at: { x: number; y: number }) => void) | undefined; refreshing: boolean; loading: boolean; skeletonCount: number; detailBasePath: string; resetScrollKey: string | undefined }) {
   const scroller = useHorizontalScroller();
   const { items, finish } = useRailItems(archives, JSON.stringify([scopeId, serverId]));
-  const visible = items.length > 0 || loading;
+  const visible = items.length > 0 || loading || Boolean(emptyMessage);
   useLayoutEffect(() => {
     if (resetScrollKey !== undefined) scroller.resetScroll();
   }, [resetScrollKey, scroller.resetScroll]);
@@ -281,7 +278,7 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
   const visibleSkeletonCount = railWidth > 0
     ? Math.max(1, Math.ceil((railWidth + 12) / 162))
     : skeletonCount;
-  if (!items.length && !loading) return null;
+  if (!visible) return null;
   return <section className="archive-rail" aria-label={title}>
     {!headingHidden && <div className="archive-rail-heading">
       {headingContent ?? <h2>{headingIcon}<span>{title}</span></h2>}
@@ -289,6 +286,7 @@ function ArchiveThumbnailRailContent({ resetScrollKey, title, archives, scopeId,
         <RefreshCw aria-hidden="true" className={refreshing ? 'is-spinning' : undefined} />
       </button>}
     </div>}
+    {emptyMessage && !items.length && !loading && <p className="archive-rail-empty">{emptyMessage}</p>}
     <div ref={scroller.ref} className="archive-rail-grid" onMouseDown={scroller.onMouseDown} onClickCapture={scroller.onClickCapture} onDragStart={scroller.onDragStart}>
       <div className="archive-rail-track" data-horizontal-content="">
       {items.length === 0 && loading
