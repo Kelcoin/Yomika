@@ -39,7 +39,7 @@ Yomika 将 LANraragi 档案库、个人书架和阅读器整合在一个界面�
 
 ## 获取应用
 
-从 [Releases](https://github.com/Kelcoin/Yomika/releases) 选择与你的设备匹配的发布包。文件名包含版本、提交号和平台；若发布页尚未开放或没有可用安装包，可参考[源码构建指南](docs/BUILDING.md)。
+从 [Releases](https://github.com/Kelcoin/Yomika/releases) 选择与你的设备匹配的发布包。文件名包含版本、提交号和平台；如果还没有适合的平台安装包，可从源码运行。
 
 | 平台 | 下载与安装 | 使用说明 |
 | :--- | :--- | :--- |
@@ -333,7 +333,7 @@ Windows 迁移时可保留程序旁的 `data/`，但系统凭据不会随目录�
 
 ## 源码构建与项目资源
 
-Yomika 基于 **Tauri 2、React、TypeScript 与 Rust** 构建。源码构建指南包含环境准备、开发命令、Windows / Android 打包和运行库校验。[源码构建指南](docs/BUILDING.md)
+Yomika 基于 **Tauri 2、React、TypeScript 与 Rust** 构建。本地开发需要 Node.js 22.12+、npm、Rust stable 与对应平台的 Tauri 构建依赖。安装依赖后，运行 `npm run tauri -- dev`。
 
 GitHub Actions 的 **Build Packages and Releases** 可手动选择单独构建 Windows、Android、iOS，或同时构建三端。测试包可附到 `app-test` 草稿发布，应用正式发布使用 `app-v*` 标签。iOS 工作流在 macOS 运行器上生成未签名 IPA。[构建工作流](.github/workflows/build-packages.yml)
 
