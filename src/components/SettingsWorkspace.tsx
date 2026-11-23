@@ -825,13 +825,15 @@ export function SettingsWorkspace() {
     const report = await buildMigrationExport();
     if (!report) return;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const path = await pickSavePath(`yomika-export-${stamp}.json`);
+    const filename = `yomika-export-${stamp}.json`;
+    const path = platformName === 'ios' ? filename : await pickSavePath(filename);
     if (!path) return;
     const result = await saveTextToFile(path, report.text);
     if (!result.ok) {
       showToast(result.error.message, 'error');
       return;
     }
+    if (result.value === null) return;
     const summary = exportSummary(report);
     const where = `已导出到 ${result.value}`;
     if (exportItems.some(isCredentialItem)) {
@@ -1036,18 +1038,18 @@ export function SettingsWorkspace() {
               <SettingsPanel
                 icon={<FolderOpen />}
                 label="下载目录"
-                hint="上传与下载使用的本机目录"
-                value={preferenceDraft.downloadDirectory ? '自定义' : '默认'}
+                hint={platformName === 'ios' ? '档案保存在应用的下载目录中' : '上传与下载使用的本机目录'}
+                value={platformName !== 'ios' && preferenceDraft.downloadDirectory ? '自定义' : '默认'}
               >
-                <p className="settings-menu-path is-selectable">{preferenceDraft.downloadDirectory || defaultDownloadHint}</p>
-                <div className="settings-menu-actions">
+                <p className="settings-menu-path is-selectable">{(platformName !== 'ios' && preferenceDraft.downloadDirectory) || defaultDownloadHint}</p>
+                {platformName !== 'ios' && <div className="settings-menu-actions">
                   <button className="secondary-action" type="button" title="选择下载目录" aria-label="选择下载目录" onClick={() => {
                     void pickDirectory().then((selected) => {
                       if (typeof selected === 'string') editPreferences({ downloadDirectory: selected });
                     }).catch(() => showToast('无法打开目录选择器', 'error'));
                   }}><FolderOpen aria-hidden="true" />选择目录</button>
                   <button className="secondary-action" type="button" title="恢复默认下载目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" />恢复默认</button>
-                </div>
+                </div>}
               </SettingsPanel>
             )}
             </div>

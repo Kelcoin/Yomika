@@ -3668,7 +3668,8 @@ fn resolved_download_directory(
     connection: &Connection,
 ) -> Result<std::path::PathBuf, String> {
     let preferences = crate::settings::load_preferences_from(connection)?;
-    if preferences.download_directory.is_empty() {
+    // The mobile dialog cannot grant persistent write access to an iOS folder.
+    if cfg!(target_os = "ios") || preferences.download_directory.is_empty() {
         Ok(crate::inference::model_data_dir(app)
             .map_err(|error| error.to_string())?
             .join("downloads"))
@@ -8523,6 +8524,9 @@ pub struct ArchiveMetadataUpdateInput {
 }
 
 fn validate_upload_path(file_path: &str) -> Result<(std::path::PathBuf, String), String> {
+    #[cfg(target_os = "ios")]
+    let path = super::platform::ios_picked_file_path(file_path)?;
+    #[cfg(not(target_os = "ios"))]
     let path = std::path::PathBuf::from(file_path);
     if !path.is_absolute() || !path.is_file() {
         return Err("Archive file not found".to_string());

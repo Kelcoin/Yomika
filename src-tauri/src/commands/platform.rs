@@ -286,30 +286,92 @@ pub async fn open_external_url(app: tauri::AppHandle, url: String) -> CommandRes
     }
 }
 
-/// 把一段文本写到用户选定的位置（导入导出的「导出为文件」走这里）。
-///
-/// Android 上 `dialog.save` 交回来的是 SAF 的 `content://` URI（系统的「新建文档」已经
-/// 把文件建好了，零字节），`std::fs` 对它无能为力，得走原生那层 ContentResolver——
-/// 与错误日志导出是同一条路，所以那段实现留在 `mobile_host` 里，两边共用。
+#[cfg(any(target_os = "ios", test))]
+pub(super) fn ios_picked_file_path(value: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::Path::new(value);
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    url::Url::parse(value)
+        .ok()
+        .filter(|url| url.scheme() == "file")
+        .and_then(|url| url.to_file_path().ok())
+        .ok_or_else(|| "Invalid local file path".to_string())
+}
+
+/// iOS exports an existing document by copying it. The dialog plugin looks for
+/// the named source in Documents and creates an empty file if it is missing.
+#[cfg(target_os = "ios")]
+async fn export_ios_text(
+    app: &tauri::AppHandle,
+    filename: &str,
+    contents: &str,
+) -> Result<Option<String>, String> {
+    use std::io::Write;
+    use tauri::Manager;
+    use tauri_plugin_dialog::DialogExt;
+
+    static EXPORT_DIALOG: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let name = std::path::Path::new(filename);
+    if name.file_name().and_then(|name| name.to_str()) != Some(filename) {
+        return Err("Invalid export filename".into());
+    }
+    let (stem, extension) = filename.rsplit_once('.').ok_or("Missing export extension")?;
+    let directory = app.path().document_dir().map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let mut source = tempfile::Builder::new()
+        .prefix(&format!("{stem}-"))
+        .suffix(&format!(".{extension}"))
+        .tempfile_in(directory)
+        .map_err(|error| error.to_string())?;
+    source.write_all(contents.as_bytes()).map_err(|error| error.to_string())?;
+    let staged_name = source.path().file_name().unwrap().to_string_lossy().into_owned();
+
+    let _guard = EXPORT_DIALOG.lock().await;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().set_file_name(staged_name).save_file(move |selection| {
+        // Keep the source alive until the picker has completed the copy.
+        drop(source);
+        let _ = tx.send(selection.map(|path| {
+            let display = path.clone().into_path().ok();
+            display.map_or_else(|| path.to_string(), |path| path.display().to_string())
+        }));
+    });
+    rx.await.map_err(|error| error.to_string())
+}
+
+/// Desktop receives a path, Android receives a SAF URI, and iOS receives a
+/// suggested filename so it can stage the contents before opening the dialog.
+pub(crate) async fn write_text_export(
+    app: &tauri::AppHandle,
+    target: &str,
+    contents: &str,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "ios")]
+    return export_ios_text(app, target, contents).await;
+    #[cfg(target_os = "android")]
+    crate::mobile_host::write_text_file(app, target, contents).await?;
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        std::fs::write(target, contents).map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(target_os = "ios"))]
+    Ok(Some(target.to_string()))
+}
+
 #[tauri::command]
 pub async fn save_text_file(
     app: tauri::AppHandle,
     path: String,
     contents: String,
-) -> CommandResult<String> {
+) -> CommandResult<Option<String>> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return CommandResult::failure("INVALID_INPUT", "导出路径为空", false);
     }
-    #[cfg(target_os = "android")]
-    let written = crate::mobile_host::write_text_file(&app, trimmed, &contents).await;
-    #[cfg(not(target_os = "android"))]
-    let written = {
-        let _ = &app;
-        std::fs::write(trimmed, contents).map_err(|error| error.to_string())
-    };
-    match written {
-        Ok(()) => CommandResult::success(trimmed.to_string()),
+    match write_text_export(&app, trimmed, &contents).await {
+        Ok(path) => CommandResult::success(path),
         Err(message) => CommandResult::failure("UNKNOWN", message, true),
     }
 }
@@ -329,8 +391,13 @@ pub async fn read_text_file(app: tauri::AppHandle, path: String) -> CommandResul
         let _ = &app;
         // 导出的文件是 UTF-8；不是的话就直说（旧版导出的编码没法猜），由调用方去报
         // 「这不是本应用的导出」。
-        match std::fs::read(trimmed) {
-            Err(error) => Err(error.to_string()),
+        #[cfg(target_os = "ios")]
+        let bytes = ios_picked_file_path(trimmed)
+            .and_then(|path| std::fs::read(path).map_err(|error| error.to_string()));
+        #[cfg(not(target_os = "ios"))]
+        let bytes = std::fs::read(trimmed).map_err(|error| error.to_string());
+        match bytes {
+            Err(error) => Err(error),
             Ok(bytes) => String::from_utf8(bytes).map_err(|_| String::from("文件不是 UTF-8 文本")),
         }
     };
@@ -392,6 +459,21 @@ fn secure_storage_available() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ios_picker_url_decodes_a_local_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("备份 #1%.json");
+        std::fs::write(&path, "{}").unwrap();
+        let url = url::Url::from_file_path(&path).unwrap();
+
+        let resolved = super::ios_picked_file_path(url.as_str()).unwrap();
+        assert_eq!(resolved, path);
+        assert_eq!(std::fs::read_to_string(resolved).unwrap(), "{}");
+        assert_eq!(super::ios_picked_file_path(path.to_str().unwrap()).unwrap(), path);
+        assert!(super::ios_picked_file_path("content://provider/backup.json").is_err());
+        assert!(super::ios_picked_file_path("https://localhost/backup.json").is_err());
+    }
+
     use super::*;
 
     #[test]

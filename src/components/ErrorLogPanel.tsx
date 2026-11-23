@@ -251,11 +251,13 @@ export function useErrorLog(): ErrorLogState {
     setExporting(true);
     try {
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-      const path = await pickSavePath(`yomika-error-${stamp}.log`);
+      const filename = `yomika-error-${stamp}.log`;
+      const path = platform === 'ios' ? filename : await pickSavePath(filename);
       if (!path) return;
       await flushErrorLog();
       const response = await repository.exportTo(path, exportText(entries, appInfoLines(build, platform)));
-      showToast(response.ok ? `错误日志已导出到 ${path}` : response.error.message, response.ok ? 'success' : 'error');
+      if (!response.ok) showToast(response.error.message, 'error');
+      else if (response.value !== null) showToast(`错误日志已导出到 ${response.value}`, 'success');
     } catch (error) {
       showToast(error instanceof Error ? error.message : '导出错误日志失败', 'error');
     } finally {
