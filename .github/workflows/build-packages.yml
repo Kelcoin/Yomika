@@ -48,16 +48,15 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
-    env:
-      # Keep the hash-named ORT cache and its extraction paths short on Windows.
-      ORT_CACHE_DIR: ${{ github.workspace }}/.ort
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      # ort-sys rc.13 assumes the Cargo 1.98 OUT_DIR layout when copying
+      # DirectML.dll. Cargo 1.100 adds a level and sends it to the wrong directory.
+      - uses: dtolnay/rust-toolchain@1.98.0
       - run: npm ci --no-audit --no-fund
       # The Windows build script carries the Windows-specific packaging work: it
       # strips the non-Windows ONNX dylibs ort drops next to the exe, resolves the

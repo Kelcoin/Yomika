@@ -93,12 +93,6 @@ try {
         "-p", "yomika-compute-worker"
     )
     if (-not $DebugBuild) { $buildArgs += "--release" }
-    # ort-sys stages its runtime DLL in these directories during its build
-    # script. Create them up front so staging can also run on a clean checkout.
-    $profileDir = Join-Path $targetDir $configuration
-    foreach ($directory in @($profileDir, (Join-Path $profileDir "examples"), (Join-Path $profileDir "deps"))) {
-        New-Item -ItemType Directory -Force -Path $directory | Out-Null
-    }
     & $cargo @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build -p yomika-compute-worker failed with exit code $LASTEXITCODE." }
 
