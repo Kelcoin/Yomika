@@ -33,9 +33,9 @@ export async function sampleNativeWheelZoom(session: number, page: number, maxim
 }
 
 let pinchConfiguration = Promise.resolve<unknown>(undefined);
-export function configureNativePinchInput(session: number, page: number, enabled: boolean, maximum: number, reduceMotion: boolean, left?: number, right?: number, exitLeft?: boolean): Promise<boolean> {
+export function configureNativePinchInput(session: number, page: number, enabled: boolean, maximum: number, reduceMotion: boolean, left?: number, right?: number): Promise<boolean> {
   if (!hasNativePinchInput()) return Promise.resolve(false);
-  const result = pinchConfiguration.then(() => invoke('reader_native_pinch_input', { session, page, enabled, maximum, reduceMotion, ...(left && { left }), ...(right && { right }), ...(exitLeft !== undefined && { exitLeft }) }));
+  const result = pinchConfiguration.then(() => invoke('reader_native_pinch_input', { session, page, enabled, maximum, reduceMotion, ...(left && { left }), ...(right && { right }) }));
   pinchConfiguration = result.catch(() => undefined);
   return result.then(() => true, () => false);
 }
@@ -91,6 +91,11 @@ export function updateNativeReaderTransform(page: number, zoom: ZoomState, sessi
     edgeOffset: samePage ? previous.edgeOffset : 0,
     neighbourPage: samePage ? previous.neighbourPage : undefined,
   }, zoomFrom ? { from: samePage ? previous.edgeOffset : 0, durationMs, zoomFrom } : undefined);
+}
+
+/** Mirror UIKit's settled zoom before the next shared pan or page slide. */
+export function rememberNativeReaderZoom(page: number, session: number, zoom: ZoomState): void {
+  previewTransform = { ...zoom, page, session, pixelRatio: window.devicePixelRatio || 1, edgeOffset: 0 };
 }
 
 function sendPreviewTransform(transform: PreviewTransform, transition?: SlideTransition): void {

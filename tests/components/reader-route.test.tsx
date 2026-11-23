@@ -271,14 +271,14 @@ describe('reader route', () => {
     expect(screen.queryByText(/超分这一步没跑成/)).not.toBeInTheDocument();
   });
 
-  it('shows the initial page without waiting for a slow neighbour prefetch', async () => {
+  it('shows the initial page and starts the neighbour request while the initial image is still pending', async () => {
     const cache = getNativeImageCache();
-    const pending: Array<() => void> = [];
+    const pending = new Map<number, () => void>();
     vi.spyOn(cache, 'release').mockImplementation(() => {});
     vi.spyOn(cache, 'load').mockImplementation((identity) => {
       const handle = { key: `${identity.rendition}-${identity.pageIndex}`, url: `blob:initial-${identity.pageIndex}`, bytes: 1 };
-      if (identity.rendition === 'reader-page' && identity.pageIndex > 0) {
-        return new Promise<ImageHandle>((resolve) => { pending.push(() => resolve(handle)); });
+      if (identity.rendition === 'reader-page') {
+        return new Promise<ImageHandle>((resolve) => { pending.set(identity.pageIndex, () => resolve(handle)); });
       }
       return Promise.resolve(handle);
     });
@@ -294,10 +294,13 @@ describe('reader route', () => {
     });
     const view = render(<MemoryRouter initialEntries={['/reader/slow-neighbour']}><App /></MemoryRouter>);
     try {
+      await waitFor(() => expect(pending.has(1)).toBe(true));
+      expect(screen.getByRole('main', { name: '漫画阅读器' })).toBeInTheDocument();
+      await act(async () => pending.get(0)?.());
       expect(await screen.findByRole('img', { name: '第 1 页' })).toHaveAttribute('src', 'blob:initial-0');
     } finally {
       view.unmount();
-      for (const resolve of pending) resolve();
+      for (const resolve of pending.values()) resolve();
     }
   });
 

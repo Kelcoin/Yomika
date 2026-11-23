@@ -607,25 +607,31 @@ export class NativeLibraryRepository {
    * behind them — reading the whole library to resolve a dozen titles scaled
    * with the library instead of with the shelf. Answers in the requested id
    * order. Resolve missing metadata without pulling the entire index. */
-  async listArchivesByIds(serverId: string, archiveIds: string[], options: { resolveMissing?: boolean } = {}): Promise<CommandResult<ArchiveRecord[]>> {
+  async listArchivesByIds(serverId: string, archiveIds: string[], options: { resolveMissing?: boolean; onAvailable?: (archives: ArchiveRecord[]) => void; signal?: AbortSignal } = {}): Promise<CommandResult<ArchiveRecord[]>> {
     if (archiveIds.length === 0) return { ok: true, value: [] };
     const cached = await invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema));
     if (!cached.ok || options.resolveMissing === false) return cached;
+    if (!options.signal?.aborted && cached.value.length) options.onAvailable?.(cached.value);
     const found = new Set(cached.value.map(archive => archive.archiveId));
     const missing = [...new Set(archiveIds)].filter(id => !found.has(id)).slice(0, 64);
     if (missing.length === 0) return cached;
     let cursor = 0;
     let resolved = false;
     await Promise.all(Array.from({ length: Math.min(4, missing.length) }, async () => {
-      while (cursor < missing.length) {
+      while (!options.signal?.aborted && cursor < missing.length) {
         const id = missing[cursor++]!;
         // Native metadata loading persists the record. Offline failures leave
         // the existing shelf usable; a later refresh can try missing ids again.
         const result = await this.loadArchiveMetadata(serverId, id);
-        if (result.ok) resolved = true;
+        if (!result.ok || options.signal?.aborted) continue;
+        resolved = true;
+        if (options.onAvailable) {
+          const indexed = await this.listArchivesByIds(serverId, [id], { resolveMissing: false });
+          if (indexed.ok && indexed.value.length && !options.signal?.aborted) options.onAvailable(indexed.value);
+        }
       }
     }));
-    return resolved
+    return resolved && !options.signal?.aborted
       ? invokeCommand('list_archives_by_ids', { serverId, archiveIds }, z.array(ArchiveRecordSchema))
       : cached;
   }

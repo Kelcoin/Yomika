@@ -5,7 +5,8 @@ import { invokeCommand } from '../bridge/invoke';
 import { DataExportReportSchema, DataImportReportSchema, type DataExportReport, type DataImportReport } from '../domain/dataExport';
 import type { CommandResult } from '../domain/result';
 
-/** Keep in step with `MAX_PREFETCH_PAGES` in src-tauri/src/settings.rs. */
+/** Keep in step with the prefetch bounds in src-tauri/src/settings.rs. */
+export const MIN_PREFETCH_PAGES = 1;
 export const MAX_PREFETCH_PAGES = 10;
 
 export const DETAIL_ACTIONS = ['read', 'readingList', 'favorites', 'download', 'edit', 'clearProgress', 'delete'] as const;
@@ -20,7 +21,7 @@ export const PreferenceSnapshotSchema = z.object({
   cacheMaxBytes: z.number().int().min(1_073_741_824).max(34_359_738_368).refine((value) => value % 1_073_741_824 === 0),
   // Defaults keep an older native build (which does not send these yet) from
   // failing the whole snapshot.
-  prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).default(2),
+  prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).transform((pages) => Math.max(MIN_PREFETCH_PAGES, pages)).default(2),
   coverConcurrency: z.number().int().min(1).max(8).default(4),
   /** Which page opens at launch. Someone who lives in the library should not
    * have to step through the home page every time. */

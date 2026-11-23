@@ -49,6 +49,26 @@ describe('remote favorites authority', () => {
     expect(metadata).not.toHaveBeenCalled();
     vi.restoreAllMocks();
   });
+  it('publishes indexed favorites and each available search page before the final page', async () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f'];
+    const record = (archiveId: string) => ({ serverId: 's', archiveId, title: archiveId, pageCount: 3, updatedAt: 'now' });
+    vi.spyOn(NativeLibraryRepository.prototype, 'listArchivesByIds').mockResolvedValue({ ok: true, value: [record('a')] });
+    let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    vi.spyOn(NativeLibraryRepository.prototype, 'searchArchivesPage')
+      .mockResolvedValueOnce({ ok: true, value: { items: [record('b'), record('stale')], total: 7, hasMore: true } })
+      .mockImplementationOnce(async () => {
+        await pending;
+        return { ok: true, value: { items: ids.slice(2).map(record), total: 7, hasMore: false } };
+      });
+    const available = vi.fn();
+    const loading = loadFavoriteArchives('s', ids, 'fav', { onAvailable: available });
+    try {
+      await vi.waitFor(() => expect(available.mock.calls).toEqual([[[record('a')]], [[record('b')]]]));
+    } finally { finish(); }
+    expect((await loading).map(archive => archive.archiveId)).toEqual(ids);
+    vi.restoreAllMocks();
+  });
   it('limits metadata requests to four at once', async () => {
     vi.spyOn(NativeLibraryRepository.prototype, 'listArchivesByIds').mockResolvedValue({ ok: true, value: [] });
     let active = 0, peak = 0;

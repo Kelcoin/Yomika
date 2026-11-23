@@ -98,3 +98,35 @@ it('revalidates warm history on mount and when returning to a retained home', as
   expect(await screen.findByText('History newer')).toBeInTheDocument();
   await waitFor(() => expect(screen.queryByText('History new')).not.toBeInTheDocument());
 });
+
+it('adds home cards as their metadata resolves while the other shelf is pending', async () => {
+  const server = { id: 'progressive', scopeId: 'progressive', name: 'Server', baseUrl: 'https://example.com', enabled: true };
+  let finishReading!: () => void;
+  const reading = new Promise<void>(resolve => { finishReading = resolve; });
+  let finishSlow!: () => void;
+  const slow = new Promise<void>(resolve => { finishSlow = resolve; });
+  const indexed = new Set(['cached']);
+  setInvokeAdapterForTests(async (command, args) => {
+    if (command === 'list_servers') return { ok: true, value: [server] };
+    if (command === 'list_reading_history') return { ok: true, value: ['cached', 'fast', 'slow'].map(archiveId => ({ scopeId: server.scopeId, archiveId, pageIndex: 1, visitedAt: '2026-10-16', deviceId: 'd', revision: 1 })) };
+    if (command === 'list_reading_list') { await reading; return { ok: true, value: [] }; }
+    if (command === 'list_archives_by_ids') return { ok: true, value: (args?.archiveIds as string[]).filter(id => indexed.has(id)).map(archiveId => ({ serverId: server.id, archiveId, title: `Card ${archiveId}`, pageCount: 20, updatedAt: 'now' })) };
+    if (command === 'load_archive_metadata') {
+      const archiveId = args?.archiveId as string;
+      if (archiveId === 'slow') await slow;
+      indexed.add(archiveId);
+      return { ok: true, value: { archiveId, title: archiveId, filename: 'archive.cbz', tags: '', extension: 'cbz', progress: 0, pageCount: 20, lastReadTime: 0, size: 1024 } };
+    }
+    return { ok: true, value: [] };
+  });
+  render(<MemoryRouter><PreferencesProvider><ToastProvider><WorkspaceRoutes /></ToastProvider></PreferencesProvider></MemoryRouter>);
+  try {
+    const cached = await screen.findByRole('link', { name: /Card cached/ });
+    const fast = await screen.findByRole('link', { name: /Card fast/ });
+    expect(fast.closest('.archive-rail-item')).toHaveClass('is-entering');
+    expect(screen.queryByRole('link', { name: /Card slow/ })).toBeNull();
+    await act(async () => finishSlow());
+    expect(await screen.findByRole('link', { name: /Card slow/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Card cached/ })).toBe(cached);
+  } finally { await act(async () => { finishSlow(); finishReading(); }); }
+});

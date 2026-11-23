@@ -1910,6 +1910,26 @@ describe('reader screen', () => {
     view.unmount();
   });
 
+  it('keeps the forward preload alive during consecutive swipes through loading pages', async () => {
+    const loadPage = vi.fn((_index: number, _signal?: AbortSignal) => new Promise<string>(() => {}));
+    render(<MemoryRouter><ReaderScreen archiveId="a" title="Reader" pages={['blob:first', '', '', '', '']}
+      layout="single" direction="ltr" prefetchDistance={3} loadPage={loadPage} /></MemoryRouter>);
+    await waitFor(() => expect(loadPage).toHaveBeenCalledWith(2, expect.any(AbortSignal)));
+    const forwardPreload = loadPage.mock.calls.find(([index]) => index === 2)![1]!;
+    const reader = screen.getByRole('main', { name: '漫画阅读器' });
+    const swipe = () => {
+      fireEvent.touchStart(reader, { touches: [{ clientX: 300, clientY: 150 }] });
+      fireEvent.touchMove(reader, { touches: [{ clientX: 50, clientY: 150 }] });
+      fireEvent.touchEnd(reader, { changedTouches: [{ clientX: 50, clientY: 150 }] });
+    };
+    swipe();
+    expect(screen.getByText('2 / 5')).toBeInTheDocument();
+    expect(forwardPreload.aborted).toBe(false);
+    swipe();
+    expect(screen.getByText('3 / 5')).toBeInTheDocument();
+    expect(forwardPreload.aborted).toBe(false);
+  });
+
   it('shows a page that has not arrived as loading rather than as a failure', async () => {
     let resolvePage: ((value: string | undefined) => void) | undefined;
     const loadPage = vi.fn(() => new Promise<string | undefined>((resolve) => { resolvePage = resolve; }));

@@ -621,10 +621,65 @@ it('keeps a native iOS zoom sample when the same page is being processed', async
       window.dispatchEvent(new CustomEvent('yomika-reader-tile-presented', { detail: { slot: replacement } }));
     });
     expect(rendered.container.querySelector('.reader-frame.is-current .reader-zoom') ?? rendered.container.querySelector('[style*="scale(2)"]')).toHaveStyle({ transform: 'scale(2) translate(24px, -12px)' });
+    const canvas = screen.getByRole('main', { name: '漫画阅读器' });
+    const touch = (clientX: number) => ({ clientX, clientY: 300 });
+    fireEvent.touchStart(canvas, { touches: [touch(400)] });
+    // Deliberately overshoot the pan limit before reversing by one pixel.
+    fireEvent.touchMove(canvas, { touches: [touch(400 + window.innerWidth)] });
+    const edge = window.innerWidth / 4;
+    await vi.waitFor(() => expect(rawInvoke).toHaveBeenCalledWith('reader_native_view_transform', expect.objectContaining({
+      transform: expect.objectContaining({ session: 12, page: 1, scale: 2, panX: edge }),
+    }), undefined));
+    fireEvent.touchMove(canvas, { touches: [touch(399 + window.innerWidth)] });
+    await vi.waitFor(() => expect(rawInvoke).toHaveBeenCalledWith('reader_native_view_transform', expect.objectContaining({
+      transform: expect.objectContaining({ session: 12, page: 1, scale: 2, panX: edge - 0.5 }),
+    }), undefined));
+    fireEvent.touchEnd(canvas, { touches: [], changedTouches: [touch(399 + window.innerWidth)] });
   } finally {
     rendered.unmount();
     for (const url of [plain, derived]) forgetTileSource(url);
     resetInvokeAdapterForTests();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('animates a short iOS swipe to a loading page after the finger reverses', async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal('__yomikaNativeReaderPreview', true);
+  vi.stubGlobal('__yomikaNativePinchInput', true);
+  const invoke = vi.fn().mockResolvedValue(undefined);
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  const loadPage = vi.fn(() => new Promise<string>(() => {}));
+  const view = render(<MemoryRouter><ReaderScreen archiveId="reverse" title="Reader" layout="single"
+    readerSession={72} initialPage={1} pages={[plain, 'blob:current', '']} loadPage={loadPage} /></MemoryRouter>);
+  try {
+    const canvas = screen.getByRole('main', { name: '漫画阅读器' });
+    const track = canvas.querySelector<HTMLElement>('.reader-track')!;
+    const animation = { cancel: vi.fn(), onfinish: undefined as (() => void) | undefined };
+    track.animate = vi.fn().mockReturnValue(animation);
+    const touch = (clientX: number) => ({ clientX, clientY: 300 });
+    fireEvent.touchStart(canvas, { touches: [touch(400)] });
+    fireEvent.touchMove(canvas, { touches: [touch(402)] });
+    await act(async () => { await vi.advanceTimersByTimeAsync(16); });
+    expect(track.style.transform).toBe('translate3d(2px,0,0)');
+    expect(invoke).toHaveBeenCalledWith('reader_native_view_transform', expect.objectContaining({
+      transform: expect.objectContaining({ session: 72, page: 2, neighbourPage: 1, edgeOffset: 2 / window.innerWidth }),
+    }), undefined);
+    fireEvent.touchMove(canvas, { touches: [touch(365)] });
+    await act(async () => { await vi.advanceTimersByTimeAsync(16); });
+    await act(async () => { fireEvent.touchEnd(canvas, { touches: [], changedTouches: [touch(365)] }); });
+    expect(invoke).toHaveBeenCalledWith('reader_native_view_transform', expect.objectContaining({
+      transform: expect.objectContaining({ session: 72, page: 2, neighbourPage: 3, edgeOffset: -1 }),
+      transition: expect.objectContaining({ from: -35 / window.innerWidth, durationMs: expect.any(Number) }),
+    }), undefined);
+    expect(track.animate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ duration: expect.any(Number) }));
+    expect(screen.getByText('2 / 3')).toBeInTheDocument();
+    await act(async () => { animation.onfinish?.(); });
+    expect(screen.getByText('3 / 3')).toBeInTheDocument();
+    expect(screen.getByRole('status', { name: '正在加载' })).toBeInTheDocument();
+  } finally {
+    view.unmount();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   }
 });

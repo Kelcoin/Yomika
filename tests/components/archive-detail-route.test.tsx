@@ -898,17 +898,13 @@ describe('archive detail route', () => {
     expect(tablist!.querySelector('.archive-recommendations-tab-creator')).not.toBeNull();
   });
 
-  it('requests page thumbnails only when they approach the viewport', async () => {
+  it('loads all page thumbnails with bounded concurrency before scrolling', async () => {
     const OriginalObserver = window.IntersectionObserver;
-    const observed: Array<() => void> = [];
-    // 共享观察器（全页面一个实例）的语义：observe 一个节点产生一次可触发的
-    // 回调注册，而不是构造实例时触发一次。
+    const pending: Array<() => void> = [];
+    const count = 52;
+    // The observer deliberately never reports any visible tiles.
     window.IntersectionObserver = class {
-      private callback: IntersectionObserverCallback;
-      constructor(callback: IntersectionObserverCallback) { this.callback = callback; }
-      observe(node: Element) {
-        observed.push(() => this.callback([{ isIntersecting: true, target: node } as IntersectionObserverEntry], this as unknown as IntersectionObserver));
-      }
+      observe() {}
       disconnect() {}
       takeRecords() { return []; }
       unobserve() {}
@@ -918,22 +914,48 @@ describe('archive detail route', () => {
     } as unknown as typeof IntersectionObserver;
     const adapter = vi.fn(async (command: string, args?: Record<string, any>) => {
       if (command === 'list_servers') return { ok: true, value: [server] };
-      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 4 } };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, archiveId: 'thumbnail-queue', pageCount: count } };
       if (command === 'list_watchlist' || command === 'list_reading_list') return { ok: true, value: [] };
       if (command === 'cache_read_image') return { ok: true, value: [] };
       if (command === 'load_archive_thumbnail') return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'No cover', retryable: true } };
-      if (command === 'load_archive_page_thumbnail') return { ok: true, value: [255, 216, 255, 224] };
+      if (command === 'load_archive_page_thumbnail') {
+        await new Promise<void>((resolve) => pending.push(resolve));
+        return { ok: true, value: [255, 216, 255, 224] };
+      }
       throw new Error(`Unexpected command: ${command} ${JSON.stringify(args)}`);
     });
     setInvokeAdapterForTests(adapter);
     try {
-      renderDetail();
+      render(<MemoryRouter><ArchiveDetailRoute archiveId="thumbnail-queue" /></MemoryRouter>);
       await screen.findByRole('button', { name: '查看第 4 页' });
-      expect(adapter.mock.calls.filter(([command]) => command === 'load_archive_page_thumbnail')).toHaveLength(0);
-      observed.forEach((intersect) => intersect());
-      await vi.waitFor(() => {
-        expect(adapter.mock.calls.filter(([command]) => command === 'load_archive_page_thumbnail')).toHaveLength(4);
-      });
+      expect(screen.queryByRole('button', { name: `查看第 ${count} 页` })).toBeNull();
+      await waitFor(() => expect(pending).toHaveLength(4));
+      const requests = () => adapter.mock.calls.filter(([command]) => command === 'load_archive_page_thumbnail');
+      for (let done = 0; done < count; done += 4) {
+        await waitFor(() => expect(pending).toHaveLength(4));
+        expect(requests()).toHaveLength(done + 4);
+        await act(async () => { pending.splice(0).forEach((resolve) => resolve()); });
+      }
+      expect(new Set(requests().map(([, args]) => args?.page)).size).toBe(count);
+      const grid = document.querySelector<HTMLElement>('.archive-page-thumbnails-grid')!;
+      const first = () => screen.queryByRole('button', { name: '查看第 1 页' });
+      const original = first();
+      const src = original?.querySelector('img')?.getAttribute('src');
+      expect(src).toBeTruthy();
+      Object.defineProperties(grid, { clientWidth: { value: 120 }, clientHeight: { value: 300 } });
+      // The grid chooses its scroll host when the layout effect first runs.
+      // Scrolling its original host changes the measured grid offset.
+      let top = 0;
+      vi.spyOn(grid, 'getBoundingClientRect').mockImplementation(() => ({ top } as DOMRect));
+      top = -6500;
+      fireEvent(window, new Event('resize'));
+      await waitFor(() => expect(first()).toBeNull());
+      top = 0;
+      fireEvent(window, new Event('resize'));
+      await waitFor(() => expect(first()?.querySelector('img')).toHaveAttribute('src', src));
+      expect(first()).not.toBe(original);
+      expect(first()?.querySelector('.is-skeleton')).toBeNull();
+      expect(requests()).toHaveLength(count);
     } finally {
       window.IntersectionObserver = OriginalObserver;
     }
@@ -1011,6 +1033,28 @@ describe('archive detail route', () => {
     const rail = await screen.findByRole('region', { name: '推荐' });
     expect(within(rail).getByRole('link', { name: /Kept recommendation/ })).toBeInTheDocument();
     expect(within(rail).queryByRole('link', { name: /Gone recommendation/ })).not.toBeInTheDocument();
+  });
+
+  it('shows the first recommendation page while later pages are pending', async () => {
+    let finishSearch!: () => void;
+    const laterPage = new Promise<void>((resolve) => { finishSearch = resolve; });
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'list_servers') return { ok: true, value: [server] };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'search_archives_page') {
+        const start = (args as { input: { start: number } }).input.start;
+        if (start > 0) await laterPage;
+        return { ok: true, value: { items: [{ serverId: server.id, archiveId: start > 0 ? 'second' : 'first', title: start > 0 ? 'Later result' : 'Early result', updatedAt: 'now', pageCount: 1, tags: ['female:glasses'] }], total: 2, hasMore: start === 0 } };
+      }
+      return { ok: true, value: [] };
+    });
+    renderDetail();
+    try {
+      expect(await screen.findByRole('link', { name: /Early result/ })).toBeInTheDocument();
+      expect(screen.queryByRole('link', { name: /Later result/ })).toBeNull();
+      finishSearch();
+      expect(await screen.findByRole('link', { name: /Later result/ })).toBeInTheDocument();
+    } finally { finishSearch(); }
   });
 
   it('shows recommendations on the owning page even while history is pending', async () => {

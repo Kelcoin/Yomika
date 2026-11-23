@@ -81,6 +81,7 @@ pub const MAX_CACHE_BYTES: u64 = 32 * GIB_BYTES;
 /// Pages either side of the current one the reader may preload. A page is a few
 /// hundred KB from a server on the same LAN, so the old ceiling of 5 was
 /// needlessly cautious.
+const MIN_PREFETCH_PAGES: u8 = 1;
 pub const MAX_PREFETCH_PAGES: u8 = 10;
 
 pub(crate) fn get_or_create_device_id(
@@ -414,6 +415,7 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
     Ok(PreferenceSnapshot {
         detail_actions: ["read", "readingList", "favorites", "download", "edit", "clearProgress", "delete"].into_iter().filter(|item| value.detail_actions.iter().any(|value| value == item)).map(String::from).collect(),
         bottom_nav_items: normalized,
+        prefetch_pages: value.prefetch_pages.max(MIN_PREFETCH_PAGES),
         ..value.clone()
     })
 }

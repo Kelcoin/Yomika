@@ -20,7 +20,9 @@ import { createRecommendationSeed, pickPopularSeedTags, rankRecommendations, sam
 import { pickServer } from '../domain/server';
 import { useTagTranslations } from '../lib/tagTranslationService';
 import { getNativeImageCache, RenditionError } from '../lib/nativeImageCache';
-import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
+import { THUMBNAIL_CONCURRENCY } from '../lib/thumbnailScheduler';
+import type { ImageCacheIdentity } from '../domain/cache';
+import type { ImageHandle } from '../lib/unifiedImageCache';
 import { invalidateRouteCache, readRouteCache, writeRouteCache } from '../lib/routeCache';
 import { ArchiveMetadataSchema, isArchiveDownloadPending, NativeLibraryRepository, type ArchiveMetadata } from '../repositories/nativeLibraryRepository';
 import type { ArchiveRecord } from '../domain/library';
@@ -566,11 +568,12 @@ detailBasePath?: string | undefined }) {
       {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} detailBasePath={detailBasePath} />}
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
-        <DetailPageThumbnailGrid count={metadata.pageCount}>
-            {(index) => (
-              <ArchivePageThumbnail key={index} serverId={serverId} scopeId={scopeId} archiveId={archiveId} page={index + 1} onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)} />
-            )}
-        </DetailPageThumbnailGrid>
+        <ArchivePageThumbnails
+          key={JSON.stringify([scopeId, serverId, archiveId])}
+          count={metadata.pageCount}
+          archive={{ scopeId, serverId, archiveId }}
+          onOpen={(page) => navigate(`/reader/${encodeURIComponent(archiveId)}?page=${page - 1}&server=${encodeURIComponent(serverId)}`)}
+        />
       )}
 
       {metadata?.summary && <p className="archive-detail-summary">{metadata.summary}</p>}
@@ -670,72 +673,76 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     }).catch(() => undefined);
     /** 服务端联系不上时改问镜像：它只有同步过的那部分，但总比空白强。一问镜像就等于
      * 承认这次答案是短的，`complete` 因此恒为 false。 */
-    const mirrorSeed = async (seed: string): Promise<{ items: ArchiveRecord[]; complete: boolean }> => {
+    const mirrorSeed = async (seed: string): Promise<ArchiveRecord[]> => {
       const mirrored = await repository.listArchivesPage(serverId, 0, RECOMMENDATION_SEED_LIMIT, { query: seed });
-      return { items: mirrored.ok ? mirrored.value.items : [], complete: false };
+      return mirrored.ok ? mirrored.value.items : [];
     };
-    /** Sample the authoritative server within the page budget. Reaching that
-     * budget is normal; treating it as failure would repeat every search on
-     * every visit for popular tags. Partial network results remain retryable. */
-    const searchSeed = async (seed: string): Promise<{ items: ArchiveRecord[]; complete: boolean }> => {
-      const items: ArchiveRecord[] = [];
+    const seeds = pickPopularSeedTags(tags, seed);
+    const normalize = (tag: string) => tag.trim().toLowerCase();
+    const similarSeeds = new Set(seeds.map(normalize));
+    const creatorSeeds = new Set(creator.tags.map(normalize));
+    const similarMatches = new Map<string, ArchiveRecord>();
+    const creatorMatchesById = new Map<string, ArchiveRecord>();
+    const rank = (found: Map<string, ArchiveRecord>, isCreator: boolean, pages = availableProgress) => {
+      const candidates = withRecommendationProgress([...found.values()], pages);
+      return isCreator ? sortSameCreatorRecommendations(candidates)
+        : rankRecommendations(tags, candidates, Number.MAX_SAFE_INTEGER, { seed });
+    };
+    const limitFor = (isCreator: boolean) => isCreator ? RECOMMENDATION_VISIBLE_LIMIT : RECOMMENDATION_POOL_LIMIT;
+    const publishPage = (tag: string, items: ArchiveRecord[]) => {
+      if (!active) return;
+      const exact = items.filter((archive) => archive.archiveId !== currentArchiveId
+        && archive.tags?.some((item) => normalize(item) === tag));
+      if (!exact.length) return;
+      const collect = (found: Map<string, ArchiveRecord>, isCreator: boolean) => {
+        for (const archive of exact) found.set(archive.archiveId, archive);
+        const ranked = rank(found, isCreator).slice(0, limitFor(isCreator));
+        if (isCreator) setSameCreator(ranked);
+        else setSimilarPool(ranked);
+      };
+      if (similarSeeds.has(tag)) collect(similarMatches, false);
+      if (creatorSeeds.has(tag)) collect(creatorMatchesById, true);
+    };
+    // Publish each page independently, including the first page of a slow seed.
+    // The final shortlist is still checked for deletions before caching it.
+    const searchSeed = async (seed: string, key: string): Promise<boolean> => {
       let start = 0;
-      for (let page = 0; page < RECOMMENDATION_SEED_PAGES; page += 1) {
+      for (let page = 0; active && page < RECOMMENDATION_SEED_PAGES; page += 1) {
         const result = await repository.searchArchivesPage(serverId, start, { query: seed });
+        if (!active) return false;
         if (!result.ok) {
-          return items.length > 0 ? { items, complete: false } : mirrorSeed(seed);
+          if (start === 0) publishPage(key, await mirrorSeed(seed));
+          return false;
         }
-        items.push(...result.value.items);
-        if (!result.value.hasMore || result.value.items.length === 0) return { items, complete: true };
+        publishPage(key, result.value.items);
+        if (!result.value.hasMore || result.value.items.length === 0) return true;
         start += result.value.items.length;
       }
-      return { items, complete: true };
+      return active;
     };
-    const seedRequests = new Map<string, ReturnType<typeof searchSeed>>();
+    const seedRequests = new Map<string, Promise<boolean>>();
     const loadSeed = (tag: string) => {
-      const key = tag.trim().toLowerCase();
+      const key = normalize(tag);
       const pending = seedRequests.get(key);
       if (pending) return pending;
-      const request = searchSeed(tag);
+      const request = searchSeed(tag, key);
       seedRequests.set(key, request);
       return request;
     };
-    const searchByTags = async (seeds: readonly string[]) => {
-      const found = new Map<string, ArchiveRecord>();
-      let complete = true;
-      if (seeds.length === 0) return { found, complete };
-      // 四路并发：一打种子串行要付一打 RTT，推荐栏才出得来。
-      const searchOne = async (seed: string) => ({ seed, ...(await loadSeed(seed)) });
-      for (let index = 0; index < seeds.length; index += 4) {
-        if (!active) return { found, complete: false };
-        const responses = await Promise.all(seeds.slice(index, index + 4).map(searchOne));
-        if (!active) return { found, complete: false };
-        for (const { seed, items, complete: seedComplete } of responses) {
-          if (!seedComplete) complete = false;
-          const normalizedSeed = seed.trim().toLowerCase();
-          for (const archive of items) {
-            // LANraragi's text search is a prefix match, not an equality test:
-            // `artist:foo` also answers with `artist:foobar`. The seed is a tag
-            // copied off this archive, so only the exact tag may come back.
-            const hasExactTag = (archive.tags ?? []).some((tag) => tag.trim().toLowerCase() === normalizedSeed);
-            if (archive.archiveId !== currentArchiveId && hasExactTag) found.set(archive.archiveId, archive);
-          }
-        }
-      }
-      return { found, complete };
-    };
     const runSearch = async () => {
-      // 问哪几个标签也由种子决定：从前的种子集是固定的，同一份标签每次都问同样几个。
-      const seeds = pickPopularSeedTags(tags, seed);
       const loadRail = async (railTags: readonly string[], isCreator: boolean) => {
-        const result = await searchByTags(railTags);
+        let next = 0;
+        let complete = true;
+        await Promise.all(Array.from({ length: Math.min(4, railTags.length) }, async () => {
+          while (active && next < railTags.length) {
+            if (!await loadSeed(railTags[next++]!)) complete = false;
+          }
+        }));
+        if (!active) return { items: [], complete: false };
+        const found = isCreator ? creatorMatchesById : similarMatches;
         const select = async (pages?: ReadonlyMap<string, number>) => {
-          const candidates = withRecommendationProgress([...result.found.values()], pages);
-          const ranked = isCreator ? sortSameCreatorRecommendations(candidates)
-            : rankRecommendations(tags, candidates, Number.MAX_SAFE_INTEGER, { seed });
-          const limit = isCreator ? RECOMMENDATION_VISIBLE_LIMIT : RECOMMENDATION_POOL_LIMIT;
-          // Verify the retained pool and a small reserve for confirmed deletions.
-          const shortlist = ranked.slice(0, limit + 8);
+          const limit = limitFor(isCreator);
+          const shortlist = rank(found, isCreator, pages).slice(0, limit + 8);
           const missing = await findMissingArchives(serverId, shortlist.map(archive => archive.archiveId));
           const items = shortlist.filter(archive => !missing.has(archive.archiveId)).slice(0, limit);
           if (active) {
@@ -746,13 +753,11 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
         };
         const initial = availableProgress;
         let items = await select(initial);
-        // Show search results immediately, then select again before caching if
-        // history arrived after the first shortlist was chosen.
         if (!initial) {
           const pages = await history;
           if (active && pages) items = await select(pages);
         }
-        return { items, complete: result.complete };
+        return { items, complete };
       };
       const [similar, creatorMatches] = await Promise.all([
         loadRail(seeds, false),
@@ -848,66 +853,114 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
   );
 }
 
-function ArchivePageThumbnail({
-  serverId,
-  scopeId,
-  archiveId,
-  page,
-  onOpen,
-}: {
-  serverId: string;
-  scopeId: string;
-  archiveId: string;
-  page: number;
+type ThumbnailArchive = Required<Pick<ImageCacheIdentity, 'scopeId' | 'serverId' | 'archiveId'>>;
+type ThumbnailOutcome = 'ready' | 'error';
+
+function thumbnailIdentity(archive: ThumbnailArchive, pageIndex: number): ImageCacheIdentity {
+  return { ...archive, rendition: 'page-thumbnail', pageIndex };
+}
+
+function waitForThumbnailRetry(delay: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) { resolve(); return; }
+    const finish = () => {
+      window.clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = window.setTimeout(finish, delay);
+    signal.addEventListener('abort', finish, { once: true });
+  });
+}
+
+function ArchivePageThumbnails({ archive: { scopeId, serverId, archiveId }, count, onOpen }: {
+  archive: ThumbnailArchive;
+  count: number;
   onOpen: (page: number) => void;
 }) {
-  const [src, setSrc] = useState<string>();
-  const [state, setState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
-  const [retry, setRetry] = useState(0);
-  const [node, setNode] = useState<HTMLSpanElement | null>(null);
+  const archive = useMemo(() => ({ scopeId, serverId, archiveId }), [scopeId, serverId, archiveId]);
+  const active = usePageActive();
+  const completed = useRef(new Map<number, ThumbnailOutcome>());
+  const [outcomes, setOutcomes] = useState<Record<number, ThumbnailOutcome>>({});
+
   useEffect(() => {
-    if (!node) return undefined;
+    if (!active) return;
+    const cache = getNativeImageCache();
     const controller = new AbortController();
-    let handle: import('../lib/unifiedImageCache').ImageHandle | undefined;
-    let retryTimer: number | undefined;
-    const load = () => {
-      setState('loading');
-      void getNativeImageCache().load({
-        scopeId,
-        serverId,
-        archiveId,
-        rendition: 'page-thumbnail',
-        pageIndex: page - 1,
-      }, { signal: controller.signal }).then((loaded) => {
-        if (controller.signal.aborted) { getNativeImageCache().release(loaded); return; }
-        handle = loaded;
-        setSrc(loaded.url);
-        setState('ready');
-      }).catch((error: unknown) => {
-        if (controller.signal.aborted) return;
-        setState('error');
-        if (retry === 0 && error instanceof RenditionError && error.retryable
-          && error.code !== 'INVALID_RESPONSE') {
+    const { signal } = controller;
+    const done = completed.current;
+    let next = 0;
+    const load = async (index: number, retry = true): Promise<ThumbnailOutcome> => {
+      try {
+        const handle = await cache.load(thumbnailIdentity(archive, index), { signal, retain: true });
+        cache.release(handle);
+        return 'ready';
+      } catch (error) {
+        if (retry && !signal.aborted && error instanceof RenditionError && error.retryable && error.code !== 'INVALID_RESPONSE') {
           const delay = error.code === 'REMOTE_RATE_LIMIT' ? 6000 : 3000;
-          retryTimer = window.setTimeout(() => setRetry(1), delay + Math.random() * 1000);
+          await waitForThumbnailRetry(delay + Math.random() * 1000, signal);
+          return load(index, false);
         }
-      });
+        return 'error';
+      }
     };
-    // Delay native IPC as well as image decoding. Prefetch nearby rows without
-    // making several off-screen rows compete with the visible page thumbnails.
-    const stopObserving = observeOnceInScroll(node, load, '320px');
+    const consume = async () => {
+      while (!signal.aborted && next < count) {
+        const index = next++;
+        if (done.get(index) === 'ready') continue;
+        const outcome = await load(index);
+        if (!signal.aborted) {
+          done.set(index, outcome);
+          setOutcomes((previous) => ({ ...previous, [index]: outcome }));
+        }
+      }
+    };
+    for (let slot = 0; slot < Math.min(count, THUMBNAIL_CONCURRENCY); slot += 1) void consume();
+    return () => controller.abort();
+  }, [active, archive, count]);
+
+  return <DetailPageThumbnailGrid count={count}>
+    {(index) => <ArchivePageThumbnail key={index} archive={archive} index={index} outcome={outcomes[index]} onOpen={onOpen} />}
+  </DetailPageThumbnailGrid>;
+}
+
+function ArchivePageThumbnail({ archive, index, outcome, onOpen }: {
+  archive: ThumbnailArchive;
+  index: number;
+  outcome: ThumbnailOutcome | undefined;
+  onOpen: (page: number) => void;
+}) {
+  const cache = getNativeImageCache();
+  const identity = useMemo(() => thumbnailIdentity(archive, index), [archive, index]);
+  const [leasedUrl, setLeasedUrl] = useState<string>();
+  // A virtual row can appear again before its effects run. Start with the
+  // retained URL and take a reference before paint so LRU cannot revoke it.
+  const src = leasedUrl ?? cache.peekUrl(identity);
+  useLayoutEffect(() => {
+    const cached = cache.peek(identity);
+    if (cached) {
+      setLeasedUrl(cached.url);
+      return () => cache.release(cached);
+    }
+    if (outcome !== 'ready') return;
+    // Memory eviction is allowed on long archives. Restore from the disk
+    // cache silently, keeping the completed state while the bytes arrive.
+    const controller = new AbortController();
+    let handle: ImageHandle | undefined;
+    void cache.load(identity, { signal: controller.signal, retain: true }).then((loaded) => {
+      if (controller.signal.aborted) { cache.release(loaded); return; }
+      handle = loaded;
+      setLeasedUrl(loaded.url);
+    }).catch(() => undefined);
     return () => {
-      stopObserving();
       controller.abort();
-      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-      if (handle) getNativeImageCache().release(handle);
+      if (handle) cache.release(handle);
     };
-  }, [archiveId, node, page, retry, scopeId, serverId]);
-  return (
-    <DetailPageThumbnail page={page} mediaRef={setNode} loading={!src && state !== 'error'} onOpen={() => onOpen(page)}>
-      {src ? <img src={src} alt="" loading="lazy" decoding="async" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true" />}
-    </DetailPageThumbnail>
-  );
+  }, [cache, identity, outcome]);
+  const page = index + 1;
+  return <DetailPageThumbnail page={page} loading={!src && outcome === undefined} onOpen={() => onOpen(page)}>
+    {src ? <img src={src} alt="" decoding="async" /> : <span className="archive-page-thumbnail-placeholder" aria-hidden="true" />}
+  </DetailPageThumbnail>;
 }
 
 function formatBytes(value: number): string {

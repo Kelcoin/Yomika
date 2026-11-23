@@ -95,6 +95,11 @@ describe('native settings bridge', () => {
     await expect(repository.save({ ...preferences, cacheMaxBytes: 34_359_738_369 })).resolves.toMatchObject({ ok: false });
   });
 
+  it('loads legacy zero-page preload preferences as one page', async () => {
+    setInvokeAdapterForTests(async () => ({ ok: true, value: { ...preferences, prefetchPages: 0 } }));
+    await expect(new NativeSettingsRepository().load()).resolves.toMatchObject({ ok: true, value: { prefetchPages: 1 } });
+  });
+
   it('rejects an unusable preload distance or upscale backend', async () => {
     const adapter = vi.fn(async (_command: string, args?: Record<string, unknown>) => ({ ok: true, value: args?.input }));
     setInvokeAdapterForTests(adapter);

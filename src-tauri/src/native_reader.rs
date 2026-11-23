@@ -461,14 +461,13 @@ pub(crate) async fn reader_native_pinch_input(
     reduce_motion: bool,
     left: Option<i32>,
     right: Option<i32>,
-    exit_left: Option<bool>,
 ) -> Result<(), String> {
     if session == 0 || page <= 0 || !(1.0..=14.0).contains(&maximum) {
         return Ok(());
     }
     let left = left.filter(|number| *number > 0 && *number != page);
     let right = right.filter(|number| *number > 0 && *number != page);
-    ios_host::configure_pinch(webview, session, page, enabled, maximum, reduce_motion, left, right, exit_left).await
+    ios_host::configure_pinch(webview, session, page, enabled, maximum, reduce_motion, left, right).await
 }
 
 #[cfg(all(test, any(windows, target_os = "ios")))]

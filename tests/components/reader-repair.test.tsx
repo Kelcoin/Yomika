@@ -6,20 +6,29 @@ import { setImageDecoderForTests } from '../../src/lib/decodeImage';
 
 afterEach(() => { setImageDecoderForTests(undefined); vi.useRealTimers(); vi.restoreAllMocks(); });
 
-it('preempts slow prefetches still inside the window when an unloaded page becomes visible', async () => {
-  const attempts: { index: number; signal: AbortSignal | undefined }[] = [];
-  const loadPage = vi.fn((index: number, signal?: AbortSignal) => {
-    attempts.push({ index, signal });
-    return new Promise<string>(() => {});
-  });
-  render(<MemoryRouter><ReaderScreen archiveId="priority" title="Priority" pages={['blob:first', '', '', '', '']} layout="single" prefetchDistance={3} loadPage={loadPage} /></MemoryRouter>);
-  await waitFor(() => expect(attempts.some(a => a.index === 2)).toBe(true));
-  const neighbour = attempts.find(a => a.index === 1)!;
-  const prefetch = attempts.find(a => a.index === 2)!;
+it('requeues distant prefetches when turning to an unloaded page and keeps both nearby requests', async () => {
+  vi.useFakeTimers();
+  const loadPage = vi.fn((_index: number, _signal?: AbortSignal) => new Promise<string>(() => {}));
+  render(<MemoryRouter><ReaderScreen archiveId="priority" title="Priority" pages={['blob:first', '', '', '', '']}
+    layout="single" direction="ltr" prefetchDistance={3} loadPage={loadPage} /></MemoryRouter>);
+  await act(async () => {});
+  const requestsFor = (index: number) => loadPage.mock.calls.filter(([page]) => page === index);
+  const nextPage = requestsFor(1)[0]![1]!;
+  const newNeighbour = requestsFor(2)[0]![1]!;
+  const distant = requestsFor(3)[0]![1]!;
+
   fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'ArrowRight' });
-  await waitFor(() => expect(prefetch.signal?.aborted).toBe(true));
-  expect(neighbour.signal?.aborted).toBe(false);
-  expect(attempts.filter(a => a.index === 2)).toHaveLength(2);
+  expect(screen.getByText('2 / 5')).toBeInTheDocument();
+  expect(distant.aborted).toBe(true);
+  expect(nextPage.aborted).toBe(false);
+  expect(newNeighbour.aborted).toBe(false);
+  expect(requestsFor(3)).toHaveLength(1);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+  expect(requestsFor(3)).toHaveLength(2);
+  expect(requestsFor(3)[1]![1]!.aborted).toBe(false);
+  expect(requestsFor(1)).toHaveLength(1);
+  expect(requestsFor(2)).toHaveLength(1);
 });
 
 it('retries a page request that never settles and aborts its old consumer', async () => {

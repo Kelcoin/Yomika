@@ -855,6 +855,7 @@ describe('settings workspace', () => {
     await user.click(await screen.findByRole('button', { name: '预加载页数' }));
     const preload = await within(screen.getByRole('dialog', { name: '预加载页数' })).findByRole('slider', { name: '预加载页数' });
     // Ten pages, not five: a LAN page is a few hundred KB.
+    expect(preload).toHaveAttribute('min', '1');
     expect(preload).toHaveAttribute('max', '10');
     fireEvent.change(preload, { target: { value: '8' } });
     await user.keyboard('{Escape}');

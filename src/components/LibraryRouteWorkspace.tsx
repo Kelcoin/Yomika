@@ -393,13 +393,13 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     // the native side serves a persisted snapshot. Loading them here as well
     // meant every visit to the library re-resolved every dynamic category.
     setCategoryError(undefined);
-    const [historyResult, readingListResult] = await Promise.all([
-      repository.listHistory(server.scopeId),
-      repository.listReadingList(server.scopeId),
-    ]);
-    if (request !== libraryRequest.current) return;
-    if (historyResult.ok) setReadingHistory(historyResult.value);
-    if (readingListResult.ok) setReadingList(readingListResult.value);
+    // Ancillary facts update independently of each other and of archive paging.
+    void repository.listHistory(server.scopeId).then((result) => {
+      if (request === libraryRequest.current && result.ok) setReadingHistory(result.value);
+    });
+    void repository.listReadingList(server.scopeId).then((result) => {
+      if (request === libraryRequest.current && result.ok) setReadingList(result.value);
+    });
     void repository.listSearchPresets(server.scopeId).then((result) => {
       if (request === libraryRequest.current && result.ok) setPresets(result.value);
     });

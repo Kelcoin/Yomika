@@ -1612,19 +1612,11 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       const stored = progress.ok ? progress.value : null;
       setReadingLayout(stored?.layout === 'continuous' ? 'webtoon' : preferences.defaultLayout);
       setReadingDirection(preferences.defaultDirection);
-      // ReaderScreen owns asynchronous neighbouring-page loading. Waiting for
-      // Promise.all(prefetch) here made a ready first page wait for a slow LRR
-      // neighbour, delaying navigation even though no compute was needed.
-      const firstSource = await loadPage(firstPage, controller.signal);
-      if (!stillCurrent()) return;
-      if (!firstSource) {
-        setError('阅读页面加载失败');
-        return;
-      }
-      const pageSources = Array<string>(manifest.value.pages.length).fill('');
-      pageSources[firstPage] = firstSource;
+      // Mount the page slots as soon as the manifest and position are known.
+      // The screen can prioritize the visible page, start its neighbours and
+      // accept swipes while any of those downloads are still pending.
       setReaderSession(context.readerSession);
-      setPages(pageSources);
+      setPages(Array<string>(manifest.value.pages.length).fill(''));
     })();
 
     return () => {

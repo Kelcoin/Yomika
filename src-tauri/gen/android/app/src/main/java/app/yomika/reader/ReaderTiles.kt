@@ -131,6 +131,7 @@ internal class ReaderTiles(private val web: WebView) {
     private val continuousCropped = mutableSetOf<Int>()
     private var webTransparent = false
     private var previousWebBackground: android.graphics.drawable.Drawable? = null
+    private var readerBackdrop: View? = null
     private var showing: SubsamplingScaleImageView? = null
     private var nativeTouchActive = false
     private var nativePanStarted = false
@@ -509,14 +510,25 @@ internal class ReaderTiles(private val web: WebView) {
     private fun updateWebBackground() {
         val transparent = !paused && (underlay != null || continuousPresented.isNotEmpty())
         if (transparent == webTransparent) return
-        webTransparent = transparent
         if (transparent) {
+            val parent = web.parent as? ViewGroup ?: return
+            // A page can translate offscreen during an edge drag. Keep black
+            // behind every native tile so the exposed area stays black.
+            val backdrop = View(web.context).apply {
+                setBackgroundColor(Color.BLACK)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            }
+            parent.addView(backdrop, 0, ViewGroup.LayoutParams(-1, -1))
+            readerBackdrop = backdrop
             previousWebBackground = web.background
             web.setBackgroundColor(Color.TRANSPARENT)
         } else {
             web.background = previousWebBackground
             previousWebBackground = null
+            readerBackdrop?.let { backdrop -> (backdrop.parent as? ViewGroup)?.removeView(backdrop) }
+            readerBackdrop = null
         }
+        webTransparent = transparent
     }
 
     private fun placeContinuous(id: Int) {
@@ -661,14 +673,17 @@ internal class ReaderTiles(private val web: WebView) {
                     // Start drawing with the first horizontal sample. Use slop
                     // only to decide whether a tiny preview was a tap on release.
                     if (horizontal) horizontalTurnDrag = true
-                    if (horizontalTurnDrag && previewSwipe(e, dx, dy, normal)) return true
-                    val active = showing
-                    if (active != null && horizontal && canSwipe(active, dx, dy)) {
-                        // The DOM track owns the boundary and unprepared pages.
-                        // A captured zoom consumes DOWN, so replay it before handing off.
-                        webSwipe = true
-                        normal(start)
-                        return normal(e)
+                    if (horizontalTurnDrag) {
+                        val preview = swipe?.takeIf { it.onSettled == null }
+                        val active = showing
+                        if (previewSwipe(e, dx, dy, normal)) return true
+                        if (active == null || canSwipe(active, dx, dy)) {
+                            // Keep the DOM in charge even if a tile becomes ready
+                            // before UP. Only replay DOWN if native input owned it.
+                            webSwipe = true
+                            if (active != null || preview != null) normal(start)
+                            return normal(e)
+                        }
                     }
                 }
             }
@@ -708,6 +723,11 @@ internal class ReaderTiles(private val web: WebView) {
                         e.eventTime - start.eventTime < 500L) {
                         // Preview cancelled the WebView stream or consumed DOWN.
                         // Restore a tap after taking the preview off screen.
+                        finishSwipe()
+                        normal(start)
+                        normal(e)
+                    } else if (start != null && (e.rawX - start.rawX) * it.end < 0f &&
+                        swipeTarget(e.rawX - start.rawX, e.rawY - start.rawY) == null) {
                         finishSwipe()
                         normal(start)
                         normal(e)
@@ -1023,9 +1043,14 @@ internal class ReaderTiles(private val web: WebView) {
         val current = swipe?.takeIf { it.onSettled == null }
         val target = if (dx == 0f) null else swipeTarget(dx, dy)
         if (target == null) {
-            if (current == null) return false
-            drawSwipe(current, 0f)
-            return true
+            if (dx == 0f && current != null) {
+                drawSwipe(current, 0f)
+                return true
+            }
+            // A reversal can point at an unprepared neighbour after preview
+            // cancelled the DOM stream. Let dispatch restart that stream.
+            if (current != null) finishSwipe()
+            return false
         }
         val from = underlay ?: return false
         if (current == null && showing == null) {

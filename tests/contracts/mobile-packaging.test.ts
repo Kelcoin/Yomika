@@ -286,7 +286,23 @@ it('previews Android page turns before touch slop and uses slop for release clas
   const dispatch = reader.split('fun dispatch(e: MotionEvent')[1]!.split('private fun finishNativeTouch')[0]!;
   const move = dispatch.split('MotionEvent.ACTION_MOVE -> if (singleTouch)')[1]!.split('MotionEvent.ACTION_POINTER_DOWN,')[0]!;
   expect(move).toMatch(/val horizontal = kotlin\.math\.abs\(dx\) > kotlin\.math\.abs\(dy\)/);
-  expect(move).toMatch(/if \(horizontalTurnDrag && previewSwipe\(e, dx, dy, normal\)\) return true/);
+  expect(move).toMatch(/if \(horizontalTurnDrag\)[\s\S]*?if \(previewSwipe\(e, dx, dy, normal\)\) return true/);
   expect(move.replace(/turnExceededSlop = .*\r?\n/, '')).not.toContain('touchSlop');
+  expect(move).toMatch(/if \(webSwipe\) return normal\(e\)[\s\S]*?if \(active == null \|\| canSwipe\(active, dx, dy\)\)[\s\S]*?webSwipe = true/);
+  expect(dispatch.split('MotionEvent.ACTION_UP -> if (singleTouch)')[1]).toMatch(/if \(webSwipe\)[\s\S]*?return result[\s\S]*?if \(tryTurn/);
   expect(dispatch).toMatch(/!turnExceededSlop[\s\S]*?finishSwipe\(\)[\s\S]*?normal\(start\)[\s\S]*?normal\(e\)/);
+});
+
+it('keeps a stationary black Android canvas behind translated native pages', () => {
+  const reader = read('../../src-tauri/gen/android/app/src/main/java/app/yomika/reader/ReaderTiles.kt');
+  const background = reader.split('private fun updateWebBackground()')[1]!.split('private fun placeContinuous')[0]!;
+  expect(background).toMatch(/setBackgroundColor\(Color\.BLACK\)[\s\S]*?parent\.addView\(backdrop, 0,[\s\S]*?web\.setBackgroundColor\(Color\.TRANSPARENT\)/);
+  expect(background).toMatch(/web\.background = previousWebBackground[\s\S]*?removeView\(backdrop\)/);
+});
+
+it('leaves iOS single-finger paging and panning on the same touch stream', () => {
+  const gestures = read('../../src-tauri/src/native_reader/ios_host/pinch.rs');
+  expect(gestures).toContain('UIPinchGestureRecognizer::initWithTarget_action');
+  expect(gestures).toContain('recognizer.setCancelsTouchesInView(false)');
+  expect(gestures).not.toContain('UIPanGestureRecognizer::initWithTarget_action');
 });

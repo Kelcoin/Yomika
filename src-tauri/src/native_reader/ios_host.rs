@@ -51,10 +51,7 @@ struct Reader {
     pinch_config: Option<pinch::PinchConfig>,
     pinch: Option<pinch::PinchRecognizer>,
     pinching: Option<(u32, i32)>,
-    panning: Option<(u32, i32)>,
     pinch_settle: Option<u64>,
-    turn_settling: Option<(u32, i32)>,
-    turn_outgoing: Option<ViewTransform>,
     continuous_views: HashMap<i32, PageView>,
     animation_window: Option<WebviewWindow>,
     animation_tick: Option<(Instant, u64)>,
@@ -76,15 +73,7 @@ pub(crate) fn cover(covered: bool) {
                     if let (Some(key), Some(window)) = (reader.pinching.take(), reader.pinch.as_ref().map(|input| input.window().clone())) {
                         interrupted_pinches.push((window, key));
                     }
-                    reader.panning = None;
                     reader.pinch_settle = None;
-                    reader.turn_outgoing = None;
-                    if let Some(key) = reader.turn_settling.take() {
-                        if let Some(transform) = reader.transforms.get_mut(&key) {
-                            transform.edge_offset = 0.0;
-                            transform.neighbour_page = None;
-                        }
-                    }
                     None
                 } else {
                     reader.animation_window.clone()
@@ -472,15 +461,7 @@ impl Reader {
         }
         let incoming = transform
             .and_then(ViewTransform::incoming)
-            .and_then(|mut incoming| {
-                if let Some(outgoing) = self.turn_outgoing.filter(|old| old.matches(incoming.session, incoming.page)) {
-                    let remaining = transform.map_or(0.0, |frame| {
-                        (frame.edge_offset / outgoing.edge_offset).clamp(0.0, 1.0)
-                    });
-                    incoming.scale += (outgoing.scale - 1.0) * remaining;
-                    incoming.pan_x = outgoing.pan_x * remaining;
-                    incoming.pan_y = outgoing.pan_y * remaining;
-                }
+            .and_then(|incoming| {
                 let slot = self
                     .slots
                     .values()
@@ -1058,14 +1039,12 @@ pub(super) async fn transform(
                 return;
             };
             let key = (transform.session, transform.page);
-            if reader.pinching == Some(key) || reader.panning == Some(key)
-                || reader.turn_settling == Some(key)
+            if reader.pinching == Some(key)
                 || (reader.pinch_settle.is_some() && cancelled.is_some()) {
                 return;
             }
             if reader.active.is_some_and(|slot| reader.slots.get(&slot).is_some_and(|entry| transform.matches(entry.session, entry.page))) {
                 reader.pinch_settle = None;
-                reader.turn_settling = None;
             }
             if !reader
                 .slots

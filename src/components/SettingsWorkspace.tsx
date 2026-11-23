@@ -59,7 +59,7 @@ import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { NativeInferenceRepository, InstalledModelSchema, UpscaleCatalogSchema, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
 import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
-import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
+import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, MIN_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { readerSettingsOrigin } from '../lib/pageBackNavigation';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
@@ -1216,9 +1216,9 @@ export function SettingsWorkspace() {
               <SettingsNumber
                 icon={<Layers />}
                 label="预加载页数"
-                hint="阅读时提前取回的页数，0 表示关闭"
+                hint="阅读时提前取回的页数"
                 value={preferenceDraft.prefetchPages}
-                min={0}
+                min={MIN_PREFETCH_PAGES}
                 max={MAX_PREFETCH_PAGES}
                 format={(value) => `${value} 页`}
                 onChange={(value) => editPreferences({ prefetchPages: value })}

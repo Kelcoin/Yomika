@@ -163,11 +163,11 @@ function HomeWorkspace() {
   const [readingList, setReadingList] = useState<WatchlistRecord[]>(snapshot?.readingList ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
   const [randomArchives, setRandomArchives] = useState<ArchiveRecord[]>(snapshot?.randomArchives ?? []);
-  const [recentLoading, setRecentLoading] = useState(!snapshot);
+  const [loadingShelves, setLoadingShelves] = useState({ history: !snapshot, reading: !snapshot });
+  const recentLoading = loadingShelves.history || loadingShelves.reading;
   const [recentError, setRecentError] = useState<string>();
   const [randomLoading, setRandomLoading] = useState(!snapshot);
   const [serverLoadAttempt, setServerLoadAttempt] = useState(0);
-  const restoredFromSnapshot = useRef(Boolean(snapshot));
   /** 现在这一排随机漫游画的是哪台服务器抽出来的那一批。换服务器要重抽；同一台
    * 服务器只是书架数据变了（翻一页就写一次阅读进度、加收藏、删档案都会广播失效）
    * 就不重抽——随机漫游「自己刷新」正是从那儿来的。 */
@@ -179,6 +179,9 @@ function HomeWorkspace() {
   const [refreshingShelf, setRefreshingShelf] = useState({ history: false, reading: false });
   const shelfRequests = useRef({ history: 0, reading: 0 });
   const shelfBusy = useRef({ history: false, reading: false });
+  const mergeShelfArchives = (available: ArchiveRecord[]) => {
+    setArchives(current => [...new Map([...current, ...available].map(archive => [archive.archiveId, archive])).values()]);
+  };
   const refreshShelf = async (kind: 'history' | 'reading') => {
     const server = servers?.ok ? pickServer(servers.value, null) : undefined;
     if (!server || shelfBusy.current[kind]) return;
@@ -192,11 +195,18 @@ function HomeWorkspace() {
       if (!owns()) return;
       if (!result.ok) { setRecentError(result.error.message); return; }
       const ids = result.value.filter(item => !('deleted' in item) || !item.deleted).map(item => item.archiveId);
-      const resolved = await repository.listArchivesByIds(server.id, kind === 'history' ? ids : ids.slice(0, 24));
+      const resolved = await repository.listArchivesByIds(server.id, kind === 'history' ? ids : ids.slice(0, 24), {
+        onAvailable: (available) => {
+          if (!owns()) return;
+          mergeShelfArchives(available);
+          if (kind === 'history') setHistory(result.value as ReadingHistoryRecord[]);
+          else setReadingList(result.value as WatchlistRecord[]);
+        },
+      });
       if (!owns()) return;
       if (!resolved.ok) { setRecentError(resolved.error.message); return; }
       // Commit the membership and its resolved cards together; the other shelf keeps its data.
-      setArchives(current => [...new Map([...current, ...resolved.value].map(archive => [archive.archiveId, archive])).values()]);
+      mergeShelfArchives(resolved.value);
       if (kind === 'history') setHistory(result.value as ReadingHistoryRecord[]);
       else setReadingList(result.value as WatchlistRecord[]);
     } finally {
@@ -231,12 +241,13 @@ function HomeWorkspace() {
       const random = await repository.searchRandomArchives(serverId, 24);
       if (!ownsRequest()) return;
       if (!random.ok) break;
+      const previousSize = collected.size;
       for (const archive of random.value) {
         if (accepted(archive)) collected.set(archive.archiveId, archive);
       }
+      if (collected.size > previousSize) setRandomArchives([...collected.values()]);
     }
-    if (collected.size > 0) setRandomArchives([...collected.values()]);
-    else {
+    if (collected.size === 0) {
       // Server could not answer. Sample the newest page from the local mirror
       // rather than reading the whole index to pick that many cards.
       const page = await repository.listArchivesPage(serverId, 0, 60, { sortBy: 'added', order: 'desc' });
@@ -254,96 +265,84 @@ function HomeWorkspace() {
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   useEffect(() => {
-    // A fresh snapshot is already on screen; re-resolving the shelves would cost
-    // a round trip and draw a different random set for no reason.
+    // Revalidate the shelves in place and keep the current random draw.
     if (!pageActive) return;
-    restoredFromSnapshot.current = false;
-    let active = true;
-    shelfRequests.current.history++;
-    shelfRequests.current.reading++;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const requests = { history: ++shelfRequests.current.history, reading: ++shelfRequests.current.reading };
     shelfBusy.current = { history: false, reading: false };
     setRefreshingShelf({ history: false, reading: false });
+    setLoadingShelves({ history: true, reading: true });
+    setRecentError(undefined);
     void (async () => {
-      setRecentLoading(true);
-      setRecentError(undefined);
       const result = await repository.listServers();
-      if (!active) return;
-      const nextRandomOwner = result.ok ? pickServer(result.value, null)?.id : undefined;
-      if (randomOwnerRef.current !== nextRandomOwner) {
-        // Shelf re-reads on the same server keep their draw; server changes
-        // retire both remote draws and their pending local fallback.
+      if (signal.aborted) return;
+      const server = result.ok ? pickServer(result.value, null) : undefined;
+      if (randomOwnerRef.current !== server?.id) {
         randomRequestRef.current += 1;
-        randomOwnerRef.current = nextRandomOwner;
+        randomOwnerRef.current = server?.id;
         randomServerRef.current = undefined;
+        setHistory([]);
+        setReadingList([]);
+        setArchives([]);
         setRandomArchives([]);
-        setRandomLoading(Boolean(nextRandomOwner));
+        setRandomLoading(Boolean(server));
       }
       setServers(result);
-      if (!result.ok) {
-        setRecentLoading(false);
-        setRandomLoading(false);
-        return;
-      }
-      const server = pickServer(result.value, null);
       if (!server) {
-        setRecentLoading(false);
+        setLoadingShelves({ history: false, reading: false });
         setRandomLoading(false);
         return;
       }
-      const [historyResult, readingListResult] = await Promise.all([
-        repository.listHistory(server.scopeId),
-        repository.listReadingList(server.scopeId),
-      ]);
-      if (!active) return;
-      // Every early exit clears both flags: a rail left on `loading` shimmers
-      // forever instead of admitting it has nothing.
-      if (!historyResult.ok) { setRecentError(historyResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
-      if (!readingListResult.ok) { setRecentError(readingListResult.error.message); setRecentLoading(false); setRandomLoading(false); return; }
-      setHistory(historyResult.value);
-      setReadingList(readingListResult.value);
-      // 历史那一批解析的是**整条历史**的档案，和历史页面解析的是同一批：只解析一排
-      // 要显示的那六条，被隐藏的已读完、或镜像里暂时解析不出来的记录就会在这一排里
-      // 留下空格——两页看的是同一份历史，不该有两套口径。整条历史都是本地索引上的一次
-      // 点查（历史页面本来就这么解析），多出来的存在性探测由 `findMissingArchives` 分次
-      // 问完（每次至多 192 个，答案在会话里记住）。
-      const shelfIds = [...new Set([
-        ...historyResult.value.map((item) => item.archiveId),
-        ...readingListResult.value.filter((item) => !item.deleted).slice(0, 24).map((item) => item.archiveId),
-      ])];
-      // 书架 id 解析与随机漫游互不依赖，重叠拉取：原先是先等完书架、
-      // 再等随机、最后等缺失确认，三条链串行只让首屏更晚齐。
-      const archivePromise = repository.listArchivesByIds(server.id, shelfIds);
-      // 已经为这台服务器抽过的那一批就留着：书架里绝大多数失效广播都来自书架自身的
-      // 写入（阅读进度每翻一页写一次），重抽会让随机漫游在用户没碰它的时候换一批。
-      // 换服务器时 `randomServerRef` 是另一台的名字，照旧重抽。
-      const randomPromise = randomServerRef.current === server.id
-        ? Promise.resolve()
-        : loadRandom(server.id, {
+      const historyRequest = shelfRead(`history:${server.scopeId}`, () => repository.listHistory(server.scopeId));
+      const readingRequest = shelfRead(`toRead:${server.scopeId}`, () => repository.listReadingList(server.scopeId));
+      const randomRequest = historyRequest.then((historyResult) => {
+        if (signal.aborted || randomServerRef.current === server.id) return;
+        return loadRandom(server.id, {
           showFinished: preferencesRef.current.randomRoamShowFinished,
-          progress: new Map(historyResult.value.map((item) => [item.archiveId, item.pageIndex + 1])),
+          progress: new Map(historyResult.ok ? historyResult.value.map(item => [item.archiveId, item.pageIndex + 1]) : []),
         });
-      const archiveResult = await archivePromise;
-      if (!active) return;
-      if (!archiveResult.ok) setRecentError(archiveResult.error.message);
-      else setArchives(archiveResult.value);
-      setRecentLoading(false);
-      // The mirror only learns about a deletion when something asks the server,
-      // so confirm the handful of cards the rails are about to show rather than
-      // letting the user discover a gone archive by clicking it.
-      const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
-      await randomPromise;
-      if (!active || missing.size === 0) return;
-      setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
-      setRandomArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
-    })();
-    return () => { active = false; shelfRequests.current.history++; shelfRequests.current.reading++; };
+      });
+      const loadShelf = async (kind: 'history' | 'reading') => {
+        const owns = () => !signal.aborted && shelfRequests.current[kind] === requests[kind];
+        try {
+          const shelf = await (kind === 'history' ? historyRequest : readingRequest);
+          if (!owns()) return;
+          if (!shelf.ok) { setRecentError(shelf.error.message); return; }
+          const ids = shelf.value.filter(item => !('deleted' in item) || !item.deleted).map(item => item.archiveId);
+          const publish = (available: ArchiveRecord[]) => {
+            if (!owns()) return;
+            mergeShelfArchives(available);
+            if (kind === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
+            else setReadingList(shelf.value as WatchlistRecord[]);
+          };
+          const resolved = await repository.listArchivesByIds(server.id, kind === 'history' ? ids : ids.slice(0, 24), { onAvailable: publish, signal });
+          if (!owns()) return;
+          if (!resolved.ok) { setRecentError(resolved.error.message); return; }
+          publish(resolved.value);
+          setLoadingShelves(current => ({ ...current, [kind]: false }));
+          const missing = await findMissingArchives(server.id, resolved.value.map(archive => archive.archiveId));
+          if (!owns() || missing.size === 0) return;
+          setArchives(current => current.filter(archive => !missing.has(archive.archiveId)));
+          setRandomArchives(current => current.filter(archive => !missing.has(archive.archiveId)));
+        } finally {
+          if (owns()) setLoadingShelves(current => current[kind] ? { ...current, [kind]: false } : current);
+        }
+      };
+      await Promise.all([loadShelf('history'), loadShelf('reading'), randomRequest]);
+    })().catch(error => {
+      if (signal.aborted) return;
+      setRecentError(String(error));
+      setLoadingShelves({ history: false, reading: false });
+      setRandomLoading(false);
+    });
+    return () => { controller.abort(); shelfRequests.current.history++; shelfRequests.current.reading++; };
   }, [loadRandom, serverLoadAttempt, pageActive]);
   const connected = servers?.ok && servers.value.length > 0;
   const serverFailure = servers && !servers.ok ? servers : undefined;
   const connectionError = serverFailure?.error.message;
   useWorkspaceRefresh('/', useCallback(() => {
-    setRecentLoading(true);
-    restoredFromSnapshot.current = false;
+    setLoadingShelves({ history: true, reading: true });
     randomServerRef.current = undefined;
     setServerLoadAttempt(attempt => attempt + 1);
   }, []));
@@ -358,8 +357,7 @@ function HomeWorkspace() {
         // 启用服务器切换会广播全量失效，书架必须改读新启用的那台。
         // 随机漫游不跟着亮加载态：只有换服务器才会重抽（见载入 effect 里那条判断），
         // 让它先闪一下再换回同一批卡片没有意义。
-        setRecentLoading(true);
-        restoredFromSnapshot.current = false;
+        setLoadingShelves({ history: true, reading: true });
         setServerLoadAttempt((attempt) => attempt + 1);
       }
     };
@@ -372,6 +370,15 @@ function HomeWorkspace() {
       setRandomArchives((current) => current.filter((archive) => archive.archiveId !== archiveId));
     },
   });
+  useEffect(() => {
+    if (recentLoading) return;
+    const memberIds = new Set([
+      ...history.map(item => item.archiveId),
+      ...readingList.filter(item => !item.deleted).map(item => item.archiveId),
+    ]);
+    setArchives(current => current.every(archive => memberIds.has(archive.archiveId))
+      ? current : current.filter(archive => memberIds.has(archive.archiveId)));
+  }, [history, readingList, recentLoading]);
   const archiveById = useMemo(() => new Map(archives.map((archive) => [archive.archiveId, archive])), [archives]);
   /** 「继续阅读」的已读完开关：关闭时不把进度超过 95% 的记录放进这一排，其余照旧。
    * 口径与历史页面共用（`historyShelfArchives`），首页这一排只取前 `HOME_RAIL_LIMIT`
@@ -441,8 +448,8 @@ function HomeWorkspace() {
         <ServerRequiredPrompt />
       )}
       {(servers === undefined || connected) && <>
-      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} progressScope="history" loading={recentLoading} skeletonCount={4} refreshing={recentLoading || refreshingShelf.history} onRefresh={() => { void refreshShelf('history'); }} resetScrollKey={`${homeServer?.id ?? ''}:${continueReading[0]?.archiveId ?? ''}`} onArchiveContextMenu={openContextMenu} />
-      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={recentLoading} skeletonCount={4} refreshing={recentLoading || refreshingShelf.reading} onRefresh={() => { void refreshShelf('reading'); }} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="继续阅读" headingIcon={<BookOpen aria-hidden="true" />} archives={continueReading} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} progressScope="history" loading={loadingShelves.history} skeletonCount={4} refreshing={loadingShelves.history || refreshingShelf.history} onRefresh={() => { void refreshShelf('history'); }} resetScrollKey={`${homeServer?.id ?? ''}:${continueReading[0]?.archiveId ?? ''}`} onArchiveContextMenu={openContextMenu} />
+      <ArchiveThumbnailRail title="待看档案" headingIcon={<Bookmark aria-hidden="true" />} archives={toRead} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={loadingShelves.reading} skeletonCount={4} refreshing={loadingShelves.reading || refreshingShelf.reading} onRefresh={() => { void refreshShelf('reading'); }} onArchiveContextMenu={openContextMenu} />
       <ArchiveThumbnailRail title="随机漫游" headingIcon={<Shuffle aria-hidden="true" />} archives={random} scopeId={homeServer?.scopeId ?? ''} serverId={homeServer?.id ?? ''} detailBasePath="/home" progressByArchiveId={progressByArchiveId} loading={randomLoading} skeletonCount={6} refreshing={randomLoading} onRefresh={homeServer ? () => { void loadRandom(homeServer.id, { showFinished: preferences.randomRoamShowFinished, progress: progressByArchiveId }); } : undefined} onArchiveContextMenu={openContextMenu} />
       {contextMenu}
       </>}
@@ -530,6 +537,8 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
   const [history, setHistory] = useState<ReadingHistoryRecord[]>(snapshot?.history ?? []);
   const [watchlist, setWatchlist] = useState<WatchlistRecord[]>(snapshot?.watchlist ?? []);
   const [archives, setArchives] = useState<ArchiveRecord[]>(snapshot?.archives ?? []);
+  const displayedArchives = useRef(archives);
+  displayedArchives.current = archives;
   const shownArchiveIds = useRef(snapshot ? new Set(snapshot.archives.map(archive => archive.archiveId)) : undefined);
   const [freshArchiveIds, setFreshArchiveIds] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => {
@@ -544,6 +553,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       if (fresh.length) setFreshArchiveIds(current => new Set([...current, ...fresh]));
     }
     shownArchiveIds.current = new Set(next.map(archive => archive.archiveId));
+    displayedArchives.current = next;
     setArchives(next);
   }, []);
   /** 收藏与待看的顶栏与档案库同一套（分类筛选、排序方式、多选、显示模式）。
@@ -646,14 +656,15 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
   // the same way. Categories need a server-side list this page does not load.
   useEffect(() => {
     if (!pageActive) return;
-    let active = true;
+    const controller = new AbortController();
+    const { signal } = controller;
     if (name !== 'watchlist') setVerificationPending(true);
     if (name === 'watchlist') {
       setError(undefined);
     }
     void (async () => {
       const servers = await shelfRead('servers', () => repository.listServers());
-      if (!active) return;
+      if (signal.aborted) return;
       if (!servers.ok) { setError(servers.error.message); setLoading(false); return; }
       const server = pickServer(servers.value, serverParam);
       if (!server) { setHasServer(false); setLoading(false); return; }
@@ -692,7 +703,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
         const cachedCategories = readCategorySnapshot(server.id);
         if (cachedCategories) setCategories(cachedCategories);
         void repository.listCategories(server.id).then(result => {
-          if (active && result.ok) setCategories(result.value);
+          if (!signal.aborted && result.ok) setCategories(result.value);
         }).catch(() => {});
       }
       const shelf = await (name === 'history'
@@ -700,37 +711,39 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
         : name === 'toRead'
           ? shelfRead(`toRead:${server.scopeId}`, () => repository.listReadingList(server.scopeId))
           : shelfRead(`favorites:${server.id}`, () => repository.readFavoritesCategory(server.id)));
-      if (!active) return;
+      if (signal.aborted) return;
       if (!shelf.ok) { setError(shelf.error.message); setLoading(false); return; }
       const favoriteIds = name === 'watchlist' ? (shelf.value as { archives: string[] } | null)?.archives ?? [] : [];
       const shelfIds = name === 'history'
         ? (shelf.value as ReadingHistoryRecord[]).map(item => item.archiveId)
         : name === 'watchlist' ? favoriteIds : (shelf.value as WatchlistRecord[]).filter(item => !item.deleted).map(item => item.archiveId);
       const uniqueIds = [...new Set(shelfIds)];
-      const resolveArchives = () => shelfRead(`archives:${server.id}:${JSON.stringify(uniqueIds)}`,
-        () => repository.listArchivesByIds(server.id, uniqueIds));
-      const mirroredArchives = name !== 'watchlist' && !shownArchiveIds.current && uniqueIds.length
-        ? await repository.listArchivesByIds(server.id, uniqueIds, { resolveMissing: false })
-        : undefined;
-      if (!active) return;
-      const completeMirror = mirroredArchives?.ok && mirroredArchives.value.length === uniqueIds.length;
-      if (mirroredArchives?.ok && !completeMirror && mirroredArchives.value.length) {
-        // Show the locally indexed cards while the missing metadata arrives.
-        if (name === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
-        else setWatchlist(shelf.value as WatchlistRecord[]);
-        showArchives(mirroredArchives.value, false);
-        setCanShowStale(true);
-        setLoading(false);
-      }
-      const archiveResult = name === 'watchlist'
-        ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds, (shelf.value as { id: string } | null)?.id) }
-        : completeMirror ? mirroredArchives : await resolveArchives();
-      if (!active) return;
-      if (!archiveResult.ok) setError(archiveResult.error.message);
-      else {
+      const favoriteMembership = favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 }));
+      const publishMembership = () => {
         if (name === 'history') setHistory(shelf.value as ReadingHistoryRecord[]);
         else if (name === 'toRead') setWatchlist(shelf.value as WatchlistRecord[]);
-        else setWatchlist(favoriteIds.map(archiveId => ({ scopeId: server.scopeId, archiveId, addedAt: '', deleted: false, deviceId: '', updatedAt: '', revision: 1 })));
+        else setWatchlist(favoriteMembership);
+      };
+      const partial = new Map(displayedArchives.current.filter(archive => archive.serverId === server.id)
+        .map(archive => [archive.archiveId, archive]));
+      const onAvailable = (available: ArchiveRecord[]) => {
+        if (signal.aborted) return;
+        for (const archive of available) partial.set(archive.archiveId, archive);
+        publishMembership();
+        showArchives(uniqueIds.flatMap(id => {
+          const archive = partial.get(id);
+          return archive ? [archive] : [];
+        }), true);
+        setCanShowStale(true);
+        setLoading(false);
+      };
+      const archiveResult = name === 'watchlist'
+        ? { ok: true as const, value: await loadFavoriteArchives(server.id, shelfIds, (shelf.value as { id: string } | null)?.id, { onAvailable, signal }) }
+        : await repository.listArchivesByIds(server.id, uniqueIds, { onAvailable, signal });
+      if (signal.aborted) return;
+      if (!archiveResult.ok) setError(archiveResult.error.message);
+      else {
+        publishMembership();
         showArchives(archiveResult.value, true);
         setCanShowStale(true);
         setError(undefined);
@@ -757,11 +770,11 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       // Same reason as the home rails: the mirror does not hear about deletions,
       // so a shelf would keep offering archives the server no longer has.
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
-      if (!active) return;
+      if (signal.aborted) return;
       if (missing.size > 0) setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
       setVerificationPending(false);
-    })().catch(error => { if (active) { setError(String(error)); setLoading(false); } }).finally(() => { if (active) setPulling(false); });
-    return () => { active = false; };
+    })().catch(error => { if (!signal.aborted) { setError(String(error)); setLoading(false); } }).finally(() => { if (!signal.aborted) setPulling(false); });
+    return () => controller.abort();
   }, [name, pageActive, reloadToken, serverParam, showArchives, showShelfToolbar]);
   useEffect(() => {
     if (name === 'watchlist' || loading || verificationPending || error || !serverId || !scopeId) return;

@@ -25,7 +25,7 @@ import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
-import { allocateNativeReaderSession, configureNativePinchInput, configureNativeContinuousInput, repositionNativeContinuousInput, trackNativeContinuousInput, NativeReaderSession, canPresentNativePage, hasNativeReaderTiles, hasNativeWheelZoom, sampleNativeWheelZoom, invalidateContinuousReaderLayout, hasAndroidReaderTileSource, ReaderTileSlot, readerUsesShellGestures, requestNativeReaderDoubleTap, requestNativeReaderViewport, settleNativeReaderFitForTurn, updateNativeReaderEdge, updateNativeReaderSlide, updateNativeReaderTransform, type ReaderTileViewport, type ReaderTilePageSize, type WheelZoomSample } from '../lib/readerNativeTiles';
+import { allocateNativeReaderSession, configureNativePinchInput, configureNativeContinuousInput, repositionNativeContinuousInput, trackNativeContinuousInput, NativeReaderSession, canPresentNativePage, hasNativeReaderTiles, hasNativeWheelZoom, sampleNativeWheelZoom, invalidateContinuousReaderLayout, hasAndroidReaderTileSource, ReaderTileSlot, readerUsesShellGestures, rememberNativeReaderZoom, requestNativeReaderDoubleTap, requestNativeReaderViewport, settleNativeReaderFitForTurn, updateNativeReaderEdge, updateNativeReaderSlide, updateNativeReaderTransform, type ReaderTileViewport, type ReaderTilePageSize, type WheelZoomSample } from '../lib/readerNativeTiles';
 import { useReaderImageHandover } from '../lib/useReaderImageHandover';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
@@ -833,7 +833,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const [panning, setPanning] = useState(false);
   const nativePinchPage = useRef<number>();
   const nativePinchTouches = useRef(false);
-  const nativePanTouches = useRef(false);
   const panStart = useRef<{ x: number; y: number; zoom: ZoomState; lastX?: number; lastY?: number }>();
   const pinchStart = useRef<{ distance: number; x: number; y: number; zoom: ZoomState; waitingForImage: boolean }>();
 
@@ -1173,7 +1172,9 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       // The slots either side are rendered for the swipe, so they have to be
       // fetched as slots — a spread advances by two pages, which a symmetric
       // distance of one would miss.
-      for (const index of [...visibleIndexes, ...neighbourIndexes.previous, ...neighbourIndexes.next]) {
+      const forward = state.direction === 'rtl' ? neighbourIndexes.previous : neighbourIndexes.next;
+      const backward = state.direction === 'rtl' ? neighbourIndexes.next : neighbourIndexes.previous;
+      for (const index of [...visibleIndexes, ...forward, ...backward]) {
         add(immediate, index);
         add(fetchSet, index);
         add(retainSet, index);
@@ -1198,10 +1199,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     }
     fetchAnchorRef.current = anchor;
     for (const [index, controller] of loadingPagesRef.current) {
-      // A slow prefetch may still belong to the new window, but it must not
-      // occupy every native download slot while the new visible page queues.
-      // Requeue it behind the visible pages with a fresh cancellation ID.
-      if (fetchSet.has(index) && (!needsForeground || visibleIndexes.includes(index))) continue;
+      // Keep immediate neighbours in flight: cancelling a still-relevant
+      // download on each turn starves the next swipe. Only distant speculation
+      // yields its slot when the visible page is missing.
+      if (fetchSet.has(index) && (!needsForeground || effectiveLayout === 'webtoon' || immediate.has(index))) continue;
       loadingPagesRef.current.delete(index);
       controller.abort();
       releasePage?.(index);
@@ -1284,7 +1285,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       const timer = window.setTimeout(() => setRetryTick((value) => value + 1), Math.max(1, soonest - Date.now()));
       return () => window.clearTimeout(timer);
     }
-  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, pages.length, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive]);
+  }, [effectiveLayout, loadPage, loadedPages, neighbourIndexes, pages.length, prefetchDistance, releasePage, retryTick, visibleIndexes, webtoonFirst, webtoonLast, pageActive, state.direction]);
 
   const retryPage = useCallback((index: number) => {
     const pending = loadingPagesRef.current.get(index);
@@ -1761,8 +1762,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       // offset before asking the native view to spring back or exit.
       updateNativeReaderEdge(edgePage, dragOffset.current / Math.max(1, width), 0, nativeSession);
     }
+    const remaining = Math.abs(target - dragOffset.current);
+    const measuredSpeed = velocity ?? (elapsed > 0 ? dx / elapsed : 0);
+    const duration = boundary ? EDGE_SETTLE_MS : commit ? pageTurnDuration(remaining, measuredSpeed, returnToFit) : 200;
     if (edgePage !== undefined && !(commit && crossedLastPage)) {
-      updateNativeReaderEdge(edgePage, 0, reducedMotionRef.current ? 0 : EDGE_SETTLE_MS, nativeSession);
+      const nativeDuration = reducedMotionRef.current ? 0 : duration;
+      updateNativeReaderEdge(edgePage, target / Math.max(1, width), nativeDuration, nativeSession);
     }
     if (commit && crossedLastPage) {
       // RetainedPage keeps the reader visible during its exit transition.
@@ -1775,10 +1780,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     if (!track?.animate || reducedMotionRef.current) { finish(); return; }
     sliding.current = true;
     // A fast flick or an almost-completed drag should not wait a fixed 240ms.
-    const remaining = Math.abs(target - dragOffset.current);
-    const measuredSpeed = velocity ?? (elapsed > 0 ? dx / elapsed : 0);
-    const turnDuration = pageTurnDuration(remaining, measuredSpeed, returnToFit);
-    const duration = boundary ? EDGE_SETTLE_MS : commit ? turnDuration : 200;
     slideAnimation.current = track.animate([
       { transform: `translate3d(${from}px,0,0)` },
       { transform: `translate3d(${to}px,0,0)` },
@@ -1824,7 +1825,11 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       side: dx < 0 ? 'right' : 'left',
     } : undefined;
     dragOffset.current = boundary ? rubberBand(dx, exits ? Math.min(360, width * 0.82) : Math.min(64, width * 0.16)) : Math.max(-width, Math.min(width, dx));
-    if (boundary) nativeEdgePage.current = nativePageRef.current;
+    // Android gives the DOM the swipe when the neighbour has no ready tile.
+    // Its outgoing artwork is still native, so move it with the DOM track.
+    if (boundary || (!readerUsesShellGestures() && zoomElementRef.current?.querySelector('[data-native-reader-visible]'))) {
+      nativeEdgePage.current = nativePageRef.current;
+    }
     else if (nativeEdgePage.current !== undefined) {
       updateNativeReaderEdge(nativeEdgePage.current, 0, 0, nativeSession);
       nativeEdgePage.current = undefined;
@@ -1859,23 +1864,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
 
   useLayoutEffect(() => {
     if (!pageActive || effectiveLayout === 'webtoon' || thumbnailPanelOpen) return;
-    const boundary = (event: Event) => {
-      const detail = (event as CustomEvent<{ session: number; page: number; left: boolean; progress: number; pixels: number }>).detail;
-      const hint = exitHintRef.current;
-      if (!hint || detail.session !== nativeSession || detail.page !== nativePageRef.current) return;
-      const ready = detail.progress >= 1;
-      hint.dataset.visible = 'true';
-      hint.dataset.ready = String(ready);
-      hint.dataset.side = detail.left ? 'right' : 'left';
-      hint.setAttribute('aria-hidden', 'false');
-      hint.setAttribute('aria-label', ready ? '松手退出阅读' : '继续拖动退出');
-      hint.style.setProperty('--reader-exit-progress', String(detail.progress));
-      hint.style.setProperty('--reader-exit-midpoint', `${detail.pixels / 2}px`);
-    };
     const sync = (event: Event) => {
       const detail = (event as CustomEvent<ZoomState & { session: number; page: number }>).detail;
       if (detail.session !== nativeSession || detail.page !== nativePageRef.current) return;
-      setZoom({ scale: detail.scale, panX: detail.panX, panY: detail.panY }, false);
+      const zoom = { scale: detail.scale, panX: detail.panX, panY: detail.panY };
+      rememberNativeReaderZoom(detail.page, detail.session, zoom);
+      setZoom(zoom, false);
     };
     const gesture = (event: Event) => {
       const detail = (event as CustomEvent<{ session: number; page: number; active: boolean }>).detail;
@@ -1884,16 +1878,13 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
         hideChromeForZoomRef.current?.();
         // UIKit may have accepted the newly presented neighbour while its
         // WebKit configuration is still in flight.
-        if (pinchStart.current) {
-          pinchStart.current = undefined;
-          setPanning(false);
-        }
+        pinchStart.current = undefined;
+        setPanning(false);
         touchStartRef.current = null;
         panStart.current = undefined;
         nativePinchTouches.current = true;
       } else {
         nativePinchTouches.current = false;
-        nativePanTouches.current = false;
         resumeHandover(180);
       }
       setNativeBusy(detail.active);
@@ -1905,17 +1896,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     window.addEventListener('yomika-reader-native-zoom-start', zoomStart);
     window.addEventListener('yomika-reader-native-zoom', sync);
     window.addEventListener('yomika-reader-native-pinch', gesture);
-    window.addEventListener('yomika-reader-native-boundary', boundary);
-    window.addEventListener('yomika-reader-native-boundary-clear', hideExitHint);
     return () => {
       nativePinchPage.current = undefined;
       nativePinchTouches.current = false;
-      nativePanTouches.current = false;
       window.removeEventListener('yomika-reader-native-zoom-start', zoomStart);
       window.removeEventListener('yomika-reader-native-zoom', sync);
       window.removeEventListener('yomika-reader-native-pinch', gesture);
-      window.removeEventListener('yomika-reader-native-boundary', boundary);
-      window.removeEventListener('yomika-reader-native-boundary-clear', hideExitHint);
       hideExitHint();
       setNativeBusy(false);
       void configureNativePinchInput(nativeSession, nativePageRef.current, false, 3, reduceMotion);
@@ -1929,15 +1915,14 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const nativeCanTurn = !thumbnailPanelOpen && !autoPlay;
   const nativeLeftPage = nativeCanTurn ? (neighbourIndexes.next[0] ?? -1) + 1 : 0;
   const nativeRightPage = nativeCanTurn ? (neighbourIndexes.previous[0] ?? -1) + 1 : 0;
-  const nativeExitLeft = nativeCanTurn && pages.length > 0 ? state.direction !== 'rtl' : undefined;
   useLayoutEffect(() => {
     if (!pageActive || effectiveLayout === 'webtoon' || thumbnailPanelOpen) return;
     let mounted = true;
-    void configureNativePinchInput(nativeSession, nativePage, true, Math.min(14, maxSettledZoom.current), reduceMotion, nativeLeftPage, nativeRightPage, nativeExitLeft).then((ready) => {
+    void configureNativePinchInput(nativeSession, nativePage, true, Math.min(14, maxSettledZoom.current), reduceMotion, nativeLeftPage, nativeRightPage).then((ready) => {
       if (mounted && ready) nativePinchPage.current = nativePage;
     });
     return () => { mounted = false; };
-  }, [effectiveLayout, nativeExitLeft, nativeLeftPage, nativePage, nativeRightPage, nativeSession, pageActive, reduceMotion, thumbnailPanelOpen]);
+  }, [effectiveLayout, nativeLeftPage, nativePage, nativeRightPage, nativeSession, pageActive, reduceMotion, thumbnailPanelOpen]);
 
   const getDoubleTapProfile = useCallback(() => {
     const frame = zoomElementRef.current;
@@ -1967,7 +1952,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     if (profile.large) {
       maxSettledZoom.current = Math.max(3, profile.cropScale);
       if (nativePinchPage.current === nativePageRef.current) void configureNativePinchInput(nativeSession, nativePageRef.current, true, Math.min(14, maxSettledZoom.current), reduceMotion,
-        nativeLeftPage, nativeRightPage, nativeExitLeft);
+        nativeLeftPage, nativeRightPage);
     }
     const animateNative = readerUsesShellGestures() && !reduceMotion && next.scale !== current.scale;
     if (next.scale !== current.scale) hideChromeForZoomRef.current?.();
@@ -1990,7 +1975,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     }
     resumeHandover(profile.duration + 32);
     return true;
-  }, [canZoomCurrentImage, getDoubleTapProfile, nativeExitLeft, nativeLeftPage, nativeRightPage, nativeSession, readLiveZoom, reduceMotion, resumeHandover, setZoom]);
+  }, [canZoomCurrentImage, getDoubleTapProfile, nativeLeftPage, nativeRightPage, nativeSession, readLiveZoom, reduceMotion, resumeHandover, setZoom]);
 
   const touchDoubleTap = useCallback((x: number, y: number, time: number) => {
     const previous = lastTapRef.current;
@@ -2052,12 +2037,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       }
       return;
     }
-    const nativePan = layoutRef.current !== 'webtoon' && zoomRef.current.scale > PAGE_SWIPE_MAX_ZOOM
-      && nativePinchPage.current === nativePageRef.current
-      && Boolean(zoomElementRef.current?.querySelector('[data-native-reader-visible]'));
-    nativePanTouches.current = nativePan;
     const previousTap = lastTapRef.current;
-    if (!toolbar && !nativePan && previousTap && Date.now() - previousTap.time < 300 && Math.hypot(touch.clientX - previousTap.x, touch.clientY - previousTap.y) <= 40
+    if (!toolbar && previousTap && Date.now() - previousTap.time < 300 && Math.hypot(touch.clientX - previousTap.x, touch.clientY - previousTap.y) <= 40
       && layoutRef.current !== 'webtoon' && canZoomCurrentImage()) {
       const profile = getDoubleTapProfile();
       if (profile.large) {
@@ -2120,13 +2101,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       return;
     }
     if (panStart.current && event.touches[0]) {
-      if (nativePanTouches.current) {
-        const finger = event.touches[0];
-        const start = panStart.current;
-        if (Math.hypot(finger.clientX - start.x, finger.clientY - start.y) > TAP_SLOP) gestureMovedRef.current = true;
-      } else {
-        dragZoom(event.touches[0].clientX, event.touches[0].clientY, true);
-      }
+      dragZoom(event.touches[0].clientX, event.touches[0].clientY, true);
       return;
     }
     const start = touchStartRef.current;
@@ -2158,15 +2133,12 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     if (nativePinchTouches.current) {
       if (event.touches.length === 0) {
         nativePinchTouches.current = false;
-        nativePanTouches.current = false;
         touchZoomAt.current = Date.now();
         resumeHandover(180);
       }
       return;
     }
-    const nativePan = nativePanTouches.current;
     if (event.touches.length === 0) {
-      nativePanTouches.current = false;
       resumeHandover(pinchStart.current || panStart.current ? 180 : EDGE_SETTLE_MS + 32);
     }
     const quick = quickScale.current;
@@ -2210,7 +2182,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       }
       panStart.current = undefined;
       setPanning(false);
-      if (!nativePan) settleZoomNow();
+      settleZoomNow();
       return;
     }
     const start = touchStartRef.current;
@@ -2370,9 +2342,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     quickScale.current = undefined;
     panStart.current = undefined;
     setPanning(false);
-    if (nativePinchTouches.current || nativePanTouches.current) {
+    if (nativePinchTouches.current) {
       nativePinchTouches.current = false;
-      nativePanTouches.current = false;
       resumeHandover(180);
       return;
     }
