@@ -1,8 +1,5 @@
 # Local architecture and migration documents（架构、审计与迁移笔记只在本地，不随仓库走）。
-/docs/*
-# Public build instructions linked from the user-facing README.
-!/docs/BUILDING.md
-!/docs/UI_STANDARDS.md
+/docs/
 
 # Planning state
 /.planning/
@@ -27,7 +24,6 @@ CLAUDE.local.md
 # Local generated previews and skill work
 /.skill-archive/
 /.superpowers/
-/docs/superpowers/
 
 # Local build helpers: entrypoint, one-off packaging, model pipeline, and the
 # portable toolchain under tools/windows/toolchain/. The Windows build script is
@@ -87,14 +83,6 @@ NVIDIA Corporation/
 # 所以这里不再需要例外。
 /scripts/
 
-# LANraragi Bridge 的实施文档随功能交付，其他本地调研文档仍忽略。
-!/docs/2026-11-09-lrr-bridge-implementation.md
-!/docs/superpowers/
-/docs/superpowers/*
-!/docs/superpowers/plans/
-/docs/superpowers/plans/*
-!/docs/superpowers/plans/2026-11-09-lrr-bridge.md
 
 # Codex 侧的浏览器探针产物（Edge 配置档、截图、一次性脚本），不随仓库走。
 /.codex-artifacts/
-!/docs/superpowers/plans/2026-11-21-native-reader.md
