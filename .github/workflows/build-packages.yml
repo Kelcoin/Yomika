@@ -3,6 +3,15 @@ name: Build Packages and Releases
 on:
   workflow_dispatch:
     inputs:
+      platform:
+        description: 'Platform to build'
+        type: choice
+        default: all
+        options:
+          - all
+          - windows
+          - android
+          - ios
       release_tag:
         description: 'Tag of the release to publish to: `app-test` is the rolling test draft, `app-v*` are real releases. Leave empty to build without publishing.'
         required: false
@@ -43,8 +52,11 @@ permissions:
 jobs:
   windows:
     needs: [prepare-release]
-    # 没有 tag 输入时 prepare-release 会被跳过，构建本身仍要跑。
-    if: always()
+    # An empty release_tag skips preparation but still allows a build.
+    if: >-
+      ${{ !cancelled() &&
+          (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') &&
+          (github.event_name != 'workflow_dispatch' || (inputs.platform || 'all') == 'all' || inputs.platform == 'windows') }}
     permissions:
       contents: write
     runs-on: windows-latest
@@ -90,8 +102,11 @@ jobs:
 
   android:
     needs: [prepare-release]
-    # 没有 tag 输入时 prepare-release 会被跳过，构建本身仍要跑。
-    if: always()
+    # An empty release_tag skips preparation but still allows a build.
+    if: >-
+      ${{ !cancelled() &&
+          (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') &&
+          (github.event_name != 'workflow_dispatch' || (inputs.platform || 'all') == 'all' || inputs.platform == 'android') }}
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -184,8 +199,11 @@ jobs:
 
   ios-unsigned:
     needs: [prepare-release]
-    # 没有 tag 输入时 prepare-release 会被跳过，构建本身仍要跑。
-    if: always()
+    # An empty release_tag skips preparation but still allows a build.
+    if: >-
+      ${{ !cancelled() &&
+          (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') &&
+          (github.event_name != 'workflow_dispatch' || (inputs.platform || 'all') == 'all' || inputs.platform == 'ios') }}
     permissions:
       contents: write
     runs-on: macos-latest
