@@ -8,11 +8,13 @@
 //! 这里编不出来不是错误：退化成「这个构建没有 NGX 核心」，DLSS5 那一组会明说原因，
 //! 离线、没有 MSVC 也照样能编译（和搬过来之前的行为一致）。
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
+#[cfg(windows)]
+use std::{path::PathBuf, process::Command};
 
 /// 仓库里 `vendor/ngx/` 的位置。构建脚本的当前目录是 `CARGO_MANIFEST_DIR`
 /// （= `src-tauri/crates/compute-core`），所以往上两级才是 `src-tauri/`。
+#[cfg(windows)]
 fn vendor_ngx() -> PathBuf {
     PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
         .join("../..")
@@ -25,6 +27,7 @@ fn vendor_ngx() -> PathBuf {
 /// 不能用 `cc::Build::compile`：那个函数只会编出目标文件交给 Rust 的链接步骤，而
 /// 我们需要的是一个独立的 DLL（/MT 的世界要关在它自己里面）。所以这里自己调
 /// `cl.exe /LD`——工具链位置交给 `cc` 去问 VS 注册表，省得自己找 vswhere。
+#[cfg(windows)]
 fn build_ngx_shim() -> bool {
     let target = std::env::var("TARGET").unwrap_or_default();
     let Some(tool) = cc::windows_registry::find_tool(&target, "cl.exe") else {
@@ -88,7 +91,12 @@ fn main() {
 
     require_mobile_ort();
     link_mobile_ncnn();
+    #[cfg(windows)]
+    configure_ngx();
+}
 
+#[cfg(windows)]
+fn configure_ngx() {
     // 只对 Windows 目标编，而且只有开了 `dlssnr` 才有那个模块（没开时
     // `include_bytes!` 根本不会被求值，编了也没人要）。
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
