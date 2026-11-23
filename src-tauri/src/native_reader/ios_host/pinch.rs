@@ -22,6 +22,7 @@ struct PinchStart {
 struct PinchTargetState {
     window: WebviewWindow,
     start: Cell<Option<PinchStart>>,
+    focus: Cell<(f64, f64)>,
 }
 
 define_class!(
@@ -82,6 +83,7 @@ define_class!(
                 let transform = if ending {
                     reader.transforms.get(&key).copied().unwrap_or(start.transform)
                 } else {
+                    self.ivars().focus.set((x, y));
                     let scale = elastic_scale(start.transform.scale * scale, start.maximum);
                     let mut transform = ViewTransform { scale, edge_offset: 0.0, neighbour_page: None, ..start.transform };
                     if scale <= 1.0 {
@@ -102,8 +104,9 @@ define_class!(
                 if !ending { return None; }
                 self.ivars().start.set(None);
                 reader.pinching = None;
-                let target = settle(transform, start.maximum, width, height);
-                let animation = if !config.reduce_motion && transform.scale != target.scale {
+                let focus = self.ivars().focus.get();
+                let target = settle(transform, start.maximum, width, height, focus);
+                let animation = if !config.reduce_motion && (transform.scale != target.scale || transform.pan_x != target.pan_x || transform.pan_y != target.pan_y) {
                     let token = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
                     reader.pinch_settle = Some(token);
                     Some(token)
@@ -156,8 +159,12 @@ fn elastic_scale(raw: f64, maximum: f64) -> f64 {
     edge * (1.0 + travel.signum() * 0.12 * (1.0 - (-2.75 * travel.abs()).exp()))
 }
 
-fn settle(mut transform: ViewTransform, maximum: f64, width: f64, height: f64) -> ViewTransform {
+fn settle(mut transform: ViewTransform, maximum: f64, width: f64, height: f64, focus: (f64, f64)) -> ViewTransform {
+    let previous_scale = transform.scale;
     transform.scale = transform.scale.clamp(1.0, maximum);
+    let inverse_delta = transform.scale.recip() - previous_scale.recip();
+    transform.pan_x += focus.0 * inverse_delta;
+    transform.pan_y += focus.1 * inverse_delta;
     let max_x = width * (1.0 - transform.scale.recip()) / 2.0;
     let max_y = height * (1.0 - transform.scale.recip()) / 2.0;
     transform.pan_x = transform.pan_x.clamp(-max_x, max_x);
@@ -212,7 +219,7 @@ impl PinchRecognizer {
     pub(super) fn window(&self) -> &WebviewWindow { &self._target.ivars().window }
 
     pub fn new(window: WebviewWindow, web: &UIView, mtm: MainThreadMarker) -> Self {
-        let target = mtm.alloc::<PinchTarget>().set_ivars(PinchTargetState { window, start: Cell::new(None) });
+        let target = mtm.alloc::<PinchTarget>().set_ivars(PinchTargetState { window, start: Cell::new(None), focus: Cell::new((0.0, 0.0)) });
         let target: Retained<PinchTarget> = unsafe { msg_send![super(target), init] };
         let recognizer = unsafe {
             UIPinchGestureRecognizer::initWithTarget_action(mtm.alloc(), Some(target.as_ref()), Some(sel!(yomikaPinch:)))

@@ -294,9 +294,14 @@ fn default_bottom_nav_items() -> Vec<String> {
 ///
 /// 名字是快照序列化后的键（camelCase），因为判断发生在 JSON 上：日志里存的是那份
 /// JSON，远端来的也是 JSON。
-pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 10] = [
+pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 15] = [
     "downloadDirectory",
     "cacheMaxBytes",
+    "upscaleModel",
+    "upscaleBackend",
+    "upscaleAutoEnable",
+    "dlssnrEnabled",
+    "dlssnrPasses",
     // 算力中心这一组全是「这台机器」的事：端口可能撞别的设备、令牌是这台机器的
     // 凭据、远端地址指的是具体一台机器。同步出去只会把别的设备设置改坏。
     "computeCenterEnabled",
@@ -391,7 +396,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         // 都会超分失去意义。与设置页步进器的范围一致。
         || !(64 * 1024..=8 * 1024 * 1024).contains(&value.upscale_auto_threshold_bytes)
         || value.download_directory.len() > 4096
-        || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute())
+        || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute()
+            && !(cfg!(target_os = "android") && is_document_tree(&value.download_directory)))
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
         || value.custom_css.len() > 20_000
         || value.bottom_nav_items.iter().any(|item| {
@@ -447,6 +453,11 @@ fn map_value<T: serde::de::DeserializeOwned>(
         Some(value) => serde_json::from_str(value).map_err(|error| error.to_string()),
         None => Ok(fallback),
     }
+}
+
+pub(crate) fn is_document_tree(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| url.scheme() == "content" && url.host_str().is_some()
+        && url.path_segments().is_some_and(|mut parts| parts.next() == Some("tree") && parts.next().is_some_and(|id| !id.is_empty()) && parts.next().is_none()))
 }
 
 pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapshot, String> {

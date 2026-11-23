@@ -3,4 +3,6 @@
 <plist version="1.0"><dict>
   <key>NSFaceIDUsageDescription</key>
   <string>使用 Face ID 解锁 Yomika，保护此设备上的阅读内容。</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>连接同一局域网中的算力设备和档案服务器。</string>
 </dict></plist>

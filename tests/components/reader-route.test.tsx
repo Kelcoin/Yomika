@@ -1,8 +1,8 @@
-import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
+import { setInvokeAdapterForTests as installLocalReadingAdapter } from '../localReadingDataAdapter';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { StrictMode } from 'react';
-import { afterEach, vi } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 import { App } from '../../src/app/App';
@@ -251,7 +251,21 @@ function enhancedReader(
   return release;
 }
 
+// Supply the installed-model inventory independently of the requested setting.
+const installedModels = ['test', 'realcugan-2x', 'realcugan-2x-denoise3x', 'real-esrgan', 'realesr-general-x4v3', 'local-model']
+  .map(id => ({ id, version: 'test', scale: 2, kind: 'upscale' }));
+function setInvokeAdapterForTests(adapter: Parameters<typeof installLocalReadingAdapter>[0]) {
+  installLocalReadingAdapter((command, args) => command === 'inference_list_models'
+    ? Promise.resolve({ ok: true, value: installedModels })
+    : adapter(command, args));
+}
+
+beforeEach(() => {
+  document.documentElement.dataset.nativePlatform = 'windows';
+});
+
 afterEach(() => {
+  delete document.documentElement.dataset.nativePlatform;
   resetInvokeAdapterForTests();
   vi.restoreAllMocks();
 });
@@ -1052,7 +1066,7 @@ describe('reader route', () => {
       'list_servers', 'load_preferences', 'load_reader_manifest', 'load_archive_metadata',
       'load_reading_progress', 'load_archive_thumbnail', 'cache_read_image', 'load_reader_page',
       'save_reading_progress',
-      'app_release_latest', 'inference_list_models', 'model_release_list_upscalers',
+      'app_release_latest', 'model_release_list_upscalers',
       'compute_worker_status', 'fetch_tag_counts',
       // 进阅读器就把上一趟留下的成品清一次（超分 / DLSSNR 的产物，见
       // `purgeReaderProducts`）：它们只在这次会话里有意义，不该跟着配额与 LRU 走。
@@ -2065,6 +2079,7 @@ describe('reader route', () => {
     /** 前几次问能力清单先答不上（对面刚起、网络抖一下）：默认 0。 */
     probeFailures?: number;
     localModel?: string;
+    localDlssnr?: boolean;
     pageCount?: number;
     processFile?: () => unknown;
     rawPage?: (pageIndex: number) => unknown;
@@ -2083,6 +2098,7 @@ describe('reader route', () => {
             prefetchPages: options.prefetchPages ?? 0, coverConcurrency: 4,
             // 本机一个模型都没有：这三枚按钮能亮，只可能是因为对面报了可用。
             upscaleBackend: options.localModel ? 'cpu' : 'off', upscaleModel: options.localModel ?? '',
+            dlssnrEnabled: options.localDlssnr ?? false,
             remoteComputeUrl: '192.168.1.9:47653',
             remoteComputeToken: 'remote-token',
             remoteComputeOps: serializeRemoteOps({
@@ -2132,6 +2148,28 @@ describe('reader route', () => {
     render(<MemoryRouter initialEntries={['/reader/remote-reader']}><App /></MemoryRouter>);
     return { calls };
   }
+
+  it('ignores stale local DLSSNR settings on iOS and preserves remote DLSSNR', async () => {
+    document.documentElement.dataset.nativePlatform = 'ios';
+    const { calls } = remoteReader({ ready: { upscale: false, dlssnr: true }, localDlssnr: true });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    expect(await screen.findByRole('button', { name: '开启 DLSSNR' })).toBeEnabled();
+    expect(calls.some(([command]) => command === 'dlssnr_status')).toBe(false);
+  });
+
+  it('does not queue an uninstalled local upscale model when the remote worker fails', async () => {
+    const { calls } = remoteReader({
+      ready: { upscale: true, dlssnr: false }, localModel: 'uninstalled-model',
+      process: () => ({ ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: false } }),
+    });
+    await screen.findByRole('img', { name: '第 1 页' });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(await screen.findByRole('button', { name: '开启超分' }));
+    await waitFor(() => expect(calls.some(([command]) => command === 'remote_compute_process')).toBe(true));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '关闭超分' })).not.toBeInTheDocument());
+    expect(calls.some(([command]) => command === 'compute_submit_reader_page')).toBe(false);
+  });
 
   it('reacquires and presents a remote result after native preparation fails in the same session', async () => {
     const events: { op: string; id: number }[] = [];

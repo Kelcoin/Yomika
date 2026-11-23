@@ -282,9 +282,13 @@ fn fetch_upscale_catalog_with_fallback(owner_repo: &str) -> Result<UpscaleCatalo
 }
 
 fn with_upstream_models(mut catalog: UpscaleCatalog) -> Result<UpscaleCatalog, String> {
-    let model = upstream_realesrgan()?;
-    if !catalog.models.iter().any(|entry| entry.id == model.id) {
-        catalog.models.push(model);
+    for model in [upstream_realesrgan()?, bundled_nomosuni()?] {
+        if model.id == "span-nomosuni-photo" {
+            catalog.models.retain(|entry| entry.id != model.id);
+        }
+        if !catalog.models.iter().any(|entry| entry.id == model.id) {
+            catalog.models.push(model);
+        }
     }
     validate_upscale_catalog(&catalog)?;
     Ok(catalog)
@@ -293,6 +297,29 @@ fn with_upstream_models(mut catalog: UpscaleCatalog) -> Result<UpscaleCatalog, S
 fn upstream_realesrgan() -> Result<UpscaleCatalogModel, String> {
     serde_json::from_str(include_str!("../resources/models/realesrgan-catalog.json"))
         .map_err(|error| error.to_string())
+}
+
+const NOMOSUNI_BUNDLE: &[u8] = include_bytes!("../resources/models/span-nomosuni-photo.zip");
+
+fn bundled_nomosuni() -> Result<UpscaleCatalogModel, String> {
+    serde_json::from_str(include_str!("../resources/models/span-nomosuni-catalog.json"))
+        .map_err(|error| error.to_string())
+}
+
+fn install_bundled_nomosuni(data: &std::path::Path) -> Result<(), String> {
+    use std::io::Read;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(NOMOSUNI_BUNDLE))
+        .map_err(|error| error.to_string())?;
+    let mut contents = Vec::new();
+    archive.by_name("manifest.json").and_then(|mut file| file.read_to_end(&mut contents).map_err(Into::into))
+        .map_err(|error| error.to_string())?;
+    let manifest: crate::inference::ModelManifest = serde_json::from_slice(&contents).map_err(|error| error.to_string())?;
+    let (staging, root) = crate::inference::model_install_roots(data, &manifest.id, &manifest.version)
+        .map_err(|error| format!("{error:?}"))?;
+    if crate::inference::read_model_manifest(&root).is_some() { return Ok(()); }
+    crate::inference::install_model_archive(NOMOSUNI_BUNDLE, &manifest, &staging, &root)
+        .map(|_| ())
+        .map_err(|error| format!("{error:?}"))
 }
 
 pub const MIRROR_PRESETS: &[(&str, &str)] = &[
@@ -942,6 +969,9 @@ fn install_hosted_upscale_model(
     data: &std::path::Path,
     model_id: &str,
 ) -> Result<(), String> {
+    if model_id == "span-nomosuni-photo" {
+        return install_bundled_nomosuni(data);
+    }
     let upstream = upstream_realesrgan()?;
     let catalog = if model_id == upstream.id {
         // A known, pinned upstream does not need the project catalog online.
@@ -1206,7 +1236,19 @@ mod tests {
         let manifest = hosted_model_manifest(model).unwrap();
         assert_eq!(manifest.sha256, "1c0fc21d1d6d7df7f39c1fa23c73138a87a01ea0b3ac56ebd0ea943e62e12800");
         assert!(model.model_file().unwrap().direct_url.as_ref().unwrap().contains("e2a8b86b2d947b18e024c3975aa13eadcd7751e6"));
-        assert_eq!(with_upstream_models(catalog).unwrap().models.len(), 1);
+        assert_eq!(with_upstream_models(catalog).unwrap().models.len(), 2);
+    }
+
+    #[test]
+    fn bundled_nomosuni_is_listed_and_installs_from_its_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = with_upstream_models(UpscaleCatalog { tag: MODEL_RELEASE_TAG.into(), models: vec![] }).unwrap();
+        let model = catalog.models.iter().find(|model| model.id == "span-nomosuni-photo").unwrap();
+        install_bundled_nomosuni(dir.path()).unwrap();
+        install_bundled_nomosuni(dir.path()).unwrap();
+        let root = dir.path().join("models").join(&model.id).join(&model.version);
+        assert_eq!(crate::inference::read_model_manifest(&root).unwrap().sha256, model.model_file().unwrap().sha256);
+        assert!(root.join("LICENSE.txt").is_file());
     }
 
     #[test]

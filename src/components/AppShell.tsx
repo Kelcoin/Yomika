@@ -265,7 +265,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
       // 上面，点一下还会把两栏一起拉回顶部——用户报的正是这两条。
       const region = activeRegionRef.current;
       const panel = region && region !== workspaceRef.current ? region.getBoundingClientRect() : undefined;
-      if (panel && panel.width > 0) {
+      if (!compact && panel && panel.width > 0) {
         // 栏内右下角、离边 12px；底栏压着那一角时抬到底栏上面（与 `above` 同一套算法：
         // bottom 是离窗口底边的距离，越大越靠上）。
         const anchored = {
@@ -278,11 +278,13 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
           ? current : anchored);
         return;
       }
-      const beside = !compactNavHidden && bar.right + 12 + width <= window.innerWidth - 16 - safeRight;
+      const gutter = Math.max(0, window.innerWidth - bar.right - safeRight);
+      const gap = Math.min(12, Math.max(4, (gutter - width) / 2));
+      const beside = !compactNavHidden && gutter >= width + 2 * gap - 0.5;
       const bottom = compactNavHidden ? 16 + safeBottom : beside
         ? window.innerHeight - (barTop + bar.height / 2) - height / 2
         : window.innerHeight - barTop + 12;
-      const right = beside ? window.innerWidth - bar.right - 12 - width : 16 + safeRight;
+      const right = beside ? window.innerWidth - bar.right - gap - width : 16 + safeRight;
       const next = { placement: beside ? 'beside' : 'above', bottom, right };
       parkedTopPositionRef.current = next;
       setTopPosition((current) => current?.placement === next.placement && current.bottom === next.bottom && current.right === next.right
@@ -305,7 +307,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
       nav.removeEventListener('transitioncancel', settled);
       window.removeEventListener('resize', measure);
     };
-  }, [floatingNav, compactNavHidden, preferences.bottomNavItems]);
+  }, [compact, floatingNav, compactNavHidden, preferences.bottomNavItems]);
 
   // Dead zones around and inside the workspace — the collapsed sidebar strip,
   // the title bar, a rail whose horizontal scroll has run out — have no scroll
@@ -392,7 +394,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
           // 滚不到。首页的全宽与内边距由 shell.css 里 `:has(.workspace-home)` 那条规则给；
           // 详情一开则由 `:has(.library-shell.is-home.has-detail)` 那三条把它钳成一屏两栏
           // （右栏要能自己滚），所以那一态同样不能套这条「整页滚」的容器。
-          className={`workspace${!returningHome && /^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
+          className={`workspace${pathname === '/settings' ? ' is-settings-workspace' : ''}${!returningHome && /^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
           ref={workspaceRef}
           tabIndex={-1}
         >

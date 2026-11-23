@@ -10,6 +10,9 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
+import androidx.activity.result.ActivityResult
+import app.tauri.annotation.ActivityCallback
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -178,6 +181,12 @@ fun applySystemBarAppearance(activity: Activity, dark: Boolean, background: Stri
  *
  * 命令都跑在主线程（Tauri 把插件调用派发到 Android 主线程），所以这里可以直接碰视图。
  */
+@InvokeArg
+class DownloadDirectoryCopyArgs {
+  lateinit var directory: String
+  lateinit var path: String
+}
+
 @TauriPlugin
 class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
   @Command
@@ -301,10 +310,61 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
     }
   }
 
-  /**
-   * 写一份文本到用户选定的位置。SAF 给的是 `content://` URI（系统的「新建文档」已经把
-   * 文件建好了，零字节），普通路径直接写文件。
-   */
+  @Command
+  fun pickDownloadDirectory(invoke: Invoke) {
+    val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(
+      Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+        Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION or Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+    )
+    try {
+      startActivityForResult(invoke, intent, "downloadDirectoryPicked")
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "无法打开系统目录选择器")
+    }
+  }
+
+  @ActivityCallback
+  fun downloadDirectoryPicked(invoke: Invoke, result: ActivityResult) {
+    val intent = result.data
+    val tree = intent?.data
+    if (result.resultCode != Activity.RESULT_OK || intent == null || tree == null) {
+      invoke.resolve(JSObject().put("path", org.json.JSONObject.NULL))
+      return
+    }
+    try {
+      val grants = intent.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+      require((grants and Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0) { "所选目录没有写入权限" }
+      hostActivity.contentResolver.takePersistableUriPermission(tree, grants)
+      invoke.resolve(JSObject().put("path", tree.toString()))
+    } catch (error: Exception) {
+      invoke.reject(error.message ?: "无法授权下载目录")
+    }
+  }
+
+  @Command
+  fun copyArchiveToDownloadDirectory(invoke: Invoke) {
+    val args = invoke.parseArgs(DownloadDirectoryCopyArgs::class.java)
+    Thread {
+      val resolver = hostActivity.contentResolver
+      var output: Uri? = null
+      try {
+        val tree = Uri.parse(args.directory)
+        val source = File(args.path)
+        val parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+        val document = DocumentsContract.createDocument(resolver, parent, "application/zip", source.name)
+          ?: error("无法在所选目录创建文件")
+        output = document
+        resolver.openOutputStream(document, "w")?.use { target ->
+          source.inputStream().use { it.copyTo(target) }
+        } ?: error("无法写入所选目录")
+        invoke.resolve(JSObject())
+      } catch (error: Exception) {
+        output?.let { runCatching { DocumentsContract.deleteDocument(resolver, it) } }
+        invoke.reject(error.message ?: "无法复制下载文件")
+      }
+    }.start()
+  }
+
   @Command
   fun writeClipboardText(invoke: Invoke) {
     val args = invoke.parseArgs(ClipboardTextArgs::class.java)

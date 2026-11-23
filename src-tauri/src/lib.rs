@@ -316,6 +316,23 @@ pub fn run() {
                 .ok_or_else(|| std::io::Error::other("Main window configuration unavailable"))?;
             let builder = tauri::WebviewWindowBuilder::from_config(app, config)?
                 .initialization_script(commands::app_security::bootstrap_script(app.handle()).map_err(std::io::Error::other)?);
+            #[cfg(target_os = "ios")]
+            let builder = {
+                use objc2_ui_kit::{UITraitCollection, UIUserInterfaceStyle};
+                use tauri::webview::Color;
+
+                let theme = launch_preferences.as_ref().map(|preferences| preferences.theme.as_str());
+                let dark = match theme {
+                    Some("dark") => true,
+                    Some("light") => false,
+                    // This setup hook runs on UIKit's main thread.
+                    _ => unsafe { UITraitCollection::currentTraitCollection().userInterfaceStyle() == UIUserInterfaceStyle::Dark },
+                };
+                // Cover the native backing view until WebKit has drawn its first
+                // full-sized frame. An alpha-zero config exposes the UIWindow.
+                let canvas = if dark { Color(18, 20, 18, 255) } else { Color(251, 248, 243, 255) };
+                builder.background_color(canvas).initialization_script("window.__yomikaNativeIos = true;")
+            };
             // Native reader artwork is available on normal desktop/iOS routes.
             // Keep the original renderer selectable for platform diagnostics.
             #[cfg(any(windows, target_os = "ios"))]
@@ -495,6 +512,7 @@ pub fn run() {
             show_system_toast,
             save_text_file,
             read_text_file,
+            commands::platform::pick_download_directory,
             system_insets,
             set_system_bar_style,
             commands::platform::set_status_bar_visible,

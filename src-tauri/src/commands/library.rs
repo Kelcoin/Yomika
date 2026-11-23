@@ -1701,6 +1701,11 @@ pub async fn download_archive(
         ));
     }
     if let Some(existing) = existing_archive_download(&database, &server_id, &archive_id)? {
+        #[cfg(target_os = "android")]
+        let existing = match copy_finished_android_download(&app, &database, Ok(existing)).await {
+            Ok(download) => download,
+            Err(error) => return Ok(CommandResult::failure("REMOTE_UNAVAILABLE", error, true)),
+        };
         return Ok(CommandResult::success(existing));
     }
     let (base_url, scope_id, directory) = {
@@ -1712,6 +1717,8 @@ pub async fn download_archive(
         let directory = resolved_download_directory(&app, &connection)?;
         (base_url, scope_id, directory)
     };
+    #[cfg(target_os = "android")]
+    let export_host = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<DownloadResult, String> {
         let database = app.state::<Database>();
         let identity = format!("download:{server_id}:{archive_id}");
@@ -1763,10 +1770,42 @@ pub async fn download_archive(
     })
     .await
     .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "android")]
+    let result = copy_finished_android_download(&export_host, &database, result).await;
     Ok(match result {
         Ok(download) => CommandResult::success(download),
         Err(error) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),
     })
+}
+
+/// Keep the local archive readable by the index and publish a copy through
+/// Android's persisted document-tree grant when the user selected a folder.
+#[cfg(target_os = "android")]
+async fn copy_finished_android_download(app: &tauri::AppHandle, database: &Database, result: Result<DownloadResult, String>) -> Result<DownloadResult, String> {
+    let download = result?;
+    if download.status != "completed" || download.path.is_empty() { return Ok(download); }
+    // Serialize exports so tapping Download again during completion cannot
+    // create a second copy. Failed exports can retry from the existing archive.
+    static EXPORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = EXPORT_LOCK.lock().await;
+    let key = format!("android_download_export.{}", download.task_id);
+    let (directory, recorded) = {
+        let connection = database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
+        let directory = crate::settings::load_preferences_from(&connection)?.download_directory;
+        let recorded: Option<String> = connection
+            .query_row("SELECT value_json FROM settings WHERE key = ?1", params![&key], |row| row.get(0))
+            .optional().map_err(|error| error.to_string())?;
+        (directory, recorded)
+    };
+    let receipt = serde_json::json!([directory, download.path]).to_string();
+    if crate::settings::is_document_tree(&directory) && recorded.as_deref() != Some(receipt.as_str()) {
+        crate::mobile_host::copy_archive_to_download_directory(app, &directory, &download.path).await
+            .map_err(|error| format!("档案已保存到应用内，复制到所选目录失败：{error}"))?;
+        let connection = database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
+        connection.execute("INSERT INTO settings (key, value_json) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json", params![key, receipt])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(download)
 }
 
 /// 下载对外报的结果：状态、落盘路径（中止时是空串）和任务 id。暂停不是失败，
@@ -3669,7 +3708,8 @@ fn resolved_download_directory(
 ) -> Result<std::path::PathBuf, String> {
     let preferences = crate::settings::load_preferences_from(connection)?;
     // The mobile dialog cannot grant persistent write access to an iOS folder.
-    if cfg!(target_os = "ios") || preferences.download_directory.is_empty() {
+    if cfg!(target_os = "ios") || preferences.download_directory.is_empty()
+        || (cfg!(target_os = "android") && crate::settings::is_document_tree(&preferences.download_directory)) {
         Ok(crate::inference::model_data_dir(app)
             .map_err(|error| error.to_string())?
             .join("downloads"))
@@ -4056,6 +4096,8 @@ pub async fn resume_download(
     } else {
         (received.max(0) as u64).min(on_disk)
     };
+    #[cfg(target_os = "android")]
+    let export_host = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || -> Result<DownloadResult, String> {
         let api_key = SystemCredentialStore
             .get_server_api_key(&scope_id)
@@ -4107,6 +4149,8 @@ pub async fn resume_download(
     })
     .await
     .map_err(|error| error.to_string())?;
+    #[cfg(target_os = "android")]
+    let result = copy_finished_android_download(&export_host, &database, result).await;
     Ok(match result {
         Ok(download) => CommandResult::success(download),
         Err(error) => CommandResult::failure("REMOTE_UNAVAILABLE", error, true),

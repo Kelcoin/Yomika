@@ -378,6 +378,7 @@ detailBasePath?: string | undefined }) {
     };
   }, [serverId, archiveId, currentDownloadOwner, favoritePageActive, showDownload, serverOwner, readingIdentity]);
   const { open: openMenu, menu } = useArchiveContextMenu({
+    detail: true,
     hiddenActions: detailActions.filter(action => action !== 'clearProgress' || progress.hasProgress),
     onMembershipChange: (id, list, next) => {
       if (id !== archiveId || favoriteOwner.current.identity !== favoriteIdentity || favoriteOwner.current.generation !== favoriteGeneration) return;

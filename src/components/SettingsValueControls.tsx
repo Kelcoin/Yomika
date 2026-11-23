@@ -25,19 +25,20 @@ export function SettingsOption({ active, action, status, align = 'center', child
 }
 
 /** A settings row whose secondary content uses the common menu lifecycle. */
-export function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, children }: {
+export function SettingsPanel({ icon, label, hint, value, ariaLabel, onClose, className, children }: {
   icon?: ReactNode;
   label: string;
   hint?: string | undefined;
   value?: string | undefined;
   ariaLabel?: string | undefined;
   onClose?: (() => void) | undefined;
+  className?: string | undefined;
   children: ReactNode;
 }) {
   const [open, setOpen] = useDisclosedSettingsMenu();
   const close = () => { setOpen(false); onClose?.(); };
   return <>
-    <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} />
+    <SettingsRow icon={icon} label={label} hint={hint} value={value} onClick={() => setOpen(true)} ariaLabel={ariaLabel ?? label} expanded={open} className={className} />
     {open && <SettingsMenu title={ariaLabel ?? label} icon={icon} onClose={close}>{children}</SettingsMenu>}
   </>;
 }
@@ -146,7 +147,7 @@ export function SettingsMenu({ title, icon, action, onClose, onBack, role = 'dia
           <SettingsMenuContext.Provider value={context}>
           <h2 className="settings-choice-title" data-has-navigation={Boolean(action) || undefined}>
             {icon && <span className="settings-choice-icon" aria-hidden="true">{icon}</span>}
-            {title}
+            <span className="settings-choice-title-text">{title}</span>
             {action && <span className="settings-choice-action">{action}</span>}
           </h2>
           <div className="settings-menu-body" ref={bodyRef}>

@@ -7717,3 +7717,80 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 .app-main.has-home-topbar .workspace-home > .archive-rail { margin-block: 0; }
 .app-main.has-home-topbar .workspace-home > .first-run-page { padding-block-start: 0; }
+
+/* Keep touch scrolling in WebKit's bounded workspace and let the edge-back
+   recognizer claim horizontal movement only. */
+:root[data-native-platform='ios'] .workspace.is-settings-workspace {
+  min-block-size: 0;
+  overflow-y: scroll;
+  touch-action: pan-y;
+  overscroll-behavior-y: auto;
+}
+:root[data-native-platform='ios'] .settings-page { touch-action: pan-y; }
+:root[data-native-platform='ios'] .settings-layout.is-backing { display: grid; isolation: isolate; pointer-events: none; }
+.settings-layout.is-backing > :is(.settings-sidebar-slot, .settings-content) { grid-area: 1 / 1; min-inline-size: 0; }
+.settings-layout.is-backing > .settings-content { background: var(--surface-panel); }
+
+
+.archive-context-menu.is-detail-menu {
+  width: max-content;
+  min-width: 0;
+  max-width: calc(100vw - 24px);
+  padding-inline-end: 4px;
+}
+.archive-context-menu.is-detail-menu :is(.archive-context-menu-item, .archive-context-menu-label) {
+  min-width: 0;
+  padding-inline-end: 6px;
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+.archive-context-menu.is-detail-menu svg { flex: none; }
+
+.settings-device-menu { display: grid; gap: var(--space-3); }
+.settings-choice-title-text {
+  min-width: 0;
+  line-height: var(--leading-normal);
+  overflow-wrap: anywhere;
+}
+
+.settings-device-menu .settings-choice-empty {
+  min-height: var(--control-height);
+  padding: var(--space-2) var(--space-3);
+  text-align: start;
+  align-content: center;
+  justify-content: stretch;
+  background: var(--surface-container);
+  border-radius: var(--radius-control);
+}
+.settings-device-menu :is(.settings-address-input, .settings-code-input) {
+  min-height: var(--control-height);
+  padding-block: var(--space-2);
+  line-height: var(--leading-normal);
+}
+.settings-device-menu .settings-address-input { text-align: start; }
+.settings-device-menu .settings-menu-field-label { line-height: var(--leading-normal); }
+.settings-device-menu .settings-menu-actions > button,
+.settings-download-actions > button {
+  padding-inline: var(--space-2);
+  line-height: var(--leading-normal);
+  white-space: normal;
+}
+
+.settings-download-directory .settings-row {
+  /* The icon shares the first line with the label. The hint sits below both. */
+  grid-template-rows: auto auto;
+  row-gap: 2px;
+}
+.settings-download-directory .settings-row-copy { display: contents; }
+.settings-download-directory .settings-row-icon { grid-area: 1 / 1; }
+.settings-download-directory .settings-row-label { grid-area: 1 / 2; }
+.settings-download-directory .settings-row-hint { grid-area: 2 / 2; }
+.settings-download-directory .settings-row-control { grid-area: 1 / 3 / span 2; }
+.settings-download-path {
+  display: grid;
+  min-height: var(--control-height);
+  align-content: center;
+}
+.settings-device-menu .settings-menu-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.settings-device-menu .settings-menu-actions > :only-child { grid-column: 1 / -1; }
+.settings-device-menu .settings-discovery-error { color: var(--state-danger); }

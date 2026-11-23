@@ -18,6 +18,7 @@ export interface ArchiveContextMenuTarget {
 
 interface ArchiveContextMenuProps {
   target: ArchiveContextMenuTarget | undefined;
+  detail?: boolean | undefined;
   onClose: () => void;
   onRead: (archive: ArchiveRecord) => void;
   onReadIncognito: (archive: ArchiveRecord) => void;
@@ -49,6 +50,7 @@ interface ArchiveContextMenuProps {
  * trigger. Keep it nonmodal: locking body scroll changes scrollbar geometry
  * beneath a scrolled virtual grid and can repack/remount the cards behind it. */
 export function ArchiveContextMenu({
+  detail,
   target,
   onClose,
   onReadIncognito,
@@ -73,7 +75,7 @@ export function ArchiveContextMenu({
   const archive = target.archive;
   const galleryUrl = archiveSourceUrl(archive.tags);
   return (
-    <PositionedMenu at={target} label={`${archive.title} 操作`} onClose={onClose}>
+    <PositionedMenu at={target} label={`${archive.title} 操作`} {...(detail ? { className: 'is-detail-menu' } : {})} onClose={onClose}>
           <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onReadIncognito(archive)}>
             <EyeOff aria-hidden="true" />无痕阅读
           </DropdownMenu.Item>
@@ -151,6 +153,7 @@ export function ArchiveContextMenu({
  * 那些 IPC。条目名也会是错的（本地文件没有「无痕阅读」）。所以只能另起一个
  * 薄壳，样式一字不差地复用。 */
 export interface LocalArchiveContextMenuTarget {
+  detail?: boolean;
   path: string;
   title: string;
   x: number;
@@ -165,7 +168,7 @@ export function LocalArchiveContextMenu({ target, onClose, onOpen, onDelete }: {
 }) {
   if (!target) return null;
   return (
-    <PositionedMenu at={target} label={`${target.title} 操作`} onClose={onClose}>
+    <PositionedMenu at={target} label={`${target.title} 操作`} {...(target.detail ? { className: 'is-detail-menu' } : {})} onClose={onClose}>
           <DropdownMenu.Item className="archive-context-menu-item" onSelect={() => onOpen(target)}>
             <BookOpen aria-hidden="true" />查看详情
           </DropdownMenu.Item>

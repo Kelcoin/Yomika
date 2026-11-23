@@ -1,5 +1,6 @@
 import { useLayoutEffect, type RefObject } from 'react';
 import { EDGE_CLAIM_PX, EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from './motion';
+import { isIosDevice } from './layoutMode';
 import { createWheelMotion, isDiscreteWheel } from './wheelMotion';
 
 /** Excessive sibling surfaces degrade to native scrolling rather than blocking input. */
@@ -87,6 +88,7 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
       lastY = y;
     };
     const touchStart = (event: TouchEvent) => {
+      if (route === '/settings' && isIosDevice()) return;
       wheelMotion.cancel();
       wheelPainting = false;
       if (wheelRelease !== undefined) window.clearTimeout(wheelRelease);

@@ -28,6 +28,7 @@ import { parseDlssnrPasses, serializeDlssnrPasses } from '../repositories/native
 import { loadLocalRenditions, type ReaderPageEngine, type ReaderPageFailure } from '../lib/readerComputedPage';
 import type { ImageCacheIdentity } from '../domain/cache';
 import { readerDerivedRetainedBytes, type ImageHandle } from '../lib/unifiedImageCache';
+import { useDevicePlatform } from '../lib/useDevicePlatform';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
@@ -287,7 +288,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
    * 但「设置里开了」只是一句**持久化**的意图：它可能来自另一台机器、或者那个 DLL
    * 已经被换掉。本地超分的模型在不在问得出来，DLSSNR 能不能跑要问原生（见下）。 */
   const [dlssnrReady, setDlssnrReady] = useState(false);
-  const dlssnrRequested = preferences.dlssnrEnabled;
+  const platform = useDevicePlatform();
+  const dlssnrRequested = platform === 'windows' && preferences.dlssnrEnabled;
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   /** 已经就「这台机器跑不了 DLSSNR」说过一次的那句话：同一条理由只说一遍，不然每翻
@@ -339,7 +341,18 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
   // page. Upscaling therefore needs a model, not just a backend.
   //
   // 远端能力决定远端服务能否使用；本地模型只在探测完成后提供回退。
-  const localUpscaleConfigured = preferences.upscaleBackend !== 'off' && preferences.upscaleModel !== '';
+  const localModelId = preferences.upscaleBackend === 'off' ? '' : preferences.upscaleModel;
+  const [checkedLocalModel, setCheckedLocalModel] = useState<string>();
+  useEffect(() => {
+    if (!pageActive || !localModelId) return;
+    let active = true;
+    void inferenceRepository.listModels().then((result) => {
+      if (active) setCheckedLocalModel(result.ok && result.value.some((model) =>
+        model.id === localModelId && model.kind === 'upscale' && model.scale !== null) ? localModelId : undefined);
+    });
+    return () => { active = false; };
+  }, [pageActive, localModelId]);
+  const localUpscaleConfigured = Boolean(localModelId && checkedLocalModel === localModelId);
   // Wait for the remote probe before allowing local fallback on a cold start.
   const remoteProbed = remoteCapabilities?.address === remoteAddress || remoteProbeFailed === remoteAddress;
   const upscaleConfigured = remoteConfigured
@@ -1387,7 +1400,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
         ...(dlssnrConfigured ? (['dlssnr'] as const) : []),
       ]
       : [];
-    const upscaleModel = upscaleEnabled && preferences.upscaleBackend !== 'off' ? preferences.upscaleModel : '';
+    const upscaleModel = upscaleEnabled && localUpscaleConfigured ? localModelId : '';
     // 后台任务从游标补进队列时取不到这里的局部变量，所以在排这一轮的时候留一份。
     derivedConfigRef.current = { upscaleModel, engine, remoteChain };
     let queued = false;
@@ -1468,7 +1481,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     // 队列里可能已经有后台那一档的活，所以这里不能只看 `queued`。
     // 等清理落地那一关在 `runDerivedQueue` 里（闸门只设一处）。
     if (queued || derivedQueueRef.current.length > 0) void runDerivedQueue();
-  }, [dlssnrConfigured, prefetchDistance, preferences.upscaleModel, preferences.upscaleBackend, remoteUsable, remoteCapabilities, remoteAddress, runDerivedQueue, upscaleEnabled]);
+  }, [dlssnrConfigured, prefetchDistance, localModelId, localUpscaleConfigured, remoteUsable, remoteCapabilities, remoteAddress, runDerivedQueue, upscaleEnabled]);
 
   const rejectDerivedPresentation = useCallback((pageIndex: number, url: string) => {
     const handle = derivedHandlesRef.current.get(pageIndex);
@@ -1502,7 +1515,8 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
     dlssnrConfigured,
     enhancementToken,
     preferences.dlssnrPasses,
-    preferences.upscaleModel,
+    localModelId,
+    localUpscaleConfigured,
     preferences.upscaleOutputScale,
     releaseDerived,
     remoteConfigured,

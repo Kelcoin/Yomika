@@ -17,8 +17,9 @@ import { ChevronDown, ChevronRight } from 'lucide-react';
 /** One setting row. A plain value row when there is nothing to open; a button
  * that opens a floating menu otherwise. Nothing in the row is shaped like a
  * field — choosing happens in the menu. */
-export function SettingsRow({ icon, label, hint, value, trailing = 'menu', mark, onClick, to, ariaLabel, expanded, busy, disabled, control }: {
+export function SettingsRow({ icon, label, hint, value, trailing = 'menu', mark, onClick, to, ariaLabel, expanded, busy, disabled, control, className }: {
   icon?: ReactNode;
+  className?: string | undefined;
   /** A node, not just a string: the server row trails a 「当前」 mark behind the
    * name, and that mark belongs to the label rather than the control slot. */
   label: ReactNode;
@@ -65,7 +66,7 @@ export function SettingsRow({ icon, label, hint, value, trailing = 'menu', mark,
   ) : (
     <div className="settings-row">{body}</div>
   );
-  return <div className="settings-item">{row}</div>;
+  return <div className={className ? `settings-item ${className}` : 'settings-item'}>{row}</div>;
 }
 
 /** The three cells of a row, without the row's own element. Exported for the one

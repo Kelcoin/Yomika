@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { closeTopOverlay } from './overlayBackGuard';
+import { resolveRouteMotion, routeMotionAllowed } from './routeMotion';
+import { closeTopOverlay, hasBackOverlay, topBackGestureSurface } from './overlayBackGuard';
 import { isIosBackEdge, isMobileDevice } from './layoutMode';
 
 export const MOBILE_BACK_EVENT = 'yomika-mobile-back';
@@ -50,6 +51,11 @@ export class PageBackHistory {
     return pageRoot(url.split('?')[0]!);
   }
 
+  peekBack(): string | undefined {
+    const stack = this.pages.get(this.owner);
+    return stack && stack.length > 1 ? stack.at(-2) : this.homeEntries.has(this.owner) ? '/' : undefined;
+  }
+
   back(): string | undefined {
     const stack = this.pages.get(this.owner);
     if (!stack || stack.length <= 1) {
@@ -75,7 +81,7 @@ export function usePageBackNavigation(): void {
   }, [location]);
   useLayoutEffect(() => {
     const back = (event: Event) => {
-      if (closeTopOverlay()) {
+      if (closeTopOverlay(event instanceof CustomEvent && event.detail?.iosBack ? event.detail.offset : undefined)) {
         event.preventDefault();
         return;
       }
@@ -83,7 +89,7 @@ export function usePageBackNavigation(): void {
       // Unhandled root Back lets Android's host move the task to the background.
       if (!target) return;
       event.preventDefault();
-      navigate(target, { replace: true, state: { routeDirection: -1 } });
+      navigate(target, { replace: true, state: { routeDirection: -1, ...(event instanceof CustomEvent && event.detail?.iosBack ? { iosBack: true, iosBackOffset: event.detail.offset } : {}) } });
     };
     window.addEventListener(MOBILE_BACK_EVENT, back);
     // WKWebView/browser gestures still deliver POP. Stop cross-tab browser
@@ -100,10 +106,21 @@ export function usePageBackNavigation(): void {
     window.addEventListener('popstate', pop, true);
     // WKWebView has no hardware Back action. Use the same page stack as Android,
     // so one edge gesture dismisses the top overlay or returns within this tab.
-    let edge: { id: number; x: number; y: number; horizontal: boolean } | undefined;
-    const clearEdge = () => { edge = undefined; };
+    let edge: { id: number; x: number; y: number; horizontal: boolean; surface?: HTMLElement | undefined } | undefined;
+    const clearEdge = () => {
+      const previous = edge;
+      edge = undefined;
+      return previous;
+    };
+    const cancelEdge = () => {
+      const surface = clearEdge()?.surface;
+      if (!surface) return;
+      const from = surface.style.translate;
+      surface.style.removeProperty('translate');
+      surface.animate?.([{ translate: from }, { translate: '0px' }], { duration: 160, easing: 'ease-out' });
+    };
     const edgeStart = (event: TouchEvent) => {
-      clearEdge();
+      cancelEdge();
       const touch = event.touches[0];
       if (event.touches.length !== 1 || !touch || !isIosBackEdge(touch.clientX)) return;
       edge = { id: touch.identifier, x: touch.clientX, y: touch.clientY, horizontal: false };
@@ -111,36 +128,56 @@ export function usePageBackNavigation(): void {
     const edgeMove = (event: TouchEvent) => {
       if (!edge) return;
       const touch = event.touches[0];
-      if (event.touches.length !== 1 || touch?.identifier !== edge.id) { clearEdge(); return; }
+      if (event.touches.length !== 1 || touch?.identifier !== edge.id) { cancelEdge(); return; }
       const dx = touch.clientX - edge.x;
       const dy = Math.abs(touch.clientY - edge.y);
       if (!edge.horizontal) {
         if (Math.max(Math.abs(dx), dy) < 8) return;
         if (dx <= dy * 1.4) { clearEdge(); return; }
         edge.horizontal = true;
+        if (routeMotionAllowed()) {
+          const target = history.current.peekBack();
+          if (hasBackOverlay()) edge.surface = topBackGestureSurface() ?? undefined;
+          else if (target && !current.current.url.startsWith('/reader/')) {
+            const from = new URL(current.current.url, window.location.origin);
+            const to = new URL(target, window.location.origin);
+            const motion = resolveRouteMotion(from, { pathname: to.pathname, search: to.search, state: { iosBack: true } }, true, -1);
+            const panel = document.querySelector<HTMLElement>('.workspace > .route-cache-panel:not([hidden])');
+            edge.surface = (motion.kind === 'detail-close' ? panel?.querySelector<HTMLElement>('.library-shell-detail') : panel) ?? undefined;
+          }
+        }
       }
+      if (event.cancelable) event.preventDefault();
+      if (edge.surface) edge.surface.style.translate = `${Math.max(0, dx)}px`;
     };
     const edgeEnd = (event: TouchEvent) => {
       const start = edge;
-      clearEdge();
-      if (!start?.horizontal) return;
+      if (!start?.horizontal) { cancelEdge(); return; }
       const touch = event.changedTouches[0];
-      if (touch?.identifier !== start.id) return;
+      if (touch?.identifier !== start.id) { cancelEdge(); return; }
       const dx = touch.clientX - start.x;
-      if (dx < 56 || dx <= Math.abs(touch.clientY - start.y) * 1.4) return;
-      if (!window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true })) && event.cancelable) event.preventDefault();
+      if (dx < 56 || dx <= Math.abs(touch.clientY - start.y) * 1.4) { cancelEdge(); return; }
+      const offset = parseFloat(start.surface?.style.translate ?? '') || 0;
+      const surface = clearEdge()?.surface;
+      const handled = !window.dispatchEvent(new CustomEvent(MOBILE_BACK_EVENT, { cancelable: true, detail: { iosBack: true, offset } }));
+      // Allow the destination's layout effect to take ownership before clearing the drag.
+      if (surface) requestAnimationFrame(() => {
+        if (surface.style.translate === `${offset}px`) surface.style.removeProperty('translate');
+      });
+      if (handled && event.cancelable) event.preventDefault();
     };
     window.addEventListener('touchstart', edgeStart, { capture: true, passive: true });
-    window.addEventListener('touchmove', edgeMove, { capture: true, passive: true });
+    window.addEventListener('touchmove', edgeMove, { capture: true, passive: false });
     window.addEventListener('touchend', edgeEnd, { capture: true, passive: false });
-    window.addEventListener('touchcancel', clearEdge, true);
+    window.addEventListener('touchcancel', cancelEdge, true);
     return () => {
+      cancelEdge();
       window.removeEventListener(MOBILE_BACK_EVENT, back);
       window.removeEventListener('popstate', pop, true);
       window.removeEventListener('touchstart', edgeStart, true);
       window.removeEventListener('touchmove', edgeMove, true);
       window.removeEventListener('touchend', edgeEnd, true);
-      window.removeEventListener('touchcancel', clearEdge, true);
+      window.removeEventListener('touchcancel', cancelEdge, true);
     };
   }, [navigate]);
 }

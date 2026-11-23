@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { invokeCommand } from './invoke';
 type FilePicker = () => Promise<string | null>;
 type MultiFilePicker = () => Promise<string[]>;
 type SavePicker = (defaultName: string) => Promise<string | null>;
@@ -62,9 +64,14 @@ export async function pickTextFile(): Promise<string | null> {
 }
 
 /** 选一个目录：装那种大到不能当字节递过来的东西——DLSSNR 的 NGX 片段一个就 158 MB。 */
-export async function pickDirectory(): Promise<string | null> {
+export async function pickDirectory(platform?: string): Promise<string | null> {
   if (testDirectoryPicker) return testDirectoryPicker();
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
+  if (platform === 'android') {
+    const result = await invokeCommand('pick_download_directory', {}, z.string().nullable());
+    if (!result.ok) throw new Error(result.error.message);
+    return result.value;
+  }
   const { open } = await import('@tauri-apps/plugin-dialog');
   const selected = await open({ multiple: false, directory: true });
   return typeof selected === 'string' ? selected : null;
@@ -72,16 +79,14 @@ export async function pickDirectory(): Promise<string | null> {
 
 const ARCHIVE_EXTENSIONS = ['zip', 'rar', '7z', 'tar', 'gz', 'cbz', 'cbr', 'cb7', 'pdf'];
 
-const MODEL_EXTENSIONS = ['zip', 'onnx', 'dll'];
-
-export async function pickModelFile(): Promise<string | null> {
+export async function pickModelFile(allowDll = true): Promise<string | null> {
   if (testModelPicker) return testModelPicker();
   if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return null;
   const { open } = await import('@tauri-apps/plugin-dialog');
   const selected = await open({
     multiple: false,
     directory: false,
-    filters: [{ name: '模型（zip / onnx / dll）', extensions: MODEL_EXTENSIONS }],
+    filters: [{ name: '模型文件', extensions: allowDll ? ['zip', 'onnx', 'dll'] : ['zip', 'onnx'] }],
   });
   return typeof selected === 'string' ? selected : null;
 }

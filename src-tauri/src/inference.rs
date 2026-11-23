@@ -1001,8 +1001,13 @@ pub fn inference_import_model_path(
             false,
         );
     }
-    let path = std::path::Path::new(trimmed);
     let outcome = (|| -> Result<InstalledModel, String> {
+        #[cfg(target_os = "ios")]
+        let resolved = crate::commands::platform::ios_picked_file_path(trimmed)?;
+        #[cfg(target_os = "ios")]
+        let path = resolved.as_path();
+        #[cfg(not(target_os = "ios"))]
+        let path = std::path::Path::new(trimmed);
         let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
         if !metadata.is_file() {
             return Err(String::from("not a file"));

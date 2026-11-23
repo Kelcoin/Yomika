@@ -287,7 +287,7 @@ pub async fn open_external_url(app: tauri::AppHandle, url: String) -> CommandRes
 }
 
 #[cfg(any(target_os = "ios", test))]
-pub(super) fn ios_picked_file_path(value: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn ios_picked_file_path(value: &str) -> Result<std::path::PathBuf, String> {
     let path = std::path::Path::new(value);
     if path.is_absolute() {
         return Ok(path.to_path_buf());
@@ -404,6 +404,20 @@ pub async fn read_text_file(app: tauri::AppHandle, path: String) -> CommandResul
     match read {
         Ok(text) => CommandResult::success(text),
         Err(message) => CommandResult::failure("UNKNOWN", message, true),
+    }
+}
+
+#[tauri::command]
+pub async fn pick_download_directory(app: tauri::AppHandle) -> CommandResult<Option<String>> {
+    #[cfg(target_os = "android")]
+    return match crate::mobile_host::pick_download_directory(&app).await {
+        Ok(path) => CommandResult::success(path),
+        Err(error) => CommandResult::failure("UNKNOWN", error, true),
+    };
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        CommandResult::failure("PLATFORM_UNAVAILABLE", "此目录选择器仅在 Android 上可用", false)
     }
 }
 

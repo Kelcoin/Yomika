@@ -61,6 +61,7 @@ import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, MIN_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { DETAIL_EXIT_MS, routeMotionAllowed } from '../lib/routeMotion';
 import { readerSettingsOrigin } from '../lib/pageBackNavigation';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { openExternalUrl } from '../bridge/externalUrl';
@@ -233,13 +234,37 @@ export function SettingsWorkspace() {
    * of eight tabs above squeezed content. Ignored in the wide layout. */
   const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
   const [compactDrilled, setCompactDrilled] = useState(Boolean(initialSection));
-  const showSectionList = !compact || !compactDrilled;
+  const settingsContentRef = useRef<HTMLDivElement>(null);
+  const settingsListRef = useRef<HTMLDivElement>(null);
+  const [backOffset, setBackOffset] = useState<number>();
+  const showSectionList = !compact || !compactDrilled || backOffset !== undefined;
   const showSectionContent = !compact || compactDrilled;
   // 一级一级退：手机上的返回手势走的是 webview 历史（`AppPlugin` 把返回键交给
   // `webView.goBack()`），所以设置项开着时按返回，人想要的是先回到分类列表，而不是
   // 把整个设置页带回上一页。开着的时候压一条守卫条目，返回手势弹掉它、就地回到列表；
   // 页内那个「返回设置分类」按钮关掉这一层时，守卫自己把条目吃掉（`lib/overlayBackGuard`）。
-  useOverlayBackGuard(pageActive && compact && compactDrilled && !readerOrigin, () => setCompactDrilled(false));
+  const closeSettingsSection = () => { setBackOffset(undefined); setCompactDrilled(false); };
+  useOverlayBackGuard(pageActive && compact && compactDrilled && !readerOrigin, closeSettingsSection, {
+    surface: () => settingsContentRef.current,
+    close: (offset) => {
+      if (routeMotionAllowed() && typeof settingsContentRef.current?.animate === 'function') setBackOffset(offset);
+      else closeSettingsSection();
+    },
+  });
+  useLayoutEffect(() => {
+    const content = settingsContentRef.current;
+    if (backOffset === undefined || !content) return;
+    content.style.removeProperty('translate');
+    const options = { duration: DETAIL_EXIT_MS, easing: 'ease-out' } as const;
+    const front = content.animate([{ transform: `translateX(${backOffset}px)` }, { transform: 'translateX(100vw)' }], { ...options, fill: 'forwards' });
+    const back = settingsListRef.current?.animate([
+      { transform: `translateX(${Math.min(0, (backOffset - content.clientWidth) * .26)}px)` },
+      { transform: 'translateX(0)' },
+    ], options);
+    front.onfinish = closeSettingsSection;
+    const deadline = window.setTimeout(closeSettingsSection, DETAIL_EXIT_MS + 50);
+    return () => { clearTimeout(deadline); front.onfinish = null; front.cancel(); back?.cancel(); };
+  }, [backOffset]);
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
@@ -932,14 +957,14 @@ export function SettingsWorkspace() {
   return (
     <div className="settings-page" ref={pageRef}>
       <h1 className="visually-hidden">设置</h1>
-      <div className={`settings-layout${compact ? ' is-compact' : ''}`}>
+      <div className={`settings-layout${compact ? ' is-compact' : ''}${backOffset !== undefined ? ' is-backing' : ''}`}>
         {showSectionList && (
         /* The sticky element sits inside a slot that stretches to the row, so its
            containing block does not change height with the section: as a direct
            grid item the sidebar was offset by its own `top` (24px) whenever the
            content was taller than the nav, and the whole list jumped on every
            switch between a tall and a short section. */
-        <div className="settings-sidebar-slot">
+        <div className="settings-sidebar-slot" ref={settingsListRef}>
         <aside className="settings-sidebar" aria-label="设置分类">
           {compact && <header className="settings-compact-heading is-landing"><h2><Settings2 aria-hidden="true" /><span>设置</span></h2></header>}
           {compact ? (
@@ -978,7 +1003,7 @@ export function SettingsWorkspace() {
         </div>
         )}
         {showSectionContent && (
-        <div className="settings-content">
+        <div className="settings-content" ref={settingsContentRef}>
       {(compact || readerOrigin) && (
         <header className="settings-compact-heading">
           <button className="reader-icon-button" type="button" aria-label={readerOrigin ? '返回阅读模式' : '返回设置分类'} onClick={readerOrigin ? goBack : () => setCompactDrilled(false)}>
@@ -1034,22 +1059,23 @@ export function SettingsWorkspace() {
                 onToggle={() => editPreferences({ randomRoamShowFinished: !preferenceDraft.randomRoamShowFinished })}
               />
             )}
-            {selectedSettingsSection === 'settings-general' && (
+            {selectedSettingsSection === 'settings-general' && platformName !== 'ios' && (
               <SettingsPanel
                 icon={<FolderOpen />}
+                className="settings-download-directory"
                 label="下载目录"
-                hint={platformName === 'ios' ? '档案保存在应用的下载目录中' : '上传与下载使用的本机目录'}
-                value={platformName !== 'ios' && preferenceDraft.downloadDirectory ? '自定义' : '默认'}
+                hint={platformName === 'android' ? '已下载的档案会另存一份到所选目录' : '档案下载使用的目录'}
+                value={preferenceDraft.downloadDirectory ? '自定义' : '默认'}
               >
-                <p className="settings-menu-path is-selectable">{(platformName !== 'ios' && preferenceDraft.downloadDirectory) || defaultDownloadHint}</p>
-                {platformName !== 'ios' && <div className="settings-menu-actions">
+                <p className="settings-menu-path settings-download-path is-selectable">{preferenceDraft.downloadDirectory || defaultDownloadHint}</p>
+                <div className="settings-menu-actions settings-download-actions">
                   <button className="secondary-action" type="button" title="选择下载目录" aria-label="选择下载目录" onClick={() => {
-                    void pickDirectory().then((selected) => {
+                    void pickDirectory(platformName).then((selected) => {
                       if (typeof selected === 'string') editPreferences({ downloadDirectory: selected });
-                    }).catch(() => showToast('无法打开目录选择器', 'error'));
+                    }).catch((error) => showToast(error instanceof Error ? error.message : '无法打开目录选择器', 'error'));
                   }}><FolderOpen aria-hidden="true" />选择目录</button>
                   <button className="secondary-action" type="button" title="恢复默认下载目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" />恢复默认</button>
-                </div>}
+                </div>
               </SettingsPanel>
             )}
             </div>
@@ -1152,9 +1178,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<ArrowDownWideNarrow />}
                   label="标签补全排序规则"
-                  hint={tagCountVersion
-                    ? `数据版本 ${formatTagDataVersion(tagCountVersion)} · 同分内按全站使用频次排序`
-                    : '默认智能排序，打开后同分内按全站使用频次排序'}
+                  hint={tagCountVersion ? `数据版本 ${formatTagDataVersion(tagCountVersion)}` : '数据版本 —'}
                   checked={preferenceDraft.tagCountOrderEnabled}
                   action={<button
                     className="icon-button"
@@ -1634,9 +1658,9 @@ export function SettingsWorkspace() {
                 <SettingsRow
                   icon={<Upload />}
                   label="模型导入"
-                  hint="导入超分模型或 DLSSNR DLL；DLL 验证仅覆盖本机测试尺寸"
+                  hint={platformName === 'windows' ? '导入超分模型或 DLSSNR DLL；DLL 验证仅覆盖本机测试尺寸' : '导入 ONNX 超分模型或 ZIP 模型包'}
                   control={
-                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
+                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile(platformName === 'windows').then((selected) => { if (selected) void importModelFromPath(selected); })}>
                       <SvgIcon className="model-import-glyph">
                         <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
                         <path d="M12 3v12" />

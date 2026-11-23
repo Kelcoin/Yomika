@@ -77,6 +77,18 @@ describe('one first frame', () => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
+  it('paints the cold-start canvas and uses the native iOS marker before the platform query', () => {
+    expect(html).toMatch(/html, body\s*\{[^}]+background:\s*var\(--surface-canvas/);
+    vi.stubGlobal('__yomikaNativeIos', true);
+    try {
+      restore('dark', false);
+      expect(document.documentElement.dataset.nativeMobile).toBe('true');
+      expect(document.documentElement.dataset.layout).toBe('compact');
+    } finally {
+      delete document.documentElement.dataset.nativeMobile;
+      vi.unstubAllGlobals();
+    }
+  });
   it('uses the same mother paths for static and React marks', () => {
     const { container } = render(<YomikaMark />);
     const paths = (element: ParentNode) => [...element.querySelectorAll('path')].map(path => path.getAttribute('d'));

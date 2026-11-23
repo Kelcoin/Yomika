@@ -1,0 +1,14 @@
+{
+  "id": "span-nomosuni-photo",
+  "version": "392a7579034d-08dafed2",
+  "label": "NomosUni Photo",
+  "scale": 2,
+  "source": "Philip Hofmann, CC BY 4.0",
+  "files": [
+    {
+      "name": "model.onnx",
+      "size": 1659043,
+      "sha256": "392a7579034da12f2a68b6ede11fd81135217404b360dd6cd0be87559b7119f7"
+    }
+  ]
+}
