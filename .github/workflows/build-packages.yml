@@ -215,6 +215,19 @@ jobs:
           face_id_reason=$(plutil -extract NSFaceIDUsageDescription raw src-tauri/Info.ios.plist)
           test -n "$face_id_reason"
       - run: npx tauri ios init --ci
+      # Direct xcodebuild bypasses the plist merge performed by `tauri ios build`.
+      - name: Merge iOS app permissions into the Xcode target
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          target = Path("src-tauri/gen/apple/yomika_iOS/Info.plist")
+          generated = plistlib.loads(target.read_bytes())
+          overrides = plistlib.loads(Path("src-tauri/Info.ios.plist").read_bytes())
+          generated.update(overrides)
+          target.write_bytes(plistlib.dumps(generated, sort_keys=False))
+          PY
       - name: Build pinned iOS ONNX Runtime with CoreML
         run: |
           python3 -m pip install --break-system-packages 'cmake==3.31.6' numpy packaging
