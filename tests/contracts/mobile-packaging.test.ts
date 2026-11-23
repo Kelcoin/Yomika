@@ -35,6 +35,14 @@ describe('mobile packaging', () => {
     expect(workflow).toContain('verify-mobile-runtime.py');
   });
 
+  it('uses a CI build number for Android and verifies it in the actual APK', () => {
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    expect(workflow).toContain('code=$GITHUB_RUN_NUMBER');
+    expect(workflow).toContain('--config "$android_config"');
+    expect(workflow).toContain('"versionCode":%d');
+    expect(workflow).toContain("versionCode='$YOMIKA_ANDROID_VERSION_CODE'");
+  });
+
   it('declares the feature the Tauri CLI switches on for release builds', () => {
     // `cfg(dev)` comes from this cargo feature, not from the debug/release profile: a
     // build without it is a development build, and on mobile that means every asset

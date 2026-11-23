@@ -91,19 +91,16 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   const animations = useRef<Animation[]>([]);
   /** 已经起过动画的那一个 slide 对象；同一个不重起。 */
   const animatedFor = useRef<Slide<T> | null>(null);
-  const stageHeight = useRef(0);
   const scrollportRef = useRef<HTMLElement>();
   const positions = useRef(new Map<T, number>());
   const verticalOffsets = useRef(new Map<T, number>());
-  const mapped = useRef(false);
-  const geometry = useRef({ offset: 0, viewport: 1, scrollTop: 0, stageTop: 0, viewportTop: 0 });
+  const geometry = useRef({ offset: 0, scrollTop: 0, stageTop: 0, viewportTop: 0 });
   const restoreScroll = useRef<number>();
   const identity = useRef(resetKey);
   if (identity.current !== resetKey) {
     identity.current = resetKey;
     positions.current.clear();
     verticalOffsets.current.clear();
-    mapped.current = false;
   }
   const viewportBounds = useCallback(() => {
     const scroller = scrollportRef.current;
@@ -112,19 +109,38 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
     const top = Math.max(0, rect?.top ?? 0) + (header?.getBoundingClientRect().height ?? 0);
     return { top, bottom: Math.min(window.innerHeight, rect?.bottom ?? window.innerHeight) };
   }, []);
-  const prepareStage = useCallback(() => {
+  const prepareStage = useCallback((from: T) => {
     const element = containerRef.current;
-    if (!element) return;
+    if (!element) return window.innerWidth;
     const rect = element.getBoundingClientRect();
+    const width = element.clientWidth || window.innerWidth;
     const { top, bottom } = viewportBounds();
     const floor = Math.ceil(Math.max(280, bottom - Math.max(top, rect.top)));
+    const stageHeight = Math.max(rect.height, floor);
+    const host = scrollportRef.current ?? document.scrollingElement;
+    const offset = Math.max(0, top - rect.top);
+    const viewport = Math.max(1, bottom - top);
+    geometry.current = { offset, scrollTop: host?.scrollTop ?? 0, stageTop: rect.top, viewportTop: top };
+
+    // Idle panels already have layout boxes. Read both heights before changing
+    // stage height, visibility or transforms, so revealing them needs no readback.
+    const heights = new Map(Array.from(nodes.current, ([id, node]) => [id, node.scrollHeight] as const));
+    const sourceHeight = heights.get(from) || viewport;
+    positions.current.set(from, offset);
+    verticalOffsets.current.clear();
+    for (const [id, height] of heights) {
+      const target = rect.top > top ? 0 : mapPanelDepth(offset, sourceHeight, height || viewport, viewport, positions.current.get(id));
+      verticalOffsets.current.set(id, id === from ? 0 : offset - target);
+    }
+
     element.style.minHeight = `${floor}px`;
     element.style.setProperty('--panel-min-height', `${floor}px`);
-    stageHeight.current = Math.max(rect.height, floor);
-    const host = scrollportRef.current ?? document.scrollingElement;
-    geometry.current = { offset: Math.max(0, top - rect.top), viewport: Math.max(1, bottom - top), scrollTop: host?.scrollTop ?? 0, stageTop: rect.top, viewportTop: top };
-    verticalOffsets.current.clear();
-    mapped.current = false;
+    element.style.height = `${stageHeight}px`;
+    for (const [id, node] of nodes.current) {
+      const y = verticalOffsets.current.get(id) ?? 0;
+      node.style.clipPath = `inset(${Math.max(0, -y)}px 0 ${Math.max(0, (heights.get(id) ?? 0) + y - stageHeight)}px 0)`;
+    }
+    return width;
   }, [viewportBounds]);
 
   // The short/empty panel still owns the touch area below the tabs. Keep
@@ -141,7 +157,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
     scrollportRef.current = scrollport;
     const measure = (allowGrow = false) => {
       frame = 0;
-      if (slideRef.current) return;
+      if (slideRef.current || (!allowGrow && element.style.height)) return;
       const { top, bottom } = viewportBounds();
       const height = Math.ceil(Math.max(280, bottom - Math.max(top, element.getBoundingClientRect().top)));
       const next = allowGrow ? height : Math.min(parseFloat(element.style.minHeight) || height, height);
@@ -184,10 +200,9 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   }, []);
 
   const settle = useCallback((from: T, to: T, dx: number) => {
-    if (!slideRef.current) prepareStage();
     travelRef.current = dx;
     setSlide({ from, to, settling: true });
-  }, [prepareStage]);
+  }, []);
 
   /** 收势与「点标签页」共用一段动画：先把两块面板摆上舞台（这一次渲染），
    * 再在布局阶段起动画——反过来的话，正在 `display: none` 的元素上起动画，
@@ -214,32 +229,8 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       animatedFor.current = null;
       return;
     }
-    if (containerRef.current) containerRef.current.style.height = `${stageHeight.current}px`;
-    if (!mapped.current) {
-      const { offset, viewport } = geometry.current;
-      const source = nodes.current.get(current.from);
-      const sourceHeight = source?.scrollHeight || source?.getBoundingClientRect().height || viewport;
-      positions.current.set(current.from, offset);
-      for (const [id, node] of nodes.current) {
-        if (id === current.from) { verticalOffsets.current.set(id, 0); continue; }
-        const height = node.scrollHeight || node.getBoundingClientRect().height || viewport;
-        // If the stage starts below the sticky header, restoring a deep
-        // panel position would scroll the still-visible tab strip offscreen.
-        const target = geometry.current.stageTop > geometry.current.viewportTop
-          ? 0
-          : mapPanelDepth(offset, sourceHeight, height, viewport, positions.current.get(id));
-        verticalOffsets.current.set(id, offset - target);
-      }
-      mapped.current = true;
-    }
-    // Commit base positions before WAAPI samples its first frame. Button
-    // switches otherwise expose both newly visible panels at the same origin.
+    // Commit the base positions before WAAPI samples its first frame.
     paint(current.from, travelRef.current);
-    for (const [id, node] of nodes.current) {
-      const y = verticalOffsets.current.get(id) ?? 0;
-      const height = node.scrollHeight || node.getBoundingClientRect().height;
-      node.style.clipPath = `inset(${Math.max(0, -y)}px 0 ${Math.max(0, height + y - stageHeight.current)}px 0)`;
-    }
     if (!current.settling) return;
     if (animatedFor.current === current) return;
     animatedFor.current = current;
@@ -295,7 +286,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       setSlide(null);
       return;
     }
-    let gesture: { x: number; y: number; from: T; to: T | undefined; raw: number; travel: number; horizontal: boolean; blocked: boolean; time: number } | undefined;
+    let gesture: { x: number; y: number; from: T; to: T | undefined; raw: number; travel: number; horizontal: boolean; blocked: boolean; time: number; width: number } | undefined;
     let suppressClickUntil = 0;
 
     const start = (event: TouchEvent) => {
@@ -312,7 +303,7 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       for (let node = target; node && node !== element; node = node.parentElement ?? undefined) {
         if (node.scrollWidth > node.clientWidth + 1 && /(auto|scroll)/.test(getComputedStyle(node).overflowX)) return;
       }
-      gesture = { x: touch.clientX, y: touch.clientY, from: panelRef.current, to: undefined, raw: 0, travel: 0, horizontal: false, blocked: false, time: Date.now() };
+      gesture = { x: touch.clientX, y: touch.clientY, from: panelRef.current, to: undefined, raw: 0, travel: 0, horizontal: false, blocked: false, time: Date.now(), width: 0 };
     };
 
     const move = (event: TouchEvent) => {
@@ -321,7 +312,8 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       if (event.touches.length !== 1 || !touch) { release(false); return; }
       const dx = touch.clientX - gesture.x;
       const dy = touch.clientY - gesture.y;
-      if (!gesture.horizontal) {
+      const starting = !gesture.horizontal;
+      if (starting) {
         if (Math.max(Math.abs(dx), Math.abs(dy)) < SLOP_PX) return;
         if (Math.abs(dy) > Math.abs(dx) * 1.3) { gesture = undefined; return; }
         // Chromium can make the next stream noncancelable while a previous
@@ -329,26 +321,23 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
         // panning; a clearly horizontal new drag can still own this pager.
         if (Math.abs(dx) < Math.abs(dy) * (event.cancelable ? 1.05 : 1.6)) return;
         gesture.horizontal = true;
-        prepareStage();
-        travelRef.current = 0;
+        gesture.width = prepareStage(gesture.from);
       }
       // Resolve direction on every move: a drag can cross its starting point.
       const ids = orderRef.current;
       const index = ids.indexOf(gesture.from);
       const next = dx < 0 ? ids[index + 1] : ids[index - 1];
-      if (gesture.to !== next || !slideRef.current) {
-        setSlide({ from: gesture.from, to: next ?? gesture.from, settling: false });
-      }
       gesture.to = next;
       gesture.blocked = next === undefined;
-      const width = element.clientWidth || window.innerWidth;
+      const width = gesture.width;
       gesture.raw = dx;
       gesture.travel = gesture.blocked
         ? rubberBand(dx, BLOCKED_TRAVEL_PX)
         : Math.max(-width, Math.min(width, dx));
       travelRef.current = gesture.travel;
       if (event.cancelable) event.preventDefault();
-      paint(gesture.from, gesture.travel);
+      if (starting) setSlide({ from: gesture.from, to: gesture.from, settling: false });
+      else paint(gesture.from, gesture.travel);
     };
 
     const release = (allowTurn: boolean) => {
@@ -356,9 +345,8 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
       gesture = undefined;
       if (!current?.horizontal) return;
       suppressClickUntil = performance.now() + 400;
-      const width = element.clientWidth || window.innerWidth;
       const turn = allowTurn && !current.blocked && current.to !== undefined
-        && shouldTurnPanel(Math.abs(current.raw), Date.now() - current.time, width);
+        && shouldTurnPanel(Math.abs(current.raw), Date.now() - current.time, current.width);
       settle(current.from, turn ? current.to! : current.from, current.travel);
     };
 
@@ -394,8 +382,9 @@ export function usePanelPager<T extends string>({ order, panel, enabled, onChang
   const goTo = useCallback((next: T) => {
     const current = panelRef.current;
     if (next === current || slideRef.current) return;
+    prepareStage(current);
     settle(current, next, 0);
-  }, [settle]);
+  }, [prepareStage, settle]);
 
   return {
     containerRef,

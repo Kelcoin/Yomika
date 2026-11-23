@@ -2,7 +2,6 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { StrictMode } from 'react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, vi } from 'vitest';
 
@@ -2107,52 +2106,15 @@ describe('reader screen', () => {
     expect(within(toolbar).queryByRole('button', { name: /^(上一页|下一页)$/ })).not.toBeInTheDocument();
   });
 
-  it('answers every turn of the page with a fresh cue on the bottom bar', async () => {
-    const user = userEvent.setup();
-    renderReader();
-    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
-    // 还没翻过页：光线那个元素不该在（栏自己的进场动画与它不是一件事）。
-    expect(toolbar.querySelector('.reader-toolbar-turn')).toBeNull();
-
-    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
-    const first = toolbar.querySelector('.reader-toolbar-turn');
-    expect(first).not.toBeNull();
-
-    // 每翻一页得是一个**新元素**：重挂载才是重播一条 CSS 动画，改属性值不是——实测
-    // （debug_outputs/reader-motion）里只把属性在两个值之间轮流，第二页一条动画都没跑。
-    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
-    const second = toolbar.querySelector('.reader-toolbar-turn');
-    expect(second).not.toBeNull();
-    expect(second).not.toBe(first);
-
-    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageUp' });
-    expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBe(second);
-  });
-
-  it('does not replay the turn cue when the bottom bar comes back', async () => {
+  it('updates the toolbar page count without drawing a turn cue', async () => {
     const user = userEvent.setup();
     renderReader();
     const reader = screen.getByRole('main', { name: '漫画阅读器' });
     await user.click(reader);
     const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
-    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
-    expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBeNull();
-
-    // 收起来：底栏是条件挂载，260ms 退场窗口过去之后整棵子树摘掉。
-    await user.click(reader);
-    await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 320); }); });
-    expect(screen.queryByRole('toolbar')).not.toBeInTheDocument();
-
-    // 再唤出来：这是一次「栏回来」，不是一次翻页。原来 `turnCue > 0` 让栏带着上一次的
-    // 光线一起回来，一次性动画重播 ⇒ 栏顶闪一条主题色的线（用户报的就是这一下）。
-    await user.click(reader);
-    const again = screen.getByRole('toolbar', { name: '阅读控制' });
-    expect(again.querySelector('.reader-toolbar-turn')).toBeNull();
-
-    // 真翻一页还是要回应。
-    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
-    expect(again.querySelector('.reader-toolbar-turn')).not.toBeNull();
+    fireEvent.keyDown(reader, { key: 'PageDown' });
+    expect(within(toolbar).getByText('2 / 3')).toBeInTheDocument();
+    expect(toolbar.querySelector('.reader-toolbar-turn')).toBeNull();
   });
 
   it('hides the page pill while the bar is up instead of lifting it over the bar', async () => {
@@ -2184,24 +2146,6 @@ describe('reader screen', () => {
     const rested = pageIndicator() as HTMLElement;
     expect(rested).not.toHaveClass('is-leaving');
     expect(rested).toHaveAttribute('data-visible', 'true');
-  });
-
-  it('still shows the turn cue when React renders the screen twice', async () => {
-    // `main.tsx` 挂着 StrictMode，开发与测试都是双渲染。光线「这一轮该不该播」如果是在
-    // 渲染期间记账的（`playedCue.current = turnCue` 直接写在渲染体里），第二次渲染就已经
-    // 记成「播过」了，提交出去的那一棵里没有光线——所以那笔账必须由 effect 记。
-    const user = userEvent.setup();
-    render(
-      <StrictMode>
-        <MemoryRouter>
-          <ReaderScreen archiveId="a1" title="Test archive" pages={pages} />
-        </MemoryRouter>
-      </StrictMode>,
-    );
-    await user.click(screen.getByRole('main', { name: '漫画阅读器' }));
-    const toolbar = screen.getByRole('toolbar', { name: '阅读控制' });
-    fireEvent.keyDown(screen.getByRole('main', { name: '漫画阅读器' }), { key: 'PageDown' });
-    expect(toolbar.querySelector('.reader-toolbar-turn')).not.toBeNull();
   });
 
   it('moves the thumbnail panel from the toolbar up to the top bar', async () => {

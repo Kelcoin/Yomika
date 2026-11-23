@@ -175,7 +175,30 @@ pub async fn haptic_feedback(app: tauri::AppHandle, kind: String) -> CommandResu
             Err(message) => CommandResult::failure("PLATFORM_UNAVAILABLE", message, true),
         }
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        use objc2::{MainThreadMarker, MainThreadOnly};
+        use objc2_ui_kit::{UIImpactFeedbackGenerator, UIImpactFeedbackStyle, UISelectionFeedbackGenerator};
+
+        let result = app.run_on_main_thread(move || {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            if kind == "selection" {
+                UISelectionFeedbackGenerator::new(mtm).selectionChanged();
+                return;
+            }
+            let style = match kind.as_str() {
+                "light" => UIImpactFeedbackStyle::Light,
+                "heavy" => UIImpactFeedbackStyle::Heavy,
+                _ => UIImpactFeedbackStyle::Medium,
+            };
+            UIImpactFeedbackGenerator::initWithStyle(mtm.alloc(), style).impactOccurred();
+        });
+        match result {
+            Ok(()) => CommandResult::success(()),
+            Err(error) => CommandResult::failure("PLATFORM_UNAVAILABLE", error.to_string(), true),
+        }
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (&app, &kind);
         CommandResult::success(())

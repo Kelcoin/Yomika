@@ -4649,6 +4649,18 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .archive-thumb-card { position: relative; display: grid; flex: 0 0 150px; width: 150px; min-width: 150px; overflow: hidden; border: 0; outline: 1px solid var(--outline-variant); outline-offset: -1px; border-radius: var(--radius-card); background: var(--surface-container-high); color: inherit; scroll-snap-align: start; transition: border-color var(--motion-fast), background-color var(--motion-fast), transform var(--motion-crisp); }
 .archive-thumb-card.is-wide { flex-basis: 316px; width: 316px; min-width: 316px; }
 
+/* The rail skeleton and the resolved card are different nodes. Give a wide
+   card its own starting width, whether the ratio is cached or decoded later. */
+@media (prefers-reduced-motion: no-preference) {
+  .archive-rail:has(.archive-recommendations-tabs) .archive-rail-item:not(.is-leaving) > .archive-thumb-card.is-wide {
+    animation: recommendation-card-expand var(--motion-standard);
+  }
+}
+@keyframes recommendation-card-expand {
+  from { width: 150px; min-width: 150px; }
+  to { width: 316px; min-width: 316px; }
+}
+
 /* Hover scales the whole clipped card, so the cover cannot cross the progress bar.
    Rail snap targets stay on the stationary archive-rail-item wrapper. */
 @media (hover: hover) {

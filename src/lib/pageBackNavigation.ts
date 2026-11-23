@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { closeTopOverlay } from './overlayBackGuard';
-import { isMobileDevice } from './layoutMode';
+import { isIosBackEdge, isMobileDevice } from './layoutMode';
 
 export const MOBILE_BACK_EVENT = 'yomika-mobile-back';
 
@@ -98,9 +98,49 @@ export function usePageBackNavigation(): void {
       back(event);
     };
     window.addEventListener('popstate', pop, true);
+    // WKWebView has no hardware Back action. Use the same page stack as Android,
+    // so one edge gesture dismisses the top overlay or returns within this tab.
+    let edge: { id: number; x: number; y: number; horizontal: boolean } | undefined;
+    const clearEdge = () => { edge = undefined; };
+    const edgeStart = (event: TouchEvent) => {
+      clearEdge();
+      const touch = event.touches[0];
+      if (event.touches.length !== 1 || !touch || !isIosBackEdge(touch.clientX)) return;
+      edge = { id: touch.identifier, x: touch.clientX, y: touch.clientY, horizontal: false };
+    };
+    const edgeMove = (event: TouchEvent) => {
+      if (!edge) return;
+      const touch = event.touches[0];
+      if (event.touches.length !== 1 || touch?.identifier !== edge.id) { clearEdge(); return; }
+      const dx = touch.clientX - edge.x;
+      const dy = Math.abs(touch.clientY - edge.y);
+      if (!edge.horizontal) {
+        if (Math.max(Math.abs(dx), dy) < 8) return;
+        if (dx <= dy * 1.4) { clearEdge(); return; }
+        edge.horizontal = true;
+      }
+    };
+    const edgeEnd = (event: TouchEvent) => {
+      const start = edge;
+      clearEdge();
+      if (!start?.horizontal) return;
+      const touch = event.changedTouches[0];
+      if (touch?.identifier !== start.id) return;
+      const dx = touch.clientX - start.x;
+      if (dx < 56 || dx <= Math.abs(touch.clientY - start.y) * 1.4) return;
+      if (!window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true })) && event.cancelable) event.preventDefault();
+    };
+    window.addEventListener('touchstart', edgeStart, { capture: true, passive: true });
+    window.addEventListener('touchmove', edgeMove, { capture: true, passive: true });
+    window.addEventListener('touchend', edgeEnd, { capture: true, passive: false });
+    window.addEventListener('touchcancel', clearEdge, true);
     return () => {
       window.removeEventListener(MOBILE_BACK_EVENT, back);
       window.removeEventListener('popstate', pop, true);
+      window.removeEventListener('touchstart', edgeStart, true);
+      window.removeEventListener('touchmove', edgeMove, true);
+      window.removeEventListener('touchend', edgeEnd, true);
+      window.removeEventListener('touchcancel', clearEdge, true);
     };
   }, [navigate]);
 }

@@ -23,6 +23,7 @@
 }
 
 .archive-detail-panels {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
@@ -36,6 +37,18 @@
   grid-area: 1 / 1;
   min-width: 0;
   min-height: max(0px, calc(var(--panel-min-height, 280px) - var(--space-5)));
+}
+/* Pre-layout the adjacent panel at the same width, outside normal flow.
+   The hidden attribute and inert still keep it out of keyboard navigation. */
+.archive-detail-panels > [role='tabpanel'][hidden] {
+  display: block !important;
+  position: absolute;
+  inset: 0 0 auto;
+  visibility: hidden;
+  /* Cap its box at the shared min-height so it cannot extend the scrollport.
+     The children still lay out and scrollHeight exposes their full height. */
+  height: 0;
+  overflow: hidden;
 }
 /* Panels remain focusable for keyboard navigation, but are content surfaces,
    not controls. WebView can focus them after touching or dismissing a menu. */

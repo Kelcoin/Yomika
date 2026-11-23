@@ -293,8 +293,7 @@ export function SettingsWorkspace() {
    * closed row would say 未登录 about an account that is signed in. */
   const [ehAccountName, setEhAccountName] = useState<string>();
   useEffect(() => {
-    // 数据一节也要它：收藏同步删除没有登录账户就开不了。
-    if (!['settings-eh', 'settings-data'].includes(selectedSettingsSection)) return;
+    if (selectedSettingsSection !== 'settings-eh') return;
     let active = true;
     void new NativeEhRepository().listAccounts().then((result) => {
       if (!active || !result.ok) return;
@@ -1366,31 +1365,6 @@ export function SettingsWorkspace() {
             )}
               </div>
             )}
-            {/* 收藏删除这两个开关自己一组：它们管的是「删档案时要不要把 E-Hentai 上的
-                收藏一起删」，与数据迁移分组显示。放在迁移开关那一组里
-                会让人以为它们管的是同步本身，放在最前面又把真正的同步控件挤到了下面。 */}
-            {selectedSettingsSection === 'settings-data' && (
-              <div className="settings-group">
-                <SettingsSwitch
-                  icon={<HeartOff />}
-                  label="同步删除 E-Hentai 收藏"
-                  hint={ehAccountName ? '删除弹窗里可逐次关掉' : '登录 E-Hentai 后才能启用'}
-                  checked={preferenceDraft.ehFavoriteDeleteSync}
-                  /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
-                  disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
-                  onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
-                />
-                <SettingsDisclosure open={preferenceDraft.ehFavoriteDeleteSync}>
-                  <SettingsSwitch
-                    icon={<ShieldCheck />}
-                    label="默认开启收藏同步删除"
-                    hint="删除弹窗里的那个开关"
-                    checked={preferenceDraft.confirmEhFavoriteDelete}
-                    onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
-                  />
-                </SettingsDisclosure>
-              </div>
-            )}
             {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
                 必须是同一个 settings-group 的兄弟节点，才能吃到 preferences-form 的组间距。 */}
             {selectedSettingsSection === 'settings-data' && (
@@ -1745,6 +1719,26 @@ export function SettingsWorkspace() {
             ]}
             onChange={(value) => editPreferences({ ehCommentSort: value as PreferenceSnapshot['ehCommentSort'] })}
           />
+        </div>
+        <div className="settings-group">
+          <SettingsSwitch
+            icon={<HeartOff />}
+            label="同步删除 E-Hentai 收藏"
+            hint={ehAccountName ? '删除弹窗里可逐次关掉' : '登录 E-Hentai 后才能启用'}
+            checked={preferenceDraft.ehFavoriteDeleteSync}
+            /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
+            disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
+            onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
+          />
+          <SettingsDisclosure open={preferenceDraft.ehFavoriteDeleteSync}>
+            <SettingsSwitch
+              icon={<ShieldCheck />}
+              label="默认开启收藏同步删除"
+              hint="删除弹窗里的那个开关"
+              checked={preferenceDraft.confirmEhFavoriteDelete}
+              onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
+            />
+          </SettingsDisclosure>
         </div>
       </section>
       )}

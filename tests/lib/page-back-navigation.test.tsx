@@ -68,7 +68,7 @@ function back() {
   return unhandled;
 }
 
-afterEach(() => { delete document.documentElement.dataset.nativeMobile; });
+afterEach(() => { delete document.documentElement.dataset.nativeMobile; delete document.documentElement.dataset.nativePlatform; });
 
 it.each(['/', '/library', '/history', '/watchlist', '/to-read', '/downloads', '/settings'])('leaves root Back on %s to the native host', path => {
   render(<MemoryRouter initialEntries={[path]}><Navigation /></MemoryRouter>);
@@ -148,4 +148,22 @@ it('preserves home shortcut origin when mobile browser POP is intercepted', () =
   });
   expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
   expect(window.location.pathname).toBe('/');
+});
+
+
+it('uses an iOS edge swipe for page-scoped Back without taking vertical or interior swipes', () => {
+  document.documentElement.dataset.nativePlatform = 'ios';
+  render(<MemoryRouter initialEntries={['/home/a']}><Navigation /></MemoryRouter>);
+  const swiping = (from: number, dx: number, dy: number) => {
+    const start = { identifier: 1, clientX: from, clientY: 100 };
+    const end = { identifier: 1, clientX: from + dx, clientY: 100 + dy };
+    fireEvent.touchStart(document.body, { touches: [start] });
+    fireEvent.touchMove(document.body, { touches: [end] });
+    fireEvent.touchEnd(document.body, { touches: [], changedTouches: [end] });
+  };
+  swiping(40, 100, 0);
+  swiping(10, 45, 90);
+  expect(screen.getByTestId('route')).toHaveTextContent('/home/a');
+  swiping(10, 100, 10);
+  expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
 });

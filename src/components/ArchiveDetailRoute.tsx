@@ -565,7 +565,7 @@ detailBasePath?: string | undefined }) {
           loading={metadataLoading && !metadata}
           colorFor={myTagColorFor}
         />
-      {serverId && scopeId && <Recommendations scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} detailBasePath={detailBasePath} />}
+      {serverId && scopeId && <Recommendations key={JSON.stringify(['recommendations', scopeId, serverId, archiveId])} scopeId={scopeId} serverId={serverId} currentArchiveId={archiveId} tags={tags} detailBasePath={detailBasePath} />}
 
       {metadata && metadata.pageCount > 0 && serverId && scopeId && (
         <ArchivePageThumbnails
@@ -637,23 +637,18 @@ function withRecommendationProgress(archives: ArchiveRecord[], progress?: Readon
 
 function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBasePath }: { scopeId: string; serverId: string; currentArchiveId: string; tags: string[]; detailBasePath: string }) {
   const snapshotKey = `recommendations:${serverId}:${currentArchiveId}`;
-  const snapshot = useMemo(() => readRecommendationSnapshot(snapshotKey, serverId), [snapshotKey, serverId]);
-  // 这次进来用哪个种子：抖动靠它决定，同一次挂载内部（含后台补搜后的重排）保持稳定。
+  // Each rail publishes one ordered list per search. Progress can update the
+  // displayed cards later without changing the positions the user is looking at.
   const [seed, setSeed] = useState(createRecommendationSeed);
-  const [similarPool, setSimilarPool] = useState<ArchiveRecord[]>(snapshot?.similarPool ?? []);
-  const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>(snapshot?.sameCreator ?? []);
-  // 面板上摆的是池子按本次种子重排后的前几张：池子里的分数带抖动，顺序因此每次不
-  // 一样；池子本身不受影响，所以「每次都看到的还是这一批」不会变成看不到新东西。
+  const [similar, setSimilar] = useState<ArchiveRecord[]>([]);
+  const [sameCreator, setSameCreator] = useState<ArchiveRecord[]>([]);
   const [progress, setProgress] = useState<ReadonlyMap<string, number>>();
-  const similar = useMemo(
-    () => rankRecommendations(tags, withRecommendationProgress(similarPool, progress), RECOMMENDATION_VISIBLE_LIMIT, { seed }),
-    [progress, seed, similarPool, tags],
-  );
-  const [loading, setLoading] = useState(tags.length > 0 && !snapshot?.complete);
+  const [loading, setLoading] = useState(tags.length > 0);
   const [tab, setTab] = useState<RecommendationTab>('similar');
+  const scrollOffsets = useRef(new Map<string, number>());
   const { open: openContextMenu, menu: contextMenu } = useArchiveContextMenu({
     onDeleted: (archiveId) => {
-      setSimilarPool((current) => current.filter((archive) => archive.archiveId !== archiveId));
+      setSimilar((current) => current.filter((archive) => archive.archiveId !== archiveId));
       setSameCreator((current) => current.filter((archive) => archive.archiveId !== archiveId));
     },
   });
@@ -663,12 +658,11 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     if (tags.length === 0) return undefined;
     let active = true;
     let availableProgress: ReadonlyMap<string, number> | undefined;
-    const history = repository.listCachedHistory(scopeId).then((result) => {
+    void repository.listCachedHistory(scopeId).then((result) => {
       if (active && result.ok) {
         const pages = new Map(result.value.map((item) => [item.archiveId, item.pageIndex + 1]));
         availableProgress = pages;
         setProgress(pages);
-        return pages;
       }
     }).catch(() => undefined);
     /** 服务端联系不上时改问镜像：它只有同步过的那部分，但总比空白强。一问镜像就等于
@@ -683,38 +677,35 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     const creatorSeeds = new Set(creator.tags.map(normalize));
     const similarMatches = new Map<string, ArchiveRecord>();
     const creatorMatchesById = new Map<string, ArchiveRecord>();
-    const rank = (found: Map<string, ArchiveRecord>, isCreator: boolean, pages = availableProgress) => {
-      const candidates = withRecommendationProgress([...found.values()], pages);
-      return isCreator ? sortSameCreatorRecommendations(candidates)
-        : rankRecommendations(tags, candidates, Number.MAX_SAFE_INTEGER, { seed });
+    const rank = (archives: ArchiveRecord[], isCreator: boolean, limit: number) => {
+      const candidates = withRecommendationProgress(archives, availableProgress);
+      return isCreator ? sortSameCreatorRecommendations(candidates).slice(0, limit)
+        : rankRecommendations(tags, candidates, limit, { seed });
     };
     const limitFor = (isCreator: boolean) => isCreator ? RECOMMENDATION_VISIBLE_LIMIT : RECOMMENDATION_POOL_LIMIT;
-    const publishPage = (tag: string, items: ArchiveRecord[]) => {
+    const collectPage = (tag: string, items: ArchiveRecord[]) => {
       if (!active) return;
-      const exact = items.filter((archive) => archive.archiveId !== currentArchiveId
-        && archive.tags?.some((item) => normalize(item) === tag));
-      if (!exact.length) return;
-      const collect = (found: Map<string, ArchiveRecord>, isCreator: boolean) => {
-        for (const archive of exact) found.set(archive.archiveId, archive);
-        const ranked = rank(found, isCreator).slice(0, limitFor(isCreator));
-        if (isCreator) setSameCreator(ranked);
-        else setSimilarPool(ranked);
-      };
-      if (similarSeeds.has(tag)) collect(similarMatches, false);
-      if (creatorSeeds.has(tag)) collect(creatorMatchesById, true);
+      for (const archive of items) {
+        if (archive.archiveId === currentArchiveId || !archive.tags?.some((item) => normalize(item) === tag)) continue;
+        if (similarSeeds.has(tag)) similarMatches.set(archive.archiveId, archive);
+        if (creatorSeeds.has(tag)) creatorMatchesById.set(archive.archiveId, archive);
+      }
     };
-    // Publish each page independently, including the first page of a slow seed.
-    // The final shortlist is still checked for deletions before caching it.
+    const publish = (items: ArchiveRecord[], isCreator: boolean) => {
+      const ordered = rank(items, isCreator, RECOMMENDATION_VISIBLE_LIMIT);
+      if (isCreator) setSameCreator(ordered);
+      else setSimilar(ordered);
+    };
     const searchSeed = async (seed: string, key: string): Promise<boolean> => {
       let start = 0;
       for (let page = 0; active && page < RECOMMENDATION_SEED_PAGES; page += 1) {
         const result = await repository.searchArchivesPage(serverId, start, { query: seed });
         if (!active) return false;
         if (!result.ok) {
-          if (start === 0) publishPage(key, await mirrorSeed(seed));
+          if (start === 0) collectPage(key, await mirrorSeed(seed));
           return false;
         }
-        publishPage(key, result.value.items);
+        collectPage(key, result.value.items);
         if (!result.value.hasMore || result.value.items.length === 0) return true;
         start += result.value.items.length;
       }
@@ -729,66 +720,42 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
       seedRequests.set(key, request);
       return request;
     };
-    const runSearch = async () => {
-      const loadRail = async (railTags: readonly string[], isCreator: boolean) => {
+    const cached = readRecommendationSnapshot(snapshotKey, serverId);
+    const loadRail = async (railTags: readonly string[], isCreator: boolean) => {
+      const cachedItems = (isCreator ? cached?.sameCreator : cached?.similarPool) ?? [];
+      const found = isCreator ? creatorMatchesById : similarMatches;
+      let complete = true;
+      if (!cached?.complete) {
         let next = 0;
-        let complete = true;
         await Promise.all(Array.from({ length: Math.min(4, railTags.length) }, async () => {
           while (active && next < railTags.length) {
             if (!await loadSeed(railTags[next++]!)) complete = false;
           }
         }));
-        if (!active) return { items: [], complete: false };
-        const found = isCreator ? creatorMatchesById : similarMatches;
-        const select = async (pages?: ReadonlyMap<string, number>) => {
-          const limit = limitFor(isCreator);
-          const shortlist = rank(found, isCreator, pages).slice(0, limit + 8);
-          const missing = await findMissingArchives(serverId, shortlist.map(archive => archive.archiveId));
-          const items = shortlist.filter(archive => !missing.has(archive.archiveId)).slice(0, limit);
-          if (active) {
-            if (isCreator) setSameCreator(items);
-            else setSimilarPool(items);
-          }
-          return items;
-        };
-        const initial = availableProgress;
-        let items = await select(initial);
-        if (!initial) {
-          const pages = await history;
-          if (active && pages) items = await select(pages);
-        }
-        return { items, complete };
-      };
-      const [similar, creatorMatches] = await Promise.all([
-        loadRail(seeds, false),
-        loadRail(creator.tags, true),
-      ]);
-      return { similarPool: similar.items, sameCreator: creatorMatches.items, complete: similar.complete && creatorMatches.complete };
+      }
+      if (!active) return { items: [], complete: false };
+      // Keep cached candidates as fallback on incomplete searches. Publish the
+      // merged, validated result once, even when several seeds are shared.
+      const candidates = cached?.complete ? cachedItems : [...found.values()];
+      if (!complete) candidates.push(...cachedItems.filter(archive => !found.has(archive.archiveId)));
+      const limit = limitFor(isCreator);
+      const shortlist = rank(candidates, isCreator, limit + 8);
+      const missing = await findMissingArchives(serverId, shortlist.map(archive => archive.archiveId));
+      const items = rank(shortlist.filter(archive => !missing.has(archive.archiveId)), isCreator, limit);
+      if (active) publish(items, isCreator);
+      return { items, complete };
     };
 
-    const cached = readRecommendationSnapshot(snapshotKey, serverId);
-    setLoading(!cached?.complete);
-    void (async () => {
-      if (cached) {
-        const [missingSimilar, missingCreator] = await Promise.all([
-          findMissingArchives(serverId, cached.similarPool.map((archive) => archive.archiveId)),
-          findMissingArchives(serverId, cached.sameCreator.map((archive) => archive.archiveId)),
-        ]);
-        if (!active) return;
-        const next = {
-          similarPool: cached.similarPool.filter((archive) => !missingSimilar.has(archive.archiveId)),
-          sameCreator: cached.sameCreator.filter((archive) => !missingCreator.has(archive.archiveId)),
-          complete: cached.complete === true,
-        } satisfies RecommendationSnapshot;
-        setSimilarPool(next.similarPool);
-        setSameCreator(next.sameCreator);
-        writeRouteCache(snapshotKey, next);
-        if (next.complete) return;
-      }
-      const fresh = await runSearch();
-      if (!active || !fresh) return;
-      writeRouteCache(snapshotKey, fresh);
-    })().catch(() => {}).finally(() => { if (active) setLoading(false); });
+    setLoading(true);
+    void Promise.all([loadRail(seeds, false), loadRail(creator.tags, true)]).then(([similarResult, creatorResult]) => {
+      if (!active) return;
+      const next = {
+        similarPool: similarResult.items,
+        sameCreator: creatorResult.items,
+        complete: similarResult.complete && creatorResult.complete,
+      } satisfies RecommendationSnapshot;
+      writeRouteCache(snapshotKey, next);
+    }).catch(() => {}).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [creator, currentArchiveId, scopeId, serverId, seed, snapshotKey, tags]);
 
@@ -800,8 +767,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
   // Cached results, a refresh and the two searches can resolve independently.
   // Keep the user's selection independent of whether either rail has results.
   const activeTab = tab;
-  const orderedCreator = useMemo(() => sortSameCreatorRecommendations(withRecommendationProgress(sameCreator, progress)), [progress, sameCreator]);
-  const visible = activeTab === 'creator' ? orderedCreator : similar;
+  const visible = activeTab === 'creator' ? sameCreator : similar;
   // The rail draws the panel, so the tabs go inside it as its heading. Rendered
   // as a sibling above, they floated outside the component they belonged to.
   const tabs = (
@@ -836,6 +802,7 @@ function Recommendations({ scopeId, serverId, currentArchiveId, tags, detailBase
     <ArchiveThumbnailRail
       title="推荐"
       archives={visible}
+      scrollMemory={{ key: activeTab, offsets: scrollOffsets.current }}
       {...(progress && { progressByArchiveId: progress })}
       loading={loading && visible.length === 0}
       {...(!visible.length && { emptyMessage: activeTab === 'similar' ? '暂无推荐档案' : `暂无${creatorLabel}档案` })}

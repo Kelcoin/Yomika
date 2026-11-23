@@ -300,7 +300,7 @@ describe('settings workspace', () => {
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('data');
+    renderSettings('eh');
     // 纯开关不再有二级菜单：绘制的开关就在行的右侧，翻转即保存。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     expect(toggle).toHaveClass('switch-control');
@@ -357,7 +357,7 @@ describe('settings workspace', () => {
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('data');
+    renderSettings('eh');
     // 没登录：开关按不动，行里说明原因。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     await waitFor(() => expect(toggle).toBeDisabled());

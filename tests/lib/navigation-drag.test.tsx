@@ -84,6 +84,28 @@ it('keeps a tap highlight visible from an unlisted settings route through the ro
   expect(navigate).not.toHaveBeenCalled();
 });
 
+it('keeps moving toward the tapped tab across a deferred compatibility click and observer delivery', () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  const view = render(<Harness />);
+  const nav = screen.getByRole('navigation');
+  const position = () => parseFloat(nav.style.getPropertyValue('--nav-indicator-x'));
+  pointer('pointerdown', 150);
+  pointer('pointerup', 150);
+  flush();
+  const before = position();
+  act(() => vi.advanceTimersByTime(32));
+  act(() => resized([], {} as ResizeObserver));
+  flush();
+  expect(position()).toBeGreaterThan(before);
+  fireEvent.click(screen.getByText('档案库'), { detail: 1 });
+  view.rerender(<Harness active="/library" />);
+  const committed = position();
+  act(() => resized([], {} as ResizeObserver));
+  expect(position()).toBe(committed);
+  settle();
+  expect(position()).toBe(100);
+});
+
 it('restores an unlisted route when a released tap never produces a click', () => {
   vi.useFakeTimers();
   render(<Harness active="/settings" />);

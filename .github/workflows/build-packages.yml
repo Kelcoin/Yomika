@@ -143,6 +143,18 @@ jobs:
       - name: Pin the build stamp
         shell: bash
         run: echo "YOMIKA_BUILD_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+      - name: Set the Android build number
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Draft and formal releases share the workflow sequence. A rerun keeps
+          # the original number, while a new dispatch receives a higher number.
+          code=$GITHUB_RUN_NUMBER
+          if [[ ! "$code" =~ ^[1-9][0-9]{0,9}$ ]] || (( code > 2100000000 )); then
+            echo "Android versionCode $code is outside the supported range" >&2
+            exit 1
+          fi
+          echo "YOMIKA_ANDROID_VERSION_CODE=$code" >> "$GITHUB_ENV"
       - run: npx tauri android init --ci --skip-targets-install
       - name: Build pinned Android ONNX Runtime with NNAPI
         run: |
@@ -173,13 +185,22 @@ jobs:
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: npx tauri android build --ci --apk --target aarch64
-      - name: Verify Android native runtime dependency closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          android_config=$(printf '{"bundle":{"android":{"versionCode":%d,"autoIncrementVersionCode":false}}}' "$YOMIKA_ANDROID_VERSION_CODE")
+          npx tauri android build --ci --apk --target aarch64 --config "$android_config"
+      - name: Verify Android build number and native runtime dependencies
         shell: bash
         run: |
           set -euo pipefail
           apk=$(find src-tauri/gen/android/app/build/outputs -name '*.apk' -print -quit)
           test -n "$apk"
+          badging=$("$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$apk")
+          if ! grep -Eq "^package: .* versionCode='$YOMIKA_ANDROID_VERSION_CODE'([[:space:]]|$)" <<< "$badging"; then
+            echo "APK does not contain expected versionCode $YOMIKA_ANDROID_VERSION_CODE" >&2
+            exit 1
+          fi
           python3 .github/scripts/verify-mobile-runtime.py "$apk" --readelf "$ANDROID_HOME/ndk/28.2.13676358/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
       - name: Publish the Android package to the release
         if: needs.prepare-release.outputs.tag != ''

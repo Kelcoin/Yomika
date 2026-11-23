@@ -229,7 +229,7 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
                             return;
                         }
                         if backgrounded { crate::commands::app_security::foreground(&app); }
-                        if backgrounded || !AUTHENTICATING.load(Ordering::SeqCst) {
+                        if COVER.with(|slot| slot.borrow().is_some()) || LOCKED.load(Ordering::SeqCst) {
                             // This asks React to fetch authoritative state while the
                             // native shield remains until its ready acknowledgement.
                             let _ = app.emit("app-security-lock", ());

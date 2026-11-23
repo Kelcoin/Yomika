@@ -18,6 +18,7 @@ import { getPlatformCapabilities, setStatusBarVisible } from '../bridge/platform
 import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
 import { hapticFeedback } from '../lib/haptics';
+import { isIosBackEdge } from '../lib/layoutMode';
 import { EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
 import { ThumbnailScheduler } from '../lib/thumbnailScheduler';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
@@ -1990,6 +1991,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const handleTouchStart = useCallback((event: TouchEvent) => {
     // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
     if (thumbnailPanelOpen) return;
+    const firstTouch = event.touches[0];
+    if (event.touches.length === 1 && firstTouch && isIosBackEdge(firstTouch.clientX)) return;
     const target = event.target as Element;
     const toolbar = Boolean(target.closest('.reader-toolbar'));
     if (!toolbar && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
@@ -2508,28 +2511,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     const timer = window.setTimeout(() => setIndicatorFlash(false), INDICATOR_FLASH_MS);
     return () => window.clearTimeout(timer);
   }, [state.pageIndex]);
-  // The bottom bar answers every page turn (see `reader-toolbar-turn` in
-  // reader.css). The cue is a keyed child, not a class or an attribute: React
-  // remounting the node is what restarts a CSS animation. Alternating an
-  // attribute value looks like it should work and does not — measured in
-  // debug_outputs/reader-motion, where the second value ran no animation at all.
-  const previousPage = useRef(state.pageIndex);
-  const [turnCue, setTurnCue] = useState(0);
-  useEffect(() => {
-    if (previousPage.current === state.pageIndex) return;
-    previousPage.current = state.pageIndex;
-    setTurnCue((value) => value + 1);
-  }, [state.pageIndex]);
-  // 光线只跟**翻页那一轮**走，不跟底栏的挂载走。底栏不是常驻的：chrome 收起 260ms
-  // 之后整棵子树被摘掉（`useDelayedUnmount`），下次出现时 `key` 没变也是新 DOM 节点，
-  // 一次性 CSS 动画于是跟着重播一遍——用户看到的就是「底栏出现时栏顶闪一条线」。
-  // `playedCue` 记住已经播过的那一次；写它的是 effect 而不是渲染期间的赋值，否则
-  // StrictMode 的双渲染会在第二次就把 ref 改掉，那一轮的光线永远不出现。
-  const playedCue = useRef(0);
-  const showTurnCue = turnCue > 0 && playedCue.current !== turnCue;
-  useEffect(() => {
-    playedCue.current = turnCue;
-  }, [turnCue]);
   // One transform for the slots on screen: scaling each image on its own made a
   // double spread overlap, because both grew from their own centre. It sits
   // *inside* the current frame rather than on the track that carries all three —
@@ -2791,7 +2772,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                   on `showTurnCue` rather than `turnCue > 0` so that a bar which
                   mounts for a different reason (chrome coming back) carries no cue
                   with it — see `playedCue`. */}
-              {showTurnCue && <span key={turnCue} className="reader-toolbar-turn" aria-hidden="true" />}
               {/* Three slots, left to right: how the pages are arranged, where the
                   reader is, what is done to the page. The counter is the middle
                   slot by grid position, not by luck — the sides are equal `1fr`

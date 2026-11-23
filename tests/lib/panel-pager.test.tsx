@@ -90,6 +90,28 @@ describe('panel gesture lifecycle', () => {
     expect(screen.getAllByText('comments', { selector: 'output' })).toHaveLength(2);
   });
 
+  it('measures both panels before revealing the incoming panel and reuses geometry through release', () => {
+    render(<Pager />);
+    const stage = screen.getByTestId('stage');
+    const details = screen.getByTestId('details');
+    const comments = screen.getByTestId('comments');
+    const width = vi.spyOn(stage, 'clientWidth', 'get').mockReturnValue(400);
+    const reads: boolean[] = [];
+    const height = vi.spyOn(comments, 'scrollHeight', 'get').mockImplementation(() => {
+      reads.push(comments.hidden);
+      return 900;
+    });
+    fireEvent.touchStart(details, { touches: [touch(240)] });
+    fireEvent.touchMove(details, { touches: [touch(220)] });
+    expect(reads).toEqual([true]);
+    fireEvent.touchMove(details, { touches: [touch(260)] });
+    fireEvent.touchMove(details, { touches: [touch(160)] });
+    fireEvent.touchEnd(details, { touches: [] });
+    expect(height).toHaveBeenCalledTimes(1);
+    expect(width).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('selected')).toHaveTextContent('comments');
+  });
+
   it('waits through an ambiguous diagonal start rather than rejecting the whole swipe', () => {
     render(<Pager />);
     const details = screen.getByTestId('details');

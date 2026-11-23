@@ -1549,26 +1549,8 @@ describe('design system contract', () => {
     expect(stateLayer).toMatch(/inline-size:\s*var\(--reader-action-width\)/);
     expect(stateLayer).toMatch(/block-size:\s*var\(--reader-action-width\)/);
     expect(stateLayer).toMatch(/border-radius:\s*50%/);
-    expect(reader, '翻页的回应要有一条动画').toMatch(/@keyframes reader-toolbar-turn \{\s*from \{/);
-    const cue = ruleBody(reader, '.reader-toolbar-turn');
-    expect(cue).toMatch(/animation:\s*reader-toolbar-turn var\(--motion-slow\)/);
-    expect(cue).toMatch(/background:\s*var\(--primary\)/);
-    // 动画没有 `forwards`，播完就落回基础值：基础值必须是灭的，否则一条主题色的实线会
-    // 永久留在栏顶（工装实测过这个形态）。
-    expect(cue, '光线的底色必须是灭的').toMatch(/opacity:\s*0/);
-    // 重播靠**重新挂载**，不是改属性值：实测（debug_outputs/reader-motion）里把属性在
-    // 两个值之间轮流，第二页一条动画都没跑——Blink 只在 `animation-name` 变或元素重挂
-    // 时才重播。
-    expect(read('src/components/ReaderScreen.tsx'), '光线要按翻页次数换一个新元素')
-      .toMatch(/\{showTurnCue && <span key=\{turnCue\} className="reader-toolbar-turn"/);
-    // 但「换元素」不能变成「栏一回来就闪一下」：底栏 chrome 收起 260ms 后整棵子树被摘掉，
-    // 再出现时是全新的 DOM，一次性动画会跟着重播（用户报的「出现时顶部闪一条线」）。光线
-    // 因此只认**这一次翻页**：`playedCue` 记住已播过的那一次，且由 effect 写（渲染期间写
-    // ref 会被 StrictMode 的双渲染吃掉）。
-    expect(read('src/components/ReaderScreen.tsx'), '光线只在翻页那一轮挂上去')
-      .toMatch(/const showTurnCue = turnCue > 0 && playedCue\.current !== turnCue;/);
-    expect(read('src/components/ReaderScreen.tsx'), '已播过的那一次由 effect 记下')
-      .toMatch(/playedCue\.current = turnCue;/);
+    expect(reader).not.toContain('reader-toolbar-turn');
+    expect(read('src/components/ReaderScreen.tsx')).not.toContain('reader-toolbar-turn');
   });
 
   it('keeps the on-canvas reader chrome on its own fixed dark scheme', () => {
