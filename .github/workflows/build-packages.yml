@@ -48,6 +48,9 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-latest
+    env:
+      # Keep the hash-named ORT cache and its extraction paths short on Windows.
+      ORT_CACHE_DIR: ${{ github.workspace }}/.ort
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

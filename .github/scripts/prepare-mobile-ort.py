@@ -55,13 +55,24 @@ def reuse_android(output):
     return {"ORT_SKIP_DOWNLOAD": "1", "ORT_LIB_PATH": str(native.parent), "ORT_PREFER_DYNAMIC_LINK": "1"}
 
 
-def prepare(platform, output):
-    output = output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    source = output / "source"
-    if not source.exists():
-        run("git", "-c", "http.version=HTTP/1.1", "clone", "--depth", "1", "--branch", f"v{VERSION}", "--no-checkout",
-            "https://github.com/microsoft/onnxruntime.git", source)
+def checkout_source(source):
+    if not (source / ".git").exists():
+        run("git", "init", source)
+    cached = subprocess.run(["git", "-C", str(source), "cat-file", "-e", f"{REVISION}^{{commit}}"],
+                            capture_output=True)
+    if cached.returncode != 0:
+        # Fetch the exact commit even if a mirror does not carry release tags.
+        for remote in ("https://github.com/microsoft/onnxruntime.git",
+                       "https://github.com/intel/onnxruntime.git"):
+            result = subprocess.run(
+                ["git", "-C", str(source), "-c", "http.version=HTTP/1.1",
+                 "fetch", "--depth", "1", remote, REVISION],
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            )
+            if result.returncode == 0:
+                break
+        else:
+            raise RuntimeError(f"Could not fetch pinned ORT commit {REVISION}")
     run("git", "-C", source, "checkout", "--detach", REVISION)
     actual = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
     if actual != REVISION:
@@ -71,6 +82,13 @@ def prepare(platform, output):
     header = (source / "include/onnxruntime/core/session/onnxruntime_c_api.h").read_text()
     if "#define ORT_API_VERSION 27" not in header:
         raise RuntimeError("Pinned ORT does not implement API 27")
+
+
+def prepare(platform, output):
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    source = output / "source"
+    checkout_source(source)
     build = output / platform
     cmake = shutil.which("cmake")
     if not cmake:

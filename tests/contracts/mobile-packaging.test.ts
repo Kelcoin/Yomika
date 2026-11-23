@@ -22,6 +22,8 @@ describe('mobile packaging', () => {
     expect(core).toContain('default-features = false, features = ["std", "ndarray", "tracing", "api-27"]');
     const prepare = read('../../.github/scripts/prepare-mobile-ort.py');
     expect(prepare).toContain('8f0278c77bf44b0cc83c098c6c722b92a36ac4b5');
+    expect(prepare).toContain('"fetch", "--depth", "1", remote, REVISION');
+    expect(prepare).toContain('https://github.com/intel/onnxruntime.git');
     expect(prepare).toContain('#define ORT_API_VERSION 27');
     expect(prepare).toContain('"--use_nnapi"');
     expect(prepare).toContain('"--use_coreml"');
