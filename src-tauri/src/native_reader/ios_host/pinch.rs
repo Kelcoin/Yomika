@@ -16,6 +16,7 @@ pub(super) struct PinchConfig {
 struct PinchStart {
     transform: ViewTransform,
     maximum: f64,
+    recognizer_scale: f64,
     x: f64,
     y: f64,
 }
@@ -54,11 +55,15 @@ define_class!(
             let bounds = web.bounds();
             let width = bounds.size.width;
             let height = bounds.size.height;
+            let ending = matches!(state, UIGestureRecognizerState::Ended | UIGestureRecognizerState::Cancelled);
+            // UIKit can still report Changed when only one touch remains. Its
+            // location then jumps from the midpoint to the remaining finger.
+            if !ending && pinch.numberOfTouches() != 2 { return; }
             let location = pinch.locationInView(Some(&web));
             let x = location.x - width / 2.0;
             let y = location.y - height / 2.0;
-            let scale = pinch.scale();
-            let ending = matches!(state, UIGestureRecognizerState::Ended | UIGestureRecognizerState::Cancelled);
+            let recognizer_scale = pinch.scale();
+            if !ending && (!recognizer_scale.is_finite() || recognizer_scale <= 0.0) { return; }
             let mut began = None;
             let publish = READERS.with_borrow_mut(|readers| {
                 let reader = readers.get_mut(label)?;
@@ -70,7 +75,7 @@ define_class!(
                     // The prepared neighbour can become active before the next
                     // page's configuration arrives from WebKit.
                     let maximum = if key.1 == config.page { config.maximum } else { 3.0 };
-                    self.ivars().start.set(Some(PinchStart { transform, maximum, x, y }));
+                    self.ivars().start.set(Some(PinchStart { transform, maximum, recognizer_scale, x, y }));
                     // A quick flick can go Began → Ended with no Changed frame. Seed the
                     // focus here, or the release would settle about wherever the previous
                     // gesture left its fingers and shift the page towards that corner.
@@ -89,7 +94,7 @@ define_class!(
                     reader.transforms.get(&key).copied().unwrap_or(start.transform)
                 } else {
                     self.ivars().focus.set((x, y));
-                    let scale = elastic_scale(start.transform.scale * scale, start.maximum);
+                    let scale = elastic_scale(start.transform.scale * recognizer_scale / start.recognizer_scale, start.maximum);
                     ViewTransform {
                         scale,
                         edge_offset: 0.0,

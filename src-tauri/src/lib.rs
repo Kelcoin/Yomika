@@ -323,7 +323,7 @@ pub fn run() {
                 .initialization_script(commands::app_security::bootstrap_script(app.handle()).map_err(std::io::Error::other)?);
             #[cfg(target_os = "ios")]
             let builder = {
-                use objc2_ui_kit::{UITraitCollection, UIUserInterfaceStyle};
+                use objc2_ui_kit::{UIScreen, UITraitCollection, UIUserInterfaceStyle};
                 use tauri::webview::Color;
 
                 let theme = launch_preferences.as_ref().map(|preferences| preferences.theme.as_str());
@@ -336,7 +336,14 @@ pub fn run() {
                 // Cover the native backing view until WebKit has drawn its first
                 // full-sized frame. An alpha-zero config exposes the UIWindow.
                 let canvas = if dark { Color(18, 20, 18, 255) } else { Color(251, 248, 243, 255) };
-                builder.background_color(canvas).initialization_script("window.__yomikaNativeIos = true;")
+                // Tao uses the configured inner size for the initial UIWindow frame.
+                // Before a window scene exists, use UIKit's orientation-aware logical bounds.
+                let mtm = objc2::MainThreadMarker::new().expect("iOS setup runs on the main thread");
+                #[allow(deprecated)]
+                let screen = UIScreen::mainScreen(mtm).bounds().size;
+                builder.inner_size(screen.width, screen.height)
+                    .background_color(canvas)
+                    .initialization_script("window.__yomikaNativeIos = true;")
             };
             // Native reader artwork is available on normal desktop/iOS routes.
             // Keep the original renderer selectable for platform diagnostics.

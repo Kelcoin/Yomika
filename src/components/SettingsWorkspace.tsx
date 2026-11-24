@@ -59,6 +59,7 @@ import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, MIN_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { flushSync } from 'react-dom';
 import { DETAIL_EXIT_MS, routeMotionAllowed } from '../lib/routeMotion';
 import { readerSettingsOrigin } from '../lib/pageBackNavigation';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
@@ -238,15 +239,22 @@ export function SettingsWorkspace() {
   const settingsContentRef = useRef<HTMLDivElement>(null);
   const settingsListRef = useRef<HTMLDivElement>(null);
   const [backOffset, setBackOffset] = useState<number>();
-  const showSectionList = !compact || !compactDrilled || backOffset !== undefined;
+  const [backDragging, setBackDragging] = useState(false);
+  const showingBackList = backDragging || backOffset !== undefined;
+  const showSectionList = !compact || !compactDrilled || showingBackList;
   const showSectionContent = !compact || compactDrilled;
   // 一级一级退：手机上的返回手势走的是 webview 历史（`AppPlugin` 把返回键交给
   // `webView.goBack()`），所以设置项开着时按返回，人想要的是先回到分类列表，而不是
   // 把整个设置页带回上一页。开着的时候压一条守卫条目，返回手势弹掉它、就地回到列表；
   // 页内那个「返回设置分类」按钮关掉这一层时，守卫自己把条目吃掉（`lib/overlayBackGuard`）。
-  const closeSettingsSection = () => { setBackOffset(undefined); setCompactDrilled(false); };
+  const closeSettingsSection = () => { setBackDragging(false); setBackOffset(undefined); setCompactDrilled(false); };
   useOverlayBackGuard(pageActive && compact && compactDrilled && !readerOrigin, closeSettingsSection, {
     surface: () => settingsContentRef.current,
+    preview: (visible) => {
+      if (visible) flushSync(() => setBackDragging(true));
+      else setBackDragging(false);
+      return settingsListRef.current;
+    },
     close: (offset) => {
       if (routeMotionAllowed() && typeof settingsContentRef.current?.animate === 'function') setBackOffset(offset);
       else closeSettingsSection();
@@ -258,10 +266,10 @@ export function SettingsWorkspace() {
     content.style.removeProperty('translate');
     const options = { duration: DETAIL_EXIT_MS, easing: 'ease-out' } as const;
     const front = content.animate([{ transform: `translateX(${backOffset}px)` }, { transform: 'translateX(100vw)' }], { ...options, fill: 'forwards' });
-    const back = settingsListRef.current?.animate([
-      { transform: `translateX(${Math.min(0, (backOffset - content.clientWidth) * .26)}px)` },
-      { transform: 'translateX(0)' },
-    ], options);
+    const list = settingsListRef.current;
+    const listOffset = list?.style.translate || `${Math.min(0, (backOffset - content.clientWidth) * .26)}px`;
+    list?.style.removeProperty('translate');
+    const back = list?.animate([{ translate: listOffset }, { translate: '0px' }], options);
     front.onfinish = closeSettingsSection;
     const deadline = window.setTimeout(closeSettingsSection, DETAIL_EXIT_MS + 50);
     return () => { clearTimeout(deadline); front.onfinish = null; front.cancel(); back?.cancel(); };
@@ -929,7 +937,7 @@ export function SettingsWorkspace() {
   return (
     <div className="settings-page" ref={pageRef}>
       <h1 className="visually-hidden">设置</h1>
-      <div className={`settings-layout${compact ? ' is-compact' : ''}${backOffset !== undefined ? ' is-backing' : ''}`}>
+      <div className={`settings-layout${compact ? ' is-compact' : ''}${showingBackList ? ' is-backing' : ''}`}>
         {showSectionList && (
         /* The sticky element sits inside a slot that stretches to the row, so its
            containing block does not change height with the section: as a direct

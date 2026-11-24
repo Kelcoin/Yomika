@@ -2230,6 +2230,8 @@ body::-webkit-scrollbar,
   background: var(--surface-panel);
 }
 
+.workspace > .route-cache-panel[data-back-foreground] { position: relative; z-index: 1; }
+
 /* A zoom moves the complete page surface, including its canvas. Transparent
    wrappers made the outgoing text appear to float over the restored page. */
 .route-cache-panel[data-bounce-surface] { background: var(--surface-panel); }

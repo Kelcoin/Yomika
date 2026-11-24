@@ -1,7 +1,7 @@
 import { RefreshIcon as RefreshCw } from '../components/RefreshIcon';
 import { loadFavoriteArchives } from '../lib/favoritesMirror';
 import { Bookmark, BookOpen, Eraser, FolderHeart, Server, Shuffle } from 'lucide-react';
-import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
+import { Suspense, lazy, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { z } from 'zod';
 import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
@@ -11,6 +11,7 @@ import { pageKeyFor } from '../lib/pageKeys';
 import { useRouteDirection } from '../lib/useRouteDirection';
 import type { RouteDirection } from './RetainedPage';
 import { detailIdentity, type RouteMotion } from '../lib/routeMotion';
+import { IOS_BACK_PREVIEW } from '../lib/pageBackNavigation';
 import { useWorkspaceRouteMotion } from '../lib/useWorkspaceRouteMotion';
 import { COMPACT_WIDTH_QUERY, useMediaQuery } from '../lib/useMediaQuery';
 import { EmptyState } from '../components/EmptyState';
@@ -1058,12 +1059,26 @@ export function WorkspaceRoutes({ direction: navigationDirection, motion: outerM
   const routeKey = pageKeyFor(location.pathname);
   const preview = previewLocation ?? transition.previewLocation;
   const previewKey = preview ? pageKeyFor(preview.pathname) : undefined;
+  const [gestureTarget, setGestureTarget] = useState<string>();
+  useLayoutEffect(() => {
+    const stage = (event: Event) => setGestureTarget((event as CustomEvent<string | undefined>).detail);
+    document.addEventListener(IOS_BACK_PREVIEW, stage);
+    return () => document.removeEventListener(IOS_BACK_PREVIEW, stage);
+  }, []);
+  const displayedUrl = `${location.pathname}${location.search}${location.hash}`;
+  const gestureUrl = gestureTarget && gestureTarget !== displayedUrl ? new URL(gestureTarget, window.location.origin) : undefined;
+  const gestureLocation = useMemo(() => gestureUrl ? {
+    pathname: gestureUrl.pathname, search: gestureUrl.search, hash: gestureUrl.hash, key: 'ios-back', state: null,
+  } : undefined, [gestureUrl?.href]);
+  useLayoutEffect(() => {
+    if (gestureTarget === displayedUrl) setGestureTarget(undefined);
+  }, [displayedUrl, gestureTarget]);
   const visited = useRef(new Map<string, typeof location>());
   visited.current.set(routeKey, location);
   if (preview && previewKey) visited.current.set(previewKey, preview);
   return <>{[...visited.current].map(([key, saved]) => (
     <RetainedWorkspacePage key={key} pageKey={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
-  ))}</>;
+  ))}{gestureLocation && <RetainedWorkspacePage key="ios-back" pageKey="ios-back" saved={gestureLocation} compact={compact} direction={-1} active={false} flow />}</>;
 }
 
 function ActiveRedirect({ to }: { to: string }) {
@@ -1113,7 +1128,7 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, sav
   // These compact routes scroll through the shared workspace. Animating the
   // full card/detail columns in from outside the viewport spikes raster work.
   const fadeEntry = compact && detailKey !== undefined;
-  return <RetainedPage active={active} pageKey={pageKey} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
+  return <RetainedPage active={active} pageKey={pageKey} pageUrl={`${saved.pathname}${saved.search}${saved.hash}`} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });

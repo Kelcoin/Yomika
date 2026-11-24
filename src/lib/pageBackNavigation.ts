@@ -1,11 +1,18 @@
 import { useLayoutEffect, useRef } from 'react';
+import { flushSync } from 'react-dom';
+import { DETAIL_RETURN_PREVIEW, prepareDetailReturn } from './detailReturn';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { resolveRouteMotion, routeMotionAllowed } from './routeMotion';
-import { closeTopOverlay, hasBackOverlay, topBackGestureSurface } from './overlayBackGuard';
+import { closeTopOverlay, hasBackOverlay, topBackGesturePreview, topBackGestureSurface } from './overlayBackGuard';
 import { isIosBackEdge, isMobileDevice } from './layoutMode';
 import { pageKeyFor } from './pageKeys';
 
 export const MOBILE_BACK_EVENT = 'yomika-mobile-back';
+export const IOS_BACK_PREVIEW = 'yomika-ios-back-preview';
+
+function stageBackPreview(target?: string) {
+  document.dispatchEvent(new CustomEvent(IOS_BACK_PREVIEW, { detail: target }));
+}
 
 export function pageRoot(path: string): string {
   if (path === '/' || path.startsWith('/home/')) return '/';
@@ -80,12 +87,14 @@ export interface BackPreview { preview: HTMLElement; panel: HTMLElement }
 
 export function revealBackPreview(panel: HTMLElement | null, key: string): BackPreview | undefined {
   if (!panel) return undefined;
-  const preview = document.querySelector<HTMLElement>(`.workspace > .route-cache-panel[data-page-key="${key}"]`);
+  const preview = Array.from(panel.parentElement?.children ?? []).find((element): element is HTMLElement =>
+    element instanceof HTMLElement && element.dataset.pageKey === key);
   if (!preview || preview === panel || !preview.hidden) return undefined;
   const workspace = preview.parentElement;
   const padding = workspace ? getComputedStyle(workspace) : undefined;
   preview.hidden = false;
   preview.setAttribute('data-back-preview', '');
+  panel.setAttribute('data-back-foreground', '');
   preview.setAttribute('aria-hidden', 'true');
   preview.setAttribute('inert', '');
   if (padding) {
@@ -94,25 +103,33 @@ export function revealBackPreview(panel: HTMLElement | null, key: string): BackP
     preview.style.paddingLeft = padding.paddingLeft;
     preview.style.paddingBottom = '0px';
   }
-  panel.style.position = 'relative';
-  panel.style.zIndex = '1';
   return { preview, panel };
 }
 
 export function releaseBackPreview(back: BackPreview | undefined, keepVisible: boolean): void {
   if (!back) return;
   const { preview, panel } = back;
+  panel.removeAttribute('data-back-foreground');
   preview.removeAttribute('data-back-preview');
   preview.removeAttribute('aria-hidden');
   preview.removeAttribute('inert');
   preview.style.removeProperty('translate');
   for (const name of ['padding-top', 'padding-right', 'padding-bottom', 'padding-left']) preview.style.removeProperty(name);
-  if (!keepVisible) {
-    preview.hidden = true;
-    panel.style.removeProperty('position');
-    panel.style.removeProperty('z-index');
-  }
+  if (!keepVisible) preview.hidden = true;
 }
+function restoreWorkspaceScroll(surface: HTMLElement | undefined, top: number | undefined): void {
+  const workspace = surface?.closest<HTMLElement>('.workspace');
+  if (!workspace || top === undefined || workspace.scrollTop === top) return;
+  const behavior = workspace.style.scrollBehavior;
+  workspace.style.scrollBehavior = 'auto';
+  workspace.scrollTop = top;
+  workspace.style.scrollBehavior = behavior;
+}
+
+export function backParallax(surface: HTMLElement, offset: number): string {
+  return `${Math.min(0, (offset - (surface.clientWidth || window.innerWidth)) * .26)}px`;
+}
+
 /** Android delivers Back as an app action, not WebView.goBack(): global browser
  * history mixes tabs, filter edits and overlay guards into one confusing stack. */
 export function usePageBackNavigation(): void {
@@ -152,7 +169,7 @@ export function usePageBackNavigation(): void {
     window.addEventListener('popstate', pop, true);
     // WKWebView has no hardware Back action. Use the same page stack as Android,
     // so one edge gesture dismisses the top overlay or returns within this tab.
-    let edge: { id: number; x: number; y: number; horizontal: boolean; surface?: HTMLElement | undefined; preview?: BackPreview | undefined } | undefined;
+    let edge: { id: number; x: number; y: number; horizontal: boolean; surface?: HTMLElement | undefined; preview?: BackPreview | undefined; list?: HTMLElement | undefined; restoreDetail?: (() => void) | undefined; temporary?: boolean; workspaceScroll?: number; hideOverlayPreview?: () => void } | undefined;
     const clearEdge = () => {
       const previous = edge;
       edge = undefined;
@@ -160,14 +177,37 @@ export function usePageBackNavigation(): void {
     };
     const cancelEdge = () => {
       const previous = clearEdge();
-      releaseBackPreview(previous?.preview, false);
       const surface = previous?.surface;
-      if (!surface) return;
+      if (!previous || !surface) return;
+      const clean = () => {
+        releaseBackPreview(previous.preview, false);
+        previous.list?.style.removeProperty('translate');
+        previous.restoreDetail?.();
+        previous.hideOverlayPreview?.();
+        restoreWorkspaceScroll(surface, previous.workspaceScroll);
+        if (previous.temporary) stageBackPreview();
+      };
       const from = surface.style.translate;
       surface.style.removeProperty('translate');
-      surface.animate?.([{ translate: from }, { translate: '0px' }], { duration: 160, easing: 'ease-out' });
+      const animation = from && surface.animate?.([{ translate: from }, { translate: '0px' }], { duration: 160, easing: 'ease-out' });
+      if (animation) {
+        const underneath = previous.list ?? previous.preview?.preview;
+        const backdrop = underneath?.style.translate && underneath.animate?.([
+          { translate: underneath.style.translate }, { translate: backParallax(underneath, 0) },
+        ], { duration: 160, easing: 'ease-out', fill: 'forwards' });
+        const finish = () => {
+          finishCancellation = undefined;
+          if (backdrop) backdrop.cancel();
+          clean();
+        };
+        animation.onfinish = finish;
+        finishCancellation = () => { animation.cancel(); finish(); };
+      } else clean();
     };
+    let finishCancellation: (() => void) | undefined;
     const edgeStart = (event: TouchEvent) => {
+      finishCancellation?.();
+      finishCancellation = undefined;
       cancelEdge();
       const touch = event.touches[0];
       if (event.touches.length !== 1 || !touch || !isIosBackEdge(touch.clientX)) return;
@@ -185,25 +225,45 @@ export function usePageBackNavigation(): void {
         edge.horizontal = true;
         if (routeMotionAllowed()) {
           const target = history.current.peekBack();
-          if (hasBackOverlay()) edge.surface = topBackGestureSurface() ?? undefined;
-          else if (target && !current.current.url.startsWith('/reader/')) {
+          if (hasBackOverlay()) {
+            edge.surface = topBackGestureSurface() ?? undefined;
+            const showPreview = topBackGesturePreview();
+            if (edge.surface && showPreview) {
+              edge.list = showPreview(true) ?? undefined;
+              edge.hideOverlayPreview = () => { showPreview(false); };
+            }
+          } else if (target && !current.current.url.startsWith('/reader/')) {
             const from = new URL(current.current.url, window.location.origin);
             const to = new URL(target, window.location.origin);
             const motion = resolveRouteMotion(from, { pathname: to.pathname, search: to.search, state: { iosBack: true } }, true, -1);
             const panel = document.querySelector<HTMLElement>('.workspace > .route-cache-panel:not([hidden])');
             edge.surface = (motion.kind === 'detail-close' ? panel?.querySelector<HTMLElement>('.library-shell-detail') : panel) ?? undefined;
-            // The layer behind the drag: reveal the page this Back returns to so the
-            // gesture shows real content instead of the empty workspace background.
-            if (motion.kind === 'page-close') edge.preview = revealBackPreview(panel ?? null, pageKeyFor(to.pathname));
+            if (motion.kind === 'detail-close' && panel && edge.surface) {
+              const workspace = panel.parentElement;
+              if (workspace) edge.workspaceScroll = workspace.scrollTop;
+              edge.restoreDetail = prepareDetailReturn(panel, edge.surface);
+              edge.list = panel.querySelector<HTMLElement>('.library-shell-list') ?? undefined;
+              document.dispatchEvent(new CustomEvent(DETAIL_RETURN_PREVIEW));
+            } else if (motion.kind === 'page-close' && panel) {
+              const key = pageKeyFor(to.pathname);
+              const saved = Array.from(panel.parentElement?.children ?? []).find(node =>
+                node instanceof HTMLElement && node.dataset.pageKey === key) as HTMLElement | undefined;
+              if (saved && saved !== panel && (!saved.dataset.pageUrl || saved.dataset.pageUrl === target)) {
+                edge.preview = revealBackPreview(panel, key);
+              } else {
+                flushSync(() => stageBackPreview(target));
+                edge.preview = revealBackPreview(panel, 'ios-back');
+                edge.temporary = Boolean(edge.preview);
+                if (!edge.temporary) stageBackPreview();
+              }
+            }
           }
         }
       }
       if (event.cancelable) event.preventDefault();
       if (edge.surface) edge.surface.style.translate = `${Math.max(0, dx)}px`;
-      if (edge.preview) {
-        const width = edge.preview.preview.clientWidth || window.innerWidth;
-        edge.preview.preview.style.translate = `${Math.min(0, -width * 0.26 + Math.max(0, dx) * 0.26)}px`;
-      }
+      const underneath = edge.list ?? edge.preview?.preview;
+      if (underneath) underneath.style.translate = backParallax(underneath, Math.max(0, dx));
     };
     const edgeEnd = (event: TouchEvent) => {
       const start = edge;
@@ -216,6 +276,10 @@ export function usePageBackNavigation(): void {
       const previous = clearEdge();
       const surface = previous?.surface;
       const preview = previous?.preview;
+      // Restore the outgoing layout before the route effect takes its own measurements.
+      previous?.restoreDetail?.();
+      if (previous?.restoreDetail) previous.list?.style.removeProperty('translate');
+      restoreWorkspaceScroll(surface, previous?.workspaceScroll);
       const handled = !window.dispatchEvent(new CustomEvent(MOBILE_BACK_EVENT, { cancelable: true, detail: { iosBack: true, offset } }));
       // Allow the destination's layout effect to take ownership before clearing the drag.
       if (surface) requestAnimationFrame(() => {
@@ -223,7 +287,11 @@ export function usePageBackNavigation(): void {
       });
       // A handled Back leaves the revealed page on screen: the route motion animates it
       // from exactly this position, so only the drag's own inline styles must go away.
-      if (preview) requestAnimationFrame(() => releaseBackPreview(preview, handled));
+      if (preview && (!previous?.temporary || !handled)) requestAnimationFrame(() => releaseBackPreview(preview, handled));
+      if (!handled) {
+        previous?.hideOverlayPreview?.();
+        if (previous?.temporary) stageBackPreview();
+      }
       if (handled && event.cancelable) event.preventDefault();
     };
     window.addEventListener('touchstart', edgeStart, { capture: true, passive: true });
@@ -231,6 +299,7 @@ export function usePageBackNavigation(): void {
     window.addEventListener('touchend', edgeEnd, { capture: true, passive: false });
     window.addEventListener('touchcancel', cancelEdge, true);
     return () => {
+      finishCancellation?.();
       cancelEdge();
       window.removeEventListener(MOBILE_BACK_EVENT, back);
       window.removeEventListener('popstate', pop, true);

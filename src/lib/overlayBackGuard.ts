@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 
 /** 一个开着的浮层：关掉它的动作、「刚才没关掉就把守卫补回去」，以及它在历史里的层号。 */
-type Overlay = { close: () => void; gestureSurface?: (() => HTMLElement | null) | undefined; gestureClose?: ((offset: number) => void) | undefined; restore: () => void; depth: number };
+type Overlay = { close: () => void; gestureSurface?: (() => HTMLElement | null) | undefined; gesturePreview?: ((visible: boolean) => HTMLElement | null) | undefined; gestureClose?: ((offset: number) => void) | undefined; restore: () => void; depth: number };
 
 const stack: Overlay[] = [];
 let bound = false;
@@ -9,6 +9,10 @@ let bound = false;
 export function hasBackOverlay(): boolean { return stack.length > 0; }
 
 export function topBackGestureSurface(): HTMLElement | null { return stack.at(-1)?.gestureSurface?.() ?? null; }
+
+export function topBackGesturePreview(): ((visible: boolean) => HTMLElement | null) | undefined {
+  return stack.at(-1)?.gesturePreview;
+}
 
 /** Native Back must close the frontmost overlay before considering a route.
  * Keep its history guard until React cleanup consumes it normally. */
@@ -65,7 +69,7 @@ function onPopState() {
  * 已知的边角：关掉一层的同一瞬间又开一层（连点两个设置行）时，`history.back()` 与新
  * `pushState` 谁先谁后由浏览器定；最坏情况是那一次返回被吃掉，页面不会被带走。
  */
-export function useOverlayBackGuard(open: boolean, close: () => void, gesture?: { surface: () => HTMLElement | null; close: (offset: number) => void }): void {
+export function useOverlayBackGuard(open: boolean, close: () => void, gesture?: { surface: () => HTMLElement | null; preview?: (visible: boolean) => HTMLElement | null; close: (offset: number) => void }): void {
   const latestClose = useRef(close);
   latestClose.current = close;
   const latestGesture = useRef(gesture);
@@ -84,6 +88,7 @@ export function useOverlayBackGuard(open: boolean, close: () => void, gesture?: 
       depth: stack.length + 1,
       close: () => latestClose.current(),
       gestureSurface: () => latestGesture.current?.surface() ?? null,
+      gesturePreview: (visible) => latestGesture.current?.preview?.(visible) ?? null,
       gestureClose: (offset) => {
         if (latestGesture.current) latestGesture.current.close(offset);
         else latestClose.current();

@@ -377,9 +377,19 @@ it('keeps a stationary black Android canvas behind translated native pages', () 
   expect(background).toMatch(/web\.background = previousWebBackground[\s\S]*?removeView\(backdrop\)/);
 });
 
+it('sizes the initial iOS window and its WebView in their local coordinate systems', () => {
+  const host = read('../../src-tauri/src/lib.rs');
+  expect(host).toContain('UIScreen::mainScreen(mtm).bounds().size');
+  expect(host).toContain('builder.inner_size(screen.width, screen.height)');
+  const wry = read('../../src-tauri/vendor/wry/src/wkwebview/mod.rs');
+  expect(wry).toContain('let frame = ns_view.bounds();');
+});
+
 it('leaves iOS single-finger paging and panning on the same touch stream', () => {
   const gestures = read('../../src-tauri/src/native_reader/ios_host/pinch.rs');
   expect(gestures).toContain('UIPinchGestureRecognizer::initWithTarget_action');
   expect(gestures).toContain('recognizer.setCancelsTouchesInView(false)');
+  expect(gestures).toMatch(/if !ending && pinch\.numberOfTouches\(\) != 2[\s\S]+pinch\.locationInView/);
+  expect(gestures).toContain('recognizer_scale / start.recognizer_scale');
   expect(gestures).not.toContain('UIPanGestureRecognizer::initWithTarget_action');
 });

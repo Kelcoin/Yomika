@@ -446,7 +446,8 @@ impl InnerWebView {
       };
       #[cfg(target_os = "ios")]
       let webview = {
-        let frame = ns_view.frame();
+        // The child frame is in the parent's local coordinate space.
+        let frame = ns_view.bounds();
         let webview: Retained<WryWebView> =
           objc2::msg_send![super(webview), initWithFrame: frame, configuration: &**config];
         if let Some((red, green, blue, alpha)) = attributes.background_color {

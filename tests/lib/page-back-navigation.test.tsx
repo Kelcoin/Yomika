@@ -188,6 +188,29 @@ it('uses the same workspace history for the detail back button and gesture', () 
   expect(screen.getByRole('status')).toHaveTextContent(/^\/library$/);
 });
 
+it('exposes the retained list while an iOS detail is being dragged and restores it on cancel', () => {
+  document.documentElement.dataset.nativePlatform = 'ios';
+  function Detail() {
+    usePageBackNavigation();
+    return <main className="workspace"><section className="route-cache-panel" data-page-key="/library">
+      <div className="library-shell-list">archive list</div>
+      <div className="library-shell-detail">archive detail</div>
+    </section></main>;
+  }
+  render(<MemoryRouter initialEntries={['/library/a']}><Detail /></MemoryRouter>);
+  const start = { identifier: 1, clientX: 10, clientY: 100 };
+  const move = { ...start, clientX: 42 };
+  fireEvent.touchStart(document.body, { touches: [start] });
+  fireEvent.touchMove(document.body, { touches: [move] });
+  const list = screen.getByText('archive list');
+  expect(list.closest('[data-detail-return]')).not.toBeNull();
+  expect(screen.getByText('archive detail').style.translate).toBe('32px');
+  expect(list.style.translate).toBeTruthy();
+  fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
+  expect(list.closest('[data-detail-return]')).toBeNull();
+  expect(list.style.translate).toBe('');
+});
+
 function StagedPages() {
   usePageBackNavigation();
   const location = useLocation();

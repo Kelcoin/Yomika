@@ -603,6 +603,9 @@ it('keeps a native iOS zoom sample when the same page is being processed', async
     await nativeReady(plain);
     expect(rawInvoke).toHaveBeenCalledWith('reader_native_pinch_input', expect.objectContaining({ session: 12, page: 1, maximum: 3, enabled: true, reduceMotion: false }), undefined);
     rendered.rerender(reader(true));
+    const canvas = screen.getByRole('main', { name: '漫画阅读器' });
+    const touch = (clientX: number) => ({ clientX, clientY: 300 });
+    fireEvent.touchStart(canvas, { touches: [touch(350), touch(450)] });
     const nativePinch = (session: number, active: boolean) => act(() => {
       window.dispatchEvent(new CustomEvent('yomika-reader-native-pinch', { detail: { session, page: 1, active } }));
     });
@@ -615,14 +618,18 @@ it('keeps a native iOS zoom sample when the same page is being processed', async
     });
     report(12, 2);
     report(11, 1);
+    fireEvent.touchEnd(canvas, { touches: [touch(350)], changedTouches: [touch(450)] });
     await act(async () => { nativePinch(12, false); });
+    const transformsBeforeLift = rawInvoke.mock.calls.filter(([command]) => command === 'reader_native_view_transform').length;
+    fireEvent.touchMove(canvas, { touches: [touch(630)] });
+    fireEvent.touchEnd(canvas, { touches: [], changedTouches: [touch(630)] });
+    expect(rawInvoke.mock.calls.filter(([command]) => command === 'reader_native_view_transform')).toHaveLength(transformsBeforeLift);
+    await vi.waitFor(() => expect(invoke.mock.calls.some(([, args]) => args?.leaseId === derived)).toBe(true));
     const replacement = await nativeReady(derived);
     await act(async () => {
       window.dispatchEvent(new CustomEvent('yomika-reader-tile-presented', { detail: { slot: replacement } }));
     });
     expect(rendered.container.querySelector('.reader-frame.is-current .reader-zoom') ?? rendered.container.querySelector('[style*="scale(2)"]')).toHaveStyle({ transform: 'scale(2) translate(24px, -12px)' });
-    const canvas = screen.getByRole('main', { name: '漫画阅读器' });
-    const touch = (clientX: number) => ({ clientX, clientY: 300 });
     fireEvent.touchStart(canvas, { touches: [touch(400)] });
     // Deliberately overshoot the pan limit before reversing by one pixel.
     fireEvent.touchMove(canvas, { touches: [touch(400 + window.innerWidth)] });

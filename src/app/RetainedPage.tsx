@@ -44,7 +44,7 @@ function writeInstantScroll(region: HTMLElement, write: () => void) {
 
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
-export function RetainedPage({ active, pageKey, flow = false, motionSurface = false, transitionKey, detailKey, fadeEntry = false, direction = 1, motion, surfaceRef, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; detailKey?: string | undefined; fadeEntry?: boolean; direction?: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined; pageKey?: string | undefined; children: ReactNode }) {
+export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSurface = false, transitionKey, detailKey, fadeEntry = false, direction = 1, motion, surfaceRef, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; detailKey?: string | undefined; fadeEntry?: boolean; direction?: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined; pageKey?: string | undefined; pageUrl?: string | undefined; children: ReactNode }) {
   const parentActive = usePageActive();
   const visible = active && parentActive;
   const root = useRef<HTMLElement | null>(null);
@@ -121,6 +121,6 @@ export function RetainedPage({ active, pageKey, flow = false, motionSurface = fa
   return <PageActiveContext.Provider value={visible}>
     {/* Workspace pages keep viewport-fixed UI in body portals. The outer shell
         and reader deliberately do not opt into this transform contract. */}
-    <section ref={setRoot} data-bounce-surface={motionSurface ? '' : undefined} className={`route-cache-panel${flow ? ' is-flow' : ''}`} data-page-key={pageKey} hidden={!visible}>{children}</section>
+    <section ref={setRoot} data-bounce-surface={motionSurface ? '' : undefined} className={`route-cache-panel${flow ? ' is-flow' : ''}`} data-page-key={pageKey} data-page-url={pageUrl} hidden={!visible}>{children}</section>
   </PageActiveContext.Provider>;
 }

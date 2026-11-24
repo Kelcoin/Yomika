@@ -836,6 +836,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const [panning, setPanning] = useState(false);
   const nativePinchPage = useRef<number>();
   const nativePinchTouches = useRef(false);
+  const canvasTouchCount = useRef(0);
   const panStart = useRef<{ x: number; y: number; zoom: ZoomState; lastX?: number; lastY?: number }>();
   const pinchStart = useRef<{ distance: number; x: number; y: number; zoom: ZoomState; waitingForImage: boolean }>();
 
@@ -1968,9 +1969,10 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
         setPanning(false);
         touchStartRef.current = null;
         panStart.current = undefined;
-        nativePinchTouches.current = true;
+        nativePinchTouches.current = canvasTouchCount.current > 0;
       } else {
-        nativePinchTouches.current = false;
+        // UIKit ends a pinch on the first lift. TouchEnd/TouchCancel own the
+        // WebKit touch stream until the final finger has left the screen.
         resumeHandover(180);
       }
       setNativeBusy(detail.active);
@@ -2089,6 +2091,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     horizontalDrag.current = false;
     const touch = event.touches[0];
     if (!touch) return;
+    canvasTouchCount.current = event.touches.length;
     pauseHandover();
     // Two fingers are a pinch, never a page turn: a zoom gesture used to leave a
     // drag offset behind and could commit a turn on release.
@@ -2143,6 +2146,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, [hideExitHint, thumbnailPanelOpen, pauseHandover, canZoomCurrentImage, getDoubleTapProfile, readLiveZoom]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
+    if (nativePinchTouches.current) return;
     const quick = quickScale.current;
     const finger = event.touches[0];
     if (quick && finger && event.touches.length === 1) {
@@ -2218,6 +2222,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
 
   const handleTouchEnd = useCallback((event: TouchEvent) => {
     touchEndAt.current = Date.now();
+    canvasTouchCount.current = event.touches.length;
     if (nativePinchTouches.current) {
       if (event.touches.length === 0) {
         nativePinchTouches.current = false;
@@ -2422,6 +2427,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, []);
 
   function cancelGesture() {
+    canvasTouchCount.current = 0;
     if (touchStartRef.current || pointerStartRef.current || panStart.current) gestureMovedRef.current = true;
     resumeHandover();
     touchStartRef.current = null;
