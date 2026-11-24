@@ -92,6 +92,8 @@ detailBasePath?: string | undefined }) {
   const [serverOwner, setServerOwner] = useState<string>();
   const [scopeId, setScopeId] = useState<string>();
   const favoritePageActive = usePageActive();
+  const detailActive = useRef(favoritePageActive);
+  detailActive.current = favoritePageActive;
   const [favorite, setFavorite] = useState(false);
   const [favoriteReady, setFavoriteReady] = useState(false);
   const [favoriteSettled, setFavoriteSettled] = useState(false);
@@ -233,8 +235,13 @@ detailBasePath?: string | undefined }) {
           invalidateRouteCache('home:');
           invalidateRouteCache('library:');
           invalidateRouteCache('state:');
-          showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
-          navigate(shelfBase, { replace: true });
+          if (detailActive.current) {
+            showToast('该档案已从 LANraragi 移除，本地索引已清理', 'info');
+            navigate(shelfBase, { replace: true });
+          } else {
+            setMetadata(undefined);
+            setError(result.error.message);
+          }
         } else if (!cached) setError(result.error.message);
         setMetadataLoading(false);
       });

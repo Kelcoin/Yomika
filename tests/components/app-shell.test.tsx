@@ -1,7 +1,7 @@
 import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { MemoryRouter, useLocation } from 'react-router-dom';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
 
 const translationLifecycle = vi.hoisted(() => ({ start: vi.fn(), stop: vi.fn() }));
@@ -57,6 +57,59 @@ describe('application shell', () => {
       expect(preview).not.toBeInTheDocument();
     } finally {
       view.unmount();
+      window.matchMedia = originalMedia;
+    }
+  });
+
+  it('previews and restores the original iOS detail without reloading its metadata', async () => {
+    const originalMedia = window.matchMedia;
+    window.matchMedia = query => ({
+      matches: query === COMPACT_WIDTH_QUERY, media: query, onchange: null,
+      addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true,
+    });
+    document.documentElement.dataset.nativePlatform = 'ios';
+    const readMetadata = vi.fn();
+    setInvokeAdapterForTests(async (command, args) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
+      if (command === 'load_archive_metadata') {
+        const archiveId = String(args?.archiveId);
+        readMetadata(archiveId);
+        return { ok: true, value: { archiveId, title: archiveId, filename: 'sample.cbz', tags: '', summary: '', extension: 'cbz', progress: 0, pageCount: 0, lastReadTime: 0, size: 1024 } };
+      }
+      if (command === 'list_tasks' || command === 'cache_read_image') return { ok: true, value: [] };
+      return { ok: false, error: { code: 'UNKNOWN', message: 'unused', retryable: false } };
+    });
+    function OpenSecondDetail() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate('/home/ios-detail-b')}>Open second detail</button>;
+    }
+    const view = render(<MemoryRouter initialEntries={['/home/ios-detail-a']}><App /><OpenSecondDetail /></MemoryRouter>);
+    try {
+      const title = await screen.findByRole('heading', { name: 'ios-detail-a' });
+      const panel = title.closest<HTMLElement>('[data-page-url]')!;
+      const workspace = document.getElementById('main-content')!;
+      const hasLayout = vi.spyOn(workspace, 'getClientRects').mockReturnValue({ length: 1 } as DOMRectList);
+      workspace.scrollTop = 172;
+      fireEvent.scroll(workspace);
+      fireEvent.click(screen.getByRole('button', { name: 'Open second detail' }));
+      await screen.findByRole('heading', { name: 'ios-detail-b' });
+      expect(panel).toHaveAttribute('hidden');
+      const start = { identifier: 1, clientX: 8, clientY: 150 };
+      const finish = { ...start, clientX: 122 };
+      fireEvent.touchStart(workspace, { touches: [start] });
+      fireEvent.touchMove(workspace, { touches: [finish] });
+      const preview = document.querySelector<HTMLElement>('[data-ios-back-preview] .workspace')!;
+      expect(preview).toHaveTextContent('ios-detail-a');
+      expect(preview.scrollTop).toBe(172);
+      fireEvent.touchEnd(workspace, { touches: [], changedTouches: [finish] });
+      expect(await screen.findByRole('heading', { name: 'ios-detail-a' })).toBe(title);
+      expect(workspace.scrollTop).toBe(172);
+      expect(readMetadata.mock.calls.filter(([id]) => id === 'ios-detail-a')).toHaveLength(1);
+      hasLayout.mockRestore();
+    } finally {
+      view.unmount();
+      delete document.documentElement.dataset.nativePlatform;
       window.matchMedia = originalMedia;
     }
   });

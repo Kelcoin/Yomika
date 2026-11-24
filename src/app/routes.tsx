@@ -7,9 +7,11 @@ import { Suspense, lazy, memo, useCallback, useEffect, useLayoutEffect, useMemo,
 import { z } from 'zod';
 import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, useLocation, useParams, useSearchParams } from 'react-router-dom';
 
-import { RetainedPage, usePageActive } from './RetainedPage';
+import { renderRetainedPreview, RetainedPage, usePageActive } from './RetainedPage';
 import { useWorkspaceRefresh } from './workspaceRefresh';
 import { pageKeyFor } from '../lib/pageKeys';
+import { isIosDevice } from '../lib/layoutMode';
+import { ArchiveDetailRoute } from '../components/ArchiveDetailRoute';
 import { useRouteDirection } from '../lib/useRouteDirection';
 import type { RouteDirection } from './RetainedPage';
 import { detailIdentity, type RouteMotion } from '../lib/routeMotion';
@@ -153,6 +155,8 @@ const HomeSnapshotSchema = z.object({
 
 function HomeWorkspace() {
   const pageActive = usePageActive();
+  const restoredByGesture = useRef(false);
+  restoredByGesture.current = useLocation().state?.iosBackSettled === true;
   const { preferences } = usePreferences();
   const [snapshot] = useState(() => {
     const parsed = HomeSnapshotSchema.safeParse(readRouteCache<unknown>(HOME_SNAPSHOT_KEY, HOME_SNAPSHOT_FRESH_MS));
@@ -266,11 +270,12 @@ function HomeWorkspace() {
   // Preferences as of the latest render, for the load effect below: toggling a
   // preference must not re-resolve the shelves, so the effect reads the ref
   // instead of closing over state.
+  const completedHomeLoad = useRef<number>();
   const preferencesRef = useRef(preferences);
   preferencesRef.current = preferences;
   useEffect(() => {
     // Revalidate the shelves in place and keep the current random draw.
-    if (!pageActive) return;
+    if (!pageActive || (restoredByGesture.current && completedHomeLoad.current === serverLoadAttempt)) return;
     const controller = new AbortController();
     const { signal } = controller;
     const requests = { history: ++shelfRequests.current.history, reading: ++shelfRequests.current.reading };
@@ -334,6 +339,7 @@ function HomeWorkspace() {
         }
       };
       await Promise.all([loadShelf('history'), loadShelf('reading'), randomRequest]);
+      if (!signal.aborted) completedHomeLoad.current = serverLoadAttempt;
     })().catch(error => {
       if (signal.aborted) return;
       setRecentError(String(error));
@@ -520,6 +526,8 @@ function StateWorkspace({ name, detailBasePath }: { name: 'history' | 'watchlist
 
 function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'watchlist' | 'toRead'; detailBasePath: string }) {
   const pageActive = usePageActive();
+  const restoredByGesture = useRef(false);
+  restoredByGesture.current = useLocation().state?.iosBackSettled === true;
   const { showToast } = useToast();
   const [searchParams] = useSearchParams();
   const serverParam = searchParams.get('server');
@@ -603,6 +611,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
     setReloadToken(value => value + 1);
   }, []);
   useWorkspaceRefresh(detailBasePath, refreshShelf);
+  const completedShelfLoad = useRef<{ token: number; serverParam: typeof serverParam }>();
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
   // Removing an entry is here rather than in a toolbar: the multi-select bar that
@@ -659,7 +668,8 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
   // The shelves show the same cards as the library, so they answer a right click
   // the same way. Categories need a server-side list this page does not load.
   useEffect(() => {
-    if (!pageActive) return;
+    if (!pageActive || (restoredByGesture.current && completedShelfLoad.current?.token === reloadToken
+      && completedShelfLoad.current.serverParam === serverParam)) return;
     const controller = new AbortController();
     const { signal } = controller;
     if (name !== 'watchlist') setVerificationPending(true);
@@ -767,6 +777,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       }
       setLoading(false);
       if (name === 'watchlist') {
+        if (archiveResult.ok) completedShelfLoad.current = { token: reloadToken, serverParam };
         // Fresh remote membership supersedes redundant per-archive probes.
         setVerificationPending(false);
         return;
@@ -776,6 +787,7 @@ function StateWorkspaceContent({ name, detailBasePath }: { name: 'history' | 'wa
       const missing = await findMissingArchives(server.id, archiveResult.ok ? archiveResult.value.map((archive) => archive.archiveId) : []);
       if (signal.aborted) return;
       if (missing.size > 0) setArchives((current) => current.filter((archive) => !missing.has(archive.archiveId)));
+      if (archiveResult.ok) completedShelfLoad.current = { token: reloadToken, serverParam };
       setVerificationPending(false);
     })().catch(error => { if (!signal.aborted) { setError(String(error)); setLoading(false); } }).finally(() => { if (!signal.aborted) setPulling(false); });
     return () => controller.abort();
@@ -1055,12 +1067,10 @@ export function WorkspaceRoutes({ direction: navigationDirection, motion: outerM
   const { location } = transition;
   const motion = outerMotion ?? transition.motion;
   const surface = surfaceRef ?? transition.surface;
-  /** 一条详情路由与它的列表同属一页：`/library/:id` 归 `/library`，三个书架的
-   * `/history/:id` 之类归各自的书架，首页的 `/home/:id` 归 `/`。保留页面按这个键
-   * 复用（见 RetainedPage）。 */
-  const routeKey = pageKeyFor(location.pathname);
+  const retainDetails = compact && isIosDevice();
+  const routeKey = workspaceCacheKey(location, retainDetails);
   const preview = previewLocation ?? transition.previewLocation;
-  const previewKey = preview ? pageKeyFor(preview.pathname) : undefined;
+  const previewKey = preview ? workspaceCacheKey(preview, retainDetails) : undefined;
   const [gestureTarget, setGestureTarget] = useState<string>();
   useLayoutEffect(() => {
     const stage = (event: Event) => setGestureTarget((event as CustomEvent<string | undefined>).detail);
@@ -1068,35 +1078,54 @@ export function WorkspaceRoutes({ direction: navigationDirection, motion: outerM
     return () => document.removeEventListener(IOS_BACK_PREVIEW, stage);
   }, []);
   const visited = useRef(new Map<string, typeof location>());
+  // Keep detail state across nested iOS returns, but bound the retained trees.
+  if (routeKey.startsWith('detail:') && visited.current.get(routeKey) !== location) visited.current.delete(routeKey);
   visited.current.set(routeKey, location);
   if (preview && previewKey) visited.current.set(previewKey, preview);
+  const detailKeys = [...visited.current.keys()].filter(key => key.startsWith('detail:'));
+  for (const key of detailKeys.slice(0, Math.max(0, detailKeys.length - MAX_RETAINED_IOS_DETAILS))) {
+    if (key !== routeKey && key !== previewKey) visited.current.delete(key);
+  }
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedWorkspacePage key={key} pageKey={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={workspacePageFlows(key)} />
-  ))}{gestureTarget && <WorkspaceBackPreview target={gestureTarget} compact={compact} />}</>;
+    <RetainedWorkspacePage key={key} pageKey={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? noBackPreviewMotion : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={workspacePageFlows(pageKeyFor(saved.pathname))} />
+  ))}{gestureTarget && <WorkspaceBackPreview target={gestureTarget} compact={compact} cacheKey={workspaceCacheKey(new URL(gestureTarget, window.location.origin), retainDetails)} />}</>;
 }
 
-function WorkspaceBackPreview({ target, compact }: { target: string; compact: boolean }) {
+const MAX_RETAINED_IOS_DETAILS = 6;
+
+function workspaceCacheKey(location: { pathname: string; search: string }, retainDetails: boolean): string {
+  const base = pageKeyFor(location.pathname);
+  if (!retainDetails || location.pathname === '/downloads' || !detailIdentity(location)) return base;
+  return `detail:${JSON.stringify([location.pathname, new URLSearchParams(location.search).get('server')])}`;
+}
+
+function WorkspaceBackPreview({ target, compact, cacheKey }: { target: string; compact: boolean; cacheKey: string }) {
   const { preferences } = usePreferences();
   const [layout] = useState(() => {
     const source = document.getElementById('main-content')?.closest<HTMLElement>('.app-main');
     if (!source?.parentElement) return undefined;
     const { left, top, width, height } = source.getBoundingClientRect();
-    return { host: source.parentElement, left, top, width, height };
+    const retained = [...(document.getElementById('main-content')?.children ?? [])]
+      .find((panel): panel is HTMLElement => panel instanceof HTMLElement && panel.dataset.pageKey === cacheKey && panel.dataset.pageUrl === target);
+    return { host: source.parentElement, left, top, width, height, retained };
   });
   const saved = useMemo(() => {
     const { pathname, search, hash } = new URL(target, window.location.origin);
     return { pathname, search, hash, key: 'ios-back', state: null };
   }, [target]);
   const homeTopbar = compact && saved.pathname === '/';
-  const targetKey = pageKeyFor(saved.pathname);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (layout?.retained && workspaceRef.current) return renderRetainedPreview(layout.retained, workspaceRef.current);
+  }, [layout]);
   if (!layout) return null;
   return createPortal(
     <div className={`app-main${homeTopbar ? ' has-home-topbar' : ''}`} data-ios-back-preview="" aria-hidden="true" ref={markBackPreviewInert}
       style={{ left: layout.left, top: layout.top, width: layout.width, height: layout.height }}>
       {homeTopbar && <MobileHomeTopbar bottomNavItems={preferences.bottomNavItems} />}
-      <div className={workspaceClassFor(saved.pathname)}>
-        <RetainedWorkspacePage pageKey="ios-back" saved={saved} compact={compact} direction={-1} active
-          motion={noBackPreviewMotion} flow={workspacePageFlows(targetKey)} previewOnly />
+      <div ref={workspaceRef} className={workspaceClassFor(saved.pathname)}>
+        {!layout.retained && <RetainedWorkspacePage pageKey={cacheKey} saved={saved} compact={compact} direction={-1} active
+          motion={noBackPreviewMotion} flow={workspacePageFlows(pageKeyFor(saved.pathname))} previewOnly />}
       </div>
     </div>, layout.host,
   );
@@ -1130,6 +1159,7 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, sav
   const content = useMemo(() => (
       <Suspense fallback={<WorkspaceRouteFallback path={saved.pathname} />}>
         <Routes location={saved}>
+          {pageKey.startsWith('detail:') && <Route path={`${pageKeyFor(saved.pathname) === '/' ? '/home' : pageKeyFor(saved.pathname)}/:archiveId`} element={<CompactArchiveDetail />} />}
           <Route path="/" element={<HomeShell><HomeWorkspace /></HomeShell>} />
           {/* 首页自己的详情：卡片开在 `/home/:id` 上，返回与再进首页都落在首页，
               不会把档案库那一页也带上这份详情。 */}
@@ -1149,7 +1179,7 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, sav
           <Route path="*" element={<HomeWorkspace />} />
         </Routes>
       </Suspense>
-  ), [saved]);
+  ), [pageKey, saved]);
   const archiveKey = detailIdentity(saved);
   const detailKey = archiveKey === undefined ? undefined : JSON.stringify([archiveKey, new URLSearchParams(saved.search).get('server')]);
   const transitionKey = detailKey === undefined ? saved.pathname : JSON.stringify([saved.pathname, detailKey]);
@@ -1160,6 +1190,19 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, sav
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });
+
+function CompactArchiveDetail() {
+  const { archiveId = '' } = useParams();
+  const { pathname } = useLocation();
+  const detailBasePath = pathname.slice(0, pathname.lastIndexOf('/'));
+  return <div className={`library-shell has-detail${detailBasePath === '/home' ? ' is-home' : ''}`} data-group="">
+    <div className="library-shell-panel-content" data-panel="">
+      <section className="library-shell-detail" data-scroll-region>
+        <ArchiveDetailRoute archiveId={archiveId} detailBasePath={detailBasePath} />
+      </section>
+    </div>
+  </div>;
+}
 
 function MetadataEditRouteRoute() {
   const { archiveId = '' } = useParams();

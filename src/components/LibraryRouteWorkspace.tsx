@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import { RotateCcw, ServerCrash } from 'lucide-react';
 import { z } from 'zod';
 
@@ -715,6 +715,8 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
     window.addEventListener('yomika:route-cache-invalidated', invalidate);
     return () => { active = false; window.removeEventListener('yomika:route-cache-invalidated', invalidate); };
   }, [serverId, pageActive, favoriteIdentity]);
+  const restoredByGesture = useRef(false);
+  restoredByGesture.current = useLocation().state?.iosBackSettled === true;
   const wasActiveRef = useRef(pageActive);
   const loadFirstPageRef = useRef(loadFirstPage);
   loadFirstPageRef.current = loadFirstPage;
@@ -723,7 +725,7 @@ function LibraryRouteWorkspaceContent({ showDetail, onServerResolved }: { showDe
   useEffect(() => {
     const wasActive = wasActiveRef.current;
     wasActiveRef.current = pageActive;
-    if (!pageActive || wasActive || !serverIdRef.current) return;
+    if (!pageActive || wasActive || restoredByGesture.current || !serverIdRef.current) return;
     void loadFirstPageRef.current(serverIdRef.current, { background: true });
     if (scopeId) void repository.listHistory(scopeId).then((result) => {
       if (result.ok) setReadingHistory(result.value);

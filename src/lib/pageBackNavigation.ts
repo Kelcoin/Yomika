@@ -90,7 +90,7 @@ export function usePageBackNavigation(): void {
   }, [location]);
   useLayoutEffect(() => {
     const back = (event: Event) => {
-      if (closeTopOverlay(event instanceof CustomEvent && event.detail?.iosBack ? event.detail.offset : undefined)) {
+      if (closeTopOverlay()) {
         event.preventDefault();
         return;
       }
@@ -118,48 +118,52 @@ export function usePageBackNavigation(): void {
     type Edge = {
       id: number; x: number; y: number; horizontal: boolean;
       target?: string; surface?: HTMLElement; preview?: HTMLElement;
-      width?: number; hideOverlayPreview?: () => void;
+      width?: number; offset?: number; overlay?: boolean; hideOverlayPreview?: () => void;
     };
     let edge: Edge | undefined;
     let interruptSettlement: (() => void) | undefined;
-    const dispatchBack = (offset: number, settled = false) => !window.dispatchEvent(new CustomEvent(MOBILE_BACK_EVENT, {
-      cancelable: true, detail: { iosBack: true, offset, settled },
+    const dispatchBack = (settled = false) => !window.dispatchEvent(new CustomEvent(MOBILE_BACK_EVENT, {
+      cancelable: true, detail: { iosBack: true, settled },
     }));
+    const translate = (offset: number) => `translate3d(${offset}px, 0, 0)`;
     const cleanGesture = ({ surface, preview, target, hideOverlayPreview }: Edge) => {
-      surface?.style.removeProperty('translate');
+      surface?.style.removeProperty('transform');
       surface?.removeAttribute('data-ios-back-foreground');
-      preview?.style.removeProperty('translate');
+      preview?.style.removeProperty('transform');
       if (target) stageBackPreview();
       hideOverlayPreview?.();
     };
     const settle = (gesture: Edge, commit: boolean) => {
-      const { surface, preview, target, width = window.innerWidth } = gesture;
-      const from = surface?.style.translate;
-      // iOS-tuned timing: faster commit (170ms) for decisive action, slightly longer cancel (165ms) for visible return
-      const duration = commit ? 170 : 165;
-      // iOS native curve: swift acceleration with gentle deceleration
-      const easing = commit ? 'cubic-bezier(0.36, 0.66, 0.04, 1)' : 'cubic-bezier(0.25, 0.46, 0.45, 0.94)';
-      const options = { duration, easing, fill: 'both' } as const;
-      const animation = from && surface?.animate?.([{ translate: from }, { translate: commit ? `${width}px` : '0px' }], options);
-      // Backdrop moves at 26% of foreground for depth parallax
-      const backdrop = animation && preview?.animate?.([
-        { translate: preview.style.translate }, { translate: commit ? '0px' : `${-width * .26}px` },
-      ], options);
+      const { surface, preview, target, overlay, offset = 0, width = window.innerWidth } = gesture;
+      const end = commit ? width : 0;
+      const duration = commit ? 235 : 190;
+      const options = { duration, easing: 'cubic-bezier(.22, .7, .22, 1)', fill: 'both' } as const;
+      // Drag and release drive the same transform on both layers. Hold the
+      // final frame until React has switched the foreground and its chrome.
+      const animations = [
+        surface?.animate?.([{ transform: translate(offset) }, { transform: translate(end) }], options),
+        preview?.animate?.([{ transform: translate((offset - width) * .26) }, { transform: translate((end - width) * .26) }], options),
+      ].filter((animation): animation is Animation => Boolean(animation));
       let timer: number | undefined;
+      let remaining = animations.length;
+      let finished = false;
       const finish = (advance: boolean) => {
+        if (finished) return;
+        finished = true;
         interruptSettlement = undefined;
         clearTimeout(timer);
-        if (animation) { animation.onfinish = null; animation.cancel(); }
-        if (backdrop) backdrop.cancel();
-        if (advance && commit && target === history.current.peekBack() && !hasBackOverlay()) {
-          // A detail return can reuse the outgoing DOM for its destination.
-          // Clear the drag transform and replace the route in one paint.
-          flushSync(() => { cleanGesture(gesture); dispatchBack(0, true); });
+        for (const animation of animations) { animation.onfinish = null; animation.cancel(); }
+        const canAdvance = overlay ? hasBackOverlay() : target === history.current.peekBack() && !hasBackOverlay();
+        if (advance && commit && canAdvance) {
+          flushSync(() => { cleanGesture(gesture); dispatchBack(true); });
         } else cleanGesture(gesture);
       };
-      if (animation) {
-        timer = window.setTimeout(() => finish(true), duration + 80);
-        animation.onfinish = () => finish(true);
+      if (animations.length) {
+        timer = window.setTimeout(() => finish(true), duration + 100);
+        for (const animation of animations) animation.onfinish = () => {
+          remaining -= 1;
+          if (remaining === 0) finish(true);
+        };
         interruptSettlement = () => finish(false);
       } else finish(true);
     };
@@ -194,13 +198,17 @@ export function usePageBackNavigation(): void {
           if (hasBackOverlay()) {
             const surface = topBackGestureSurface();
             const showPreview = topBackGesturePreview();
-            if (surface) gesture.surface = surface;
+            if (surface) {
+              gesture.surface = surface;
+              gesture.overlay = true;
+              gesture.width = surface.clientWidth || window.innerWidth;
+            }
             if (surface && showPreview) {
               const preview = showPreview(true);
               if (preview) gesture.preview = preview;
               gesture.hideOverlayPreview = () => { showPreview(false); };
             }
-          } else if (target && !current.current.url.startsWith('/reader/')) {
+          } else if (target && !target.startsWith('/reader/') && !current.current.url.startsWith('/reader/')) {
             const surface = document.getElementById('main-content')?.closest<HTMLElement>('.app-main');
             if (surface?.parentElement) {
               flushSync(() => stageBackPreview(target));
@@ -219,8 +227,9 @@ export function usePageBackNavigation(): void {
       if (event.cancelable) event.preventDefault();
       const width = gesture.width ?? window.innerWidth;
       const offset = Math.min(width, Math.max(0, dx));
-      if (gesture.surface) gesture.surface.style.translate = `${offset}px`;
-      if (gesture.preview) gesture.preview.style.translate = `${(offset - width) * .26}px`;
+      gesture.offset = offset;
+      if (gesture.surface) gesture.surface.style.transform = translate(offset);
+      if (gesture.preview) gesture.preview.style.transform = translate((offset - width) * .26);
     };
     const edgeEnd = (event: TouchEvent) => {
       const gesture = edge;
@@ -232,20 +241,10 @@ export function usePageBackNavigation(): void {
       // 1.6 diagonal ratio (stricter than 1.4) to prevent accidental triggers on vertical scrolls
       if (dx < 48 || dx <= Math.abs(touch.clientY - gesture.y) * 1.6) { cancelEdge(); return; }
       edge = undefined;
-      if (gesture.target) {
+      if (gesture.surface) {
         if (event.cancelable) event.preventDefault();
         settle(gesture, true);
-        return;
-      }
-      // The overlay owns its closing animation and accepts the live offset.
-      const surface = gesture.surface;
-      const offset = parseFloat(surface?.style.translate ?? '') || 0;
-      const handled = dispatchBack(offset);
-      if (surface) requestAnimationFrame(() => {
-        if (surface.style.translate === `${offset}px`) surface.style.removeProperty('translate');
-      });
-      if (!handled) gesture.hideOverlayPreview?.();
-      if (handled && event.cancelable) event.preventDefault();
+      } else if (dispatchBack() && event.cancelable) event.preventDefault();
     };
     window.addEventListener('touchstart', edgeStart, { capture: true, passive: true });
     window.addEventListener('touchmove', edgeMove, { capture: true, passive: false });

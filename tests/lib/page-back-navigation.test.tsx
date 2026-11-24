@@ -214,24 +214,33 @@ it.each([true, false])('settles the same detail-to-detail layers before swapping
   fireEvent.click(screen.getByText('first detail'));
   fireEvent.click(screen.getByText('second detail'));
   const foreground = document.querySelector<HTMLElement>('.app-main')!;
-  let playback: { onfinish?: () => void; cancel: () => void } | undefined;
-  foreground.animate = frames => {
-    expect(frames).toEqual([{ translate: commit ? '110px' : '32px' }, { translate: commit ? `${window.innerWidth}px` : '0px' }]);
-    playback = { cancel() {} };
+  const animations: { onfinish?: () => void; cancel: () => void }[] = [];
+  const recordPlayback = () => {
+    const playback = { cancel() {} };
+    animations.push(playback);
     return playback as unknown as Animation;
+  };
+  foreground.animate = frames => {
+    expect(frames).toEqual([{ transform: commit ? 'translate3d(110px, 0, 0)' : 'translate3d(32px, 0, 0)' }, { transform: `translate3d(${commit ? window.innerWidth : 0}px, 0, 0)` }]);
+    return recordPlayback();
   };
   const start = { identifier: 1, clientX: 10, clientY: 300 };
   const move = { ...start, clientX: commit ? 120 : 42 };
   fireEvent.touchStart(document.body, { touches: [start] });
   fireEvent.touchMove(document.body, { touches: [move] });
   expect(document.querySelector('[data-ios-back-preview]')).toHaveTextContent('/library/a');
+  const preview = document.querySelector<HTMLElement>('[data-ios-back-preview]')!;
+  preview.animate = recordPlayback;
   fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
   expect(screen.getByTestId('stage-route')).toHaveTextContent('/library/b');
-  expect(foreground.style.translate).toBe(commit ? '110px' : '32px');
-  act(() => playback?.onfinish?.());
+  expect(foreground.style.transform).toBe(commit ? 'translate3d(110px, 0, 0)' : 'translate3d(32px, 0, 0)');
+  act(() => animations[0]?.onfinish?.());
+  expect(preview).toBeInTheDocument();
+  expect(screen.getByTestId('stage-route')).toHaveTextContent('/library/b');
+  act(() => animations[1]?.onfinish?.());
   expect(screen.getByTestId('stage-route')).toHaveTextContent(commit ? '/library/a' : '/library/b');
   if (commit) expect(screen.getByTestId('route-motion')).toHaveTextContent('none');
-  expect(foreground.style.translate).toBe('');
+  expect(foreground.style.transform).toBe('');
   expect(foreground.hasAttribute('data-ios-back-foreground')).toBe(false);
   expect(document.querySelector('[data-ios-back-preview]')).toBeNull();
 });

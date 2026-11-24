@@ -30,7 +30,7 @@ export function useWorkspaceRouteMotion(location: Location, compact: boolean, di
   const displayed = displayedRef.current;
   useLayoutEffect(() => {
     if (!exiting) return;
-    const wholePage = motion.kind === 'page-close';
+    const wholePage = motion.kind === 'page-close' || surface.current?.dataset.pageKey?.startsWith('detail:') === true;
     const detail = wholePage ? surface.current : surface.current?.querySelector<HTMLElement>('.library-shell-detail');
     if (!detail || typeof detail.animate !== 'function') { setCompleted(location); return; }
     const panel = surface.current!;

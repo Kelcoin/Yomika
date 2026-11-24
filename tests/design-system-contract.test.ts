@@ -1975,8 +1975,7 @@ describe('design system contract', () => {
     // route-cache-panel 的 height:100% 钳制会把溢出尾困在面板外：首页与书架
     // 面板必须随内容生长（is-flow），≤900 则所有路由（含档案库页面滚动）放开。
     expect(routes).toContain("const workspacePageFlows = (key: string) => !['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key);");
-    expect(routes).toContain("flow={workspacePageFlows(key)}");
-    expect(routes).toContain("flow={workspacePageFlows(targetKey)}");
+    expect(routes.match(/flow=\{workspacePageFlows\(pageKeyFor\(saved\.pathname\)\)\}/g)).toHaveLength(2);
     expect(read('src/app/RetainedPage.tsx')).toContain("flow ? ' is-flow'");
     expect(shell).toMatch(/\.route-cache-panel\.is-flow \{[\s\S]{0,400}?height:\s*auto/);
     expect(shell, '紧凑档由设备壳层驱动').toContain(COMPACT_LAYOUT);
@@ -3525,11 +3524,11 @@ describe('the 2026-10-17 UI batch', () => {
     // 工作区那一处也走它；位置缺省是 0（第一次进这一页就该在顶上），且只在真的
     // 不一样时才写——一样就写一次会让浏览器把平滑滚动重新跑一遍。
     expect(retained, '工作区那一处要走它').toMatch(
-      /const top = positions\.current\.get\(workspace\) \?\? 0;\s*if \(workspace\.scrollTop !== top\) writeInstantScroll\(workspace, \(\) => \{ workspace\.scrollTop = top; \}\);/,
+      /const \{ top, left \} = positions\.current\.get\(workspace\) \?\? \{ top: 0, left: 0 \};\s*if \(workspace\.scrollTop !== top \|\| workspace\.scrollLeft !== left\) writeInstantScroll\(workspace, \(\) => \{ workspace\.scrollTop = top; workspace\.scrollLeft = left; \}\);/,
     );
-    expect(retained, '隐藏的滚动区不许被改写').toMatch(/region !== workspace && !region\.closest\('\[hidden\]'\) && region\.scrollTop !== top/);
+    expect(retained, '隐藏的滚动区不许被改写').toMatch(/region !== workspace && !region\.closest\('\[hidden\]'\) && \(region\.scrollTop !== top \|\| region\.scrollLeft !== left\)/);
     expect(retained, '滚动区那一处也要走它').toContain(
-      'writeInstantScroll(region, () => { region.scrollTop = top; })',
+      'writeInstantScroll(region, () => { region.scrollTop = top; region.scrollLeft = left; })',
     );
   });
 

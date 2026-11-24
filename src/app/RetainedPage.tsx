@@ -42,6 +42,35 @@ function writeInstantScroll(region: HTMLElement, write: () => void) {
   region.style.scrollBehavior = previous;
 }
 
+type ScrollPosition = { top: number; left: number };
+const retainedScroll = new WeakMap<HTMLElement, Map<HTMLElement, ScrollPosition>>();
+
+/** Render the retained content in the preview workspace at its last scroll position. */
+export function renderRetainedPreview(panel: HTMLElement, workspace: HTMLElement): () => void {
+  const clone = panel.cloneNode(true) as HTMLElement;
+  clone.hidden = false;
+  clone.removeAttribute('id');
+  const originalRegions = panel.querySelectorAll<HTMLElement>('*');
+  const clonedRegions = clone.querySelectorAll<HTMLElement>('*');
+  const positions = retainedScroll.get(panel);
+  workspace.append(clone);
+  const restore = (source: HTMLElement | null, destination: HTMLElement) => {
+    const position = source && positions?.get(source);
+    if (!position) return;
+    writeInstantScroll(destination, () => {
+      destination.scrollTop = position.top;
+      destination.scrollLeft = position.left;
+    });
+  };
+  restore(panel.closest<HTMLElement>('.workspace'), workspace);
+  restore(panel, clone);
+  clonedRegions.forEach((region, index) => {
+    region.removeAttribute('id');
+    restore(originalRegions[index] ?? null, region);
+  });
+  return () => clone.remove();
+}
+
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
 export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSurface = false, transitionKey, detailKey, fadeEntry = false, direction = 1, motion, surfaceRef, previewOnly = false, children }: { previewOnly?: boolean; active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; detailKey?: string | undefined; fadeEntry?: boolean; direction?: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined; pageKey?: string | undefined; pageUrl?: string | undefined; children: ReactNode }) {
@@ -52,7 +81,7 @@ export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSur
     root.current = node;
     if (surfaceRef) surfaceRef.current = node;
   }, [surfaceRef]);
-  const positions = useRef(new Map<HTMLElement, number>());
+  const positions = useRef(new Map<HTMLElement, ScrollPosition>());
   const directionRef = useRef(direction);
   directionRef.current = direction;
   const motionRef = useRef(motion);
@@ -61,15 +90,16 @@ export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSur
     if (!visible || previewOnly || !root.current) return;
     const panel = root.current;
     const workspace = panel.closest<HTMLElement>('.workspace');
-    const restore = () => positions.current.forEach((top, region) => {
+    retainedScroll.set(panel, positions.current);
+    const restore = () => positions.current.forEach(({ top, left }, region) => {
       if (!region.isConnected) { positions.current.delete(region); return; }
-      if (region !== workspace && !region.closest('[hidden]') && region.scrollTop !== top) {
-        writeInstantScroll(region, () => { region.scrollTop = top; });
+      if (region !== workspace && !region.closest('[hidden]') && (region.scrollTop !== top || region.scrollLeft !== left)) {
+        writeInstantScroll(region, () => { region.scrollTop = top; region.scrollLeft = left; });
       }
     });
     if (workspace) {
-      const top = positions.current.get(workspace) ?? 0;
-      if (workspace.scrollTop !== top) writeInstantScroll(workspace, () => { workspace.scrollTop = top; });
+      const { top, left } = positions.current.get(workspace) ?? { top: 0, left: 0 };
+      if (workspace.scrollTop !== top || workspace.scrollLeft !== left) writeInstantScroll(workspace, () => { workspace.scrollTop = top; workspace.scrollLeft = left; });
     }
     restore();
     const frame = requestAnimationFrame(restore);
@@ -78,7 +108,7 @@ export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSur
       // Ignore other panels/overlays before asking the browser for layout.
       // This capture listener sees every nested scroll event in the document.
       if (region instanceof HTMLElement && (region === workspace || panel.contains(region)) && !region.closest('[hidden]') && region.getClientRects().length > 0) {
-        positions.current.set(region, region.scrollTop);
+        positions.current.set(region, { top: region.scrollTop, left: region.scrollLeft });
       }
     };
     document.addEventListener('scroll', save, true);
