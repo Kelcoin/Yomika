@@ -72,8 +72,16 @@ foreach ($name in @('yomika.exe', 'DirectML.dll')) {
     Write-Host "拷进包：$name（$((Get-Item -LiteralPath (Join-Path $stage $name)).Length) 字节）"
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $stage 'data\models') | Out-Null
-Copy-Item -LiteralPath $required['bundled-model'] -Destination (Join-Path $stage 'data\models\waifu2x-upconv7') -Recurse -Force
-$modelFiles = @(Get-ChildItem -LiteralPath (Join-Path $stage 'data\models\waifu2x-upconv7') -Recurse -File)
+$modelStage = Join-Path $stage 'data\models\waifu2x-upconv7'
+$modelFiles = @(Get-ChildItem -LiteralPath $required['bundled-model'] -Recurse -File | Where-Object {
+    $_.Name -notin @('model.tflite', 'yomika-accelerator.json')
+})
+foreach ($file in $modelFiles) {
+    $relative = [System.IO.Path]::GetRelativePath($required['bundled-model'], $file.FullName)
+    $destination = Join-Path $modelStage $relative
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+    Copy-Item -LiteralPath $file.FullName -Destination $destination
+}
 Write-Host "拷进包：随包模型 waifu2x-upconv7，$($modelFiles.Count) 个文件"
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $output) | Out-Null

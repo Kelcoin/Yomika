@@ -2217,6 +2217,19 @@ body::-webkit-scrollbar,
 
 .route-cache-panel[hidden] { display: none; }
 
+/* The page an iOS Back gesture is dragging towards: already mounted but hidden,
+   revealed under the sliding page so the gesture shows real content instead of
+   the empty workspace background. Pinned to the viewport like the sliding panel
+   (which the return animation freezes), inert, and never interactive. */
+.workspace > .route-cache-panel[data-back-preview] {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--surface-panel);
+}
+
 /* A zoom moves the complete page surface, including its canvas. Transparent
    wrappers made the outgoing text appear to float over the restored page. */
 .route-cache-panel[data-bounce-surface] { background: var(--surface-panel); }
@@ -5408,7 +5421,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     padding: var(--space-1) var(--space-2) var(--safe-bottom);
     border-top: 1px solid var(--hairline);
     background: var(--surface-container);
-    backdrop-filter: blur(16px);
     transition: transform var(--motion-dock), opacity var(--motion-dock), visibility 0s;
   }
 
@@ -5636,6 +5648,26 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
    its own surface; this reuses the dialog's radius, elevation and scroll rules. */
 /* The one floating panel: the preset menu and every settings choice open in the
    same masked sheet, so the two read as the same kind of thing. */
+/* 键盘只抬起需要避让的那一块（用户 2026-11-24 第 7 项）：iOS 上键盘落下时，
+   按 --viewport-height 定高的壳层原本会跟着 dvh 一起缩短，整棵树重排——看上去就是
+   「所有层级的页面一起避让」。现在 main.tsx（src/lib/keyboardAvoidance.ts）在键盘
+   落下期间钉住视口高度，只给焦点所在的那一层算一份 --keyboard-lift；这里用独立的
+   `translate` 属性抬起它，而不是 `transform`——`.dialog-content` 自己的
+   `translate(-50%, -50%)` 还要留着居中，两条属性是叠加而不是互相覆盖的。 */
+.settings-choice-panel[data-keyboard-lifted],
+.dialog-content[data-keyboard-lifted],
+.search-preset-panel[data-keyboard-lifted],
+.tag-suggest-panel[data-keyboard-lifted] {
+  translate: 0 calc(-1 * var(--keyboard-lift, 0px));
+  transition: translate var(--motion-fast);
+}
+@media (prefers-reduced-motion: reduce) {
+  .settings-choice-panel[data-keyboard-lifted],
+  .dialog-content[data-keyboard-lifted],
+  .search-preset-panel[data-keyboard-lifted],
+  .tag-suggest-panel[data-keyboard-lifted] { transition: none; }
+}
+
 .settings-choice-overlay {
   position: fixed;
   z-index: var(--z-overlay);
@@ -7794,3 +7826,16 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 .settings-device-menu .settings-menu-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .settings-device-menu .settings-menu-actions > :only-child { grid-column: 1 / -1; }
 .settings-device-menu .settings-discovery-error { color: var(--state-danger); }
+
+/* Reduce Transparency（iOS 与 macOS 的辅助功能）：全屏蒙版上的模糊是合成里最贵的
+   一类效果——每一帧都要重新采样背后的画面——而系统既然要求减少透明度，这层模糊在
+   观感上反而更差。与 reader.css 里那条同一口径：只摘模糊，不动底色，底色本身已经
+   提供可读性所需的对比。 */
+@media (prefers-reduced-transparency: reduce) {
+  .dialog-overlay,
+  .settings-overlay,
+  .archive-cover-preview::before {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+}

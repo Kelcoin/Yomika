@@ -1,22 +1,6 @@
-//! 凭据落盘：一处入口，两种后端。
-//!
-//! 桌面（Windows / macOS / Linux）仍旧走系统凭据库（keyring），**条目名与格式一个字节
-//! 都没变**——Windows 上还是 `LegacyGeneric:target=scope_ba325455….app.yomika.reader`
-//! 那样一条，老条目照读不误。
-//!
-//! 移动（Android / iOS）必须换一条路：keyring 3.6.3 没有任何移动后端，当目标平台上没有
-//! 可用的平台存储特性时它会退化成一个平台无关的 mock（`src/mock.rs` 的
-//! `CredentialPersistence::EntryOnly`，原文「There is no persistence other than in the
-//! entry itself」）——每次 `Entry::new` 都 `build` 出一个**全新的空**对象。于是写进去的
-//! API Key 当场丢在一个马上被丢弃的临时对象里，之后每次读都是 `NoEntry`，档案库、E-H
-//! Cookie 等凭据在手机上全部「凭据不可用」。这里改成数据目录（`init` 记下的那个）
-//! 下的一份 `secrets.json`。
-//!
-//! 明文落盘是移动端不得不做的取舍：Android/iOS 上没有一个 keyring 能用的系统凭据库，
-//! 而「读不出来」不是可接受的现状。文件权限收到 0600，且只放在应用自己的数据目录里。
-//!
-//! 文件存储的实现放在 [`file_store`]——**不被 cfg 关掉**，所以它在 Windows 宿主上照样
-//! 编译、照样单测；cfg 只决定入口走 keyring 还是走文件。
+//! Desktop keeps its existing OS credential-store keys. Android uses its
+//! app-private file. iOS writes only to Keychain and migrates legacy entries
+//! on access, preserving the old copy if Keychain rejects a write.
 
 use std::path::Path;
 
@@ -194,6 +178,24 @@ mod file_store {
         }
 
         #[test]
+        fn migration_preserves_legacy_value_until_secure_write_succeeds() {
+            let dir = TempDir::new("keychain-migration");
+            set(dir.path(), "service", "first", "existing secret").unwrap();
+            set(dir.path(), "service", "second", "another secret").unwrap();
+            assert!(super::super::migrate_legacy_secret(dir.path(), "service", "first", |_| {
+                Err("Keychain unavailable".into())
+            }).is_err());
+            assert_eq!(get(dir.path(), "service", "first").unwrap(), "existing secret");
+            let migrated = super::super::migrate_legacy_secret(dir.path(), "service", "first", |value| {
+                assert_eq!(value, "existing secret");
+                Ok(())
+            }).unwrap();
+            assert_eq!(migrated, "existing secret");
+            assert_eq!(get(dir.path(), "service", "first").unwrap_err(), NO_MATCHING_ENTRY);
+            assert_eq!(get(dir.path(), "service", "second").unwrap(), "another secret");
+        }
+
+        #[test]
         fn a_written_secret_reads_back_and_an_overwrite_wins() {
             let dir = TempDir::new("roundtrip");
             set(dir.path(), "app.yomika.reader", "scope-a", "first").expect("set");
@@ -350,6 +352,78 @@ mod file_store {
     }
 }
 
+#[cfg(any(target_os = "ios", test))]
+fn migrate_legacy_secret(
+    dir: &Path,
+    service: &str,
+    account: &str,
+    store: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<String, String> {
+    let value = file_store::get(dir, service, account)?;
+    store(&value)?;
+    // The new copy is authoritative. A failed cleanup can be retried on read.
+    let _ = file_store::delete(dir, service, account);
+    Ok(value)
+}
+
+#[cfg(target_os = "ios")]
+mod ios {
+    use super::{data_dir, file_store, migrate_legacy_secret};
+    use security_framework::passwords::{delete_generic_password, get_generic_password, set_generic_password};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    const ITEM_NOT_FOUND: i32 = -25300;
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock() -> MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn set(service: &str, account: &str, value: &str) -> Result<(), String> {
+        let _guard = lock();
+        let dir = data_dir()?;
+        set_generic_password(service, account, value.as_bytes()).map_err(|error| error.to_string())?;
+        let _ = file_store::delete(&dir, service, account);
+        Ok(())
+    }
+
+    pub(super) fn get(service: &str, account: &str) -> Result<String, String> {
+        let _guard = lock();
+        let dir = data_dir()?;
+        match get_generic_password(service, account) {
+            Ok(bytes) => {
+                let value = String::from_utf8(bytes).map_err(|error| error.utf8_error().to_string())?;
+                let _ = file_store::delete(&dir, service, account);
+                Ok(value)
+            }
+            Err(error) if error.code() == ITEM_NOT_FOUND => {
+                migrate_legacy_secret(&dir, service, account, |value| {
+                    set_generic_password(service, account, value.as_bytes())
+                        .map_err(|error| error.to_string())
+                })
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    pub(super) fn delete(service: &str, account: &str) -> Result<(), String> {
+        let _guard = lock();
+        // Remove the legacy entry first so a deleted Keychain item cannot be
+        // recreated from an older secret on the next read.
+        let legacy_removed = match file_store::delete(&data_dir()?, service, account) {
+            Ok(()) => true,
+            Err(error) if error == file_store::NO_MATCHING_ENTRY => false,
+            Err(error) => return Err(error),
+        };
+        match delete_generic_password(service, account) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == ITEM_NOT_FOUND && legacy_removed => Ok(()),
+            Err(error) if error.code() == ITEM_NOT_FOUND => Err(file_store::NO_MATCHING_ENTRY.into()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
 /// 记下数据目录（移动端的 `secrets.json` 就放这里，由 `data_paths::prepare` 建好并调用）。
 ///
 /// 桌面端凭据在系统凭据库里，与这个目录无关，所以那边这个函数什么都不做——签名一致，
@@ -391,7 +465,11 @@ pub(crate) fn set_secret(service: &str, account: &str, value: &str) -> Result<()
             .set_password(value)
             .map_err(|error| error.to_string())
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    {
+        ios::set(service, account, value)
+    }
+    #[cfg(target_os = "android")]
     {
         file_store::set(&data_dir()?, service, account, value)
     }
@@ -408,7 +486,11 @@ pub(crate) fn get_secret(service: &str, account: &str) -> Result<String, String>
             .get_password()
             .map_err(|error| error.to_string())
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    {
+        ios::get(service, account)
+    }
+    #[cfg(target_os = "android")]
     {
         file_store::get(&data_dir()?, service, account)
     }
@@ -424,7 +506,11 @@ pub(crate) fn delete_secret(service: &str, account: &str) -> Result<(), String> 
             .delete_credential()
             .map_err(|error| error.to_string())
     }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    {
+        ios::delete(service, account)
+    }
+    #[cfg(target_os = "android")]
     {
         file_store::delete(&data_dir()?, service, account)
     }

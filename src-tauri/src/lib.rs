@@ -68,7 +68,7 @@ use cache::{
     cache_read_image, cache_stats,
 };
 use commands::eh::{capture_eh_login_cookies, cancel_eh_in_app_login, start_eh_in_app_login, take_eh_in_app_login, InAppLoginState, check_eh_login_health, close_eh_login_window, fetch_eh_forum_username, fetch_eh_my_tags, get_eh_comments, get_eh_gallery, get_eh_gallery_image, set_eh_gallery_favorite, list_eh_accounts, list_eh_my_tags, login_eh_account, open_eh_login_window, post_eh_comment, read_eh_account_cookie, remove_eh_account, remove_eh_favorite, save_eh_account, search_eh_galleries, set_eh_username_hint, vote_eh_comment};
-use commands::legacy::{import_legacy_export, import_worker_export};
+use commands::legacy::import_legacy_export;
 use commands::local_cover::{
     load_local_archive_cover, load_local_archive_manifest, load_local_archive_original, open_local_archive_reader_file,
     load_local_archive_page, local_archive_progress,
@@ -106,7 +106,7 @@ use credentials::{export_data, import_data};
 use db::Database;
 use dedup::{
     dedup_cancel_scan, dedup_check_file, dedup_delete_selected, dedup_delete_session,
-    dedup_find_exact, dedup_import_readoshi, dedup_list_non_duplicates, dedup_list_sessions, dedup_save_session,
+    dedup_find_exact, dedup_list_non_duplicates, dedup_list_sessions, dedup_save_session,
     dedup_load_result, dedup_remove_non_duplicate, dedup_resume_scan, dedup_save_feature,
     dedup_save_non_duplicate, dedup_save_non_duplicates, dedup_save_selection,
     dedup_scan, dedup_scan_chunk,
@@ -180,6 +180,11 @@ pub fn run() {
     builder
         .setup(move |app| {
             data_paths::prepare(app.handle()).map_err(std::io::Error::other)?;
+            // 随包分发的模型在启动时装好：装的是二进制里那份，不依赖网络，也不等用户
+            // 去点「下载」（NomosUni Photo 就是这样随包的）。失败只记一行，列表照旧可用。
+            if let Err(error) = model_release::install_bundled_models(app.handle()) {
+                eprintln!("无法安装随包模型：{error}");
+            }
             commands::app_security::setup(app.handle()).map_err(std::io::Error::other)?;
             // 错误日志留两轮：先把「本轮」翻成「上一轮」（上一轮的现场是这次闪退唯一的
             // 线索），再挂上 panic 钩子。
@@ -391,7 +396,12 @@ pub fn run() {
                 builder.data_directory(data_paths::data_dir(app.handle())?.join("webview"));
             let main_window = builder.build()?;
             #[cfg(target_os = "ios")]
-            app_security_ios::install(app.handle()).map_err(std::io::Error::other)?;
+            {
+                app_security_ios::install(app.handle()).map_err(std::io::Error::other)?;
+                if let Some(preferences) = &launch_preferences {
+                    app_security_ios::set_theme(app.handle(), &preferences.theme);
+                }
+            }
             let security_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = commands::app_security::restore_platform(&security_app).await {
@@ -721,10 +731,8 @@ pub fn run() {
             dedup_save_non_duplicates,
             dedup_remove_non_duplicate,
             dedup_delete_selected,
-            dedup_import_readoshi,
             dedup_list_non_duplicates,
             import_legacy_export,
-            import_worker_export,
             error_log_append,
             error_log_append_batch,
             error_log_read,

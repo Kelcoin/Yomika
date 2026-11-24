@@ -2612,6 +2612,20 @@ ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     }
     // The shell is a fixed frame, so nothing should chain a gesture back to it.
     expect(ruleBody(base, 'html')).toMatch(/overscroll-behavior:\s*none/);
+    // iOS 在横屏、以及系统「文字大小」调大之后会对整块文本做自动缩放（text
+    // autosizing）：px 定死的工具栏跟着长高、按钮文字互相顶开。字号由设置里的
+    // 阅读字号决定，不是浏览器缩放，所以两条前缀都钉在 100%。
+    expect(ruleBody(base, 'html')).toMatch(/-webkit-text-size-adjust:\s*100%/);
+    expect(ruleBody(base, 'html')).toMatch(/\n\s*text-size-adjust:\s*100%/);
+    // Reduce Transparency 是系统级辅助功能：全屏蒙版的模糊必须能被关掉。这条钉住
+    // 三个蒙版都在守卫里，且守卫只是**加**了一条 none，没有把原来的模糊删掉。
+    const shell = read('src/styles/shell.css');
+    const scrims = ruleBody(shell, '@media (prefers-reduced-transparency: reduce)');
+    for (const selector of ['.dialog-overlay', '.settings-overlay', '.archive-cover-preview::before']) {
+      expect(scrims, selector).toContain(selector);
+    }
+    expect(scrims).toMatch(/backdrop-filter:\s*none/);
+    expect(ruleBody(shell, '.dialog-overlay')).toMatch(/backdrop-filter:\s*blur\(/);
     expect(ruleBody(base, 'body')).toMatch(/overscroll-behavior:\s*none/);
     // 横向导轨的手势归**浏览器**管：导轨是 `overflow-x: auto`，另一轴的 computed 值随
     // 之变成 `auto`，所以 touch-action 只写 `pan-x` 时整条命中链的交集把纵向平移摘掉
@@ -3581,10 +3595,17 @@ describe('移动端：软键盘、卡片高亮、底部留白、底栏避让', (
   });
 
   it('keeps the floating nav where it is when the soft keyboard opens', () => {
-    const main = read('src/main.tsx');
-    expect(main, '布局视口被键盘缩短了多少，写成 --keyboard-inset（visualViewport 的收缩量）').toMatch(
-      /visualViewport[\s\S]{0,600}setProperty\('--keyboard-inset'/,
+    const keyboard = read('src/lib/keyboardAvoidance.ts');
+    expect(keyboard, '键盘收缩量取自 visualViewport，而不是布局视口').toMatch(/visualViewport/);
+    expect(keyboard, '布局视口被键盘缩短了多少，写成 --keyboard-inset（visualViewport 的收缩量）').toMatch(
+      /setProperty\('--keyboard-inset', `\$\{inset\}px`\)/,
     );
+    expect(keyboard, '只有真正要输入的那块浮层被抬起来，页面本身不跟着挪').toMatch(
+      /setProperty\('--keyboard-lift'/,
+    );
+    const main = read('src/main.tsx');
+    expect(main, '原生壳启动时装上这套避让').toMatch(/installKeyboardAvoidance\(\)/);
+    expect(main, '避让不再写死在入口里').not.toMatch(/setProperty\('--keyboard-inset'/);
     const base = read('src/styles/base.css');
     expect(base, '变量得有声明在 html 上的兜底值，否则 calc() 整条失效').toMatch(/--keyboard-inset: 0px;/);
     const shell = read('src/styles/shell.css');

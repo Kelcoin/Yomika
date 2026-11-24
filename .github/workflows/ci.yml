@@ -37,6 +37,25 @@ jobs:
       - name: Production build
         run: npm run build
 
+  lanraragi-bridge-test:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the plugin against Redis
+        env:
+          YOMIKA_TEST_REDIS_PORT: ${{ job.services.redis.ports[6379] }}
+        run: prove -v plugins/lanraragi/t/bridge.t
+
   rust-test:
     runs-on: windows-latest
     steps:

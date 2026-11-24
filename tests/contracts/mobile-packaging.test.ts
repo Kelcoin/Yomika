@@ -264,6 +264,61 @@ describe('mobile packaging', () => {
     expect(verifier).toContain('OrtGetApiBase');
     expect(verifier).toContain('ort-sys crate could not link to ONNX Runtime');
   });
+
+  it('declares the iOS bundle keys that only degrade when missing', () => {
+    // 这几个键的共同点是「缺了不报错，只是降级」：Face ID 首次调用直接崩、ProMotion 屏
+    // 退回 60 Hz、iPad 指针被当成手指、每次上传都在出口合规那一步被拦下来问一遍。
+    const plist = read('../../src-tauri/Info.ios.plist');
+    for (const key of [
+      'NSFaceIDUsageDescription',
+      'NSLocalNetworkUsageDescription',
+      'CADisableMinimumFrameDurationOnPhone',
+      'UIApplicationSupportsIndirectInputEvents',
+      'ITSAppUsesNonExemptEncryption',
+    ]) {
+      expect(plist, key).toContain(`<key>${key}</key>`);
+    }
+    expect(plist).toMatch(/<key>CADisableMinimumFrameDurationOnPhone<\/key>\s*<true\/>/);
+    expect(plist).toMatch(/<key>UIApplicationSupportsIndirectInputEvents<\/key>\s*<true\/>/);
+    expect(plist).toMatch(/<key>ITSAppUsesNonExemptEncryption<\/key>\s*<false\/>/);
+    // tauri.conf.json 是唯一告诉打包器「这份 plist 要合并进生成工程」的地方。
+    expect(readJson('../../src-tauri/tauri.conf.json')).toMatchObject({
+      bundle: { iOS: { infoPlist: 'Info.ios.plist' } },
+    });
+    // 直接 xcodebuild 绕过了 `tauri ios build` 的合并，所以 CI 自己合一次；布尔键在
+    // CI 里读成 xml1 再找标签，`plutil -extract … raw` 对布尔值的输出格式各版不一致。
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    expect(workflow).toContain('generated.update(overrides)');
+    expect(workflow).toContain(
+      'plutil -extract UIApplicationSupportsIndirectInputEvents xml1 -o - "$plist" | grep -q \'<true/>\'',
+    );
+    expect(workflow).toContain(
+      'plutil -extract ITSAppUsesNonExemptEncryption xml1 -o - "$plist" | grep -q \'<false/>\'',
+    );
+  });
+
+  it('ships a single-executable iOS bundle instead of the debug dylib split', () => {
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    expect(workflow).toContain('-configuration release');
+    expect(workflow).toContain(' -showBuildSettings -json');
+    expect(workflow).toContain("settings['CONFIGURATION'] != 'release'");
+    expect(workflow).toContain('release-iphoneos');
+    expect(workflow).not.toContain('for config in debug release');
+    expect(workflow).toContain('*.debug.dylib');
+    expect(workflow).toContain('test ! -e "$app/__preview.dylib"');
+    expect(workflow).toContain('cmp src-tauri/PrivacyInfo.xcprivacy "$app/PrivacyInfo.xcprivacy"');
+    expect(read('../../src-tauri/PrivacyInfo.xcprivacy')).toContain('C617.1');
+    // 合并进生成工程不算数，最终 bundle 里也得有这几个键。
+    for (const [key, tag] of [
+      ['CADisableMinimumFrameDurationOnPhone', '<true/>'],
+      ['UIApplicationSupportsIndirectInputEvents', '<true/>'],
+      ['ITSAppUsesNonExemptEncryption', '<false/>'],
+    ] as const) {
+      expect(workflow, key).toContain(
+        `plutil -extract ${key} xml1 -o - "$app/Info.plist" | grep -q '${tag}'`,
+      );
+    }
+  });
 });
 
 // Native Android owns the visual settle. Updating the React page window on

@@ -36,7 +36,7 @@ import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { UpscaleIcon } from './UpscaleIcon';
 import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
 import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
-import { DATA_EXPORT_CREDENTIAL_ITEMS, DEFAULT_DATA_EXPORT_ITEMS, DATA_EXPORT_RECORD_ITEMS, isCredentialItem, dataExportItemLabel, type DataExportReport } from '../domain/dataExport';
+import { DATA_EXPORT_CREDENTIAL_ITEMS, DEFAULT_DATA_EXPORT_ITEMS, DATA_EXPORT_RECORD_ITEMS, HOSTED_DATA_EXPORT_ITEMS, isCredentialItem, dataExportItemLabel, type DataExportReport } from '../domain/dataExport';
 
 import { installedDllLabel } from '../domain/dlssnrVersion';
 
@@ -50,11 +50,9 @@ import { ServerSetupDialog } from './ServerSetupDialog';
 
 import { usePreferences } from '../app/preferences';
 import { parseMigrationExport } from '../lib/dataMigration';
-import { readoshiServerScope } from '../lib/readoshiScope';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { COLOR_SCHEMES, CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
-import { NativeDedupRepository, type DedupPairInput } from '../repositories/nativeDedupRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { NativeInferenceRepository, InstalledModelSchema, UpscaleCatalogSchema, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
 import { readStorageSnapshot } from '../lib/storageSnapshot';
@@ -104,7 +102,6 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
 const settingsRepository = new NativeSettingsRepository();
-const dedupRepository = new NativeDedupRepository();
 const cacheRepository = new NativeCacheRepository();
 const inferenceRepository = new NativeInferenceRepository();
 const GIB = 1_073_741_824;
@@ -139,11 +136,15 @@ function formatCacheBytes(value: number): string {
   return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')} ${units[index]}`;
 }
 
-/** 超分模型列表的固定头名次：内置的那两档（Anime4K 的 shader 链、随包 waifu2x）永远
- * 排在最前，其余的按 id 排。名次写死在这里而不是从数据库或目录里读——那两处的顺序
- * 会随「下载完成」「目录刷新」「版本更新」变化，而列表顺序不该跟着跳（用户 2026-10-18：
- * 模型下载完成会导致顺序发生变化，另外让 anime4k 和 waifu2x 放到上面）。 */
-const BUILT_IN_HEAD = ['anime4k-hq', 'anime4k-ultra', 'anime4k', 'waifu2x-upconv7'];
+/** 超分模型列表的固定头名次：随包/内置的几档永远排在最前，其余的按 id 排。名次写死
+ * 在这里而不是从数据库或目录里读——那两处的顺序会随「下载完成」「目录刷新」「版本更新」
+ * 变化，而列表顺序不该跟着跳（用户 2026-10-18：模型下载完成会导致顺序发生变化，另外让
+ * anime4k 和 waifu2x 放到上面）。
+ *
+ * NomosUni Photo 也在这里：它的权重随二进制分发（`model_release::install_bundled_models`
+ * 启动即装），所以它不是「可以下载的在线模型」，既不该有下载/删除按钮，也要排在真正
+ * 需要下载的那几档（Real-ESRGAN、Real-CUGAN）前面（用户 2026-11-24）。 */
+const BUILT_IN_HEAD = ['anime4k-hq', 'anime4k-ultra', 'anime4k', 'waifu2x-upconv7', 'span-nomosuni-photo'];
 function builtInRank(id: string): number {
   const at = BUILT_IN_HEAD.indexOf(id);
   return at === -1 ? BUILT_IN_HEAD.length : at;
@@ -650,12 +651,23 @@ export function SettingsWorkspace() {
       return;
     }
     if (parsed.kind === 'export') {
-      // 新版文件：文件里有什么就勾什么（默认全选），等使用者确认再落地。
-      setMigrationText(text.trim());
-      setImportAvailable(parsed.payload.items);
-      setImportItems([...parsed.payload.items]);
-      showToast(`文件里包含 ${parsed.payload.items.map(dataExportItemLabel).join('、')}`, 'info');
+      // 新版文件：文件里有什么就勾什么（默认全选），等使用者确认再落地。托管给插件
+      // 的那三类不再从应用落地，旧文件里遇到就把它们从勾选里摘掉并说明去哪儿导。
+      const hosted = parsed.payload.items.filter((id) => HOSTED_DATA_EXPORT_ITEMS.includes(id));
+      const items = parsed.payload.items.filter((id) => !HOSTED_DATA_EXPORT_ITEMS.includes(id));
       setMigrationPending(false);
+      if (items.length === 0) {
+        showToast('这份文件里只有待看、历史与非重复标记：它们已由服务器插件托管，请到设置 →「服务器阅读数据」里导入', 'error');
+        return;
+      }
+      setMigrationText(text.trim());
+      setImportAvailable(items);
+      setImportItems([...items]);
+      showToast(
+        `文件里包含 ${items.map(dataExportItemLabel).join('、')}` +
+        (hosted.length > 0 ? `；${hosted.map(dataExportItemLabel).join('、')} 由服务器插件托管，请到「服务器阅读数据」里导入` : ''),
+        'info',
+      );
       return;
     }
     if (parsed.kind === 'legacy') {
@@ -676,7 +688,7 @@ export function SettingsWorkspace() {
       // 旧版独立导出的同步文档：按记录类全集落地（旧文件里没有凭据）。
       const result = await settingsRepository.importScopedData(
         text.trim(),
-        JSON.stringify(['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings']),
+        JSON.stringify(['progress', 'search_presets', 'app_settings']),
       );
       if (!result.ok) {
         showToast(result.error.message, 'error');
@@ -694,51 +706,11 @@ export function SettingsWorkspace() {
       return;
     }
     if (parsed.kind === 'workerV3') {
-      const payload = parsed.payload;
-      // The export's serverScope is md5(normalized server URL) in Readoshi's
-      // formula; recompute it over the configured servers to find the target
-      // scope. A foreign server must be added first — guessing would write
-      // the records into the wrong scope.
-      const target = servers.find((server) => readoshiServerScope(server.baseUrl) === payload.serverScope);
-      if (!target) {
-        showToast('导出属于其他 LANraragi 服务器（指纹 ' + payload.serverScope + '），先在设置中添加该服务器再导入', 'error');
-        setMigrationPending(false);
-        return;
-      }
-      const result = await legacyRepository.importWorkerExport(target.scopeId, payload);
-      if (!result.ok) {
-        showToast(result.error.message, 'error');
-        setMigrationPending(false);
-        return;
-      }
-      const skipped = payload.history.skipped + payload.watchlist.skipped + payload.dedupe.skipped;
-      let dedupePairs = 0;
-      let dedupeNote = '';
-      if (payload.dedupe.pairs.length > 0) {
-        const pairs: DedupPairInput[] = payload.dedupe.pairs.map((pair) => ({
-          leftArchiveId: pair.leftArchiveId,
-          rightArchiveId: pair.rightArchiveId,
-          source: 'readoshi',
-          diagnostics: null,
-        }));
-        const dedupeResult = await dedupRepository.importReadoshi({ scopeId: target.scopeId, pairs });
-        if (dedupeResult.ok) dedupePairs = pairs.length;
-        else dedupeNote = `（重复关系导入失败：${dedupeResult.error.message}）`;
-      }
-      setMigrationText('');
-      const removed = [
-        result.value.historyRemoved ? `清理阅读 ${result.value.historyRemoved}` : '',
-        result.value.watchlistRemoved ? `墓碑 ${result.value.watchlistRemoved}` : '',
-      ].filter(Boolean).join('，');
-      showToast(
-        `已导入：阅读 ${result.value.history} · 待看 ${result.value.watchlist} · 重复关系 ${dedupePairs}` +
-        (removed ? `（${removed}）` : '') +
-        (skipped ? `，跳过 ${skipped} 条异常记录` : '') +
-        dedupeNote,
-        result.value.history + result.value.watchlist > 0 ? 'success' : 'error',
-      );
-      invalidateRouteCache('home:');
+      // 阅读历史、待看与非重复标记已经由 Yomika Bridge 插件托管在服务端：应用这边
+      // 再写一份本地副本，会和插件里的那份各自往前走，谁都不是真相。旧文件不再
+      // 在应用内落地，而是指路到插件设置页（那里认这份格式，见 bridgeDataTransfer）。
       setMigrationPending(false);
+      showToast('阅读历史、待看与非重复标记已由服务器插件托管：请到设置 →「服务器阅读数据」里导入这份旧数据', 'error');
       return;
     }
     const scopeId = parsed.payload.scopeId || servers[0]?.scopeId;

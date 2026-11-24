@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { resolveRouteMotion, routeMotionAllowed } from './routeMotion';
 import { closeTopOverlay, hasBackOverlay, topBackGestureSurface } from './overlayBackGuard';
 import { isIosBackEdge, isMobileDevice } from './layoutMode';
+import { pageKeyFor } from './pageKeys';
 
 export const MOBILE_BACK_EVENT = 'yomika-mobile-back';
 
@@ -70,6 +71,48 @@ export class PageBackHistory {
   }
 }
 
+/** 返回手势拖到一半时，把「上一层」那一块已经挂着的页面露出来（用户 2026-11-24 第 1 项）。
+ *
+ * 路由缓存里每个页面都还在 DOM 里，只是 hidden。拖手时把它解除隐藏、按视口铺在下面，
+ * 当前页滑开就能看见真正的上一层，而不是空白；松手取消就原样收回去，提交则交给
+ * useWorkspaceRouteMotion 的 page-close 动画（它从 -26% 起步，正好接上这里的位置）。 */
+export interface BackPreview { preview: HTMLElement; panel: HTMLElement }
+
+export function revealBackPreview(panel: HTMLElement | null, key: string): BackPreview | undefined {
+  if (!panel) return undefined;
+  const preview = document.querySelector<HTMLElement>(`.workspace > .route-cache-panel[data-page-key="${key}"]`);
+  if (!preview || preview === panel || !preview.hidden) return undefined;
+  const workspace = preview.parentElement;
+  const padding = workspace ? getComputedStyle(workspace) : undefined;
+  preview.hidden = false;
+  preview.setAttribute('data-back-preview', '');
+  preview.setAttribute('aria-hidden', 'true');
+  preview.setAttribute('inert', '');
+  if (padding) {
+    preview.style.paddingTop = padding.paddingTop;
+    preview.style.paddingRight = padding.paddingRight;
+    preview.style.paddingLeft = padding.paddingLeft;
+    preview.style.paddingBottom = '0px';
+  }
+  panel.style.position = 'relative';
+  panel.style.zIndex = '1';
+  return { preview, panel };
+}
+
+export function releaseBackPreview(back: BackPreview | undefined, keepVisible: boolean): void {
+  if (!back) return;
+  const { preview, panel } = back;
+  preview.removeAttribute('data-back-preview');
+  preview.removeAttribute('aria-hidden');
+  preview.removeAttribute('inert');
+  preview.style.removeProperty('translate');
+  for (const name of ['padding-top', 'padding-right', 'padding-bottom', 'padding-left']) preview.style.removeProperty(name);
+  if (!keepVisible) {
+    preview.hidden = true;
+    panel.style.removeProperty('position');
+    panel.style.removeProperty('z-index');
+  }
+}
 /** Android delivers Back as an app action, not WebView.goBack(): global browser
  * history mixes tabs, filter edits and overlay guards into one confusing stack. */
 export function usePageBackNavigation(): void {
@@ -109,14 +152,16 @@ export function usePageBackNavigation(): void {
     window.addEventListener('popstate', pop, true);
     // WKWebView has no hardware Back action. Use the same page stack as Android,
     // so one edge gesture dismisses the top overlay or returns within this tab.
-    let edge: { id: number; x: number; y: number; horizontal: boolean; surface?: HTMLElement | undefined } | undefined;
+    let edge: { id: number; x: number; y: number; horizontal: boolean; surface?: HTMLElement | undefined; preview?: BackPreview | undefined } | undefined;
     const clearEdge = () => {
       const previous = edge;
       edge = undefined;
       return previous;
     };
     const cancelEdge = () => {
-      const surface = clearEdge()?.surface;
+      const previous = clearEdge();
+      releaseBackPreview(previous?.preview, false);
+      const surface = previous?.surface;
       if (!surface) return;
       const from = surface.style.translate;
       surface.style.removeProperty('translate');
@@ -147,11 +192,18 @@ export function usePageBackNavigation(): void {
             const motion = resolveRouteMotion(from, { pathname: to.pathname, search: to.search, state: { iosBack: true } }, true, -1);
             const panel = document.querySelector<HTMLElement>('.workspace > .route-cache-panel:not([hidden])');
             edge.surface = (motion.kind === 'detail-close' ? panel?.querySelector<HTMLElement>('.library-shell-detail') : panel) ?? undefined;
+            // The layer behind the drag: reveal the page this Back returns to so the
+            // gesture shows real content instead of the empty workspace background.
+            if (motion.kind === 'page-close') edge.preview = revealBackPreview(panel ?? null, pageKeyFor(to.pathname));
           }
         }
       }
       if (event.cancelable) event.preventDefault();
       if (edge.surface) edge.surface.style.translate = `${Math.max(0, dx)}px`;
+      if (edge.preview) {
+        const width = edge.preview.preview.clientWidth || window.innerWidth;
+        edge.preview.preview.style.translate = `${Math.min(0, -width * 0.26 + Math.max(0, dx) * 0.26)}px`;
+      }
     };
     const edgeEnd = (event: TouchEvent) => {
       const start = edge;
@@ -161,12 +213,17 @@ export function usePageBackNavigation(): void {
       const dx = touch.clientX - start.x;
       if (dx < 56 || dx <= Math.abs(touch.clientY - start.y) * 1.4) { cancelEdge(); return; }
       const offset = parseFloat(start.surface?.style.translate ?? '') || 0;
-      const surface = clearEdge()?.surface;
+      const previous = clearEdge();
+      const surface = previous?.surface;
+      const preview = previous?.preview;
       const handled = !window.dispatchEvent(new CustomEvent(MOBILE_BACK_EVENT, { cancelable: true, detail: { iosBack: true, offset } }));
       // Allow the destination's layout effect to take ownership before clearing the drag.
       if (surface) requestAnimationFrame(() => {
         if (surface.style.translate === `${offset}px`) surface.style.removeProperty('translate');
       });
+      // A handled Back leaves the revealed page on screen: the route motion animates it
+      // from exactly this position, so only the drag's own inline styles must go away.
+      if (preview) requestAnimationFrame(() => releaseBackPreview(preview, handled));
       if (handled && event.cancelable) event.preventDefault();
     };
     window.addEventListener('touchstart', edgeStart, { capture: true, passive: true });

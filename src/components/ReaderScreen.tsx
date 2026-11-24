@@ -1469,6 +1469,19 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     scheduler.setRange(thumbnailRange);
   }, [archiveId, loadPageThumbnail, pageActive, thumbnailPanelOpen, thumbnailRange]);
 
+  useEffect(() => {
+    const trimPreviews = () => {
+      const range = thumbnailPanelOpen ? thumbnailRange : undefined;
+      thumbnailScheduler.current?.forgetLoadedOutside(range);
+      setThumbnails((current) => {
+        const retained = new Map(range ? [...current].filter(([index]) => index >= range.start && index < range.end) : []);
+        return retained.size === current.size ? current : retained;
+      });
+    };
+    window.addEventListener('yomika-memory-warning', trimPreviews);
+    return () => window.removeEventListener('yomika-memory-warning', trimPreviews);
+  }, [thumbnailPanelOpen, thumbnailRange]);
+
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the canvas would zoom *and* scroll. Bind natively.
   useEffect(() => {

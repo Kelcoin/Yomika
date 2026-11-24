@@ -90,6 +90,13 @@ export class ThumbnailScheduler {
     this.failures.delete(index);
   }
 
+  /** Release settled previews; in-flight requests still own their slots. */
+  forgetLoadedOutside(range?: ThumbnailRange) {
+    for (const index of this.loaded) {
+      if (!range || index < range.start || index >= range.end) this.loaded.delete(index);
+    }
+  }
+
   get outstanding() {
     return this.inFlight.size;
   }

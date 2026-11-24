@@ -1,4 +1,5 @@
 use super::*;
+use crate::native_reader::zoom::{drag_pan, elastic_scale, settle};
 use objc2_ui_kit::UIPinchGestureRecognizer;
 
 #[derive(Clone, Copy)]
@@ -70,6 +71,10 @@ define_class!(
                     // page's configuration arrives from WebKit.
                     let maximum = if key.1 == config.page { config.maximum } else { 3.0 };
                     self.ivars().start.set(Some(PinchStart { transform, maximum, x, y }));
+                    // A quick flick can go Began → Ended with no Changed frame. Seed the
+                    // focus here, or the release would settle about wherever the previous
+                    // gesture left its fingers and shift the page towards that corner.
+                    self.ivars().focus.set((x, y));
                     reader.pinching = Some(key);
                     began = Some(key);
                     reader.pinch_settle = None;
@@ -85,17 +90,14 @@ define_class!(
                 } else {
                     self.ivars().focus.set((x, y));
                     let scale = elastic_scale(start.transform.scale * scale, start.maximum);
-                    let mut transform = ViewTransform { scale, edge_offset: 0.0, neighbour_page: None, ..start.transform };
-                    if scale <= 1.0 {
-                        transform.pan_x = 0.0;
-                        transform.pan_y = 0.0;
-                    } else {
-                        let max_x = width * (1.0 - scale.recip()) / 2.0;
-                        let max_y = height * (1.0 - scale.recip()) / 2.0;
-                        transform.pan_x = (start.transform.pan_x + x / scale - start.x / start.transform.scale).clamp(-max_x, max_x);
-                        transform.pan_y = (start.transform.pan_y + y / scale - start.y / start.transform.scale).clamp(-max_y, max_y);
+                    ViewTransform {
+                        scale,
+                        edge_offset: 0.0,
+                        neighbour_page: None,
+                        pan_x: drag_pan(start.transform.pan_x, start.x, start.transform.scale, x, scale, width),
+                        pan_y: drag_pan(start.transform.pan_y, start.y, start.transform.scale, y, scale, height),
+                        ..start.transform
                     }
-                    transform
                 };
                 reader.transforms.insert(key, transform);
                 if let Some(pane) = &reader.pane {
@@ -105,7 +107,8 @@ define_class!(
                 self.ivars().start.set(None);
                 reader.pinching = None;
                 let focus = self.ivars().focus.get();
-                let target = settle(transform, start.maximum, width, height, focus);
+                let (scale, pan_x, pan_y) = settle(transform.scale, (transform.pan_x, transform.pan_y), start.maximum, (width, height), focus);
+                let target = ViewTransform { scale, pan_x, pan_y, ..transform };
                 let animation = if !config.reduce_motion && (transform.scale != target.scale || transform.pan_x != target.pan_x || transform.pan_y != target.pan_y) {
                     let token = NEXT_REVISION.fetch_add(1, Ordering::Relaxed);
                     reader.pinch_settle = Some(token);
@@ -152,26 +155,6 @@ fn notify_zoom(window: &WebviewWindow, target: ViewTransform) {
     ));
 }
 
-fn elastic_scale(raw: f64, maximum: f64) -> f64 {
-    if (1.0..=maximum).contains(&raw) { return raw; }
-    let edge = if raw < 1.0 { 1.0 } else { maximum };
-    let travel = raw / edge - 1.0;
-    edge * (1.0 + travel.signum() * 0.12 * (1.0 - (-2.75 * travel.abs()).exp()))
-}
-
-fn settle(mut transform: ViewTransform, maximum: f64, width: f64, height: f64, focus: (f64, f64)) -> ViewTransform {
-    let previous_scale = transform.scale;
-    transform.scale = transform.scale.clamp(1.0, maximum);
-    let inverse_delta = transform.scale.recip() - previous_scale.recip();
-    transform.pan_x += focus.0 * inverse_delta;
-    transform.pan_y += focus.1 * inverse_delta;
-    let max_x = width * (1.0 - transform.scale.recip()) / 2.0;
-    let max_y = height * (1.0 - transform.scale.recip()) / 2.0;
-    transform.pan_x = transform.pan_x.clamp(-max_x, max_x);
-    transform.pan_y = transform.pan_y.clamp(-max_y, max_y);
-    transform
-}
-
 fn start_settle(window: WebviewWindow, token: u64, from: ViewTransform, target: ViewTransform, duration_ms: f64) {
     tauri::async_runtime::spawn(async move {
         let start = Instant::now();
@@ -191,7 +174,13 @@ fn start_settle(window: WebviewWindow, token: u64, from: ViewTransform, target: 
                 READERS.with_borrow_mut(|readers| {
                     let Some(reader) = readers.get_mut(label) else { return false };
                     let key = (frame.session, frame.page);
-                    if reader.pinch_settle != Some(token) || reader.pinch_key() != Some(key) || COVERED.get() { return false; }
+                    if reader.pinch_settle != Some(token) { return false; }
+                    if reader.pinch_key() != Some(key) || COVERED.get() {
+                        // Drop our own token: a stale one silently swallows the next
+                        // animated transform the webview sends.
+                        reader.pinch_settle = None;
+                        return false;
+                    }
                     reader.transforms.insert(key, frame);
                     if let Some(pane) = &reader.pane {
                         reader.paint_transform(pane, Some(frame), mtm);

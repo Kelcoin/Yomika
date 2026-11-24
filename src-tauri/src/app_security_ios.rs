@@ -10,7 +10,7 @@ use objc2_foundation::{
     ns_string, NSError, NSNotification, NSNotificationCenter, NSObjectProtocol,
 };
 use objc2_local_authentication::{LABiometryType, LAContext, LAPolicy};
-use objc2_ui_kit::{UIColor, UIView, UIViewAutoresizing};
+use objc2_ui_kit::{UIColor, UIUserInterfaceStyle, UIView, UIViewAutoresizing};
 use std::{
     cell::RefCell,
     ptr::NonNull,
@@ -198,6 +198,27 @@ pub async fn authenticate(app: &AppHandle) -> Result<(), String> {
     }
 }
 
+fn apply_theme(view: &UIView, style: UIUserInterfaceStyle) {
+    if let Some(window) = view.window() {
+        window.setOverrideUserInterfaceStyle(style);
+    }
+}
+
+pub(crate) fn set_theme(app: &AppHandle, theme: &str) {
+    let style = match theme {
+        "dark" => UIUserInterfaceStyle::Dark,
+        "light" => UIUserInterfaceStyle::Light,
+        _ => UIUserInterfaceStyle::Unspecified,
+    };
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.with_webview(move |webview| {
+            if let Some(view) = unsafe { Retained::retain(webview.inner().cast::<UIView>()) } {
+                apply_theme(&view, style);
+            }
+        });
+    }
+}
+
 pub fn install(app: &AppHandle) -> Result<(), String> {
     let window = app.get_webview_window("main").ok_or("主窗口不可用")?;
     let app = app.clone();
@@ -216,12 +237,21 @@ pub fn install(app: &AppHandle) -> Result<(), String> {
                 ns_string!("UIApplicationWillResignActiveNotification"),
                 ns_string!("UIApplicationDidEnterBackgroundNotification"),
                 ns_string!("UIApplicationDidBecomeActiveNotification"),
+                ns_string!("UIApplicationDidReceiveMemoryWarningNotification"),
             ] {
                 let app = app.clone();
                 let is_background =
                     name == ns_string!("UIApplicationDidEnterBackgroundNotification");
                 let is_active = name == ns_string!("UIApplicationDidBecomeActiveNotification");
+                let is_memory_warning = name == ns_string!("UIApplicationDidReceiveMemoryWarningNotification");
                 let callback = RcBlock::new(move |_notification: NonNull<NSNotification>| {
+                    if is_memory_warning {
+                        crate::native_reader::trim_ios_memory();
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.eval("window.dispatchEvent(new Event('yomika-memory-warning'))");
+                        }
+                        return;
+                    }
                     if is_active {
                         let backgrounded = BACKGROUNDED.swap(false, Ordering::SeqCst);
                         let auth_resume = AUTH_RESUME_PENDING.swap(false, Ordering::SeqCst);

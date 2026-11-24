@@ -322,6 +322,16 @@ fn install_bundled_nomosuni(data: &std::path::Path) -> Result<(), String> {
         .map_err(|error| format!("{error:?}"))
 }
 
+/// 随包分发的模型：启动时装一次，已装则什么都不做。
+///
+/// NomosUni Photo 的权重就在二进制里（`NOMOSUNI_BUNDLE`），所以它天生可用；从前只有
+/// 用户点「下载」时才解包，模型列表于是把它当在线模型摆着下载/删除按钮（用户
+/// 2026-11-24 报：它是随包的，不该有这些）。现在启动就装好，列表里它就是内置项。
+pub fn install_bundled_models(app: &tauri::AppHandle) -> Result<(), String> {
+    let data = crate::inference::model_data_dir(app).map_err(|error| error.to_string())?;
+    install_bundled_nomosuni(&data)
+}
+
 pub const MIRROR_PRESETS: &[(&str, &str)] = &[
     ("direct", ""),
     ("gh-proxy", "https://gh-proxy.com/"),

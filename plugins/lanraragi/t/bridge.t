@@ -30,10 +30,14 @@ is($cleared->{generation},1,'clear advances generation');
 ok(!defined($cleared->{progress}),'clear removes progress');
 eval {$bridge->can('transition')->($state,{%$op,expectedVersion=>0,progress=>{%$progress,pageCount=>0}},'now')};
 like($@,qr/BRIDGE_INVALID_REQUEST/,'invalid count rejected');
+eval {$bridge->can('dispatch')->(undef,undef,{protocol=>1,action=>'import_history',entries=>[]},1)};
+like($@,qr/BRIDGE_INVALID_REQUEST/,'empty history import batch rejected before touching Redis');
+eval {$bridge->can('dispatch')->(undef,undef,{protocol=>1,action=>'import_history',entries=>[{archiveId=>$id,pageIndex=>1,visitedAt=>'2026-09-13 09:35:33'}]},1)};
+like($@,qr/BRIDGE_INVALID_REQUEST/,'history import requires an ISO instant');
 
 # Optional real Redis integration: independent instance only, never a LANraragi server.
 SKIP: {
-    skip 'Set YOMIKA_TEST_REDIS_PORT for real Redis Lua integration', 103 unless $ENV{YOMIKA_TEST_REDIS_PORT};
+    skip 'Set YOMIKA_TEST_REDIS_PORT for real Redis Lua integration', 106 unless $ENV{YOMIKA_TEST_REDIS_PORT};
     require IO::Socket::INET;
     {
         package TestRedis;
@@ -304,5 +308,13 @@ LUA
     like($@,qr/BRIDGE_INVALID_REQUEST/,'export page above100 rejected');
     eval {$call->(action=>'apply',operation=>{%$delete_op,id=>'invalid-stale-progress',progress=>{%$progress,pageCount=>0}})};
     like($@,qr/BRIDGE_INVALID_REQUEST/,'invalid payload rejected even when state version stale');
+    my $imported_id = '1234' x 10;
+    $r->command('HSET',$imported_id,'file','/isolated/import.cbz');
+    my $import_req = {protocol=>1, action=>'import_history',
+        entries=>[{archiveId=>$imported_id, pageIndex=>12, visitedAt=>'2026-09-13T09:35:33.362Z'}]};
+    is($call->(%$import_req)->{imported}, 1, 'history import writes a record the server never saw');
+    is($call->(%$import_req, entries=>[{archiveId=>$imported_id, pageIndex=>3, visitedAt=>'2020-01-01T00:00:00.000Z'}])->{imported}, 0,
+        'history import never regresses an existing visit');
+    is($call->(action=>'states',ids=>[$imported_id])->{states}[0]{historyPageIndex}, 12, 'imported page lands on the record');
 }
 done_testing;

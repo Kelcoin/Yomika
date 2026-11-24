@@ -3,7 +3,6 @@ import { invokeCommand, VoidResponseSchema } from '../bridge/invoke';
 import { ok, type CommandResult } from '../domain/result';
 import { NativeLrrBridgeRepository } from './nativeLrrBridgeRepository';
 const hostedBridge = new NativeLrrBridgeRepository();
-import { parseReadoshiNonDuplicateExport, type ReadoshiImportReport } from '../lib/readoShiDedupeImport';
 
 const DedupCheckResultSchema = z.object({ hash: z.string(), size: z.number() });
 
@@ -159,11 +158,6 @@ export class NativeDedupRepository {
     if (result.ok) await this.notifyHostedWrite(input.scopeId);
     return result;
   }
-  async importReadoshi(input: { scopeId: string; pairs: DedupPairInput[] }) {
-    const result = await invokeCommand('dedup_import_readoshi', { input }, VoidResponseSchema);
-    if (result.ok) await this.notifyHostedWrite(input.scopeId);
-    return result;
-  }
   private async notifyHostedWrite(scopeId: string) {
     const config = await hostedBridge.config(scopeId);
     if (config.ok && config.value.enabled) window.dispatchEvent(new CustomEvent('yomika:lrr-bridge-write', { detail: { scopeId, kind: 'non_duplicates' } }));
@@ -175,14 +169,6 @@ export class NativeDedupRepository {
     const refreshed = await this.refreshHostedMarks(scopeId);
     if (!refreshed.ok) return refreshed;
     return invokeCommand('dedup_list_non_duplicates', { scopeId }, z.array(DedupNonDuplicateRecordSchema));
-  }
-  importReadoshiExport(scopeId: string, input: unknown): Promise<CommandResult<ReadoshiImportReport>> {
-    let report: ReadoshiImportReport;
-    try { report = parseReadoshiNonDuplicateExport(input, scopeId); }
-    catch (error) {
-      return Promise.resolve({ ok: false, error: { code: 'INVALID_RESPONSE', message: error instanceof Error ? error.message : '无效的 Readoshi 导入数据', retryable: false } });
-    }
-    return this.importReadoshi({ scopeId, pairs: report.pairs }).then((result) => result.ok ? { ok: true, value: report } : result as CommandResult<ReadoshiImportReport>);
   }
   async deleteSelected(input: { sessionId: string; outcomes?: DedupDeletionOutcomeInput[] }, syncFavorite = false, onProgress?: (progress: { processed: number; total: number }) => void) {
     let onProgressChannel;

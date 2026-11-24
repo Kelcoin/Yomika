@@ -241,7 +241,7 @@ describe('hosted preset and non-duplicate collections', () => {
     expect(adapter.mock.calls.some(([command]) => command === 'dedup_scan')).toBe(false);
   });
 
-  it('notifies hosted lifecycle after saves, removals and imported relations', async () => {
+  it('notifies hosted lifecycle after saves and removals', async () => {
     const events: unknown[] = [];
     const listener = (event: Event) => events.push((event as CustomEvent).detail);
     window.addEventListener('yomika:lrr-bridge-write', listener);
@@ -252,8 +252,7 @@ describe('hosted preset and non-duplicate collections', () => {
       expect((await repo.saveNonDuplicate(pair)).ok).toBe(true);
       expect((await repo.saveNonDuplicates([pair, pair])).ok).toBe(true);
       expect((await repo.removeNonDuplicate(pair)).ok).toBe(true);
-      expect((await repo.importReadoshi({ scopeId: 's', pairs: [{ leftArchiveId: 'a', rightArchiveId: 'b', source: 'readoshi' }] })).ok).toBe(true);
-      expect(events).toEqual(Array.from({ length: 4 }, () => ({ scopeId: 's', kind: 'non_duplicates' })));
+      expect(events).toEqual(Array.from({ length: 3 }, () => ({ scopeId: 's', kind: 'non_duplicates' })));
     } finally { window.removeEventListener('yomika:lrr-bridge-write', listener); }
   });
 
@@ -287,4 +286,55 @@ it('restarts an empty hosted page once and bounds retries when deletions keep in
   });
   expect(await new NativeLrrBridgeRepository().list('s', 'watchlist')).toMatchObject({ ok: false, error: { code: 'REMOTE_CONFLICT', retryable: true } });
   expect(offsets).toEqual([0, 0]);
+});
+
+
+describe('hosted data transfer', () => {
+  it('exports every hosted page and stops when the server stops adding records', async () => {
+    const inputs: unknown[] = [];
+    setInvokeAdapterForTests(async (_command, args) => {
+      const input = args?.input as { offset: number };
+      inputs.push(input);
+      // 第二页返回空：即便 total 还说有更多，也不再问下去。
+      const states = input.offset === 0
+        ? [{ ...state, archiveId: 'a' }, { ...state, archiveId: 'b' }]
+        : [];
+      return { ok: true, value: { ...metadata, version: 4, states, total: 5 } };
+    });
+    const result = await new NativeLrrBridgeRepository().exportAll('s');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.map((entry) => entry.archiveId)).toEqual(['a', 'b']);
+    expect(inputs).toEqual([{ offset: 0, limit: 100 }, { offset: 2, limit: 100 }]);
+  });
+
+  it('imports history in batches of fifty and counts what the server accepted', async () => {
+    const batches: number[] = [];
+    setInvokeAdapterForTests(async (_command, args) => {
+      const input = args?.input as { entries: unknown[] };
+      batches.push(input.entries.length);
+      // 服务端只收比现有记录更新的条目：这里一半被跳过。
+      return { ok: true, value: { imported: Math.ceil(input.entries.length / 2) } };
+    });
+    const entries = Array.from({ length: 120 }, (_unused, index) => ({
+      archiveId: `a${index}`, pageIndex: index, visitedAt: '2026-09-13T09:35:33.362Z',
+    }));
+    const result = await new NativeLrrBridgeRepository().importHistory('s', entries);
+    expect(result).toEqual({ ok: true, value: 60 });
+    expect(batches).toEqual([50, 50, 20]);
+  });
+
+  it('stops at the first failed batch instead of pretending the rest landed', async () => {
+    let calls = 0;
+    setInvokeAdapterForTests(async () => {
+      calls += 1;
+      return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } };
+    });
+    const entries = Array.from({ length: 60 }, (_unused, index) => ({
+      archiveId: `a${index}`, pageIndex: index, visitedAt: '2026-09-13T09:35:33.362Z',
+    }));
+    const result = await new NativeLrrBridgeRepository().importHistory('s', entries);
+    expect(result).toMatchObject({ ok: false, error: { code: 'REMOTE_UNAVAILABLE' } });
+    expect(calls).toBe(1);
+  });
 });

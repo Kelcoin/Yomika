@@ -13,7 +13,7 @@ my $JSON = JSON::PP->new->canonical->ascii->allow_nonref;
 
 sub plugin_info {
     return (name => 'Yomika Bridge', type => 'script', namespace => 'yomikabridge',
-        author => 'Yomika', version => '1.2.3', parameters => {
+        author => 'Yomika', version => '1.3.0', parameters => {
             import_external_history => {
                 type => 'bool', default_value => 0,
                 desc => 'Include reading recorded by LANraragi or other clients in Yomika history',
@@ -204,6 +204,23 @@ if action=='import_native_history' then
  if req.cursor=='0' then redis.call('HSET',meta,'nativeHistoryCompletedAt',req.now) end
  return cjson.encode(envelope({advanced=true}))
 end
+if action=='import_history' then
+ local meta=p..'meta'; local imported=0
+ for _,entry in ipairs(req.entries) do
+  local s=state(entry.archiveId)
+  local previous=s.historyAt~=cjson.null and s.historyAt or (s.historyRemovedAt or '')
+  if s.progress~=cjson.null and s.progress.updatedAt>previous then previous=s.progress.updatedAt end
+  if entry.visitedAt>previous then
+   s.historyAt=entry.visitedAt; s.historyPageIndex=entry.pageIndex; s.version=s.version+1
+   redis.call('HSET',p..'states',entry.archiveId,cjson.encode(s))
+   local version=redis.call('HINCRBY',meta,'version',1)
+   redis.call('ZADD',p..'history',version,entry.archiveId)
+   redis.call('ZADD',p..'records',version,entry.archiveId)
+   imported=imported+1
+  end
+ end
+ return cjson.encode(envelope({imported=imported}))
+end
 if action=='hello' then return cjson.encode(envelope({capabilities={states=true,history=true,watchlist=true,workspace=true,collections=true,export=true,coverStatus=false,push=false},limits={requestBytes=6000,states=50,page=100,workspaceBytes=1800,collectionPage=50,collectionValueBytes=4000}})) end
 if action=='states' then
  local out={}; for _,id in ipairs(req.ids) do table.insert(out,state(id)) end
@@ -336,7 +353,7 @@ sub dispatch {
     my ($redis, $archives, $req, $import_external_history) = @_;
     fail('BRIDGE_INVALID_REQUEST') unless ref($req) eq 'HASH' && integer($req->{protocol}) && $req->{protocol} == 1;
     my $action = $req->{action} // '';
-    fail('BRIDGE_INVALID_REQUEST') unless !ref($action) && $action =~ /\A(?:hello|states|list|export|history_changes|apply|workspace_get|workspace_put|collection_list|collection_get|collection_apply)\z/;
+    fail('BRIDGE_INVALID_REQUEST') unless !ref($action) && $action =~ /\A(?:hello|states|list|export|history_changes|import_history|apply|workspace_get|workspace_put|collection_list|collection_get|collection_apply)\z/;
     my %arg = %$req;
     if ($action eq 'states') {
         fail('BRIDGE_INVALID_REQUEST') unless ref($req->{ids}) eq 'ARRAY' && @{$req->{ids}} >= 1 && @{$req->{ids}} <= 50;
@@ -345,6 +362,16 @@ sub dispatch {
         fail('BRIDGE_INVALID_REQUEST') unless integer($req->{offset}) && integer($req->{limit}) && $req->{limit} >= 1 && $req->{limit} <= 100;
         fail('BRIDGE_INVALID_REQUEST') if $action eq 'history_changes' && !integer($req->{since});
         fail('BRIDGE_INVALID_REQUEST') if $action eq 'list' && (ref($req->{kind}) || ($req->{kind} // '') !~ /\A(?:history|watchlist)\z/);
+    } elsif ($action eq 'import_history') {
+        my $entries = $req->{entries};
+        fail('BRIDGE_INVALID_REQUEST') unless ref($entries) eq 'ARRAY' && @$entries >= 1 && @$entries <= 50;
+        for my $entry (@$entries) {
+            fail('BRIDGE_INVALID_REQUEST') unless ref($entry) eq 'HASH' && archive_id($entry->{archiveId})
+                && integer($entry->{pageIndex}) && defined($entry->{visitedAt}) && !ref($entry->{visitedAt})
+                && $entry->{visitedAt} =~ /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z\z/;
+            fail('BRIDGE_ARCHIVE_NOT_FOUND') unless $archives->hexists($entry->{archiveId}, 'file');
+        }
+        $arg{entries} = $entries;
     } elsif ($action eq 'collection_list') {
         fail('BRIDGE_INVALID_REQUEST') unless collection_name($req->{collection}) && integer($req->{offset})
             && integer($req->{limit}) && $req->{limit} >= 1 && $req->{limit} <= 50;

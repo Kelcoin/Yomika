@@ -847,6 +847,10 @@ pub fn save_preferences(
     drop(connection);
     match saved {
         Ok(value) => {
+            #[cfg(target_os = "ios")]
+            if previous.as_ref().is_none_or(|old| old.theme != value.theme) {
+                crate::app_security_ios::set_theme(&app, &value.theme);
+            }
             #[cfg(target_os = "windows")]
             if notify_service {
                 if let Some(data) = data { crate::windows_compute_service::preferences_saved(data); }
@@ -971,13 +975,20 @@ fn update_windows_autostart(executable: &std::path::Path, enabled: bool) -> Resu
 pub fn import_legacy_preferences(
     encoded: String,
     database: tauri::State<'_, Database>,
+    #[allow(unused_variables)] app: tauri::AppHandle,
 ) -> CommandResult<LegacyPreferenceImport> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
-    match import_legacy_preferences_from(&mut connection, &encoded) {
-        Ok(value) => CommandResult::success(value),
+    let imported = import_legacy_preferences_from(&mut connection, &encoded);
+    drop(connection);
+    match imported {
+        Ok(value) => {
+            #[cfg(target_os = "ios")]
+            crate::app_security_ios::set_theme(&app, &value.preferences.theme);
+            CommandResult::success(value)
+        }
         Err(_) => CommandResult::failure(
             "INVALID_RESPONSE",
             "Legacy ordinary preferences are invalid or unsupported",
