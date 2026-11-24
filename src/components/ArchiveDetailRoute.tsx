@@ -386,7 +386,7 @@ detailBasePath?: string | undefined }) {
   }, [serverId, archiveId, currentDownloadOwner, favoritePageActive, showDownload, serverOwner, readingIdentity]);
   const { open: openMenu, menu } = useArchiveContextMenu({
     detail: true,
-    hiddenActions: detailActions.filter(action => action !== 'clearProgress' || progress.hasProgress),
+    hiddenActions: detailActions.filter(action => action !== 'clearProgress' || progress.canClear),
     onMembershipChange: (id, list, next) => {
       if (id !== archiveId || favoriteOwner.current.identity !== favoriteIdentity || favoriteOwner.current.generation !== favoriteGeneration) return;
       if (list === 'reading') { readingOwner.current.generation++; readingOwner.current.busy = false; setReadingBusy(false); setInReadingList(next); } else { favoriteOwner.current.generation++; setFavorite(next); }
@@ -528,7 +528,7 @@ detailBasePath?: string | undefined }) {
         </button> : <DetailActionSkeleton />)}
         {detailActions.includes('edit') && (actionsHaveMetadata && serverId ? <button className="secondary-action" type="button" aria-label="编辑元数据" title="编辑元数据" onClick={() => navigate(`/library/${archiveId}/edit${serverId ? `?server=${encodeURIComponent(serverId)}` : ''}`, { state: { returnTo: `${location.pathname}${location.search}`, returnViaHistory: true } })}><Pencil aria-hidden="true" /><span className="archive-action-label">编辑</span></button> : <DetailActionSkeleton />)}
 
-        {detailActions.includes('clearProgress') && progress.hasProgress && <button className="secondary-action" type="button" aria-label="清除阅读进度" title="清除阅读进度" disabled={progress.busy} aria-busy={progress.busy} onClick={() => { void progress.clear(); }}><RotateCcw aria-hidden="true" /><span className="archive-action-label">清除进度</span><span className="archive-action-label-short" aria-hidden="true">清除</span></button>}
+        {detailActions.includes('clearProgress') && progress.canClear && <button className="secondary-action" type="button" aria-label="清除阅读进度" title="清除阅读进度" disabled={progress.busy} aria-busy={progress.busy} onClick={() => { void progress.clear(); }}><RotateCcw aria-hidden="true" /><span className="archive-action-label">清除进度</span><span className="archive-action-label-short" aria-hidden="true">清除</span></button>}
         {serverId && detailActions.includes('delete') && (
           <><button className="secondary-action" type="button" aria-label="删除档案" title="删除档案" onClick={() => setDeleteOpen(true)}><Trash2 aria-hidden="true" /><span className="archive-action-label">删除</span></button>
           {deleteOpen && <ArchiveDeleteDialog archive={{ serverId, archiveId, title }} onClose={() => setDeleteOpen(false)} onDeleted={() => navigate(shelfBase, { replace: true })} />}</>

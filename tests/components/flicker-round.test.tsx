@@ -30,12 +30,12 @@ it('keeps the open menu and skips a second progress read when the same card open
   vi.spyOn(NativeLibraryRepository.prototype, 'listServers').mockResolvedValue({ ok: true, value: [{ id: 'server', scopeId: 'scope', name: 'Test', baseUrl: 'https://example.com', enabled: true }] });
   vi.spyOn(NativeLibraryRepository.prototype, 'archiveMembership').mockResolvedValue({ ok: true, value: { reading: false, favorites: false } });
   vi.spyOn(NativeLibraryRepository.prototype, 'readFavoritesCategory').mockResolvedValue({ ok: true, value: null });
-  const reads: Array<(value: Awaited<ReturnType<NativeLibraryRepository['loadProgress']>>) => void> = [];
-  vi.spyOn(NativeLibraryRepository.prototype, 'loadProgress').mockImplementation(() => new Promise((done) => { reads.push(done); }));
+  const reads: Array<(value: Awaited<ReturnType<NativeLibraryRepository['loadReadingStatus']>>) => void> = [];
+  vi.spyOn(NativeLibraryRepository.prototype, 'loadReadingStatus').mockImplementation(() => new Promise((done) => { reads.push(done); }));
 
   render(<MemoryRouter><MenuHarness /></MemoryRouter>);
   await act(async () => { fireEvent.click(screen.getByText('Open')); });
-  await act(async () => { reads[0]?.({ ok: true, value: null }); });
+  await act(async () => { reads[0]?.({ ok: true, value: { progress: null, hasHistory: false } }); });
   expect(screen.getByRole('menu')).toBeInTheDocument();
 
   await act(async () => { fireEvent.click(screen.getByText('Open')); });

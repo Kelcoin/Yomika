@@ -255,13 +255,13 @@ describe('archive detail route', () => {
     fireEvent.click(screen.getByRole('button', { name: '档案菜单' }));
     expect(await screen.findByRole('menuitem', { name: '清除阅读进度' })).toBeInTheDocument();
   });
-  it.each([false, true])('places reset in the configured surface and removes duplicated menu actions (toolbar=%s)', async toolbar => {
+  it.each([[false, 1], [true, 1], [false, 259], [true, 259]])('clears first-page progress from the configured surface (toolbar=%s, pages=%s)', async (toolbar, pageCount) => {
     let hasProgress = true;
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: { ...DEFAULT_PREFERENCES, detailActions: ['read', 'readingList', 'favorites', 'download', 'edit', 'delete', ...(toolbar ? ['clearProgress'] : [])] } };
       if (command === 'list_servers') return { ok: true, value: [server] };
-      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount: 0 } };
-      if (command === 'load_reading_progress') return { ok: true, value: hasProgress ? { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 0, pageCount: 259, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } : null };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, pageCount } };
+      if (command === 'load_reading_progress') return { ok: true, value: hasProgress ? { scopeId: server.scopeId, archiveId: metadata.archiveId, pageIndex: 0, pageCount, layout: 'paged', direction: 'ltr', updatedAt: 'now', revision: 1 } : null };
       if (command === 'get_archive_membership') return { ok: true, value: { reading: false, favorites: false } };
       if (command === 'read_favorites_category') return { ok: true, value: null };
       if (command === 'clear_reading_progress') { hasProgress = false; return { ok: true, value: null }; }
@@ -271,6 +271,7 @@ describe('archive detail route', () => {
     setInvokeAdapterForTests(adapter);
     render(<MemoryRouter><ToastProvider><PreferencesProvider><ArchiveDetailRoute archiveId={metadata.archiveId} /></PreferencesProvider></ToastProvider></MemoryRouter>);
     await screen.findByRole('heading', { name: metadata.title });
+    await screen.findByText(`1 / ${pageCount} 页`);
     if (toolbar) await screen.findByRole('button', { name: '清除阅读进度' });
     fireEvent.click(screen.getByRole('button', { name: '档案菜单' }));
     await screen.findByRole('menuitem', { name: '无痕阅读' });
@@ -286,6 +287,7 @@ describe('archive detail route', () => {
     }
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('clear_reading_progress', { scopeId: server.scopeId, archiveId: metadata.archiveId }));
     await screen.findByText('已清除阅读进度和历史记录');
+    await screen.findByText(`${pageCount} 页`);
     expect(screen.queryByRole('button', { name: '清除阅读进度' })).not.toBeInTheDocument();
   });
   it.each([false, true])('retires an incognito press or prompt when its page hides (open=%s)', async open => {

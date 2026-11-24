@@ -19,6 +19,9 @@ body::-webkit-scrollbar,
 
 .app-shell {
   --archive-row-inset: 4px;
+  --floating-nav-item-height: 56px;
+  --floating-nav-padding: var(--space-1);
+  --floating-nav-height: calc(var(--floating-nav-item-height) + 2 * var(--floating-nav-padding) + 2px);
   display: grid;
   /* Windows: the app-drawn title bar spans the full width above the two
      columns; elsewhere the grid is just the columns. */
@@ -5456,8 +5459,8 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     width: max-content;
     max-width: calc(100% - 2 * var(--space-4));
     gap: var(--space-1);
-    min-height: 64px;
-    padding: var(--space-1);
+    min-height: var(--floating-nav-height);
+    padding: var(--floating-nav-padding);
     border-width: 1px;
     border-style: solid;
     border-radius: var(--radius-pill);
@@ -5469,11 +5472,11 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   .compact-nav.is-floating .nav-link {
-    min-height: 52px;
+    min-height: var(--floating-nav-item-height);
     flex: 1 1 64px;
     width: 64px;
     min-width: 0;
-    border-radius: var(--radius-pill);
+    border-radius: calc(var(--floating-nav-item-height) / 2);
   }
 
   /* 胶囊里激活项本身就是填充，不再需要顶边指示条。 */
@@ -5524,7 +5527,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
      retain the system safe area without leaving an empty navigation-sized tail. */
   .app-shell.is-floating-nav .workspace,
   .app-shell.is-floating-nav .workspace.is-library-workspace {
-    --workspace-floating-nav-clearance: calc(var(--safe-bottom) + 80px);
+    --workspace-floating-nav-clearance: calc(var(--safe-bottom) + var(--floating-nav-height) + 14px);
     padding-bottom: var(--workspace-floating-nav-clearance);
   }
   .app-shell.is-floating-nav[data-compact-nav-hidden] .workspace,
@@ -5554,7 +5557,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   }
 
   .app-shell.is-floating-nav .scroll-to-top {
-    bottom: calc(var(--safe-bottom) + var(--space-3) + 64px + var(--space-3));
+    bottom: calc(var(--safe-bottom) + var(--space-3) + var(--floating-nav-height) + var(--space-3));
   }
 
 .nav-link.is-active,
@@ -7481,9 +7484,6 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
   .spin { animation: none; }
 }
 
-:where(:root[data-layout='compact']) {
-  .compact-nav.is-floating .nav-link { min-height: 56px; border-radius: 28px; }
-}
 
 /* Edit forms already provide their own compact header spacing. */
 .workspace:has(> .route-cache-panel:not([hidden]) .metadata-edit-page) { padding-top: var(--space-3); }
@@ -7504,7 +7504,7 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
     transition: transform var(--motion-dock), opacity var(--motion-dock), visibility 0s 280ms;
   }
   .app-shell.is-floating-nav .scroll-to-top[data-nav-hidden='true'] {
-    transform: translateY(var(--compact-nav-travel, calc(64px + var(--safe-bottom) + var(--space-3))));
+    transform: translateY(var(--compact-nav-travel, calc(var(--floating-nav-height) + var(--safe-bottom) + var(--space-3))));
   }
 }
 
@@ -7746,6 +7746,35 @@ body:has(.route-cache-panel:not([hidden]) > .app-shell > .titlebar) :is(
 }
 .app-main.has-home-topbar .workspace-home > .archive-rail { margin-block: 0; }
 .app-main.has-home-topbar .workspace-home > .first-run-page { padding-block-start: 0; }
+
+/* Wide rows and their placeholders share the same mobile gutters. Keep the
+   outer divider and toolbar aligned to their existing edges. */
+:where(:root[data-native-mobile='true'], :root[data-native-platform='android'], :root[data-native-platform='ios']) {
+  .library-panels:has(> .library-list-panel-content > .archive-list.is-wide) {
+    padding-inline: max(var(--space-1), var(--safe-left)) max(var(--space-1), var(--safe-right));
+  }
+  .library-list-panel-content > .archive-list.is-wide { padding-inline: var(--space-1); }
+  .archive-list.is-wide.local-archives-list {
+    padding-inline: calc(max(var(--space-1), var(--safe-left)) + var(--space-1))
+                    calc(max(var(--space-1), var(--safe-right)) + var(--space-1));
+  }
+}
+
+html[data-native-platform='ios'] .app-shell.is-floating-nav {
+  --floating-nav-item-height: 34px;
+  --floating-nav-padding: 0px;
+}
+html[data-native-platform='ios'] .compact-nav.is-floating .nav-link {
+  gap: 1px;
+  padding-block: 0;
+  line-height: 1;
+}
+html[data-native-platform='ios'] .compact-nav.is-floating .nav-link > span:last-child {
+  max-inline-size: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* Keep touch scrolling in WebKit's bounded workspace and let the edge-back
    recognizer claim horizontal movement only. */

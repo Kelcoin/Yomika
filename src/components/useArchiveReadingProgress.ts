@@ -11,20 +11,20 @@ export function useArchiveReadingProgress(scopeId: string | undefined, archiveId
   if (owner.current.identity !== identity) owner.current = { identity, busy: false };
   const current = owner.current;
   const [reload, setReload] = useState(0);
-  const [state, setState] = useState({ identity, metadata, hasProgress: false, completed: false, pageIndex: null as number | null, busy: false, ready: false, error: undefined as string | undefined });
+  const [state, setState] = useState({ identity, metadata, hasProgress: false, canClear: false, completed: false, pageIndex: null as number | null, busy: false, ready: false, error: undefined as string | undefined });
   useEffect(() => {
     setState(previous => previous.identity === identity && previous.metadata === metadata ? { ...previous, error: undefined }
-      : { identity, metadata, hasProgress: false, completed: false, pageIndex: null, busy: false, ready: false, error: undefined });
+      : { identity, metadata, hasProgress: false, canClear: false, completed: false, pageIndex: null, busy: false, ready: false, error: undefined });
     let active = true;
     let request = 0;
     const refresh = () => {
       const token = ++request;
       if (!scopeId || !archiveId) return;
-      void repository.loadProgress(scopeId, archiveId).then(result => {
+      void repository.loadReadingStatus(scopeId, archiveId).then(result => {
         if (active && token === request) {
           if (!result.ok) { setState(previous => ({ ...previous, error: result.error.message })); return; }
-          const value = result.value;
-          setState(previous => ({ identity, metadata, ready: true, error: undefined, hasProgress: value !== null, completed: value !== null && value.pageCount > 0 && value.pageIndex >= value.pageCount - 1, pageIndex: value?.pageIndex ?? null, busy: previous.identity === identity && previous.busy }));
+          const { progress: value, hasHistory } = result.value;
+          setState(previous => ({ identity, metadata, ready: true, error: undefined, hasProgress: value !== null, canClear: value !== null || hasHistory, completed: value !== null && value.pageCount > 0 && value.pageIndex >= value.pageCount - 1, pageIndex: value?.pageIndex ?? null, busy: previous.identity === identity && previous.busy }));
         }
       });
     };
@@ -45,7 +45,7 @@ export function useArchiveReadingProgress(scopeId: string | undefined, archiveId
     current.busy = false;
     showToast(result.ok ? '已清除阅读进度和历史记录' : result.error.message, result.ok ? 'success' : 'error');
     if (owner.current !== current) return;
-    setState(previous => ({ identity, metadata, ready: result.ok || previous.ready, error: undefined, hasProgress: result.ok ? false : previous.hasProgress, completed: result.ok ? false : previous.completed, pageIndex: result.ok ? null : previous.pageIndex, busy: false }));
+    setState(previous => ({ identity, metadata, ready: result.ok || previous.ready, error: undefined, hasProgress: result.ok ? false : previous.hasProgress, canClear: result.ok ? false : previous.canClear, completed: result.ok ? false : previous.completed, pageIndex: result.ok ? null : previous.pageIndex, busy: false }));
   };
-  return { completed: state.identity === identity && state.completed, ready: state.identity === identity && state.metadata === metadata && state.ready, error: state.identity === identity && state.metadata === metadata ? state.error : undefined, retry: () => setReload(value => value + 1), hasProgress: state.identity === identity && state.hasProgress, pageIndex: state.identity === identity ? state.pageIndex : null, busy: state.identity === identity && state.busy, clear };
+  return { completed: state.identity === identity && state.completed, ready: state.identity === identity && state.metadata === metadata && state.ready, error: state.identity === identity && state.metadata === metadata ? state.error : undefined, retry: () => setReload(value => value + 1), hasProgress: state.identity === identity && state.hasProgress, canClear: state.identity === identity && state.canClear, pageIndex: state.identity === identity ? state.pageIndex : null, busy: state.identity === identity && state.busy, clear };
 }

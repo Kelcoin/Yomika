@@ -714,11 +714,21 @@ export class NativeLibraryRepository {
   }
 
   async loadProgress(scopeId: string, archiveId: string): Promise<CommandResult<ReadingProgress | null>> {
+    const result = await this.loadReadingStatus(scopeId, archiveId);
+    return result.ok ? ok(result.value.progress) : result;
+  }
+
+  async loadReadingStatus(scopeId: string, archiveId: string): Promise<CommandResult<{ progress: ReadingProgress | null; hasHistory: boolean }>> {
     await waitForProgress(scopeId, archiveId);
     const config = await lrrBridge.config(scopeId);
     if (!config.ok) return config;
-    if (!config.value.enabled) return invokeCommand('load_reading_progress', { scopeId, archiveId }, ReadingProgressSchema.nullable());
+    if (!config.value.enabled) {
+      const result = await invokeCommand('load_reading_progress', { scopeId, archiveId }, ReadingProgressSchema.nullable());
+      return result.ok ? ok({ progress: result.value, hasHistory: false }) : result;
+    }
     const result = await readArchiveState(scopeId, archiveId);
-    return result.ok ? ok(result.value[0] ? bridgeProgress(scopeId, result.value[0]) : null) : result;
+    if (!result.ok) return result;
+    const state = result.value[0];
+    return ok({ progress: state ? bridgeProgress(scopeId, state) : null, hasHistory: state?.historyAt != null });
   }
 }

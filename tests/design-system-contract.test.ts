@@ -339,7 +339,7 @@ describe('design system contract', () => {
     // 悬浮胶囊盖在内容上，滚动容器才需要补出它那 80px；整条 fixed 的底栏本来就占
     // 一行（.app-main 的高度里减掉了），再补出来的只是一块同色空带——手机上就是
     // 底栏之上那一大块「遮挡」。
-    const [padded] = shell.split('--workspace-floating-nav-clearance: calc(var(--safe-bottom) + 80px)');
+    const [padded] = shell.split('--workspace-floating-nav-clearance: calc(var(--safe-bottom) + var(--floating-nav-height) + 14px)');
     expect(padded!.trimEnd()).toMatch(/\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{$/);
     // 收不收底栏由悬浮和自动收起两个开关决定：没开悬浮时它有自己的行，不该被滚动带走。
     expect(app).toMatch(/if \(autoHideFloatingNav\) \{\s*setCompactNavHidden/);
@@ -1994,7 +1994,7 @@ describe('design system contract', () => {
     expect(shell).toMatch(/\.workspace-home\) \{[^}]*padding-block-start: 0;\s*padding-inline: 0;\s*\}/);
     // 被**遮挡**的那一格是例外：悬浮底栏浮在内容之上，滚到底必须能把最后一屏从栏底下
     // 拉出来，所以这一格照旧留在滚动容器上（`is-floating-nav` 那一对选择器）。
-    expect(shell).toMatch(/\.app-shell\.is-floating-nav \.workspace,\s*\n\s*\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{\s*--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ 80px\);\s*padding-bottom: var\(--workspace-floating-nav-clearance\);\s*\}/);
+    expect(shell).toMatch(/\.app-shell\.is-floating-nav \.workspace,\s*\n\s*\.app-shell\.is-floating-nav \.workspace\.is-library-workspace \{\s*--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ var\(--floating-nav-height\) \+ 14px\);\s*padding-bottom: var\(--workspace-floating-nav-clearance\);\s*\}/);
   });
 
   it('reads the comment author above the body, with the timestamp in its own column', () => {
@@ -2741,7 +2741,7 @@ ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     // Compact panels now flow inside the workspace scroll surface. Reserve the
     // floating bar once there; padding retained nested lists doubles the gap.
     const shell = read('src/styles/shell.css');
-    expect(shell.match(/--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ 80px\)/g)).toHaveLength(1);
+    expect(shell.match(/--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ var\(--floating-nav-height\) \+ 14px\)/g)).toHaveLength(1);
     expect(shell).not.toMatch(/\.app-shell\.is-floating-nav \.library-shell-list,[^}]*padding-bottom/);
   });
 
@@ -3591,7 +3591,7 @@ describe('移动端：软键盘、卡片高亮、底部留白、底栏避让', (
       /\.library-shell-list,\s*\.library-shell-detail \{ padding: var\(--space-4\) var\(--space-4\) 0;/,
     );
     expect(shell, '遮挡格仍只由唯一的滚动容器补：悬浮底栏那一格').toMatch(
-      /\.app-shell\.is-floating-nav \.workspace,[\s\S]{0,160}--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ 80px\);/,
+      /\.app-shell\.is-floating-nav \.workspace,[\s\S]{0,160}--workspace-floating-nav-clearance: calc\(var\(--safe-bottom\) \+ var\(--floating-nav-height\) \+ 14px\);/,
     );
   });
 

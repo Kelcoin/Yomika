@@ -139,7 +139,7 @@ export function useArchiveContextMenu(options: {
       // downloading, metadata and membership actions forever.
       target={progress.ready || progress.error || unavailableTarget === target ? target : undefined}
       hiddenActions={options.hiddenActions}
-      onClearProgress={progress.ready && progress.hasProgress && !progress.error && !progress.busy ? () => { void progress.clear(); } : undefined}
+      onClearProgress={progress.ready && progress.canClear && !progress.error && !progress.busy ? () => { void progress.clear(); } : undefined}
       onClose={() => setTarget(undefined)}
       onRead={(archive) => navigate(`/reader/${encodeURIComponent(archive.archiveId)}?server=${encodeURIComponent(archive.serverId)}`)}
       onDelete={setDeleteTarget}
