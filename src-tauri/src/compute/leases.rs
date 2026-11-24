@@ -345,7 +345,6 @@ impl LeaseStore {
 
     /// Take a single snapshot for both sides of a spread. Once acquired, the
     /// renderer owns these references even if either front-end lease is retired.
-    #[cfg(any(windows, target_os = "android", target_os = "ios", test))]
     pub(crate) fn reader_files(
         &self,
         left: &str,

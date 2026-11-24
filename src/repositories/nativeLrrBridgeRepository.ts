@@ -101,6 +101,32 @@ export class NativeLrrBridgeRepository {
     notifyBridge(scopeId, collection);
     return ok(result.value.record);
   }
+  /** 插件托管的全部记录：导出设置页要的是「服务器上现在有什么」，不是本机镜像。 */
+  async exportAll(scopeId: string): Promise<CommandResult<LrrBridgeState[]>> {
+    const states = new Map<string, LrrBridgeState>();
+    for (let offset = 0; ;) {
+      const result = await invokeCommand('lrr_bridge_request', { scopeId, action: 'export', input: { offset, limit: 100 } }, ListSchema);
+      if (!result.ok) return result;
+      for (const state of result.value.states) states.set(state.archiveId, state);
+      offset += result.value.states.length;
+      if (offset >= result.value.total || result.value.states.length === 0) break;
+      if (offset >= 1_000_000) return err('INVALID_RESPONSE', '托管列表分页无效', false);
+    }
+    return ok([...states.values()]);
+  }
+  /** 旧导出的历史写进插件：服务端只收比现有记录更新的条目，重复导入因此是幂等的。 */
+  async importHistory(scopeId: string, entries: readonly { archiveId: string; pageIndex: number; visitedAt: string }[]): Promise<CommandResult<number>> {
+    let imported = 0;
+    for (let offset = 0; offset < entries.length; offset += 50) {
+      const result = await invokeCommand('lrr_bridge_request', {
+        scopeId, action: 'import_history', input: { entries: entries.slice(offset, offset + 50) },
+      }, z.object({ imported: integer }));
+      if (!result.ok) return result;
+      imported += result.value.imported;
+    }
+    if (imported) notifyBridge(scopeId, 'history');
+    return ok(imported);
+  }
   config(scopeId: string, refresh = false): Promise<CommandResult<LrrBridgeConfig>> {
     if (refresh) invalidateLrrBridgeConfig(scopeId);
     const cached = configurations.get(scopeId);

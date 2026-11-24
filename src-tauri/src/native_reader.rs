@@ -4,6 +4,8 @@ use crate::compute::ComputeHandle;
 use crate::domain::result::CommandResult;
 use tauri::{AppHandle, State, WebviewWindow};
 
+pub(crate) mod crop;
+
 #[cfg(any(windows, target_os = "ios", target_os = "android"))]
 pub(crate) mod animation;
 #[cfg(windows)]
@@ -12,6 +14,10 @@ mod d2d;
 mod image_io;
 #[cfg(target_os = "ios")]
 mod ios_host;
+/// Pinch geometry shared with the iOS host; unit-tested on every platform.
+#[cfg(any(windows, target_os = "ios", test))]
+#[cfg_attr(not(target_os = "ios"), allow(dead_code))]
+mod zoom;
 #[cfg(any(windows, target_os = "ios"))]
 mod continuous_input;
 #[cfg(any(windows, target_os = "ios"))]
@@ -19,7 +25,7 @@ use continuous_input::ContinuousInputStamp;
 #[cfg(any(windows, target_os = "ios", test))]
 mod png_pixels;
 #[cfg(target_os = "ios")]
-pub(crate) use ios_host::{cover as cover_ios, retire_window as retire_ios_window};
+pub(crate) use ios_host::{cover as cover_ios, retire_window as retire_ios_window, trim_memory as trim_ios_memory};
 #[cfg(windows)]
 mod wic;
 #[cfg(windows)]

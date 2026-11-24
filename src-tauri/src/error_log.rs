@@ -527,7 +527,7 @@ pub async fn error_log_export(
     app: tauri::AppHandle,
     path: String,
     contents: String,
-) -> Result<CommandResult<String>, String> {
+) -> Result<CommandResult<Option<String>>, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Ok(CommandResult::failure("INVALID_INPUT", "Export path is empty", false));
@@ -535,20 +535,10 @@ pub async fn error_log_export(
     if contents.trim().is_empty() {
         return Ok(CommandResult::failure("INVALID_INPUT", "Error log is empty", false));
     }
-    match write_export(&app, trimmed, &crate::diagnostics::redact_text(&contents)).await {
-        Ok(()) => Ok(CommandResult::success(trimmed.to_string())),
+    match crate::commands::platform::write_text_export(&app, trimmed, &crate::diagnostics::redact_text(&contents)).await {
+        Ok(path) => Ok(CommandResult::success(path)),
         Err(message) => Ok(CommandResult::failure("UNKNOWN", message, true)),
     }
-}
-
-#[cfg(target_os = "android")]
-async fn write_export(app: &tauri::AppHandle, path: &str, contents: &str) -> Result<(), String> {
-    crate::mobile_host::write_text_file(app, path, contents).await
-}
-
-#[cfg(not(target_os = "android"))]
-async fn write_export(_app: &tauri::AppHandle, path: &str, contents: &str) -> Result<(), String> {
-    fs::write(path, contents).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

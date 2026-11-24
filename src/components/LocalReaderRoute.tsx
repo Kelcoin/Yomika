@@ -120,6 +120,7 @@ function LocalReader({ path, page, manifest, progress }: {
     initialPage={Math.min(requestedPage, pages.length - 1)}
     layout={progress?.continuous ? 'webtoon' : preferences.defaultLayout}
     direction={preferences.defaultDirection}
+    autoCropBorders={preferences.autoCropBorders}
     prefetchDistance={preferences.prefetchPages}
     loadPage={loadPage}
     releasePage={releasePage}

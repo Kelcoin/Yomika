@@ -430,20 +430,6 @@ body:has(.reader-screen [data-native-reader-visible]),
 @keyframes reader-chrome-top-out { to { transform: translateY(-100%); } }
 @keyframes reader-chrome-bottom-in { from { transform: translateY(100%); } }
 @keyframes reader-chrome-bottom-out { to { transform: translateY(100%); } }
-/* 每一页翻过去，栏顶那条分隔线上铺开一道主题色短线（从中间向两侧）。它是另挂的**新
-   元素**（见下面 `.reader-toolbar-turn`）：栏自己的 `animation` 位置是入场的，一个元素
-   上两条 animation 会互相顶掉；而重播一条 CSS 动画只有 `animation-name` 换一个或元素
-   重新挂载两条路，所以 ReaderScreen 每翻一页换一个 `key`。 */
-@keyframes reader-toolbar-turn {
-  from { opacity: 0; transform: scaleX(0.15); }
-  /* 这一道光压在画面上，只能用 --reader-* 那套固定深色方案：`--primary` 会跟着主题
-     翻转，浅色主题下它是深红，落在黑画布上就是一道看不见的暗线（判据
-     「keeps the on-canvas reader chrome on its own fixed dark scheme」按选择器剔掉
-     两条栏之后仍会扫到 @keyframes 里的这条声明）。 */
-  35% { opacity: 0.95; box-shadow: 0 0 8px var(--reader-primary); }
-  to { opacity: 0; transform: scaleX(1); box-shadow: 0 0 0 transparent; }
-}
-
 /* M3 small top app bar: a 64dp container (plus the safe area), 4dp of inline
    padding (TopAppBarHorizontalPadding), a 4dp inset before the title, and 24dp
    icons. Deliberately taller than the shell's 44px window title bar: the reader
@@ -692,6 +678,7 @@ body:has(.reader-screen [data-native-reader-visible]),
    黑画布上的控件用的（只剩重试那颗），在这两条主题色的栏上会淡得看不见。 */
 @media (hover: hover) {
   .reader-icon-button:hover,
+  .reader-chrome-top .reader-icon-button:hover::before,
   .reader-toolbar button:hover:not(:disabled)::before {
     background: var(--surface-container-high);
   }
@@ -700,8 +687,11 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-toolbar button:is(.is-pressed, :active):not(:disabled)::before { background: var(--surface-container-highest); }
 
   .reader-icon-button:active:not(:disabled) {
-    background: var(--surface-container-highest);
     transform: translateY(1px) scale(0.94);
+  }
+
+  .reader-icon-button:active:not(:disabled):where(:not(.reader-chrome-top *)) {
+    background: var(--surface-container-highest);
   }
 }
 
@@ -719,6 +709,21 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-retry-button:is(.is-pressed, :active) {
     background: var(--reader-control-hover);
   }
+}
+
+/* Narrow top-bar hit targets still use the same circular layer as the bottom bar. */
+.reader-chrome-top .reader-icon-button {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+}
+
+@media (hover: hover) {
+  .reader-chrome-top .reader-icon-button:active:not(:disabled)::before { background: var(--surface-container-highest); }
+}
+
+@media (hover: none) {
+  .reader-chrome-top .reader-icon-button:is(.is-pressed, :active)::before { background: var(--surface-container-high); }
 }
 
 .reader-toolbar button:active { transform: none; }
@@ -762,29 +767,6 @@ body:has(.reader-screen [data-native-reader-visible]),
 /* This bar is a scroll container, so the reader root's touch-action alone
    does not reach its buttons. Keep horizontal drags with the reader. */
 .reader-toolbar[data-page-swipe] { touch-action: none; }
-
-/* 翻页那一瞬的回应：栏顶那条分隔线上铺开一道主题色短线（从中间向两侧，和阅读方向
-   无关）。它是 ReaderScreen 按翻页次数挂上来的**新元素**（`key` 一变 React 就换一个），
-   不是栏自己的伪元素：栏的 `animation` 位置是入场的，而重播一条 CSS 动画只有两条路——
-   `animation-name` 换一个，或者元素重新挂载。实测（debug_outputs/reader-motion）里
-   只改属性值 Blink 不会重播。只管光线，不接指针。 */
-.reader-toolbar-turn {
-  position: absolute;
-  top: 0;
-  right: var(--space-1);
-  left: var(--space-1);
-  height: 2px;
-  border-radius: var(--radius-pill);
-  /* 底色就是主题色本身：判据钉的是 `background: var(--primary)`（光线的颜色只有
-     一处定义）。2026-10-17 那一轮视觉优化把它换成了一条 transparent→primary→
-     transparent 的渐变，`animation` 的 scaleX 也照旧，视觉上等于把同一条线淡了两端。 */
-  background: var(--primary);
-  animation: reader-toolbar-turn var(--motion-slow);
-  /* 基础值是灭的：动画没有 `forwards`，播完就落回这一档（否则一条主题色的实线会一直
-     留在栏顶）。 */
-  opacity: 0;
-  pointer-events: none;
-}
 
 .reader-toolbar.is-leaving { animation: reader-chrome-bottom-out var(--duration-exit) var(--ease-exit) forwards; pointer-events: none; }
 
@@ -836,13 +818,14 @@ body:has(.reader-screen [data-native-reader-visible]),
 }
 
 /* Keep the state layer circular even when the phone layout narrows the hit area. */
+.reader-chrome-top .reader-icon-button::before,
 .reader-toolbar button::before {
   position: absolute;
   z-index: -1;
   inset: 0;
   margin: auto;
-  inline-size: var(--reader-action-width);
-  block-size: var(--reader-action-width);
+  inline-size: var(--reader-action-width, var(--icon-button-size));
+  block-size: var(--reader-action-width, var(--icon-button-size));
   border-radius: 50%;
   transition: background-color var(--motion-standard);
   content: '';
@@ -1096,7 +1079,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   }
   .reader-toolbar-group { min-height: 44px; gap: var(--space-2); }
   .reader-toolbar button { --reader-action-width: 36px; }
-  .reader-chrome-top .reader-icon-button { width: 36px; min-width: 36px; flex-basis: 36px; }
+  .reader-chrome-top .reader-icon-button { --reader-action-width: 36px; width: 36px; min-width: 36px; flex-basis: 36px; }
   .reader-chrome-actions { gap: 0; }
 }
 
@@ -1104,7 +1087,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-toolbar { column-gap: var(--space-2); }
   .reader-toolbar-group { gap: 6px; }
   .reader-toolbar button { --reader-action-width: 30px; }
-  .reader-chrome-top .reader-icon-button { width: 30px; min-width: 30px; flex-basis: 30px; }
+  .reader-chrome-top .reader-icon-button { --reader-action-width: 30px; width: 30px; min-width: 30px; flex-basis: 30px; }
   .reader-toolbar-counter { min-inline-size: 56px; padding-inline: 4px; }
   .reader-toolbar svg,
   .reader-chrome-top .reader-icon-button svg { width: 22px; height: 22px; }

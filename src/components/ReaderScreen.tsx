@@ -18,6 +18,7 @@ import { getPlatformCapabilities, setStatusBarVisible } from '../bridge/platform
 import { decodeImageElementStrict } from '../lib/decodeImage';
 import { logError } from '../lib/errorLog';
 import { hapticFeedback } from '../lib/haptics';
+import { isIosBackEdge } from '../lib/layoutMode';
 import { EDGE_SETTLE_EASING, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
 import { ThumbnailScheduler } from '../lib/thumbnailScheduler';
 import { useDelayedUnmount } from '../lib/useDelayedUnmount';
@@ -25,7 +26,8 @@ import { COARSE_POINTER_QUERY } from '../lib/horizontalScroller';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
 import { useMediaQuery } from '../lib/useMediaQuery';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
-import { allocateNativeReaderSession, configureNativePinchInput, configureNativeContinuousInput, repositionNativeContinuousInput, trackNativeContinuousInput, NativeReaderSession, canPresentNativePage, hasNativeReaderTiles, hasNativeWheelZoom, sampleNativeWheelZoom, invalidateContinuousReaderLayout, hasAndroidReaderTileSource, ReaderTileSlot, readerUsesShellGestures, rememberNativeReaderZoom, requestNativeReaderDoubleTap, requestNativeReaderViewport, settleNativeReaderFitForTurn, updateNativeReaderEdge, updateNativeReaderSlide, updateNativeReaderTransform, type ReaderTileViewport, type ReaderTilePageSize, type WheelZoomSample } from '../lib/readerNativeTiles';
+import { allocateNativeReaderSession, configureNativePinchInput, configureNativeContinuousInput, repositionNativeContinuousInput, trackNativeContinuousInput, NativeReaderSession, canPresentNativePage, readerSourceLeaseId, hasNativeReaderTiles, hasNativeWheelZoom, sampleNativeWheelZoom, invalidateContinuousReaderLayout, hasAndroidReaderTileSource, ReaderTileSlot, readerUsesShellGestures, rememberNativeReaderZoom, requestNativeReaderDoubleTap, requestNativeReaderViewport, settleNativeReaderFitForTurn, updateNativeReaderEdge, updateNativeReaderSlide, updateNativeReaderTransform, type ReaderTileViewport, type ReaderTilePageSize, type WheelZoomSample } from '../lib/readerNativeTiles';
+import { useReaderCrop } from '../lib/useReaderCrop';
 import { useReaderImageHandover } from '../lib/useReaderImageHandover';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
@@ -274,6 +276,7 @@ interface ReaderScreenProps {
    * switch above, for instance. Every loaded page is dropped and the window
    * refetched; without it a toggle changed nothing already on screen. */
   reloadToken?: number;
+  autoCropBorders?: boolean;
   /** Enhanced renditions by page index. They arrive after the plain page and take
    * its place in the same slot, so nothing about the view changes but the `src` —
    * which is what keeps the zoom from being thrown away mid-read. */
@@ -650,7 +653,7 @@ function NativeReaderSpread({ source, nativeTarget, indexes, rtl, visible, inter
   </>;
 }
 
-export function ReaderScreen({ readerSession, archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, dlssnr, reloadToken = 0, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed, onDerivedRejected }: ReaderScreenProps) {
+export function ReaderScreen({ readerSession, archiveId, title, pages, initialPage = 0, direction = 'ltr', layout = 'auto', loadPage, loadPageThumbnail, releasePage, onProgress, info, incognito = false, prefetchDistance = 1, upscale, dlssnr, reloadToken = 0, autoCropBorders = false, derivedPages, derivingPages, derivingLabel = '处理中…', onVisiblePages, onDerivedDisplayed, onDerivedRejected }: ReaderScreenProps) {
   const nativeSession = useMemo(() => readerSession ?? allocateNativeReaderSession(), [archiveId, readerSession]);
   const pageActive = usePageActive();
   const keepNativeSlots = useContext(ReaderSettingsPause) || pageActive;
@@ -857,7 +860,52 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const [thumbnails, setThumbnails] = useState<ReadonlyMap<number, string>>(() => new Map());
   /** Natural size per page index, recorded as images load. Feeds both the `auto`
    * layout decision and the continuous-scroll slot heights. */
-  const [pageSizes, setPageSizes] = useState<ReadonlyMap<number, { width: number; height: number }>>(() => new Map());
+  const [measuredPageSizes, setPageSizes] = useState<ReadonlyMap<number, { width: number; height: number }>>(() => new Map());
+  const visibleIndexes = useMemo(
+    () => getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: pages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes }),
+    [pages.length, state.layout, state.pageIndex, state.resolvedLayout, state.shapes],
+  );
+  /** The slots a swipe reveals. Rendering only the current one left the gesture
+   * with nothing to slide in from either side, so a drag looked like the page was
+   * being dragged off a blank background. Sides are by *intent*, not by page
+   * number: dragging left always uncovers the "next" slot, in both directions. */
+  const neighbourIndexes = useMemo(() => {
+    const previous = advanceReader(state, 'previous');
+    const next = advanceReader(state, 'next');
+    const neighbour = (destination: typeof state) => {
+      const indexes = getVisiblePageIndexes(destination);
+      return indexes[0] === visibleIndexes[0] ? [] : indexes;
+    };
+    return { previous: neighbour(previous), next: neighbour(next) };
+  }, [state, visibleIndexes]);
+  const neighboursRef = useRef(neighbourIndexes);
+  neighboursRef.current = neighbourIndexes;
+
+  const cropRequests = useMemo(() => {
+    const sources = new Map<string, { index: number; originalSource?: string }>();
+    if (!hasNativeReaderTiles()) return sources;
+    const add = (index: number) => {
+      const original = loadedPages.get(index);
+      const derived = derivedPages?.get(index);
+      if (original && readerSourceLeaseId(original)) {
+        sources.set(original, { index });
+        if (derived && readerSourceLeaseId(derived)) sources.set(derived, { index, originalSource: original });
+      }
+    };
+    visibleIndexes.forEach(add);
+    neighbourIndexes.next.forEach(add);
+    neighbourIndexes.previous.forEach(add);
+    loadedPages.forEach((_url, index) => add(index));
+    return sources;
+  }, [loadedPages, derivedPages, visibleIndexes, neighbourIndexes]);
+  const { results: crops, sizes: croppedSizes, predecessors: cropPredecessors, revision: cropRevision } = useReaderCrop(nativeSession, cropRequests, autoCropBorders && pageActive && !handoverPaused);
+  const pageSizes = useMemo(() => {
+    if (!cropRevision) return measuredPageSizes;
+    const sizes = new Map(measuredPageSizes);
+    for (const [index, size] of croppedSizes) sizes.set(index, autoCropBorders ? size.cropped : size.original);
+    return sizes;
+  }, [autoCropBorders, cropRevision, croppedSizes, measuredPageSizes]);
+
   const [pageMeasurement, setPageMeasurement] = useState(0);
   /** Pages whose retries are spent, as state rather than a ref so the slot can
    * actually re-render into its failure state. */
@@ -978,6 +1026,20 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   useLayoutEffect(() => {
     if (effectiveLayout === 'webtoon') invalidateContinuousReaderLayout();
   }, [effectiveLayout, pageOffsets, viewport.width, viewport.height]);
+  const previousCropLayout = useRef({ offsets: pageOffsets, cropRevision, autoCropBorders });
+  useLayoutEffect(() => {
+    const previous = previousCropLayout.current;
+    previousCropLayout.current = { offsets: pageOffsets, cropRevision, autoCropBorders };
+    if (effectiveLayout !== 'webtoon' || (previous.cropRevision === cropRevision && previous.autoCropBorders === autoCropBorders)) return;
+    const container = webtoonRef.current;
+    if (!container || previous.offsets.length !== pageOffsets.length) return;
+    const anchor = webtoonWindow({ scrollTop: container.scrollTop, viewportHeight: viewport.height, offsets: previous.offsets, overscan: 0 }).first;
+    const delta = (pageOffsets[anchor] ?? 0) - (previous.offsets[anchor] ?? 0);
+    if (!delta) return;
+    container.scrollTop += delta;
+    repositionNativeContinuousInput(container, delta, true);
+    setScrollTop(container.scrollTop);
+  }, [autoCropBorders, cropRevision, effectiveLayout, pageOffsets, viewport.height]);
   /** What continuous scroll keeps mounted. Held as two numbers rather than an
    * object so that scrolling within the same window does not re-run the fetch
    * effect on every scroll event. */
@@ -989,26 +1051,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     () => webtoonWindow({ scrollTop, viewportHeight: viewport.height, offsets: pageOffsets, overscan: 0 }).first,
     [pageOffsets, scrollTop, viewport.height],
   );
-  const visibleIndexes = useMemo(
-    () => getVisiblePageIndexes({ pageIndex: state.pageIndex, pageCount: pages.length, layout: state.layout, resolvedLayout: state.resolvedLayout, shapes: state.shapes }),
-    [pages.length, state.layout, state.pageIndex, state.resolvedLayout, state.shapes],
-  );
-  /** The slots a swipe reveals. Rendering only the current one left the gesture
-   * with nothing to slide in from either side, so a drag looked like the page was
-   * being dragged off a blank background. Sides are by *intent*, not by page
-   * number: dragging left always uncovers the "next" slot, in both directions. */
-  const neighbourIndexes = useMemo(() => {
-    const previous = advanceReader(state, 'previous');
-    const next = advanceReader(state, 'next');
-    const neighbour = (destination: typeof state) => {
-      const indexes = getVisiblePageIndexes(destination);
-      return indexes[0] === visibleIndexes[0] ? [] : indexes;
-    };
-    return { previous: neighbour(previous), next: neighbour(next) };
-  }, [state, visibleIndexes]);
-  const neighboursRef = useRef(neighbourIndexes);
-  neighboursRef.current = neighbourIndexes;
-
   // The caller can learn the layout and direction *after* the first paint — the
   // preferences load asynchronously, and the archive's own record later still —
   // and the reader used to notice only by being unmounted, which happened as a
@@ -1309,6 +1351,37 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, [releasePage]);
 
   const [rejectedDerived, setRejectedDerived] = useState<Map<number, string>>(() => new Map());
+  const [failedCrops, setFailedCrops] = useState<ReadonlySet<string>>(() => new Set());
+  const cropSource = (url: string | undefined) => {
+    if (url === undefined || !autoCropBorders) return url;
+    const crop = crops.get(url);
+    return crop && !failedCrops.has(crop.url) ? crop.url : url;
+  };
+  const sourceFor = (index: number) => {
+    const derived = derivedPages?.get(index);
+    if (derived && rejectedDerived.get(index) !== derived) {
+      if (!autoCropBorders || !cropRequests.has(derived) || crops.has(derived)) return cropSource(derived);
+      const predecessor = cropSource(cropPredecessors.get(index));
+      if (predecessor) return predecessor;
+    }
+    return cropSource(loadedPages.get(index));
+  };
+  const reportDisplayed = useCallback((index: number, url: string) => {
+    const derived = derivedPages?.get(index);
+    onDerivedDisplayed?.(index, derived && crops.get(derived)?.url === url ? derived : url);
+  }, [crops, derivedPages, onDerivedDisplayed]);
+  const rejectCrop = (index: number, url: string) => {
+    for (const source of [loadedPages.get(index), derivedPages?.get(index)]) {
+      if (!source || crops.get(source)?.url !== url) continue;
+      setFailedCrops(current => new Set(current).add(url));
+      return true;
+    }
+    return false;
+  };
+  const reportRejected = (index: number, url: string) => {
+    if (!rejectCrop(index, url)) onDerivedRejected?.(index, url);
+  };
+
   const failPage = useCallback((index: number, url: string) => {
     // The displayed rendition may be a predecessor of the newest derived
     // candidate while that candidate is still decoding.
@@ -1395,6 +1468,19 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     scheduler.resume();
     scheduler.setRange(thumbnailRange);
   }, [archiveId, loadPageThumbnail, pageActive, thumbnailPanelOpen, thumbnailRange]);
+
+  useEffect(() => {
+    const trimPreviews = () => {
+      const range = thumbnailPanelOpen ? thumbnailRange : undefined;
+      thumbnailScheduler.current?.forgetLoadedOutside(range);
+      setThumbnails((current) => {
+        const retained = new Map(range ? [...current].filter(([index]) => index >= range.start && index < range.end) : []);
+        return retained.size === current.size ? current : retained;
+      });
+    };
+    window.addEventListener('yomika-memory-warning', trimPreviews);
+    return () => window.removeEventListener('yomika-memory-warning', trimPreviews);
+  }, [thumbnailPanelOpen, thumbnailRange]);
 
   // React registers wheel listeners as passive, so preventDefault() inside
   // onWheel is ignored and the canvas would zoom *and* scroll. Bind natively.
@@ -1555,7 +1641,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       : Boolean(zoomElementRef.current?.querySelector('[data-native-reader-ready]')) || canZoomCurrentImage();
     const next = ready ? autoTurnPageKey : undefined;
     if (autoTurnReadyKey !== next) setAutoTurnReadyKey(next);
-  }, [autoPlay, autoTurnReadyKey, pageActive, effectiveLayout, autoTurnPageKey, state.pageIndex, pageMeasurement, loadedPages, exhaustedPages, canZoomCurrentImage]);
+  }, [autoPlay, autoTurnReadyKey, pageActive, effectiveLayout, autoTurnPageKey, state.pageIndex, pageMeasurement, loadedPages, exhaustedPages, canZoomCurrentImage, cropRevision]);
   useEffect(() => {
     if (!autoPlay || !pageActive) return;
     const update = () => setAutoTurnForeground(document.visibilityState !== 'hidden');
@@ -1564,11 +1650,11 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     return () => document.removeEventListener('visibilitychange', update);
   }, [autoPlay, pageActive]);
   const autoTurnInterval = AUTO_TURN_INTERVAL_MS * (effectiveLayout === 'double' ? 2 : 1);
-  const autoTurnRunning = autoPlay && pageActive && autoTurnForeground && autoTurnReadyKey === autoTurnPageKey;
+  const autoTurnRunning = autoPlay && pageActive && autoTurnForeground && !handoverPaused && !thumbnailPanelOpen && autoTurnReadyKey === autoTurnPageKey;
   useEffect(() => {
     if (!autoTurnRunning) return;
     const timer = window.setTimeout(() => {
-      if (document.visibilityState === 'hidden') return;
+      if (document.visibilityState === 'hidden' || !canPromote()) return;
       const current = readerStateRef.current;
       // advanceReader's intents describe physical left/right, so forward in an
       // RTL book is `previous`. Always advance the logical page/spread index.
@@ -1577,7 +1663,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
       else moveRef.current(intent, false);
     }, autoTurnInterval);
     return () => window.clearTimeout(timer);
-  }, [autoTurnRunning, autoTurnPageKey, state.direction, autoTurnInterval]);
+  }, [autoTurnRunning, autoTurnPageKey, state.direction, autoTurnInterval, canPromote]);
 
   function handleKeyDown(event: KeyboardEvent<HTMLElement>) {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
@@ -1912,7 +1998,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
 
   // The bars share the reader's swipe surface. Keep the native neighbours armed
   // while chrome is visible, so native artwork still follows the finger.
-  const nativeCanTurn = !thumbnailPanelOpen && !autoPlay;
+  const nativeCanTurn = !thumbnailPanelOpen;
   const nativeLeftPage = nativeCanTurn ? (neighbourIndexes.next[0] ?? -1) + 1 : 0;
   const nativeRightPage = nativeCanTurn ? (neighbourIndexes.previous[0] ?? -1) + 1 : 0;
   useLayoutEffect(() => {
@@ -1990,6 +2076,8 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const handleTouchStart = useCallback((event: TouchEvent) => {
     // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
     if (thumbnailPanelOpen) return;
+    const firstTouch = event.touches[0];
+    if (event.touches.length === 1 && firstTouch && isIosBackEdge(firstTouch.clientX)) return;
     const target = event.target as Element;
     const toolbar = Boolean(target.closest('.reader-toolbar'));
     if (!toolbar && target.closest('button, a, input, .reader-chrome, .reader-overview, .reader-overview-backdrop')) return;
@@ -2508,28 +2596,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     const timer = window.setTimeout(() => setIndicatorFlash(false), INDICATOR_FLASH_MS);
     return () => window.clearTimeout(timer);
   }, [state.pageIndex]);
-  // The bottom bar answers every page turn (see `reader-toolbar-turn` in
-  // reader.css). The cue is a keyed child, not a class or an attribute: React
-  // remounting the node is what restarts a CSS animation. Alternating an
-  // attribute value looks like it should work and does not — measured in
-  // debug_outputs/reader-motion, where the second value ran no animation at all.
-  const previousPage = useRef(state.pageIndex);
-  const [turnCue, setTurnCue] = useState(0);
-  useEffect(() => {
-    if (previousPage.current === state.pageIndex) return;
-    previousPage.current = state.pageIndex;
-    setTurnCue((value) => value + 1);
-  }, [state.pageIndex]);
-  // 光线只跟**翻页那一轮**走，不跟底栏的挂载走。底栏不是常驻的：chrome 收起 260ms
-  // 之后整棵子树被摘掉（`useDelayedUnmount`），下次出现时 `key` 没变也是新 DOM 节点，
-  // 一次性 CSS 动画于是跟着重播一遍——用户看到的就是「底栏出现时栏顶闪一条线」。
-  // `playedCue` 记住已经播过的那一次；写它的是 effect 而不是渲染期间的赋值，否则
-  // StrictMode 的双渲染会在第二次就把 ref 改掉，那一轮的光线永远不出现。
-  const playedCue = useRef(0);
-  const showTurnCue = turnCue > 0 && playedCue.current !== turnCue;
-  useEffect(() => {
-    playedCue.current = turnCue;
-  }, [turnCue]);
   // One transform for the slots on screen: scaling each image on its own made a
   // double spread overlap, because both grew from their own centre. It sits
   // *inside* the current frame rather than on the track that carries all three —
@@ -2558,8 +2624,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
    * empty — a spread whose halves appeared one at a time used to re-centre when
    * the second arrived, shifting the page under the reader's eyes. */
   const renderSlot = (index: number, pagesInSlot = 1, staging = false) => {
-    const derived = derivedPages?.get(index);
-    const source = derived && rejectedDerived.get(index) !== derived ? derived : loadedPages.get(index);
+    const source = sourceFor(index);
     // Whatever rendition is on screen, the page draws at the size its first
     // measurement established: an enhanced page must not be drawn larger than the
     // plain one it replaced (see `.reader-page` in reader.css).
@@ -2576,7 +2641,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
     return (
       <div className={`reader-slot${exhaustedPages.has(index) ? ' is-failed' : ''}`} key={index}>
         {source && !exhaustedPages.has(index)
-          ? <ReaderPageImage continuous={continuous} tileEnabled={(!continuous || hasNativeReaderTiles()) && pagesInSlot === 1 && keepNativeSlots} tileVisible={continuous ? pageActive : visible} tileTurnTargets={tileCanTurn ? { left: (neighbourIndexes.next[0] ?? -1) + 1, right: (neighbourIndexes.previous[0] ?? -1) + 1, reduceMotion } : undefined} tileCurrent={visible && !thumbnailPanelOpen && zoom.scale === 1} index={index} source={source} fitWidth={size?.width} fitHeight={size?.height} onMeasured={measurePage} onDisplayed={staging ? undefined : onDerivedDisplayed} onFailed={staging ? ignoreStagedPageFailure : failPage} onRejected={onDerivedRejected} handoverPaused={handoverPaused || staging} canPromote={canPromote} readDomViewport={readDomViewport} applyNativeViewport={applyNativeViewport} />
+          ? <ReaderPageImage continuous={continuous} tileEnabled={(!continuous || hasNativeReaderTiles()) && pagesInSlot === 1 && keepNativeSlots} tileVisible={continuous ? pageActive : visible} tileTurnTargets={tileCanTurn ? { left: (neighbourIndexes.next[0] ?? -1) + 1, right: (neighbourIndexes.previous[0] ?? -1) + 1, reduceMotion } : undefined} tileCurrent={visible && !thumbnailPanelOpen && zoom.scale === 1} index={index} source={source} fitWidth={size?.width} fitHeight={size?.height} onMeasured={measurePage} onDisplayed={staging ? undefined : reportDisplayed} onFailed={staging ? ignoreStagedPageFailure : (page, url) => { if (!rejectCrop(page, url)) failPage(page, url); }} onRejected={reportRejected} handoverPaused={handoverPaused || staging} canPromote={canPromote} readDomViewport={readDomViewport} applyNativeViewport={applyNativeViewport} />
           : <PageStatus failed={exhaustedPages.has(index)} onRetry={() => retryPage(index)} />}
       </div>
     );
@@ -2688,8 +2753,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
             if (indexes.length === 0) return null;
             const sources = indexes.map((index) => {
               if (exhaustedPages.has(index)) return undefined;
-              const derived = derivedPages?.get(index);
-              return derived && rejectedDerived.get(index) !== derived ? derived : loadedPages.get(index);
+              return sourceFor(index);
             });
             const aspect = viewport.height > 0 ? viewport.width / viewport.height : 0;
             const nativeTarget = sources.every((url) => Boolean(url && canPresentNativePage(url)));
@@ -2727,7 +2791,7 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                   {nativeSpread ? <NativeReaderSpread key={state.direction} source={{ urls: sources as [string, string], aspect }} nativeTarget={nativeTarget}
                     indexes={[indexes[0]!, indexes[1]!]} rtl={state.direction === 'rtl'} visible={pageActive && offset === 0}
                     interactive={spreadInteractive} turnTargets={spreadTurnTargets} paused={handoverPaused}
-                    canPromote={canPromote} onMeasured={measurePage} onDisplayed={onDerivedDisplayed} onRejected={onDerivedRejected} applyNativeViewport={applyNativeViewport} fallback={renderPages} /> : renderPages()}
+                    canPromote={canPromote} onMeasured={measurePage} onDisplayed={reportDisplayed} onRejected={reportRejected} applyNativeViewport={applyNativeViewport} fallback={renderPages} /> : renderPages()}
                 </div>
               </section>
             );
@@ -2791,7 +2855,6 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
                   on `showTurnCue` rather than `turnCue > 0` so that a bar which
                   mounts for a different reason (chrome coming back) carries no cue
                   with it — see `playedCue`. */}
-              {showTurnCue && <span key={turnCue} className="reader-toolbar-turn" aria-hidden="true" />}
               {/* Three slots, left to right: how the pages are arranged, where the
                   reader is, what is done to the page. The counter is the middle
                   slot by grid position, not by luck — the sides are equal `1fr`

@@ -37,6 +37,11 @@ html {
   font-family: var(--font-body);
   font-synthesis: none;
   letter-spacing: var(--tracking-normal);
+  /* iOS 会在横屏、以及系统「文字大小」调大之后对整块文本做自动缩放（text
+     autosizing）：px 定死的工具栏跟着长高、按钮文字互相顶开。这个应用的字号
+     由设置里的阅读字号决定，不是浏览器缩放，所以钉死在 100%。 */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   text-rendering: optimizeLegibility;
   overflow: hidden;
 }

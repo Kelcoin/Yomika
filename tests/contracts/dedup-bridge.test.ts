@@ -90,7 +90,7 @@ describe('native dedup bridge', () => {
     expect(adapter).toHaveBeenLastCalledWith('dedup_load_result', { sessionId: 'scan-1', refreshIndex: true });
   });
 
-  it('bridges exclusions, imports, and partial deletion outcomes', async () => {
+  it('bridges exclusions and partial deletion outcomes', async () => {
     const adapter = vi.fn(async (command: string) => command === 'dedup_delete_selected'
       ? { ok: true, value: { rejectedArchiveIds: [], outcomes: [{ archiveId: 'a', deleted: false, message: 'offline' }] } }
       : { ok: true, value: undefined });
@@ -99,12 +99,11 @@ describe('native dedup bridge', () => {
     const relation = { scopeId: 'scope-a', leftArchiveId: 'b', rightArchiveId: 'a' };
     await repository.saveNonDuplicate(relation);
     await repository.removeNonDuplicate(relation);
-    await repository.importReadoshi({ scopeId: 'scope-a', pairs: [{ leftArchiveId: 'a', rightArchiveId: 'b', source: 'import', diagnostics: null }] });
     expect(await repository.deleteSelected({ sessionId: 'scan-1', outcomes: [{ archiveId: 'a', deleted: false, message: 'offline' }] })).toEqual({
       ok: true, value: { rejectedArchiveIds: [], outcomes: [{ archiveId: 'a', deleted: false, message: 'offline' }] },
     });
     expect(adapter.mock.calls.map(([command]) => command)).toEqual([
-      'dedup_save_non_duplicate', 'dedup_remove_non_duplicate', 'dedup_import_readoshi', 'dedup_delete_selected',
+      'dedup_save_non_duplicate', 'dedup_remove_non_duplicate', 'dedup_delete_selected',
     ]);
   });
 

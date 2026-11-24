@@ -129,7 +129,7 @@ mod tests {
     ///
     /// 文件备份直接读取待看表，不依赖旧的后台队列。
     #[test]
-    fn worker_imported_to_read_records_travel_through_a_data_export() {
+    fn existing_watchlist_records_travel_through_a_data_export() {
         let items: Vec<String> = RECORD_CATEGORIES
             .iter()
             .map(|category| category.to_string())
@@ -137,34 +137,20 @@ mod tests {
         let categories = record_categories(&items);
 
         let (value, objects) = {
-            let mut source =
+            let source =
                 crate::db::Database::open_path(":memory:").expect("in-memory database");
-            let mut connection = source.connection.lock().expect("database lock");
+            let connection = source.connection.lock().expect("database lock");
             connection
                 .execute(
                     "INSERT INTO servers (id, name, base_url, scope_id) VALUES ('scope-a', 'Home', 'https://lrr.test', 'scope-a')",
                     [],
                 )
                 .expect("insert server");
-            let report = crate::commands::legacy::import_worker_sections(
-                &mut connection,
-                crate::commands::legacy::WorkerImportInput {
-                    scope_id: "scope-a".to_string(),
-                    history: crate::commands::legacy::WorkerHistorySection {
-                        entries: Vec::new(),
-                        deleted_ids: Vec::new(),
-                    },
-                    watchlist: crate::commands::legacy::WorkerWatchlistSection {
-                        entries: vec![crate::commands::legacy::WorkerWatchlistEntry {
-                            archive_id: "archive-w".to_string(),
-                            added_at: "2026-09-01 08:00:00".to_string(),
-                        }],
-                        tombstones: Vec::new(),
-                    },
-                },
-            )
-            .expect("worker import");
-            assert_eq!(report.watchlist, 1, "worker 导入本身要认下这条待看");
+            connection.execute(
+                "INSERT INTO reading_list (scope_id, archive_id, added_at, updated_at, device_id, revision)
+                 VALUES ('scope-a', 'archive-w', '2026-09-01 08:00:00', '2026-09-01 08:00:00', 'old-device', 1)",
+                [],
+            ).expect("seed a watchlist record from an older release");
             let (value, objects) =
                 crate::commands::data_transfer::export_scoped_document(&connection, &categories)
                     .expect("export");
@@ -172,7 +158,7 @@ mod tests {
         };
         assert!(
             value.to_string().contains("archive-w"),
-            "worker 导进来的待看没进导出文档：{value}"
+            "旧版本留下的待看没进导出文档：{value}"
         );
         assert_eq!(objects, 2, "待看与应用设置都应导出：{value}");
 

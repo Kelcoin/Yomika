@@ -4,6 +4,7 @@ import { advanceNavigationSpring } from './navigationSpring';
 type Tab = { node: HTMLAnchorElement; route: string; x: number; y: number; width: number; height: number; iconX: number; iconY: number; iconWidth: number };
 type Gesture = { id: number; x: number; y: number; start: number; current: number; dragging: boolean };
 const DRAG_SLOP = 6;
+const TAP_CLICK_GRACE_MS = 350;
 
 /** BakaSU-style bottom-bar interaction: continuous preview, commit on release.
  * One decorative layer moves; page contents do not render or load until release.
@@ -233,14 +234,17 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
         // events. Keep the preview until click commits, or restore if canceled.
         nav.removeAttribute('data-nav-pressing');
         paint(target);
-        tapRestore = setTimeout(() => { tapRestore = undefined; restore(); }, 0);
+        tapRestore = setTimeout(() => { tapRestore = undefined; restore(); }, TAP_CLICK_GRACE_MS);
         return;
       }
-      restore();
-      if (previous.dragging && inside && target) {
+      if (previous.dragging && inside && target && target.route !== active) {
+        preview?.removeAttribute('data-nav-preview');
+        preview = undefined;
+        nav.removeAttribute('data-nav-pressing');
+        nav.removeAttribute('data-nav-dragging');
         paint(target);
-        if (target.route !== active) select.current(target.route);
-      }
+        select.current(target.route);
+      } else restore();
     };
     const lostCapture = (event: PointerEvent) => { if (event.target === nav && event.pointerId === gesture?.id) cancel(); };
     const click = (event: MouseEvent) => {
@@ -271,7 +275,13 @@ export function useNavigationDrag(ref: RefObject<HTMLElement>, { enabled, elasti
     window.addEventListener('blur', cancel);
     window.addEventListener('resize', resize);
     document.addEventListener('visibilitychange', visibility);
-    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(resize);
+    const observer = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => {
+      // Re-observing on a route commit sends an initial notification even when
+      // the dock has not resized. Do not snap the in-flight indicator then.
+      const widthChanged = nav.clientWidth > 0 && nav.clientWidth !== width;
+      const heightChanged = nav.clientHeight > 0 && nav.clientHeight !== height;
+      if (widthChanged || heightChanged) resize();
+    });
     observer?.observe(nav);
     return () => {
       nav.removeEventListener('pointerdown', down);

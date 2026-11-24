@@ -26,6 +26,9 @@
       :root[data-theme='dark'] { --surface-canvas: #121412; --ink-primary: #e4e3df; --yomika-mark-plate: var(--surface-container-highest, #353936); --yomika-mark-ink-accent: var(--on-surface-variant, #bec8c1); }
       @media (prefers-color-scheme: dark) { :root:not([data-theme]) { --surface-canvas: #121412; --ink-primary: #e4e3df; --yomika-mark-plate: var(--surface-container-highest, #353936); --yomika-mark-ink-accent: var(--on-surface-variant, #bec8c1); } }
       }
+      /* Paint the entire document canvas before the fixed splash is laid out.
+         At cold launch WKWebView can report its final safe area a frame later. */
+      html, body { min-height: 100%; margin: 0; background: var(--surface-canvas, #fbf8f3); }
       .app-splash-static {
         position: fixed;
         inset: 0;
@@ -55,10 +58,10 @@
     </style>
     <script>
       // Native mobile already has an OS launch screen; show only its canvas here.
-      if (window.__TAURI_INTERNALS__ && (/Android|iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1))) document.documentElement.dataset.nativeMobile = 'true';
+      if (window.__yomikaNativeIos || (window.__TAURI_INTERNALS__ && (/Android|iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)))) document.documentElement.dataset.nativeMobile = 'true';
       // Keep CSS and React on the same shell from the first frame. Width may
       // compact a desktop window, but rotating a mobile device never widens it.
-      document.documentElement.dataset.layout = (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1) || matchMedia('(max-width: 900px)').matches) ? 'compact' : 'desktop';
+      document.documentElement.dataset.layout = (document.documentElement.dataset.nativeMobile === 'true' || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1) || matchMedia('(max-width: 900px)').matches) ? 'compact' : 'desktop';
       // 自定义样式镜像在首帧前预置（与 preferences.tsx 的模块级应用同一份键、
       // 同一个 CSSStyleSheet 实例）：静态开屏帧因此跟着用户的主题预设与自定义
       // CSS 走。必须走 adoptedStyleSheets（CSSOM）——Tauri 给 CSP 注入 nonce 后

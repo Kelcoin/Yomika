@@ -8,7 +8,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { usePageActive } from '../app/RetainedPage';
 import { useLoadingReveal } from '../lib/useLoadingReveal';
-import { Languages, ArrowDownWideNarrow, ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy, CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive, HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Paintbrush, Palette, PanelBottom, Rocket, RotateCcw, Settings2, Trash2, ShieldCheck, Check, SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, WandSparkles, BookOpenText, Gauge, ScrollText } from 'lucide-react';
+import { ScanLine, Languages, ArrowDownWideNarrow, ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy, CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive, HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Paintbrush, Palette, PanelBottom, Rocket, RotateCcw, Settings2, Trash2, ShieldCheck, Check, SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, WandSparkles, BookOpenText, Gauge, ScrollText } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { writeClipboardText } from '../bridge/clipboard';
@@ -36,7 +36,7 @@ import { CheckRow, CheckRowGroup, SettingsSwitch } from './SettingsControls';
 import { UpscaleIcon } from './UpscaleIcon';
 import { getTagTranslationSourceVersion, subscribeTagTranslationService, refreshTagTranslations } from '../lib/tagTranslationService';
 import { getTagCountVersion, refreshTagCounts, subscribeTagCountChanges } from '../lib/tagCountService';
-import { DATA_EXPORT_CREDENTIAL_ITEMS, DEFAULT_DATA_EXPORT_ITEMS, DATA_EXPORT_RECORD_ITEMS, isCredentialItem, dataExportItemLabel, type DataExportReport } from '../domain/dataExport';
+import { DATA_EXPORT_CREDENTIAL_ITEMS, DEFAULT_DATA_EXPORT_ITEMS, DATA_EXPORT_RECORD_ITEMS, HOSTED_DATA_EXPORT_ITEMS, isCredentialItem, dataExportItemLabel, type DataExportReport } from '../domain/dataExport';
 
 import { installedDllLabel } from '../domain/dlssnrVersion';
 
@@ -50,17 +50,16 @@ import { ServerSetupDialog } from './ServerSetupDialog';
 
 import { usePreferences } from '../app/preferences';
 import { parseMigrationExport } from '../lib/dataMigration';
-import { readoshiServerScope } from '../lib/readoshiScope';
 import { invalidateRouteCache } from '../lib/routeCache';
 import { COLOR_SCHEMES, CSS_THEME_PRESETS } from '../lib/cssThemePresets';
 import { NativeCacheRepository, type CacheStats } from '../repositories/nativeCacheRepository';
-import { NativeDedupRepository, type DedupPairInput } from '../repositories/nativeDedupRepository';
 import { NativeEhRepository } from '../repositories/nativeEhRepository';
 import { NativeInferenceRepository, InstalledModelSchema, UpscaleCatalogSchema, type InstalledModel, type UpscaleCatalogModel } from '../repositories/nativeInferenceRepository';
 import { readStorageSnapshot } from '../lib/storageSnapshot';
 import { NativeDlssnrRepository } from '../repositories/nativeDlssnrRepository';
 import { DETAIL_ACTIONS, MAX_PREFETCH_PAGES, MIN_PREFETCH_PAGES, PreferenceSnapshotSchema } from '../repositories/nativeSettingsRepository';
 import { useOverlayBackGuard } from '../lib/overlayBackGuard';
+import { DETAIL_EXIT_MS, routeMotionAllowed } from '../lib/routeMotion';
 import { readerSettingsOrigin } from '../lib/pageBackNavigation';
 import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { openExternalUrl } from '../bridge/externalUrl';
@@ -103,7 +102,6 @@ import type { PreferenceSnapshot } from '../repositories/nativeSettingsRepositor
 const repository = new NativeLibraryRepository();
 const legacyRepository = new NativeLegacyRepository();
 const settingsRepository = new NativeSettingsRepository();
-const dedupRepository = new NativeDedupRepository();
 const cacheRepository = new NativeCacheRepository();
 const inferenceRepository = new NativeInferenceRepository();
 const GIB = 1_073_741_824;
@@ -138,11 +136,15 @@ function formatCacheBytes(value: number): string {
   return `${index === 0 ? amount.toFixed(0) : amount.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')} ${units[index]}`;
 }
 
-/** 超分模型列表的固定头名次：内置的那两档（Anime4K 的 shader 链、随包 waifu2x）永远
- * 排在最前，其余的按 id 排。名次写死在这里而不是从数据库或目录里读——那两处的顺序
- * 会随「下载完成」「目录刷新」「版本更新」变化，而列表顺序不该跟着跳（用户 2026-10-18：
- * 模型下载完成会导致顺序发生变化，另外让 anime4k 和 waifu2x 放到上面）。 */
-const BUILT_IN_HEAD = ['anime4k-hq', 'anime4k-ultra', 'anime4k', 'waifu2x-upconv7'];
+/** 超分模型列表的固定头名次：随包/内置的几档永远排在最前，其余的按 id 排。名次写死
+ * 在这里而不是从数据库或目录里读——那两处的顺序会随「下载完成」「目录刷新」「版本更新」
+ * 变化，而列表顺序不该跟着跳（用户 2026-10-18：模型下载完成会导致顺序发生变化，另外让
+ * anime4k 和 waifu2x 放到上面）。
+ *
+ * NomosUni Photo 也在这里：它的权重随二进制分发（`model_release::install_bundled_models`
+ * 启动即装），所以它不是「可以下载的在线模型」，既不该有下载/删除按钮，也要排在真正
+ * 需要下载的那几档（Real-ESRGAN、Real-CUGAN）前面（用户 2026-11-24）。 */
+const BUILT_IN_HEAD = ['anime4k-hq', 'anime4k-ultra', 'anime4k', 'waifu2x-upconv7', 'span-nomosuni-photo'];
 function builtInRank(id: string): number {
   const at = BUILT_IN_HEAD.indexOf(id);
   return at === -1 ? BUILT_IN_HEAD.length : at;
@@ -233,13 +235,37 @@ export function SettingsWorkspace() {
    * of eight tabs above squeezed content. Ignored in the wide layout. */
   const compact = useMediaQuery(COMPACT_WIDTH_QUERY);
   const [compactDrilled, setCompactDrilled] = useState(Boolean(initialSection));
-  const showSectionList = !compact || !compactDrilled;
+  const settingsContentRef = useRef<HTMLDivElement>(null);
+  const settingsListRef = useRef<HTMLDivElement>(null);
+  const [backOffset, setBackOffset] = useState<number>();
+  const showSectionList = !compact || !compactDrilled || backOffset !== undefined;
   const showSectionContent = !compact || compactDrilled;
   // 一级一级退：手机上的返回手势走的是 webview 历史（`AppPlugin` 把返回键交给
   // `webView.goBack()`），所以设置项开着时按返回，人想要的是先回到分类列表，而不是
   // 把整个设置页带回上一页。开着的时候压一条守卫条目，返回手势弹掉它、就地回到列表；
   // 页内那个「返回设置分类」按钮关掉这一层时，守卫自己把条目吃掉（`lib/overlayBackGuard`）。
-  useOverlayBackGuard(pageActive && compact && compactDrilled && !readerOrigin, () => setCompactDrilled(false));
+  const closeSettingsSection = () => { setBackOffset(undefined); setCompactDrilled(false); };
+  useOverlayBackGuard(pageActive && compact && compactDrilled && !readerOrigin, closeSettingsSection, {
+    surface: () => settingsContentRef.current,
+    close: (offset) => {
+      if (routeMotionAllowed() && typeof settingsContentRef.current?.animate === 'function') setBackOffset(offset);
+      else closeSettingsSection();
+    },
+  });
+  useLayoutEffect(() => {
+    const content = settingsContentRef.current;
+    if (backOffset === undefined || !content) return;
+    content.style.removeProperty('translate');
+    const options = { duration: DETAIL_EXIT_MS, easing: 'ease-out' } as const;
+    const front = content.animate([{ transform: `translateX(${backOffset}px)` }, { transform: 'translateX(100vw)' }], { ...options, fill: 'forwards' });
+    const back = settingsListRef.current?.animate([
+      { transform: `translateX(${Math.min(0, (backOffset - content.clientWidth) * .26)}px)` },
+      { transform: 'translateX(0)' },
+    ], options);
+    front.onfinish = closeSettingsSection;
+    const deadline = window.setTimeout(closeSettingsSection, DETAIL_EXIT_MS + 50);
+    return () => { clearTimeout(deadline); front.onfinish = null; front.cancel(); back?.cancel(); };
+  }, [backOffset]);
   const [cacheStats, setCacheStats] = useState<CacheStats>();
   const [cacheClearing, setCacheClearing] = useState(false);
   /** 标签翻译 / 补全排序的数据版本与刷新状态（docs/30 设置项）。 */
@@ -293,8 +319,7 @@ export function SettingsWorkspace() {
    * closed row would say 未登录 about an account that is signed in. */
   const [ehAccountName, setEhAccountName] = useState<string>();
   useEffect(() => {
-    // 数据一节也要它：收藏同步删除没有登录账户就开不了。
-    if (!['settings-eh', 'settings-data'].includes(selectedSettingsSection)) return;
+    if (selectedSettingsSection !== 'settings-eh') return;
     let active = true;
     void new NativeEhRepository().listAccounts().then((result) => {
       if (!active || !result.ok) return;
@@ -626,12 +651,23 @@ export function SettingsWorkspace() {
       return;
     }
     if (parsed.kind === 'export') {
-      // 新版文件：文件里有什么就勾什么（默认全选），等使用者确认再落地。
-      setMigrationText(text.trim());
-      setImportAvailable(parsed.payload.items);
-      setImportItems([...parsed.payload.items]);
-      showToast(`文件里包含 ${parsed.payload.items.map(dataExportItemLabel).join('、')}`, 'info');
+      // 新版文件：文件里有什么就勾什么（默认全选），等使用者确认再落地。托管给插件
+      // 的那三类不再从应用落地，旧文件里遇到就把它们从勾选里摘掉并说明去哪儿导。
+      const hosted = parsed.payload.items.filter((id) => HOSTED_DATA_EXPORT_ITEMS.includes(id));
+      const items = parsed.payload.items.filter((id) => !HOSTED_DATA_EXPORT_ITEMS.includes(id));
       setMigrationPending(false);
+      if (items.length === 0) {
+        showToast('这份文件里只有待看、历史与非重复标记：它们已由服务器插件托管，请到设置 →「服务器阅读数据」里导入', 'error');
+        return;
+      }
+      setMigrationText(text.trim());
+      setImportAvailable(items);
+      setImportItems([...items]);
+      showToast(
+        `文件里包含 ${items.map(dataExportItemLabel).join('、')}` +
+        (hosted.length > 0 ? `；${hosted.map(dataExportItemLabel).join('、')} 由服务器插件托管，请到「服务器阅读数据」里导入` : ''),
+        'info',
+      );
       return;
     }
     if (parsed.kind === 'legacy') {
@@ -652,7 +688,7 @@ export function SettingsWorkspace() {
       // 旧版独立导出的同步文档：按记录类全集落地（旧文件里没有凭据）。
       const result = await settingsRepository.importScopedData(
         text.trim(),
-        JSON.stringify(['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings']),
+        JSON.stringify(['progress', 'search_presets', 'app_settings']),
       );
       if (!result.ok) {
         showToast(result.error.message, 'error');
@@ -670,51 +706,11 @@ export function SettingsWorkspace() {
       return;
     }
     if (parsed.kind === 'workerV3') {
-      const payload = parsed.payload;
-      // The export's serverScope is md5(normalized server URL) in Readoshi's
-      // formula; recompute it over the configured servers to find the target
-      // scope. A foreign server must be added first — guessing would write
-      // the records into the wrong scope.
-      const target = servers.find((server) => readoshiServerScope(server.baseUrl) === payload.serverScope);
-      if (!target) {
-        showToast('导出属于其他 LANraragi 服务器（指纹 ' + payload.serverScope + '），先在设置中添加该服务器再导入', 'error');
-        setMigrationPending(false);
-        return;
-      }
-      const result = await legacyRepository.importWorkerExport(target.scopeId, payload);
-      if (!result.ok) {
-        showToast(result.error.message, 'error');
-        setMigrationPending(false);
-        return;
-      }
-      const skipped = payload.history.skipped + payload.watchlist.skipped + payload.dedupe.skipped;
-      let dedupePairs = 0;
-      let dedupeNote = '';
-      if (payload.dedupe.pairs.length > 0) {
-        const pairs: DedupPairInput[] = payload.dedupe.pairs.map((pair) => ({
-          leftArchiveId: pair.leftArchiveId,
-          rightArchiveId: pair.rightArchiveId,
-          source: 'readoshi',
-          diagnostics: null,
-        }));
-        const dedupeResult = await dedupRepository.importReadoshi({ scopeId: target.scopeId, pairs });
-        if (dedupeResult.ok) dedupePairs = pairs.length;
-        else dedupeNote = `（重复关系导入失败：${dedupeResult.error.message}）`;
-      }
-      setMigrationText('');
-      const removed = [
-        result.value.historyRemoved ? `清理阅读 ${result.value.historyRemoved}` : '',
-        result.value.watchlistRemoved ? `墓碑 ${result.value.watchlistRemoved}` : '',
-      ].filter(Boolean).join('，');
-      showToast(
-        `已导入：阅读 ${result.value.history} · 待看 ${result.value.watchlist} · 重复关系 ${dedupePairs}` +
-        (removed ? `（${removed}）` : '') +
-        (skipped ? `，跳过 ${skipped} 条异常记录` : '') +
-        dedupeNote,
-        result.value.history + result.value.watchlist > 0 ? 'success' : 'error',
-      );
-      invalidateRouteCache('home:');
+      // 阅读历史、待看与非重复标记已经由 Yomika Bridge 插件托管在服务端：应用这边
+      // 再写一份本地副本，会和插件里的那份各自往前走，谁都不是真相。旧文件不再
+      // 在应用内落地，而是指路到插件设置页（那里认这份格式，见 bridgeDataTransfer）。
       setMigrationPending(false);
+      showToast('阅读历史、待看与非重复标记已由服务器插件托管：请到设置 →「服务器阅读数据」里导入这份旧数据', 'error');
       return;
     }
     const scopeId = parsed.payload.scopeId || servers[0]?.scopeId;
@@ -826,13 +822,15 @@ export function SettingsWorkspace() {
     const report = await buildMigrationExport();
     if (!report) return;
     const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-    const path = await pickSavePath(`yomika-export-${stamp}.json`);
+    const filename = `yomika-export-${stamp}.json`;
+    const path = platformName === 'ios' ? filename : await pickSavePath(filename);
     if (!path) return;
     const result = await saveTextToFile(path, report.text);
     if (!result.ok) {
       showToast(result.error.message, 'error');
       return;
     }
+    if (result.value === null) return;
     const summary = exportSummary(report);
     const where = `已导出到 ${result.value}`;
     if (exportItems.some(isCredentialItem)) {
@@ -931,14 +929,14 @@ export function SettingsWorkspace() {
   return (
     <div className="settings-page" ref={pageRef}>
       <h1 className="visually-hidden">设置</h1>
-      <div className={`settings-layout${compact ? ' is-compact' : ''}`}>
+      <div className={`settings-layout${compact ? ' is-compact' : ''}${backOffset !== undefined ? ' is-backing' : ''}`}>
         {showSectionList && (
         /* The sticky element sits inside a slot that stretches to the row, so its
            containing block does not change height with the section: as a direct
            grid item the sidebar was offset by its own `top` (24px) whenever the
            content was taller than the nav, and the whole list jumped on every
            switch between a tall and a short section. */
-        <div className="settings-sidebar-slot">
+        <div className="settings-sidebar-slot" ref={settingsListRef}>
         <aside className="settings-sidebar" aria-label="设置分类">
           {compact && <header className="settings-compact-heading is-landing"><h2><Settings2 aria-hidden="true" /><span>设置</span></h2></header>}
           {compact ? (
@@ -977,7 +975,7 @@ export function SettingsWorkspace() {
         </div>
         )}
         {showSectionContent && (
-        <div className="settings-content">
+        <div className="settings-content" ref={settingsContentRef}>
       {(compact || readerOrigin) && (
         <header className="settings-compact-heading">
           <button className="reader-icon-button" type="button" aria-label={readerOrigin ? '返回阅读模式' : '返回设置分类'} onClick={readerOrigin ? goBack : () => setCompactDrilled(false)}>
@@ -1033,19 +1031,20 @@ export function SettingsWorkspace() {
                 onToggle={() => editPreferences({ randomRoamShowFinished: !preferenceDraft.randomRoamShowFinished })}
               />
             )}
-            {selectedSettingsSection === 'settings-general' && (
+            {selectedSettingsSection === 'settings-general' && platformName !== 'ios' && (
               <SettingsPanel
                 icon={<FolderOpen />}
+                className="settings-download-directory"
                 label="下载目录"
-                hint="上传与下载使用的本机目录"
+                hint={platformName === 'android' ? '已下载的档案会另存一份到所选目录' : '档案下载使用的目录'}
                 value={preferenceDraft.downloadDirectory ? '自定义' : '默认'}
               >
-                <p className="settings-menu-path is-selectable">{preferenceDraft.downloadDirectory || defaultDownloadHint}</p>
-                <div className="settings-menu-actions">
+                <p className="settings-menu-path settings-download-path is-selectable">{preferenceDraft.downloadDirectory || defaultDownloadHint}</p>
+                <div className="settings-menu-actions settings-download-actions">
                   <button className="secondary-action" type="button" title="选择下载目录" aria-label="选择下载目录" onClick={() => {
-                    void pickDirectory().then((selected) => {
+                    void pickDirectory(platformName).then((selected) => {
                       if (typeof selected === 'string') editPreferences({ downloadDirectory: selected });
-                    }).catch(() => showToast('无法打开目录选择器', 'error'));
+                    }).catch((error) => showToast(error instanceof Error ? error.message : '无法打开目录选择器', 'error'));
                   }}><FolderOpen aria-hidden="true" />选择目录</button>
                   <button className="secondary-action" type="button" title="恢复默认下载目录" aria-label="恢复默认下载目录" disabled={!preferenceDraft.downloadDirectory} onClick={() => editPreferences({ downloadDirectory: '' })}><RotateCcw aria-hidden="true" />恢复默认</button>
                 </div>
@@ -1151,9 +1150,7 @@ export function SettingsWorkspace() {
                 <SettingsSwitch
                   icon={<ArrowDownWideNarrow />}
                   label="标签补全排序规则"
-                  hint={tagCountVersion
-                    ? `数据版本 ${formatTagDataVersion(tagCountVersion)} · 同分内按全站使用频次排序`
-                    : '默认智能排序，打开后同分内按全站使用频次排序'}
+                  hint={tagCountVersion ? `数据版本 ${formatTagDataVersion(tagCountVersion)}` : '数据版本 —'}
                   checked={preferenceDraft.tagCountOrderEnabled}
                   action={<button
                     className="icon-button"
@@ -1210,6 +1207,15 @@ export function SettingsWorkspace() {
                 value={preferenceDraft.progressBarVisibility}
                 options={[{ value: 'none', label: '不显示' }, { value: 'history', label: '仅历史记录' }, { value: 'all', label: '全部档案' }]}
                 onChange={(value) => editPreferences({ progressBarVisibility: value as PreferenceSnapshot['progressBarVisibility'] })}
+              />
+            )}
+            {selectedSettingsSection === 'settings-reading' && (
+              <SettingsSwitch
+                icon={<ScanLine />}
+                label="自动裁剪"
+                hint="阅读时裁掉静态图片外围的白边和黑边"
+                checked={preferenceDraft.autoCropBorders}
+                onToggle={() => editPreferences({ autoCropBorders: !preferenceDraft.autoCropBorders })}
               />
             )}
             {selectedSettingsSection === 'settings-reading' && (
@@ -1364,31 +1370,6 @@ export function SettingsWorkspace() {
                 )}
               </SettingsPanel>
             )}
-              </div>
-            )}
-            {/* 收藏删除这两个开关自己一组：它们管的是「删档案时要不要把 E-Hentai 上的
-                收藏一起删」，与数据迁移分组显示。放在迁移开关那一组里
-                会让人以为它们管的是同步本身，放在最前面又把真正的同步控件挤到了下面。 */}
-            {selectedSettingsSection === 'settings-data' && (
-              <div className="settings-group">
-                <SettingsSwitch
-                  icon={<HeartOff />}
-                  label="同步删除 E-Hentai 收藏"
-                  hint={ehAccountName ? '删除弹窗里可逐次关掉' : '登录 E-Hentai 后才能启用'}
-                  checked={preferenceDraft.ehFavoriteDeleteSync}
-                  /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
-                  disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
-                  onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
-                />
-                <SettingsDisclosure open={preferenceDraft.ehFavoriteDeleteSync}>
-                  <SettingsSwitch
-                    icon={<ShieldCheck />}
-                    label="默认开启收藏同步删除"
-                    hint="删除弹窗里的那个开关"
-                    checked={preferenceDraft.confirmEhFavoriteDelete}
-                    onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
-                  />
-                </SettingsDisclosure>
               </div>
             )}
             {/* 导入与导出同属「数据迁移」，单独成组：它们与同步开关、账户配置不是一件事。
@@ -1658,9 +1639,9 @@ export function SettingsWorkspace() {
                 <SettingsRow
                   icon={<Upload />}
                   label="模型导入"
-                  hint="导入超分模型或 DLSSNR DLL；DLL 验证仅覆盖本机测试尺寸"
+                  hint={platformName === 'windows' ? '导入超分模型或 DLSSNR DLL；DLL 验证仅覆盖本机测试尺寸' : '导入 ONNX 超分模型或 ZIP 模型包'}
                   control={
-                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile().then((selected) => { if (selected) void importModelFromPath(selected); })}>
+                    <button className="secondary-action" type="button" disabled={modelPending} aria-busy={modelPending} title="导入模型文件或压缩包" onClick={() => void pickModelFile(platformName === 'windows').then((selected) => { if (selected) void importModelFromPath(selected); })}>
                       <SvgIcon className="model-import-glyph">
                         <path d="M21 15v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-3" />
                         <path d="M12 3v12" />
@@ -1745,6 +1726,26 @@ export function SettingsWorkspace() {
             ]}
             onChange={(value) => editPreferences({ ehCommentSort: value as PreferenceSnapshot['ehCommentSort'] })}
           />
+        </div>
+        <div className="settings-group">
+          <SettingsSwitch
+            icon={<HeartOff />}
+            label="同步删除 E-Hentai 收藏"
+            hint={ehAccountName ? '删除弹窗里可逐次关掉' : '登录 E-Hentai 后才能启用'}
+            checked={preferenceDraft.ehFavoriteDeleteSync}
+            /* 没登录就开不了（要关掉已经打开的仍然可以）。 */
+            disabled={!ehAccountName && !preferenceDraft.ehFavoriteDeleteSync}
+            onToggle={() => editPreferences({ ehFavoriteDeleteSync: !preferenceDraft.ehFavoriteDeleteSync })}
+          />
+          <SettingsDisclosure open={preferenceDraft.ehFavoriteDeleteSync}>
+            <SettingsSwitch
+              icon={<ShieldCheck />}
+              label="默认开启收藏同步删除"
+              hint="删除弹窗里的那个开关"
+              checked={preferenceDraft.confirmEhFavoriteDelete}
+              onToggle={() => editPreferences({ confirmEhFavoriteDelete: !preferenceDraft.confirmEhFavoriteDelete })}
+            />
+          </SettingsDisclosure>
         </div>
       </section>
       )}

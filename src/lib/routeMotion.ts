@@ -2,7 +2,7 @@ import { NAVIGATION_ROUTES, navigationOwner } from './navigationOrder';
 
 export type RouteDirection = 1 | -1;
 export type RouteMotion = { kind: 'none' | 'fade' | 'slide' | 'detail-open' | 'detail-close' | 'page-open' | 'page-close'; axis: 'x' | 'y'; direction: RouteDirection };
-type RouteAddress = { pathname: string; search: string; state?: { homeEntry?: boolean; navigationTab?: boolean } | null };
+type RouteAddress = { pathname: string; search: string; state?: { homeEntry?: boolean; navigationTab?: boolean; iosBack?: boolean } | null };
 
 export function detailIdentity(location: RouteAddress): string | undefined {
   const match = location.pathname.match(/^\/(home|library|history|watchlist|to-read)\/([^/]+)$/);
@@ -17,6 +17,10 @@ export function resolveRouteMotion(from: RouteAddress | undefined, to: RouteAddr
   const axis = compact ? 'x' : 'y';
   const none: RouteMotion = { kind: 'none', axis, direction: historyDirection };
   if (!from) return none;
+  if (compact && to.state?.iosBack && (from.pathname !== to.pathname || from.search !== to.search)) {
+    const sameWorkspaceDetail = navigationOwner(from.pathname) === navigationOwner(to.pathname) && detailIdentity(from) && !detailIdentity(to);
+    return { kind: sameWorkspaceDetail ? 'detail-close' : 'page-close', axis: 'x', direction: -1 };
+  }
   const sourceOwner = navigationOwner(from.pathname);
   const targetOwner = navigationOwner(to.pathname);
   const sourceDetail = detailIdentity(from);

@@ -161,6 +161,17 @@ pub async fn write_text_file(app: &AppHandle, path: &str, contents: &str) -> Res
     .map(|_| ())
 }
 
+pub async fn pick_download_directory(app: &AppHandle) -> Result<Option<String>, String> {
+    #[derive(serde::Deserialize)]
+    struct PickerReply { path: Option<String> }
+    call::<PickerReply>(app, "pickDownloadDirectory", json!({})).await.map(|reply| reply.path)
+}
+
+pub async fn copy_archive_to_download_directory(app: &AppHandle, directory: &str, path: &str) -> Result<(), String> {
+    call::<serde_json::Value>(app, "copyArchiveToDownloadDirectory", json!({ "directory": directory, "path": path }))
+        .await.map(|_| ())
+}
+
 pub async fn show_toast(app: &AppHandle, text: &str) -> Result<bool, String> {
     #[derive(serde::Deserialize)]
     struct ToastResult {

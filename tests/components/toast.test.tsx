@@ -116,6 +116,19 @@ describe('system Toast', () => {
     expect(Boolean(screen.queryByText(message))).toBe(!shown);
   });
 
+  it('forwards rapid repeated messages to the native replacement path', async () => {
+    vi.stubGlobal('__TAURI_INTERNALS__', {});
+    const completions: Array<(result: unknown) => void> = [];
+    const adapter = vi.fn(() => new Promise(resolve => { completions.push(resolve); }));
+    setInvokeAdapterForTests(adapter);
+    render(<ToastProvider><Trigger /></ToastProvider>);
+    const commit = screen.getByText('提交');
+    fireEvent.click(commit);
+    fireEvent.click(commit);
+    expect(adapter).toHaveBeenCalledTimes(2);
+    await act(async () => { completions.forEach(complete => complete({ ok: true, value: true })); });
+  });
+
   it('keeps actionable messages in the app', () => {
     vi.stubGlobal('__TAURI_INTERNALS__', {});
     const adapter = vi.fn();

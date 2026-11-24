@@ -63,7 +63,7 @@ describe('repository layout', () => {
     // extension last, the order Node, ripgrep and uv use. The SHA-256 of each
     // package is reported in the run summary instead of a sidecar file.
     expect(publish).toContain("require('./src-tauri/tauri.conf.json').version");
-    expect(publish).toContain('git rev-parse --short=7 HEAD');
+    expect(publish).toContain('git rev-parse --short=8 HEAD');
     expect(publish).toContain('name="yomika-${version}-${sha}-${platform}.${package##*.}"');
     expect(publish).not.toContain('$name.sha256');
     expect(publish).toContain('GITHUB_STEP_SUMMARY');

@@ -1,5 +1,28 @@
 #[cfg(test)]
 mod tests {
+    #[tokio::test(start_paused = true)]
+    async fn index_validation_timeout_is_retryable_and_cancels_refresh() {
+        use crate::domain::result::CommandResult;
+        use std::{cell::Cell, time::Duration};
+
+        struct RefreshGuard<'a>(&'a Cell<bool>);
+        impl Drop for RefreshGuard<'_> {
+            fn drop(&mut self) { self.0.set(true); }
+        }
+
+        let cancelled = Cell::new(false);
+        let started = tokio::time::Instant::now();
+        let result = super::validate_dedup_index(async {
+            let _guard = RefreshGuard(&cancelled);
+            tokio::time::sleep(Duration::from_secs(61)).await;
+            CommandResult::success(())
+        }).await;
+        assert!(cancelled.get());
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert!(matches!(result, CommandResult::Failure { error, .. }
+            if error.code == "REMOTE_TIMEOUT" && error.retryable));
+    }
+
     use super::*;
     use rusqlite::Connection;
 
@@ -488,19 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn repeated_import_has_one_active_normalized_relation() {
+    fn repeated_save_has_one_active_normalized_relation() {
         let mut connection = connection();
-        let input = DedupImportInput {
+        let input = || DedupNonDuplicateInput {
             scope_id: "server-a".into(),
-            pairs: vec![DedupPairInput {
-                left_archive_id: "b".into(),
-                right_archive_id: "a".into(),
-                source: "import".into(),
-                diagnostics: None,
-            }],
+            left_archive_id: "b".into(),
+            right_archive_id: "a".into(),
         };
-        import_readoshi(&mut connection, input.clone()).unwrap();
-        import_readoshi(&mut connection, input).unwrap();
+        save_non_duplicate(&mut connection, input()).unwrap();
+        save_non_duplicate(&mut connection, input()).unwrap();
         let count: i64 = connection.query_row("SELECT COUNT(*) FROM dedup_non_duplicates WHERE scope_id='server-a' AND pair_key='a|b' AND tombstoned=0", [], |row| row.get(0)).unwrap();
         assert_eq!(count, 1);
     }
@@ -3147,13 +3166,6 @@ pub struct DedupDeletionOutcomeInput {
     pub message: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DedupImportInput {
-    pub scope_id: String,
-    pub pairs: Vec<DedupPairInput>,
-}
-
 /// 持久化的不重复关系行（含墓碑），供工作区直接查看与撤销标记。
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -3494,25 +3506,6 @@ pub fn remove_non_duplicate(
     Ok(())
 }
 
-pub fn import_readoshi(connection: &mut Connection, input: DedupImportInput) -> Result<(), String> {
-    required_text(&input.scope_id)?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    for pair in input.pairs {
-        if crate::commands::lrr_bridge::enabled(&transaction,&input.scope_id) {
-            crate::commands::lrr_bridge::queue_nonduplicate(&transaction,&input.scope_id,&pair.left_archive_id,&pair.right_archive_id,true)?;
-            continue;
-        }
-        let (key, left, right) = pair_key(&pair.left_archive_id, &pair.right_archive_id)?;
-        transaction.execute(
-            "INSERT INTO dedup_non_duplicates (scope_id,pair_key,left_archive_id,right_archive_id,tombstoned,logical_clock) VALUES (?1,?2,?3,?4,0,1) ON CONFLICT(scope_id,pair_key) DO UPDATE SET tombstoned=0,logical_clock=dedup_non_duplicates.logical_clock+1,updated_at=CURRENT_TIMESTAMP",
-            params![input.scope_id, key, left, right],
-        ).map_err(|error| error.to_string())?;
-    }
-    transaction.commit().map_err(|error| error.to_string())
-}
-
 fn selected_component_rejections(
     connection: &Connection,
     session_id: &str,
@@ -3734,6 +3727,20 @@ pub fn dedup_resume_scan(
             .and_then(|mut connection| resume_scan(&mut connection, session_id)),
     )
 }
+async fn validate_dedup_index<T>(
+    refresh: impl std::future::Future<Output = crate::domain::result::CommandResult<T>>,
+) -> crate::domain::result::CommandResult<T> {
+    use crate::domain::result::CommandResult;
+    match tokio::time::timeout(std::time::Duration::from_secs(60), refresh).await {
+        Ok(result) => result,
+        Err(_) => CommandResult::failure(
+            "REMOTE_TIMEOUT",
+            "校验档案索引超时，请检查连接后重试；已保存的扫描结果保持不变",
+            true,
+        ),
+    }
+}
+
 #[tauri::command]
 pub async fn dedup_load_result(
     session_id: String,
@@ -3751,11 +3758,10 @@ pub async fn dedup_load_result(
         Err(error) => return Ok(command_error(Err(error))),
     };
     if refresh_index.unwrap_or(false) {
-        match tokio::time::timeout(std::time::Duration::from_secs(60),
-            crate::commands::library::refresh_dedup_archive_index(&server_id, &database)).await {
-            Ok(CommandResult::Failure { error, .. }) => return Ok(CommandResult::Failure { ok: false, error }),
-            Ok(CommandResult::Success { .. }) => {},
-            Err(_) => return Ok(CommandResult::failure("REMOTE_TIMEOUT", "校验档案索引超时，请检查连接后重试；已保存的扫描结果保持不变", true)),
+        if let CommandResult::Failure { error, .. } = validate_dedup_index(
+            crate::commands::library::refresh_dedup_archive_index(&server_id, &database),
+        ).await {
+            return Ok(CommandResult::Failure { ok: false, error });
         }
     }
     Ok(command_error(database.connection.lock().map_err(|_| crate::cache::LOCK_FAILED.into())
@@ -4004,22 +4010,6 @@ pub struct DedupExecutionProgress {
     processed: usize,
     total: usize,
 }
-#[tauri::command(async)]
-pub fn dedup_import_readoshi(
-    input: DedupImportInput,
-    database: tauri::State<'_, crate::db::Database>,
-) -> crate::domain::result::CommandResult<()> {
-    command_error(
-        database
-            .connection
-            .lock()
-            .map_err(|_| crate::cache::LOCK_FAILED.into())
-            .and_then(|mut connection| {
-                import_readoshi(&mut connection, input)
-            }),
-    )
-}
-
 fn cover_scan_pool<F: std::future::Future>(
     jobs: Vec<F>,
 ) -> impl futures_util::Stream<Item = F::Output> + Unpin {

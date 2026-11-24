@@ -5,6 +5,7 @@ use super::library::SystemCredentialStore;
 use crate::domain::result::CommandResult;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use tauri::Manager;
 
 fn schema(c: &Connection) -> Result<(), String> {
     collections::schema(c)?;
@@ -67,15 +68,15 @@ async fn db<T: Send + 'static>(
     app: &tauri::AppHandle,
     f: impl FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    let path = crate::data_paths::data_dir(app)
-        .map_err(|e| e.to_string())?
-        .join("yomika.sqlite3");
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut c = Connection::open(path).map_err(|e| e.to_string())?;
-        c.busy_timeout(std::time::Duration::from_secs(3))
-            .map_err(|e| e.to_string())?;
-        schema(&c)?;
-        f(&mut c)
+        // Use the same connection as image-cache and library operations so
+        // their writes wait on the process mutex instead of competing in SQLite.
+        let database = app.state::<crate::db::Database>();
+        let mut connection = database.connection.lock()
+            .map_err(|_| crate::cache::LOCK_FAILED.to_string())?;
+        schema(&connection)?;
+        f(&mut connection)
     })
     .await
     .map_err(|_| "Bridge database task failed".to_string())?
@@ -1083,6 +1084,7 @@ pub async fn lrr_bridge_request(
         let mut data=match remote(&app,&scope_id,&action,input.clone(),action=="hello").await{Ok(v)=>v,Err(e)=>{if matches!(action.as_str(),"states"|"list"|"export") && e=="Bridge network request failed"{return db(&app,move|c|cached(c,&scope_id,&action,&input)).await;}return Err(e);}};
         if let Some(states)=data["states"].as_array_mut(){let scope=scope_id.clone();let copy=states.clone();*states=db(&app,move|c|{copy.into_iter().map(|v|{let id=v["archiveId"].as_str().ok_or("Invalid archive state")?;let pending:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope,id],|r|r.get(0)).map_err(|e|e.to_string())?;if pending{state(c,&scope,id)}else{Ok(v)}}).collect::<Result<Vec<_>,String>>()}).await?;}
         if list_action{refresh_missing_list_states(&app,&scope_id,&request_input,&data).await?;}
+        if !data["states"].is_array() { return Ok(data); }
         let copy=data.clone();db(&app,move|c|{let tx=write_transaction(c)?;if let Some(states)=copy["states"].as_array(){if list_action{reconcile_list(&tx,&scope_id,&request_input,&copy)?;}for s in states{let id=s["archiveId"].as_str().ok_or("Invalid bridge state")?;let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM lrr_bridge_outbox WHERE scope_id=?1 AND archive_id=?2)",params![scope_id,id],|r|r.get(0)).map_err(|e|e.to_string())?;if !pending{mirror(&tx,&scope_id,s)?;}}}tx.commit().map_err(|e|e.to_string())?;Ok(())}).await?;Ok(data)
     }.await;
     reply(result)

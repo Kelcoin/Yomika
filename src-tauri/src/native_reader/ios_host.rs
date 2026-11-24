@@ -96,6 +96,20 @@ pub(crate) fn cover(covered: bool) {
     }
 }
 
+pub(crate) fn trim_memory() {
+    READERS.with_borrow_mut(|readers| {
+        for reader in readers.values_mut() {
+            for slot in reader.slots.values_mut() {
+                for detail in &mut slot.detail {
+                    // Drop the decoded refinement backing. UIImage retains the
+                    // currently displayed preview and crop independently.
+                    detail.backing = None;
+                }
+            }
+        }
+    });
+}
+
 pub(crate) fn retire_window(label: &str) {
     READERS.with_borrow_mut(|readers| readers.remove(label));
 }

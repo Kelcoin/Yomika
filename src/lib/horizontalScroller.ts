@@ -360,7 +360,7 @@ export function useHorizontalScroller() {
   }, []);
   const onDragStart = useCallback((event: React.DragEvent<HTMLElement>) => { if (event.cancelable) event.preventDefault(); }, []);
 
-  const resetScroll = useCallback(() => {
+  const resetScroll = useCallback((offset = 0) => {
     edgeRef.current?.reset();
     cancelTouch();
     stopCoast();
@@ -368,7 +368,7 @@ export function useHorizontalScroller() {
     if (wheelIdleRef.current !== undefined) window.clearTimeout(wheelIdleRef.current);
     wheelIdleRef.current = undefined;
     const element = elementRef.current;
-    if (element) element.scrollLeft = 0;
+    if (element) element.scrollLeft = offset;
   }, [cancelTouch, stopCoast, finishDrag]);
   return { ref: setRef, elementRef, resetScroll, onMouseDown, onClickCapture, onDragStart };
 }

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BrowserRouter, Link, MemoryRouter, useLocation } from 'react-router-dom';
 import { MOBILE_BACK_EVENT, PageBackHistory, usePageBackNavigation } from '../../src/lib/pageBackNavigation';
+import { useReturnNavigation } from '../../src/lib/useReturnNavigation';
 import { useState } from 'react';
 import { useOverlayBackGuard } from '../../src/lib/overlayBackGuard';
 import { useRouteDirection } from '../../src/lib/useRouteDirection';
@@ -68,7 +69,7 @@ function back() {
   return unhandled;
 }
 
-afterEach(() => { delete document.documentElement.dataset.nativeMobile; });
+afterEach(() => { delete document.documentElement.dataset.nativeMobile; delete document.documentElement.dataset.nativePlatform; });
 
 it.each(['/', '/library', '/history', '/watchlist', '/to-read', '/downloads', '/settings'])('leaves root Back on %s to the native host', path => {
   render(<MemoryRouter initialEntries={[path]}><Navigation /></MemoryRouter>);
@@ -148,4 +149,98 @@ it('preserves home shortcut origin when mobile browser POP is intercepted', () =
   });
   expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
   expect(window.location.pathname).toBe('/');
+});
+
+
+it('uses an iOS edge swipe for page-scoped Back without taking vertical or interior swipes', () => {
+  document.documentElement.dataset.nativePlatform = 'ios';
+  render(<MemoryRouter initialEntries={['/home/a']}><Navigation /></MemoryRouter>);
+  const swiping = (from: number, dx: number, dy: number) => {
+    const start = { identifier: 1, clientX: from, clientY: 100 };
+    const end = { identifier: 1, clientX: from + dx, clientY: 100 + dy };
+    fireEvent.touchStart(document.body, { touches: [start] });
+    fireEvent.touchMove(document.body, { touches: [end] });
+    fireEvent.touchEnd(document.body, { touches: [], changedTouches: [end] });
+  };
+  swiping(40, 100, 0);
+  swiping(10, 45, 90);
+  expect(screen.getByTestId('route')).toHaveTextContent('/home/a');
+  swiping(10, 100, 10);
+  expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+});
+
+function NestedDetailNavigation() {
+  usePageBackNavigation();
+  const { pathname } = useLocation();
+  const goBack = useReturnNavigation();
+  return <><output>{pathname}</output><Link to="/library/a">first</Link>
+    <Link to="/library/b" state={{ returnTo: '/library' }}>second</Link>
+    <button onClick={goBack}>back button</button></>;
+}
+
+it('uses the same workspace history for the detail back button and gesture', () => {
+  render(<MemoryRouter initialEntries={['/library']}><NestedDetailNavigation /></MemoryRouter>);
+  fireEvent.click(screen.getByText('first'));
+  fireEvent.click(screen.getByText('second'));
+  fireEvent.click(screen.getByText('back button'));
+  expect(screen.getByRole('status')).toHaveTextContent('/library/a');
+  expect(back()).toBe(false);
+  expect(screen.getByRole('status')).toHaveTextContent(/^\/library$/);
+});
+
+function StagedPages() {
+  usePageBackNavigation();
+  const location = useLocation();
+  const home = location.pathname === '/' || location.pathname.startsWith('/home/');
+  return (
+    <div className="workspace">
+      <section className="route-cache-panel" data-page-key="/" hidden={!home}><p>home page</p></section>
+      <section className="route-cache-panel" data-page-key="/settings" hidden={location.pathname !== '/settings'}><p data-testid="stage-route">{location.pathname}</p></section>
+    </div>
+  );
+}
+
+it('reveals the page behind an iOS edge swipe and hands it to the return animation', async () => {
+  document.documentElement.dataset.nativePlatform = 'ios';
+  render(<MemoryRouter initialEntries={['/']}><StagedPages /><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></MemoryRouter>);
+  fireEvent.click(screen.getByText('home settings'));
+  const home = document.querySelector<HTMLElement>('.route-cache-panel[data-page-key="/"]')!;
+  const settings = document.querySelector<HTMLElement>('.route-cache-panel[data-page-key="/settings"]')!;
+  expect(home.hidden).toBe(true);
+  const start = { identifier: 1, clientX: 10, clientY: 300 };
+  const move = { identifier: 1, clientX: 120, clientY: 306 };
+  fireEvent.touchStart(document.body, { touches: [start] });
+  fireEvent.touchMove(document.body, { touches: [move] });
+  // The layer behind the drag is the real page, pinned under the sliding one.
+  expect(home.hidden).toBe(false);
+  expect(home.hasAttribute('data-back-preview')).toBe(true);
+  expect(home.getAttribute('aria-hidden')).toBe('true');
+  expect(settings.style.translate).toBe('110px');
+  expect(parseFloat(home.style.translate)).toBeLessThan(-200);
+  fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
+  expect(screen.getByTestId('stage-route')).toHaveTextContent(/^\/$/);
+  // A handled Back keeps the revealed page on screen for the route animation;
+  // only the drag's own inline styles and the preview bookkeeping go away.
+  expect(home.hidden).toBe(false);
+  expect(home.hasAttribute('data-back-preview')).toBe(false);
+  expect(home.style.translate).toBe('');
+  expect(settings.style.translate).toBe('');
+});
+
+it('hides the revealed page again when the iOS edge swipe is too short', async () => {
+  document.documentElement.dataset.nativePlatform = 'ios';
+  render(<MemoryRouter initialEntries={['/']}><StagedPages /><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></MemoryRouter>);
+  fireEvent.click(screen.getByText('home settings'));
+  const home = document.querySelector<HTMLElement>('.route-cache-panel[data-page-key="/"]')!;
+  const start = { identifier: 1, clientX: 10, clientY: 300 };
+  const move = { identifier: 1, clientX: 40, clientY: 302 };
+  fireEvent.touchStart(document.body, { touches: [start] });
+  fireEvent.touchMove(document.body, { touches: [move] });
+  expect(home.hidden).toBe(false);
+  fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
+  expect(screen.getByTestId('stage-route')).toHaveTextContent('/settings');
+  expect(home.hidden).toBe(true);
+  expect(home.hasAttribute('data-back-preview')).toBe(false);
 });

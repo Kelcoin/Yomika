@@ -311,6 +311,10 @@ const sources = new Map<string, TileSource>();
 export function rememberTileSource(url: string, source: TileSource, bytes?: Uint8Array) {
   if (typeof window !== 'undefined' && bridge() && (!bytes || oversizedTileCandidate(bytes))) sources.set(url, source);
 }
+export function readerSourceLeaseId(url: string): string | undefined {
+  const source = sources.get(url);
+  return typeof source === 'object' && 'leaseId' in source ? source.leaseId : undefined;
+}
 export function hasAndroidReaderTileSource(url: string): boolean {
   return Boolean(androidBridge() && sources.has(url));
 }

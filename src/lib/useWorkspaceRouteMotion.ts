@@ -34,7 +34,11 @@ export function useWorkspaceRouteMotion(location: Location, compact: boolean, di
     const detail = wholePage ? surface.current : surface.current?.querySelector<HTMLElement>('.library-shell-detail');
     if (!detail || typeof detail.animate !== 'function') { setCompleted(location); return; }
     const panel = surface.current!;
+    const iosBack = location.state?.iosBack === true;
+    const offset = Math.max(0, Number(location.state?.iosBackOffset) || 0);
+    if (iosBack) detail.style.removeProperty('translate');
     const restore = prepareDetailReturn(panel, detail, wholePage);
+    if (iosBack) detail.style.transform = `translateX(${offset}px)`;
     setReturning(location);
     let animation: Animation | undefined;
     let backdrop: Animation | undefined;
@@ -59,10 +63,17 @@ export function useWorkspaceRouteMotion(location: Location, compact: boolean, di
       // detail would change its containing block and make the coordinates jump.
       // Only zoom the home page revealed by a shortcut return. A tab
       // destination should keep its natural size beneath the outgoing page.
-      if (location.pathname === '/' && underneath?.animate) backdrop = underneath.animate([
+      if (iosBack && underneath?.animate) backdrop = underneath.animate([
+        { transform: `translateX(${Math.min(0, -underneath.clientWidth * .26 + offset * .26)}px)` },
+        { transform: 'translateX(0)' },
+      ], { duration: DETAIL_EXIT_MS, easing: 'ease-out' });
+      if (!iosBack && location.pathname === '/' && underneath?.animate) backdrop = underneath.animate([
         { transform: 'scale(1.025)' }, { transform: 'scale(1)' },
       ], { duration: DETAIL_EXIT_MS, easing: 'cubic-bezier(.2, .8, .2, 1)' });
-      animation = animateDetail(detail, true, target);
+      animation = iosBack ? detail.animate([
+        { transform: `translateX(${offset}px)` },
+        { transform: 'translateX(100%)' },
+      ], { duration: DETAIL_EXIT_MS, easing: 'ease-out', fill: 'forwards' }) : animateDetail(detail, true, target);
       if (animation) animation.onfinish = finish;
       else finish();
       // Restoring a large cached page can delay this first frame. The playback

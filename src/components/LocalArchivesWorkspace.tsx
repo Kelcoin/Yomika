@@ -691,7 +691,7 @@ export function LocalArchivesWorkspace() {
             archive={detail}
             onClose={closeDetail}
             onDelete={() => setDeletePaths([detail.path])}
-            onMenu={(at) => setMenuTarget({ path: detail.path, title: detail.title, ...at })}
+            onMenu={(at) => setMenuTarget({ path: detail.path, title: detail.title, detail: true, ...at })}
             onSelectTag={(query) => { setDraft(query); setQuery(query); }}
           />
         </section>

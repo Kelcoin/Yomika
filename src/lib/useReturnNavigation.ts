@@ -1,13 +1,12 @@
 import { useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { isMobileDevice } from './layoutMode';
 import { MOBILE_BACK_EVENT } from './pageBackNavigation';
 
 export function useReturnNavigation(fallback = '/library') {
   const location = useLocation();
   const navigate = useNavigate();
   return useCallback(() => {
-    if (isMobileDevice() && !window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true }))) return;
+    if (!window.dispatchEvent(new Event(MOBILE_BACK_EVENT, { cancelable: true }))) return;
     // In-app editors are pushed from their origin. Pop that entry instead of
     // replacing it with a duplicate of the origin (which makes Back stay put).
     if ((location.state as { returnViaHistory?: boolean } | null)?.returnViaHistory && location.key !== 'default') {

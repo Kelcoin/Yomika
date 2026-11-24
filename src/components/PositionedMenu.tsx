@@ -14,7 +14,7 @@ export function PositionedMenu({ at, label, onClose, children, className = '' }:
       <span aria-hidden="true" style={{ position: 'fixed', left: at.x, top: at.y, width: 0, height: 0 }} />
     </DropdownMenu.Trigger>
     <DropdownMenu.Portal>
-      <DropdownMenu.Content className={`archive-context-menu ${className}`} align="start" sideOffset={2} aria-labelledby={undefined} aria-label={label}>
+      <DropdownMenu.Content className={`archive-context-menu ${className}`} align="start" sideOffset={2} collisionPadding={8} aria-labelledby={undefined} aria-label={label}>
         {children}
       </DropdownMenu.Content>
     </DropdownMenu.Portal>

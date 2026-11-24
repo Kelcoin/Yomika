@@ -10,6 +10,7 @@ const preferences = {
   defaultLayout: 'double' as const,
   defaultDirection: 'rtl' as const,
   cacheMaxBytes: 4_294_967_296,
+  autoCropBorders: true,
   prefetchPages: 2,
   allowProgressRegression: true,
   progressBarVisibility: 'history' as const,

@@ -21,6 +21,7 @@ export const PreferenceSnapshotSchema = z.object({
   cacheMaxBytes: z.number().int().min(1_073_741_824).max(34_359_738_368).refine((value) => value % 1_073_741_824 === 0),
   // Defaults keep an older native build (which does not send these yet) from
   // failing the whole snapshot.
+  autoCropBorders: z.boolean().default(false),
   prefetchPages: z.number().int().min(0).max(MAX_PREFETCH_PAGES).transform((pages) => Math.max(MIN_PREFETCH_PAGES, pages)).default(2),
   coverConcurrency: z.number().int().min(1).max(8).default(4),
   /** Which page opens at launch. Someone who lives in the library should not
@@ -124,6 +125,7 @@ export const DEFAULT_PREFERENCES: PreferenceSnapshot = {
   allowProgressRegression: true,
   progressBarVisibility: 'history',
   cacheMaxBytes: 2_147_483_648,
+  autoCropBorders: false,
   prefetchPages: 2,
   coverConcurrency: 4,
   startupRoute: 'home',

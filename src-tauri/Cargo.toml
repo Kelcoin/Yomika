@@ -96,11 +96,12 @@ yomika-compute-worker = { path = "worker" }
 png = "0.18"
 
 [target.'cfg(target_os = "ios")'.dependencies]
+security-framework = "3.7"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSNotification", "NSOperation", "NSString", "NSError", "block2"] }
 objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "LAContext", "LABiometryType", "block2"] }
 block2 = "0.6"
-objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIView", "UIColor", "UIResponder", "UIImage", "UIImageView", "UIGestureRecognizer", "UIPanGestureRecognizer", "UIPinchGestureRecognizer", "objc2-core-foundation"] }
+objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "UIView", "UIColor", "UIInterface", "UITraitCollection", "UIResponder", "UIWindow", "UIImage", "UIImageView", "UIGestureRecognizer", "UIPanGestureRecognizer", "UIPinchGestureRecognizer", "UIFeedbackGenerator", "UIImpactFeedbackGenerator", "UISelectionFeedbackGenerator", "objc2-core-foundation"] }
 
 # 测试二进制仍然链 ONNX Runtime。
 #
@@ -110,6 +111,7 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "
 # 它们等于把证据一起删掉。resolver = "2" 让 bin 构建不激活这一段，所以「证据」与
 # 「宿主无 ORT」可以同时成立。
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 png = "0.18"
 yomika-compute-core = { path = "crates/compute-core", features = ["cpu"] }
 

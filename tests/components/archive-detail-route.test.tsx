@@ -896,6 +896,18 @@ describe('archive detail route', () => {
       ).toContain(child.getAttribute('role'));
     }
     expect(tablist!.querySelector('.archive-recommendations-tab-creator')).not.toBeNull();
+
+    const grid = initialGrid as HTMLElement;
+    grid.scrollLeft = 460;
+    fireEvent.scroll(grid);
+    fireEvent.click(within(rail).getByRole('tab', { name: '同作者' }));
+    expect(grid.scrollLeft).toBe(0);
+    grid.scrollLeft = 180;
+    fireEvent.scroll(grid);
+    fireEvent.click(within(rail).getByRole('tab', { name: '推荐' }));
+    expect(grid.scrollLeft).toBe(460);
+    fireEvent.click(within(rail).getByRole('tab', { name: '同作者' }));
+    expect(grid.scrollLeft).toBe(180);
   });
 
   it('loads all page thumbnails with bounded concurrency before scrolling', async () => {
@@ -1035,26 +1047,64 @@ describe('archive detail route', () => {
     expect(within(rail).queryByRole('link', { name: /Gone recommendation/ })).not.toBeInTheDocument();
   });
 
-  it('shows the first recommendation page while later pages are pending', async () => {
+  it('keeps recommendation skeletons until the candidate order is final', async () => {
     let finishSearch!: () => void;
     const laterPage = new Promise<void>((resolve) => { finishSearch = resolve; });
-    setInvokeAdapterForTests(async (command, args) => {
+    let finishHistory!: () => void;
+    const history = new Promise<void>((resolve) => { finishHistory = resolve; });
+    let finishCover!: () => void;
+    const slowCover = new Promise<void>((resolve) => { finishCover = resolve; });
+    const adapter = vi.fn(async (command, args) => {
       if (command === 'list_servers') return { ok: true, value: [server] };
-      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses' } };
+      if (command === 'load_archive_metadata') return { ok: true, value: { ...metadata, tags: 'female:glasses, category:cosplay' } };
+      if (command === 'list_reading_history') {
+        await history;
+        return { ok: true, value: [{ scopeId: 'scope-a', archiveId: 'second', pageIndex: 0, visitedAt: 'now', deviceId: 'device-a', revision: 1 }] };
+      }
+      if (command === 'cache_read_image') {
+        const id = (args as { identity?: { archiveId?: string } })?.identity?.archiveId;
+        if (id === 'second') await slowCover;
+        return { ok: true, value: id === 'first' || id === 'second' ? [255, 216, 255, 224] : [] };
+      }
       if (command === 'search_archives_page') {
         const start = (args as { input: { start: number } }).input.start;
         if (start > 0) await laterPage;
-        return { ok: true, value: { items: [{ serverId: server.id, archiveId: start > 0 ? 'second' : 'first', title: start > 0 ? 'Later result' : 'Early result', updatedAt: 'now', pageCount: 1, tags: ['female:glasses'] }], total: 2, hasMore: start === 0 } };
+        return { ok: true, value: { items: [{ serverId: server.id, archiveId: start > 0 ? 'second' : 'first', title: start > 0 ? 'Later result' : 'Early result', updatedAt: 'now', pageCount: 1, tags: start > 0 ? ['female:glasses', 'category:cosplay'] : ['female:glasses'] }], total: 2, hasMore: start === 0 } };
       }
       return { ok: true, value: [] };
     });
+    setInvokeAdapterForTests(adapter);
     renderDetail();
     try {
-      expect(await screen.findByRole('link', { name: /Early result/ })).toBeInTheDocument();
-      expect(screen.queryByRole('link', { name: /Later result/ })).toBeNull();
+      const rail = await screen.findByRole('region', { name: '推荐' });
+      await waitFor(() => expect(adapter).toHaveBeenCalledWith('search_archives_page', expect.objectContaining({ input: expect.objectContaining({ start: 1 }) })));
+      expect(rail.querySelector('.archive-thumb-card.is-skeleton')).not.toBeNull();
+      expect(within(rail).queryAllByRole('link')).toHaveLength(0);
+      expect(adapter).not.toHaveBeenCalledWith('cache_read_image', expect.objectContaining({ identity: expect.objectContaining({ archiveId: 'first' }) }));
+      await act(async () => { finishSearch(); });
+      const laterCard = await within(rail).findByRole('link', { name: /Later result/ });
+      const earlyCard = within(rail).getByRole('link', { name: /Early result/ });
+      expect(within(rail).getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual([
+        '/library/second?server=server-a', '/library/first?server=server-a',
+      ]);
+      await waitFor(() => expect(earlyCard.querySelector('img')).not.toBeNull());
+      expect(laterCard.querySelector('img')).toBeNull();
+      expect(laterCard.querySelector('.archive-thumb-card-skeleton')).not.toBeNull();
+      await act(async () => { finishHistory(); });
+      expect(within(laterCard).getByText('1/1 页')).toBeInTheDocument();
+      expect(within(rail).getAllByRole('link')).toEqual([laterCard, earlyCard]);
+      await act(async () => { finishCover(); });
+      const cover = laterCard.querySelector('img');
+      expect(cover).not.toBeNull();
+      Object.defineProperties(cover!, { naturalWidth: { value: 640 }, naturalHeight: { value: 360 } });
+      fireEvent.load(cover!);
+      expect(laterCard).toHaveClass('is-wide');
+      expect(within(rail).getAllByRole('link')).toEqual([laterCard, earlyCard]);
+    } finally {
       finishSearch();
-      expect(await screen.findByRole('link', { name: /Later result/ })).toBeInTheDocument();
-    } finally { finishSearch(); }
+      finishHistory();
+      finishCover();
+    }
   });
 
   it('shows recommendations on the owning page even while history is pending', async () => {
@@ -1186,9 +1236,8 @@ describe('archive detail route', () => {
     expect(await screen.findByRole('link', { name: /第 2 轮 0/ })).toBeInTheDocument();
   });
 
-  it('retries a network-partial pool on the next visit while retaining cached cards', async () => {
-    // A network error after the first page preserves the partial pool, then
-    // retries in the background on the next visit.
+  it('retries a network-partial pool before publishing cards on the next visit', async () => {
+    // Wait for the next search to settle before showing cards from a partial snapshot.
     let round = 0;
     const gates: Array<() => void> = [];
     const adapter = vi.fn(async (command: string, args?: Record<string, unknown>) => {
@@ -1198,8 +1247,7 @@ describe('archive detail route', () => {
       if (command === 'search_archives_page') {
         const start = Number((args?.input as { start?: number } | undefined)?.start ?? 0);
         if (start === 0) round += 1;
-        // 把补齐那次搜索的第一页闸住：不闸的话它在同一串微任务里就换完答案了，
-        // 「缓存先画、后台再补」这一段根本观察不到。
+        // Keep the next visit in its initial loading state until the search returns.
         if (round > 1 && start === 0) await new Promise<void>((resolve) => gates.push(resolve));
         if (round === 1 && start > 0) return { ok: false, error: { code: 'REMOTE_UNAVAILABLE', message: 'offline', retryable: true } };
         return { ok: true, value: {
@@ -1224,10 +1272,9 @@ describe('archive detail route', () => {
 
     const second = renderDetail('/home');
     const secondRail = await screen.findByRole('region', { name: '推荐' });
-    // 缓存先把上一轮那几张摆出来（补齐的搜索还卡在网线上）。
     await waitFor(() => expect(round).toBe(2));
-    expect(within(secondRail).getByRole('link', { name: /第 1 轮 0/ })).toBeInTheDocument();
-    // ……松手之后，后台那次搜索换上补齐的答案。
+    expect(secondRail.querySelector('.archive-thumb-card.is-skeleton')).not.toBeNull();
+    expect(within(secondRail).queryAllByRole('link')).toHaveLength(0);
     await act(async () => { gates.splice(0).forEach((release) => release()); });
     expect(await within(secondRail).findByRole('link', { name: /第 2 轮 0/ })).toBeInTheDocument();
     second.unmount();

@@ -2280,7 +2280,9 @@ describe('native shell configuration', () => {
     expect(menu.replace(/\r\n/g, '\n'), '和打开菜单同一个定时器里：按住了就一定有反馈').toContain(
       "        hapticFeedback('medium');\n        open({ x: hold.x, y: hold.y });",
     );
-    expect(haptics, '只有手机有马达，判据就是 UA').toContain('/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)');
+    expect(haptics).toContain('isMobileDevice()');
+    expect(platform).toContain('UISelectionFeedbackGenerator::new(mtm).selectionChanged()');
+    expect(platform).toContain('UIImpactFeedbackGenerator::initWithStyle(mtm.alloc(), style).impactOccurred()');
     expect(haptics, '发射即忘：反馈拿不到不该把长按弄失败').toContain('.catch(() => {});');
 
     // 这条命令只该有一个出口。多一个人去叫它，桌面上就多一趟白跑的 IPC，手机上则会连震

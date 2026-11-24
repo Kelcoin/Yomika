@@ -27,6 +27,7 @@ const repository = new NativeLibraryRepository();
  * already tracks.
  */
 export function useArchiveContextMenu(options: {
+  detail?: boolean;
   hiddenActions?: readonly (typeof DETAIL_ACTIONS)[number][] | undefined;
   inReadingList?: ((archiveId: string) => boolean) | undefined;
   onToggleReadingList?: ((archive: ArchiveRecord, next: boolean) => void) | undefined;
@@ -133,6 +134,7 @@ export function useArchiveContextMenu(options: {
 
   const menu = (<>
     <ArchiveContextMenu
+      detail={options.detail}
       // Progress is optional menu data. A failed lookup must not hide reading,
       // downloading, metadata and membership actions forever.
       target={progress.ready || progress.error || unavailableTarget === target ? target : undefined}

@@ -8,9 +8,9 @@ import { z } from 'zod';
  * 读得动、写得动（系统的「新建文档」还会先把文件建好，零字节），所以这两个命令在原生侧
  * 各有一条 `mobile_host` 通道。 */
 
-/** 把一段文本写到用户选定的位置；回包是最终落盘的路径。 */
-export function saveTextToFile(path: string, contents: string): Promise<CommandResult<string>> {
-  return invokeCommand('save_text_file', { path, contents }, z.string().min(1));
+/** iOS 接收建议文件名，由原生导出面板选择位置；取消时返回 null。 */
+export function saveTextToFile(path: string, contents: string): Promise<CommandResult<string | null>> {
+  return invokeCommand('save_text_file', { path, contents }, z.string().min(1).nullable());
 }
 
 /** 读回一份文本文件。 */

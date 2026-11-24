@@ -141,6 +141,7 @@ fn restore_app_setting(
         .and_then(|value| serde_json::from_str(value).ok())
         .unwrap_or(serde_json::Value::Null);
     let mut merged = local.as_object().cloned().unwrap_or_default();
+    merged.retain(|key, _| !crate::settings::DEVICE_LOCAL_PREFERENCE_KEYS.contains(&key.as_str()));
     if let Some(imported) = payload.as_object() {
         for (key, value) in imported {
             if crate::settings::DEVICE_LOCAL_PREFERENCE_KEYS.contains(&key.as_str()) {

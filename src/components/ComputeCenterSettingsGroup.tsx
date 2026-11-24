@@ -98,6 +98,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
   const [probingRemote, setProbingRemote] = useState(false);
   const [pairMenu, setPairMenu] = useState(false);
   const [pairFromDevices, setPairFromDevices] = useState(false);
+  // iOS builds have no multicast entitlement. Manual LAN pairing still works.
   const [deviceMenu, setDeviceMenu] = useState(false);
   const [devices, setDevices] = useState<DiscoveredDevice[]>([]);
   const [address, setAddress] = useState('');
@@ -282,15 +283,24 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
     if (!options?.quiet) showToast(`已连上 ${result.value.name}`, 'success');
   }
 
+  const [discoveryError, setDiscoveryError] = useState(false);
+
+  const [discovering, setDiscovering] = useState(false);
+  const scanPending = useRef(false);
+
   async function scanDevices() {
-    if (pairPending.current) return;
-    pairPending.current = true;
-    setPairBusy(true);
-    const result = await repository.discover();
-    pairPending.current = false;
-    setPairBusy(false);
-    if (result.ok) setDevices(result.value);
-    else showToast(result.error.message, 'error');
+    if (scanPending.current || pairPending.current) return;
+    scanPending.current = true;
+    setDiscovering(true);
+    setDiscoveryError(false);
+    try {
+      const result = await repository.discover();
+      if (result.ok) setDevices(result.value);
+      else setDiscoveryError(true);
+    } finally {
+      scanPending.current = false;
+      setDiscovering(false);
+    }
   }
 
   async function startPairing() {
@@ -417,6 +427,7 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             要换设备进「已配对设备」那张菜单（它的动作行里有「添加设备」）。 */}
         {remoteOps.pairedDevices.length === 0 && <SettingsRow icon={<Plus />} label="添加设备" onClick={() => { setPairMenu(true); void scanDevices(); }} />}
         {deviceMenu && <SettingsMenu title="已配对设备" icon={<Server />} onClose={() => setDeviceMenu(false)}>
+          <div className="settings-device-menu">
           <div className="settings-choice-list">
             {remoteOps.pairedDevices.map((device) => <SettingsOption key={device.address} align="start" active={preferences.remoteComputeUrl === device.address} 
               onClick={() => { editPreferences({ remoteComputeUrl: device.address, remoteComputeToken: device.token }); setRemote(undefined); void connectRemote(device.address, device.token); }}
@@ -427,23 +438,25 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             {remoteOps.pairedDevices.length === 0 && <p className="settings-choice-empty">还没有配对过的设备</p>}
           </div>
           <div className="settings-menu-actions">
-            <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}>刷新服务</button>
+            {remoteOps.pairedDevices.length > 0 && <button className="secondary-action" type="button" disabled={probingRemote || !preferences.remoteComputeUrl} onClick={() => void connectRemote()}><RefreshCw aria-hidden="true" />刷新服务</button>}
             {/* 「添加设备」那一行在配过设备之后是收起来的，换设备只能从这里进；
                 替换语义（配对成功顶掉现在这一台）在配对那张菜单里由按钮文字自己说清。 */}
-            {remoteOps.pairedDevices.length > 0 && <button className="secondary-action" type="button" onClick={() => { setDeviceMenu(false); setPairFromDevices(true); setPairMenu(true); void scanDevices(); }}><Plus aria-hidden="true" />添加设备</button>}
+            {<button className="secondary-action" type="button" onClick={() => { setDeviceMenu(false); setPairFromDevices(true); setPairMenu(true); void scanDevices(); }}><Plus aria-hidden="true" />添加设备</button>}
           </div>
+        </div>
         </SettingsMenu>}
         {pairMenu && <SettingsMenu title="添加设备" icon={<Plus />}
           onBack={pairFromDevices ? () => { if (pairPending.current) return; setPairMenu(false); setPairFromDevices(false); setDeviceMenu(true); setRequestId(''); setCode(''); } : undefined}
           onClose={() => { if (pairPending.current) return; setPairMenu(false); setPairFromDevices(false); setRequestId(''); setCode(''); }}>
+          <div className="settings-device-menu">
           <div className="settings-choice-list">
             {unpairedDevices.map((device) => <SettingsOption key={device.address} align="start" active={address === device.address} disabled={pairBusy}
               onClick={() => { setAddress(device.address); setRequestId(''); setCode(''); }}
             >
                 <DeviceRowBody name={device.name} address={device.address} />
               </SettingsOption>)}
-            {unpairedDevices.length === 0 && <p className="settings-choice-empty">
-              {devices.length > 0 ? '搜到的设备都已配对过' : '没搜到设备，直接填地址'}
+            {(discovering || discoveryError || unpairedDevices.length === 0) && <p role="status" className={`settings-choice-empty${discoveryError ? ' settings-discovery-error' : ''}`}>
+              {discovering ? '正在搜索…' : discoveryError ? '无法搜索局域网。请检查 Wi-Fi 和局域网权限，或直接输入设备地址。' : devices.length > 0 ? '搜到的设备都已配对过' : '未发现设备，可手动输入地址。'}
             </p>}
           </div>
           {/* 字段名写在框上面：占位符放不下「这台设备是什么」，读起来也不再是一行孤零零的输入框。 */}
@@ -472,13 +485,14 @@ export function ComputeCenterSettingsGroup({ preferences, editPreferences, mobil
             />
           </label> : null}
           <div className="settings-menu-actions">
-            <button className="secondary-action" type="button" disabled={pairBusy} onClick={() => void scanDevices()}><RefreshCw aria-hidden="true" />重新搜索</button>
+            <button className="secondary-action" type="button" disabled={discovering || pairBusy} onClick={() => void scanDevices()}><RefreshCw aria-hidden="true" />重新搜索</button>
             {/* 配对是**替换**而不是追加：这件事原来靠一段小字说，现在收进按钮文字里
                 ——已经有一台时按钮就叫「替换配对」，不用再读一行解释。 */}
             {requestId
               ? <button className="primary-action" type="button" disabled={pairBusy || code.length !== 6} onClick={() => void finishPairing()}><Link2 aria-hidden="true" />{remoteOps.pairedDevices.length > 0 ? '完成替换' : '完成配对'}</button>
               : <button className="primary-action" type="button" disabled={pairBusy || !address.trim()} onClick={() => void startPairing()}><Link2 aria-hidden="true" />{remoteOps.pairedDevices.length > 0 ? '替换配对' : '配对'}</button>}
           </div>
+        </div>
         </SettingsMenu>}
       </div>}
     </>

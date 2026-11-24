@@ -7,6 +7,7 @@ import { Link, Navigate, NavigationType, Route, Routes, UNSAFE_LocationContext, 
 
 import { RetainedPage, usePageActive } from './RetainedPage';
 import { useWorkspaceRefresh } from './workspaceRefresh';
+import { pageKeyFor } from '../lib/pageKeys';
 import { useRouteDirection } from '../lib/useRouteDirection';
 import type { RouteDirection } from './RetainedPage';
 import { detailIdentity, type RouteMotion } from '../lib/routeMotion';
@@ -1054,17 +1055,14 @@ export function WorkspaceRoutes({ direction: navigationDirection, motion: outerM
   /** 一条详情路由与它的列表同属一页：`/library/:id` 归 `/library`，三个书架的
    * `/history/:id` 之类归各自的书架，首页的 `/home/:id` 归 `/`。保留页面按这个键
    * 复用（见 RetainedPage）。 */
-  const pageKeys: Record<string, string> = { home: '/', library: '/library', history: '/history', watchlist: '/watchlist', 'to-read': '/to-read' };
-  // Editors are temporary destinations, not the library tab's remembered page.
-  const keyFor = (path: string) => path.endsWith('/edit') ? path : pageKeys[path.split('/')[1] ?? ''] ?? path;
-  const routeKey = keyFor(location.pathname);
+  const routeKey = pageKeyFor(location.pathname);
   const preview = previewLocation ?? transition.previewLocation;
-  const previewKey = preview ? keyFor(preview.pathname) : undefined;
+  const previewKey = preview ? pageKeyFor(preview.pathname) : undefined;
   const visited = useRef(new Map<string, typeof location>());
   visited.current.set(routeKey, location);
   if (preview && previewKey) visited.current.set(previewKey, preview);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedWorkspacePage key={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
+    <RetainedWorkspacePage key={key} pageKey={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
   ))}</>;
 }
 
@@ -1079,8 +1077,8 @@ function WorkspaceRouteFallback({ path }: { path: string }) {
 
 /** Stable route elements keep unrelated retained pages out of navigation renders.
  * Active context still reaches consumers for freshness and scroll restoration. */
-const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, active, flow, compact, direction, motion, surfaceRef }: {
-  saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; compact: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
+const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, saved, active, flow, compact, direction, motion, surfaceRef }: {
+  pageKey: string; saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; compact: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
 }) {
   // Routes(location=...) still subscribes to the outer LocationContext. Isolate
   // that subscription too, otherwise every hidden useLocation consumer updates.
@@ -1115,7 +1113,7 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ saved, activ
   // These compact routes scroll through the shared workspace. Animating the
   // full card/detail columns in from outside the viewport spikes raster work.
   const fadeEntry = compact && detailKey !== undefined;
-  return <RetainedPage active={active} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
+  return <RetainedPage active={active} pageKey={pageKey} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });

@@ -1545,30 +1545,15 @@ describe('design system contract', () => {
     expect(ruleBody(reader, '.reader-toolbar button:hover:not(:disabled)::before')).toMatch(/background:\s*var\(--surface-container-high\)/);
     expect(reader).toMatch(/\.reader-toolbar button:is\(\.is-pressed, :active\):not\(:disabled\)::before \{ background: var\(--surface-container-highest\); \}/);
     expect(reader).toMatch(/\.reader-toolbar button\.is-pressed:not\(:disabled\) \{ transform: scale\(/);
+    // 顶栏图标按钮（窄屏才收窄）与底栏共用同一层圆形按压：它们不设 --reader-action-width，
+    // 所以宽度要带 --icon-button-size 回落，两条选择器也必须挂在同一条规则上。
+    expect(reader, '顶栏图标与底栏共用同一层圆形按压').toMatch(/\.reader-chrome-top \.reader-icon-button::before,\s*\n\s*\.reader-toolbar button::before \{/);
     const stateLayer = ruleBody(reader, '.reader-toolbar button::before');
-    expect(stateLayer).toMatch(/inline-size:\s*var\(--reader-action-width\)/);
-    expect(stateLayer).toMatch(/block-size:\s*var\(--reader-action-width\)/);
+    expect(stateLayer).toMatch(/inline-size:\s*var\(--reader-action-width(?:,\s*var\(--icon-button-size\))?\)/);
+    expect(stateLayer).toMatch(/block-size:\s*var\(--reader-action-width(?:,\s*var\(--icon-button-size\))?\)/);
     expect(stateLayer).toMatch(/border-radius:\s*50%/);
-    expect(reader, '翻页的回应要有一条动画').toMatch(/@keyframes reader-toolbar-turn \{\s*from \{/);
-    const cue = ruleBody(reader, '.reader-toolbar-turn');
-    expect(cue).toMatch(/animation:\s*reader-toolbar-turn var\(--motion-slow\)/);
-    expect(cue).toMatch(/background:\s*var\(--primary\)/);
-    // 动画没有 `forwards`，播完就落回基础值：基础值必须是灭的，否则一条主题色的实线会
-    // 永久留在栏顶（工装实测过这个形态）。
-    expect(cue, '光线的底色必须是灭的').toMatch(/opacity:\s*0/);
-    // 重播靠**重新挂载**，不是改属性值：实测（debug_outputs/reader-motion）里把属性在
-    // 两个值之间轮流，第二页一条动画都没跑——Blink 只在 `animation-name` 变或元素重挂
-    // 时才重播。
-    expect(read('src/components/ReaderScreen.tsx'), '光线要按翻页次数换一个新元素')
-      .toMatch(/\{showTurnCue && <span key=\{turnCue\} className="reader-toolbar-turn"/);
-    // 但「换元素」不能变成「栏一回来就闪一下」：底栏 chrome 收起 260ms 后整棵子树被摘掉，
-    // 再出现时是全新的 DOM，一次性动画会跟着重播（用户报的「出现时顶部闪一条线」）。光线
-    // 因此只认**这一次翻页**：`playedCue` 记住已播过的那一次，且由 effect 写（渲染期间写
-    // ref 会被 StrictMode 的双渲染吃掉）。
-    expect(read('src/components/ReaderScreen.tsx'), '光线只在翻页那一轮挂上去')
-      .toMatch(/const showTurnCue = turnCue > 0 && playedCue\.current !== turnCue;/);
-    expect(read('src/components/ReaderScreen.tsx'), '已播过的那一次由 effect 记下')
-      .toMatch(/playedCue\.current = turnCue;/);
+    expect(reader).not.toContain('reader-toolbar-turn');
+    expect(read('src/components/ReaderScreen.tsx')).not.toContain('reader-toolbar-turn');
   });
 
   it('keeps the on-canvas reader chrome on its own fixed dark scheme', () => {
@@ -2627,6 +2612,20 @@ ${shell}`).not.toMatch(/\.archive-list-skeleton[^{}]*\{[^}]*\bpadding\s*:/);
     }
     // The shell is a fixed frame, so nothing should chain a gesture back to it.
     expect(ruleBody(base, 'html')).toMatch(/overscroll-behavior:\s*none/);
+    // iOS 在横屏、以及系统「文字大小」调大之后会对整块文本做自动缩放（text
+    // autosizing）：px 定死的工具栏跟着长高、按钮文字互相顶开。字号由设置里的
+    // 阅读字号决定，不是浏览器缩放，所以两条前缀都钉在 100%。
+    expect(ruleBody(base, 'html')).toMatch(/-webkit-text-size-adjust:\s*100%/);
+    expect(ruleBody(base, 'html')).toMatch(/\n\s*text-size-adjust:\s*100%/);
+    // Reduce Transparency 是系统级辅助功能：全屏蒙版的模糊必须能被关掉。这条钉住
+    // 三个蒙版都在守卫里，且守卫只是**加**了一条 none，没有把原来的模糊删掉。
+    const shell = read('src/styles/shell.css');
+    const scrims = ruleBody(shell, '@media (prefers-reduced-transparency: reduce)');
+    for (const selector of ['.dialog-overlay', '.settings-overlay', '.archive-cover-preview::before']) {
+      expect(scrims, selector).toContain(selector);
+    }
+    expect(scrims).toMatch(/backdrop-filter:\s*none/);
+    expect(ruleBody(shell, '.dialog-overlay')).toMatch(/backdrop-filter:\s*blur\(/);
     expect(ruleBody(base, 'body')).toMatch(/overscroll-behavior:\s*none/);
     // 横向导轨的手势归**浏览器**管：导轨是 `overflow-x: auto`，另一轴的 computed 值随
     // 之变成 `auto`，所以 touch-action 只写 `pan-x` 时整条命中链的交集把纵向平移摘掉
@@ -3596,10 +3595,17 @@ describe('移动端：软键盘、卡片高亮、底部留白、底栏避让', (
   });
 
   it('keeps the floating nav where it is when the soft keyboard opens', () => {
-    const main = read('src/main.tsx');
-    expect(main, '布局视口被键盘缩短了多少，写成 --keyboard-inset（visualViewport 的收缩量）').toMatch(
-      /visualViewport[\s\S]{0,600}setProperty\('--keyboard-inset'/,
+    const keyboard = read('src/lib/keyboardAvoidance.ts');
+    expect(keyboard, '键盘收缩量取自 visualViewport，而不是布局视口').toMatch(/visualViewport/);
+    expect(keyboard, '布局视口被键盘缩短了多少，写成 --keyboard-inset（visualViewport 的收缩量）').toMatch(
+      /setProperty\('--keyboard-inset', `\$\{inset\}px`\)/,
     );
+    expect(keyboard, '只有真正要输入的那块浮层被抬起来，页面本身不跟着挪').toMatch(
+      /setProperty\('--keyboard-lift'/,
+    );
+    const main = read('src/main.tsx');
+    expect(main, '原生壳启动时装上这套避让').toMatch(/installKeyboardAvoidance\(\)/);
+    expect(main, '避让不再写死在入口里').not.toMatch(/setProperty\('--keyboard-inset'/);
     const base = read('src/styles/base.css');
     expect(base, '变量得有声明在 html 上的兜底值，否则 calc() 整条失效').toMatch(/--keyboard-inset: 0px;/);
     const shell = read('src/styles/shell.css');

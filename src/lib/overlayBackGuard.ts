@@ -1,17 +1,22 @@
 import { useEffect, useRef } from 'react';
 
 /** 一个开着的浮层：关掉它的动作、「刚才没关掉就把守卫补回去」，以及它在历史里的层号。 */
-type Overlay = { close: () => void; restore: () => void; depth: number };
+type Overlay = { close: () => void; gestureSurface?: (() => HTMLElement | null) | undefined; gestureClose?: ((offset: number) => void) | undefined; restore: () => void; depth: number };
 
 const stack: Overlay[] = [];
 let bound = false;
 
+export function hasBackOverlay(): boolean { return stack.length > 0; }
+
+export function topBackGestureSurface(): HTMLElement | null { return stack.at(-1)?.gestureSurface?.() ?? null; }
+
 /** Native Back must close the frontmost overlay before considering a route.
  * Keep its history guard until React cleanup consumes it normally. */
-export function closeTopOverlay(): boolean {
+export function closeTopOverlay(offset?: number): boolean {
   const top = stack.at(-1);
   if (!top) return false;
-  top.close();
+  if (offset !== undefined && top.gestureClose) top.gestureClose(offset);
+  else top.close();
   return true;
 }
 
@@ -60,9 +65,11 @@ function onPopState() {
  * 已知的边角：关掉一层的同一瞬间又开一层（连点两个设置行）时，`history.back()` 与新
  * `pushState` 谁先谁后由浏览器定；最坏情况是那一次返回被吃掉，页面不会被带走。
  */
-export function useOverlayBackGuard(open: boolean, close: () => void): void {
+export function useOverlayBackGuard(open: boolean, close: () => void, gesture?: { surface: () => HTMLElement | null; close: (offset: number) => void }): void {
   const latestClose = useRef(close);
   latestClose.current = close;
+  const latestGesture = useRef(gesture);
+  latestGesture.current = gesture;
   const openRef = useRef(open);
   openRef.current = open;
 
@@ -76,6 +83,11 @@ export function useOverlayBackGuard(open: boolean, close: () => void): void {
     const overlay: Overlay = {
       depth: stack.length + 1,
       close: () => latestClose.current(),
+      gestureSurface: () => latestGesture.current?.surface() ?? null,
+      gestureClose: (offset) => {
+        if (latestGesture.current) latestGesture.current.close(offset);
+        else latestClose.current();
+      },
       restore: () => {
         if (!active || !openRef.current || stack.includes(overlay)) return;
         overlay.depth = stack.length + 1;

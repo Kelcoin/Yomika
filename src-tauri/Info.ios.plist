@@ -3,4 +3,16 @@
 <plist version="1.0"><dict>
   <key>NSFaceIDUsageDescription</key>
   <string>使用 Face ID 解锁 Yomika，保护此设备上的阅读内容。</string>
+  <key>CADisableMinimumFrameDurationOnPhone</key>
+  <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>连接同一局域网中的算力设备和档案服务器。</string>
+  <!-- 只用系统 HTTPS，没有自研或第三方加密算法：在包上一次性声明，
+       免得每次上传 App Store Connect 都在「出口合规」那一步停下来问。 -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
+  <!-- iPad 的触控板与鼠标：没有这个键，指针事件会被模拟成触摸，
+       悬停样式与右键菜单全部失效。 -->
+  <key>UIApplicationSupportsIndirectInputEvents</key>
+  <true/>
 </dict></plist>

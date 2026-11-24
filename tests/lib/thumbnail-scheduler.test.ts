@@ -38,6 +38,22 @@ function range(start: number, end: number, visibleStart = start, visibleEnd = en
 }
 
 describe('thumbnail scheduler', () => {
+  it('reloads previews released under memory pressure without restarting in-flight work', async () => {
+    const loader = controlled();
+    const scheduler = new ThumbnailScheduler({ load: loader.load, onLoaded: vi.fn(), concurrency: 2 });
+    scheduler.setRange(range(0, 2, 0, 2));
+    await flush();
+    loader.settle(0, 'thumb-0');
+    await flush();
+    scheduler.forgetLoadedOutside(range(1, 2, 1, 2));
+    expect(scheduler.outstanding).toBe(1);
+    scheduler.setRange(range(0, 2, 0, 2));
+    await flush();
+    expect(loader.requests.filter(index => index === 0)).toHaveLength(2);
+    expect(loader.requests.filter(index => index === 1)).toHaveLength(1);
+    scheduler.dispose();
+  });
+
   it('spends its slots on the rows on screen before the buffer rows', async () => {
     const loader = controlled();
     const scheduler = new ThumbnailScheduler({ load: loader.load, onLoaded: () => {} });

@@ -104,7 +104,9 @@ it('deletes downloaded family weights after confirmation and selects a remaining
   await user.click(await screen.findByRole('button', { name: '超分模型' }));
   expect(screen.queryByRole('button', { name: '删除Waifu2x' })).toBeNull();
   expect(screen.queryByRole('button', { name: /设置NomosUni/ })).toBeNull();
-  expect(screen.getByRole('button', { name: /删除NomosUni/ })).toBeInTheDocument();
+  // NomosUni Photo 随包分发（启动即装），因此它和 waifu2x 一样没有删除按钮；
+  // 真正能删的是下载来的 Real-CUGAN（用户 2026-11-24）。
+  expect(screen.queryByRole('button', { name: /删除NomosUni/ })).toBeNull();
   await user.click(screen.getByRole('button', { name: '删除Real-CUGAN' }));
   expect(adapter).not.toHaveBeenCalledWith('inference_remove_models', expect.anything());
   await user.click(screen.getByRole('button', { name: '确认删除Real-CUGAN' }));
@@ -300,7 +302,7 @@ describe('settings workspace', () => {
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('data');
+    renderSettings('eh');
     // 纯开关不再有二级菜单：绘制的开关就在行的右侧，翻转即保存。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     expect(toggle).toHaveClass('switch-control');
@@ -357,7 +359,7 @@ describe('settings workspace', () => {
       return { ok: true, value: [] };
     });
     setInvokeAdapterForTests(adapter);
-    renderSettings('data');
+    renderSettings('eh');
     // 没登录：开关按不动，行里说明原因。
     const toggle = await screen.findByRole('switch', { name: '同步删除 E-Hentai 收藏' });
     await waitFor(() => expect(toggle).toBeDisabled());
@@ -531,6 +533,59 @@ describe('settings workspace', () => {
     // 承重部分——目录里 realesr 排在 waifu2x 前面，装没装都改不了它落到最后。
     expect(order[2]).toContain('Real-CUGAN');
     expect(order[3]).toContain('Real-ESRGAN');
+  });
+
+  it('keeps the bundled NomosUni model built in: no download, no delete, above the downloadable ones', async () => {
+    const user = userEvent.setup();
+    // 用户 2026-11-24：NomosUni Photo 是随包分发的，模型选择界面却有下载和删除按钮。
+    // 权重在二进制里（启动即装），所以这一行既不该给下载/删除，也要排在真正需要下载的
+    // 那几档前面。
+    localStorage.removeItem('yomika.advanced-models');
+    localStorage.removeItem('yomika.advanced-upscale-catalog');
+    const record = (id: string, scale: number) => ({ id, version: '1', scale, kind: 'upscale', components: [] });
+    const hosted = (id: string, label: string, scale: number, sha: string) => ({
+      id, label, scale, version: '1', files: [{ name: 'model.onnx', size: 1, sha256: sha.repeat(64) }],
+    });
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'inference_list_models') return {
+        ok: true,
+        value: [record('span-nomosuni-photo', 2), record('realesr-general-x4v3', 4)],
+      };
+      if (command === 'model_release_list_upscalers') return {
+        ok: true,
+        value: {
+          tag: 'v1',
+          models: [
+            hosted('span-nomosuni-photo', 'NomosUni Photo', 2, 'a'),
+            hosted('realesr-general-x4v3', 'Real-ESRGAN 通用 x4', 4, 'b'),
+          ],
+        },
+      };
+      return { ok: true, value: [] };
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('advanced');
+
+    await user.click(await screen.findByRole('button', { name: '超分模型' }));
+    const menu = await screen.findByRole('dialog', { name: '超分模型' });
+    await vi.waitFor(() => {
+      const rows = [...menu.querySelectorAll('.settings-choice-option-main')];
+      expect(rows.some((row) => (row.textContent ?? '').includes('NomosUni'))).toBe(true);
+    });
+    // 已装且是内置：下载按钮（ModelDownloadButton 在 installed && !outdated 时返回 null）与
+    // 删除按钮（只在 !BUILT_IN_HEAD.includes(id) 时渲染）都不该出现。
+    expect(within(menu).queryByRole('button', { name: '下载NomosUni Photo' })).toBeNull();
+    expect(within(menu).queryByRole('button', { name: '删除NomosUni Photo' })).toBeNull();
+    expect(within(menu).queryByRole('button', { name: '更新NomosUni Photo' })).toBeNull();
+    const order = [...menu.querySelectorAll('.settings-choice-option-main')].map((row) => row.textContent ?? '');
+    expect(order[0], `实际顺序：${order.join(' | ')}`).toContain('NomosUni');
+    expect(order[1], `实际顺序：${order.join(' | ')}`).toContain('Real-ESRGAN');
+    // 这一跑把「装了什么」写进了 localStorage 快照：不擦掉，后面的用例会读到
+    // 这份目录（waifu2x 那一行于是不见了），整文件跑就红、单跑却绿。
+    localStorage.removeItem('yomika.advanced-models');
+    localStorage.removeItem('yomika.advanced-upscale-catalog');
   });
 
   it('collapses model menu rows that share an id into one option', async () => {
@@ -1270,7 +1325,7 @@ describe('settings workspace', () => {
           ok: true,
           value: {
             text: '{"kind":"yomika-export","schemaVersion":1,"items":["progress","history"],"records":{"kind":"yomika-scope-export"}}',
-            items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
+            items: ['progress', 'search_presets', 'app_settings'],
             records: 3,
             servers: 0,
             ehAccounts: 0,
@@ -1294,7 +1349,7 @@ describe('settings workspace', () => {
     await user.click(within(exportMenu).getByRole('button', { name: '导出为文件' }));
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
-      items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
+      items: ['progress', 'search_presets', 'app_settings'],
     }));
     expect(await screen.findByText('已导出到 C:/tmp/yomika-export.json（记录与设置 3 项）')).toBeInTheDocument();
   });
@@ -1351,7 +1406,7 @@ describe('settings workspace', () => {
 
     await waitFor(() => expect(adapter).toHaveBeenCalledWith('import_scoped_data', {
       payload: scopedExport,
-      categories: JSON.stringify(['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings']),
+      categories: JSON.stringify(['progress', 'search_presets', 'app_settings']),
     }));
     expect(await screen.findByText('已导入 4 项，跳过 2 项')).toBeInTheDocument();
   });
@@ -1405,7 +1460,7 @@ describe('settings workspace', () => {
     // 默认六类记录与设置，不含凭据：面板不提醒，导出完成的 toast 是普通成功。
     await user.click(within(exportMenu).getByRole('button', { name: '导出为文件' }));
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
-      items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings'],
+      items: ['progress', 'search_presets', 'app_settings'],
     }));
     expect(within(exportMenu).queryByText(/切勿分享/)).toBeNull();
     expect(await screen.findByText('已导出到 C:/tmp/yomika-export.json（记录与设置 2 项 · E-H 账户 1）')).toBeInTheDocument();
@@ -1415,7 +1470,7 @@ describe('settings workspace', () => {
     expect(within(exportMenu).getByText(/切勿分享/)).toBeInTheDocument();
     await user.click(within(exportMenu).getByRole('button', { name: '导出为文件' }));
     await vi.waitFor(() => expect(adapter).toHaveBeenCalledWith('export_data', {
-      items: ['progress', 'history', 'watchlist', 'search_presets', 'dedup', 'app_settings', 'eh_account'],
+      items: ['progress', 'search_presets', 'app_settings', 'eh_account'],
     }));
     // 带凭据的导出仍然是**成功**：说清「这份文件敏感」靠文案，不靠红态——
     // 红态是留给「导出失败了」的。
@@ -1457,6 +1512,88 @@ describe('settings workspace', () => {
     expect(await screen.findByText('已导入：记录与设置 2 项')).toBeInTheDocument();
   });
 
+  it('offers only the three categories the app still owns', async () => {
+    // 待看、历史与非重复标记已经交给 Yomika Bridge 插件托管：导出清单里不该再有它们，
+    // 否则使用者会以为应用里还存着另一份权威数据。
+    const user = userEvent.setup();
+    setInvokeAdapterForTests(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    renderSettings('data');
+
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
+    await user.click(await screen.findByRole('button', { name: '导出数据' }));
+    const exportMenu = await screen.findByRole('dialog', { name: '导出数据' });
+
+    expect(within(exportMenu).getByRole('checkbox', { name: '导出阅读进度' })).toBeChecked();
+    expect(within(exportMenu).getByRole('checkbox', { name: '导出搜索预设' })).toBeChecked();
+    expect(within(exportMenu).getByRole('checkbox', { name: '导出应用设置' })).toBeChecked();
+    expect(within(exportMenu).queryByRole('checkbox', { name: '导出历史' })).toBeNull();
+    expect(within(exportMenu).queryByRole('checkbox', { name: '导出待看' })).toBeNull();
+    expect(within(exportMenu).queryByRole('checkbox', { name: '导出非重复标记' })).toBeNull();
+  });
+
+  it('keeps hosted categories out of an old export file and points at the plugin', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      if (command === 'import_data') return { ok: true, value: { records: 1, servers: 0, ehAccounts: 0, skipped: 0 } };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('data');
+
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
+    await user.click(await screen.findByRole('button', { name: '导入数据' }));
+    const importMenu = screen.getByRole('dialog', { name: '导入数据' });
+    const file = JSON.stringify({
+      kind: 'yomika-export', schemaVersion: 1,
+      items: ['progress', 'history', 'watchlist', 'dedup'],
+      records: { kind: 'yomika-scope-export' },
+    });
+    fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: file } });
+    await user.click(within(importMenu).getByRole('button', { name: '导入数据' }));
+
+    // 只剩应用自己那三类里的阅读进度；托管的三类被摘掉，并且明说去哪儿导。
+    expect(within(importMenu).getByRole('checkbox', { name: '导入阅读进度' })).toBeChecked();
+    expect(within(importMenu).queryByRole('checkbox', { name: '导入历史' })).toBeNull();
+    expect(within(importMenu).queryByRole('checkbox', { name: '导入待看' })).toBeNull();
+    expect(within(importMenu).queryByRole('checkbox', { name: '导入非重复标记' })).toBeNull();
+    expect(await screen.findByText(/历史、待看、非重复标记 由服务器插件托管/)).toBeInTheDocument();
+
+    await user.click(within(importMenu).getByRole('button', { name: '导入所选' }));
+    await waitFor(() => expect(adapter).toHaveBeenCalledWith('import_data', { payload: file, items: ['progress'] }));
+  });
+
+  it('refuses an old export file that holds nothing but hosted categories', async () => {
+    const user = userEvent.setup();
+    const adapter = vi.fn(async (command: string) => {
+      if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
+      if (command === 'list_servers') return { ok: true, value: [] };
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    setInvokeAdapterForTests(adapter);
+    renderSettings('data');
+
+    await user.click(await screen.findByRole('link', { name: /^数据$/ }));
+    await user.click(await screen.findByRole('button', { name: '导入数据' }));
+    const importMenu = screen.getByRole('dialog', { name: '导入数据' });
+    const file = JSON.stringify({
+      kind: 'yomika-export', schemaVersion: 1,
+      items: ['history', 'watchlist', 'dedup'],
+      records: { kind: 'yomika-scope-export' },
+    });
+    fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: file } });
+    await user.click(within(importMenu).getByRole('button', { name: '导入数据' }));
+
+    expect(await screen.findByText(/只有待看、历史与非重复标记/)).toBeInTheDocument();
+    expect(within(importMenu).queryByRole('checkbox')).toBeNull();
+    expect(adapter).not.toHaveBeenCalledWith('import_data', expect.anything());
+  });
+
   it('tells the user an old passphrase file is no longer supported', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command: string) => {
@@ -1477,15 +1614,15 @@ describe('settings workspace', () => {
     expect(await screen.findByText(/口令导入已移除/)).toBeInTheDocument();
   });
 
-  it('imports a readoshi worker v3 export into the matching server scope', async () => {
+  it('points a readoshi worker v3 export at the server plugin instead of importing it', async () => {
+    // 历史、待看与非重复标记已由 Yomika Bridge 插件托管在服务端：应用不再往本地
+    // 写一份副本（两份各走各的，谁都不是真相），只把这文件指路到插件设置页。
     const user = userEvent.setup();
     const serverScope = readoshiServerScope('https://example.com');
     const adapter = vi.fn(async (command: string) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
       if (command === 'list_servers') return { ok: true, value: [{ id: 'scope-a', name: 'Home', baseUrl: 'https://example.com', scopeId: 'scope-a' }] };
-      if (command === 'import_worker_export') return { ok: true, value: { history: 2, historyRemoved: 1, watchlist: 1, watchlistRemoved: 1 } };
-      if (command === 'dedup_import_readoshi') return { ok: true, value: null };
-      throw new Error();
+      throw new Error(`Unexpected command: ${command}`);
     });
     setInvokeAdapterForTests(adapter);
     renderSettings('data');
@@ -1508,23 +1645,14 @@ describe('settings workspace', () => {
     fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: envelope } });
     await user.click(within(importMenu).getByRole('button', { name: '导入数据' }));
 
-    expect(await screen.findByText(/已导入：阅读 2 · 待看 1 · 重复关系 1/)).toBeInTheDocument();
-    expect(adapter).toHaveBeenCalledWith('import_worker_export', expect.objectContaining({
-      input: expect.objectContaining({
-        scopeId: 'scope-a',
-        history: { entries: [{ archiveId: 'a1', pageIndex: 148, visitedAt: '2026-09-13 09:35:33.362' }], deletedIds: [] },
-        watchlist: { entries: [{ archiveId: 'w1', addedAt: '2026-09-04 16:36:57.490' }], tombstones: [] },
-      }),
-    }));
-    expect(adapter).toHaveBeenCalledWith('dedup_import_readoshi', expect.objectContaining({
-      input: expect.objectContaining({
-        scopeId: 'scope-a',
-        pairs: [{ leftArchiveId: 'aaa', rightArchiveId: 'bbb', source: 'readoshi', diagnostics: null }],
-      }),
-    }));
+    expect(await screen.findByText(/已由服务器插件托管/)).toBeInTheDocument();
+    expect(await screen.findByText(/「服务器阅读数据」/)).toBeInTheDocument();
+    // 一个字节都没往本地写。
+    expect(adapter).not.toHaveBeenCalledWith('import_worker_export', expect.anything());
+    expect(adapter).not.toHaveBeenCalledWith('dedup_import_readoshi', expect.anything());
   });
 
-  it('refuses a worker v3 export from an unconfigured server', async () => {
+  it('redirects a worker v3 export even when no server is configured yet', async () => {
     const user = userEvent.setup();
     setInvokeAdapterForTests(async (command) => {
       if (command === 'load_preferences') return { ok: true, value: DEFAULT_PREFERENCES };
@@ -1540,7 +1668,8 @@ describe('settings workspace', () => {
     fireEvent.change(within(importMenu).getByLabelText('导出 JSON'), { target: { value: envelope } });
     await user.click(within(importMenu).getByRole('button', { name: '导入数据' }));
 
-    expect(await screen.findByText(/导出属于其他 LANraragi 服务器/)).toBeInTheDocument();
+    // 认不认得那台服务器已经不重要：这份数据不归应用管，指路到插件设置页。
+    expect(await screen.findByText(/已由服务器插件托管/)).toBeInTheDocument();
   });
 
   it('shows legacy import failure without changing preferences', async () => {

@@ -20,6 +20,7 @@ const ALLOW_PROGRESS_REGRESSION_KEY: &str = "preferences.allow_progress_regressi
 const PROGRESS_BAR_VISIBILITY_KEY: &str = "preferences.progress_bar_visibility";
 const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
 const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
+const AUTO_CROP_BORDERS_KEY: &str = "preferences.auto_crop_borders";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
 const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
 const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
@@ -124,6 +125,8 @@ pub struct PreferenceSnapshot {
     pub progress_bar_visibility: String,
     pub cache_max_bytes: u64,
     /// How many pages either side of the current one the reader preloads.
+    #[serde(default)]
+    pub auto_crop_borders: bool,
     #[serde(default = "default_prefetch_pages")]
     pub prefetch_pages: u8,
     /// Concurrent cover requests; LANraragi queues thumbnail extraction.
@@ -294,9 +297,14 @@ fn default_bottom_nav_items() -> Vec<String> {
 ///
 /// 名字是快照序列化后的键（camelCase），因为判断发生在 JSON 上：日志里存的是那份
 /// JSON，远端来的也是 JSON。
-pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 10] = [
+pub(crate) const DEVICE_LOCAL_PREFERENCE_KEYS: [&str; 15] = [
     "downloadDirectory",
     "cacheMaxBytes",
+    "upscaleModel",
+    "upscaleBackend",
+    "upscaleAutoEnable",
+    "dlssnrEnabled",
+    "dlssnrPasses",
     // 算力中心这一组全是「这台机器」的事：端口可能撞别的设备、令牌是这台机器的
     // 凭据、远端地址指的是具体一台机器。同步出去只会把别的设备设置改坏。
     "computeCenterEnabled",
@@ -318,6 +326,7 @@ impl Default for PreferenceSnapshot {
             allow_progress_regression: true,
             progress_bar_visibility: default_progress_bar_visibility(),
             cache_max_bytes: 2_147_483_648,
+            auto_crop_borders: false,
             prefetch_pages: default_prefetch_pages(),
             cover_concurrency: default_cover_concurrency(),
             startup_route: default_startup_route(),
@@ -391,7 +400,8 @@ fn validate_preferences(value: &PreferenceSnapshot) -> Result<PreferenceSnapshot
         // 都会超分失去意义。与设置页步进器的范围一致。
         || !(64 * 1024..=8 * 1024 * 1024).contains(&value.upscale_auto_threshold_bytes)
         || value.download_directory.len() > 4096
-        || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute())
+        || (!value.download_directory.is_empty() && !std::path::Path::new(&value.download_directory).is_absolute()
+            && !(cfg!(target_os = "android") && is_document_tree(&value.download_directory)))
         // Bounded so a paste cannot bloat the settings row; enough for a theme.
         || value.custom_css.len() > 20_000
         || value.bottom_nav_items.iter().any(|item| {
@@ -449,6 +459,11 @@ fn map_value<T: serde::de::DeserializeOwned>(
     }
 }
 
+pub(crate) fn is_document_tree(value: &str) -> bool {
+    url::Url::parse(value).is_ok_and(|url| url.scheme() == "content" && url.host_str().is_some()
+        && url.path_segments().is_some_and(|mut parts| parts.next() == Some("tree") && parts.next().is_some_and(|id| !id.is_empty()) && parts.next().is_none()))
+}
+
 pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapshot, String> {
     let defaults = PreferenceSnapshot::default();
     let mut stored: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -473,6 +488,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         allow_progress_regression: map_value(&stored, ALLOW_PROGRESS_REGRESSION_KEY, defaults.allow_progress_regression)?,
         progress_bar_visibility: map_value(&stored, PROGRESS_BAR_VISIBILITY_KEY, defaults.progress_bar_visibility)?,
         cache_max_bytes: map_value(&stored, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
+        auto_crop_borders: map_value(&stored, AUTO_CROP_BORDERS_KEY, defaults.auto_crop_borders)?,
         prefetch_pages: map_value(&stored, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
         cover_concurrency: map_value(
             &stored,
@@ -591,6 +607,7 @@ pub(crate) fn write_preference_keys(
             CACHE_MAX_BYTES_KEY,
             serde_json::to_string(&value.cache_max_bytes),
         ),
+        (AUTO_CROP_BORDERS_KEY, serde_json::to_string(&value.auto_crop_borders)),
         (
             PREFETCH_PAGES_KEY,
             serde_json::to_string(&value.prefetch_pages),
@@ -830,6 +847,10 @@ pub fn save_preferences(
     drop(connection);
     match saved {
         Ok(value) => {
+            #[cfg(target_os = "ios")]
+            if previous.as_ref().is_none_or(|old| old.theme != value.theme) {
+                crate::app_security_ios::set_theme(&app, &value.theme);
+            }
             #[cfg(target_os = "windows")]
             if notify_service {
                 if let Some(data) = data { crate::windows_compute_service::preferences_saved(data); }
@@ -954,13 +975,20 @@ fn update_windows_autostart(executable: &std::path::Path, enabled: bool) -> Resu
 pub fn import_legacy_preferences(
     encoded: String,
     database: tauri::State<'_, Database>,
+    #[allow(unused_variables)] app: tauri::AppHandle,
 ) -> CommandResult<LegacyPreferenceImport> {
     let mut connection = match database.connection.lock() {
         Ok(value) => value,
         Err(_) => return CommandResult::failure("UNKNOWN", crate::cache::LOCK_FAILED, true),
     };
-    match import_legacy_preferences_from(&mut connection, &encoded) {
-        Ok(value) => CommandResult::success(value),
+    let imported = import_legacy_preferences_from(&mut connection, &encoded);
+    drop(connection);
+    match imported {
+        Ok(value) => {
+            #[cfg(target_os = "ios")]
+            crate::app_security_ios::set_theme(&app, &value.preferences.theme);
+            CommandResult::success(value)
+        }
         Err(_) => CommandResult::failure(
             "INVALID_RESPONSE",
             "Legacy ordinary preferences are invalid or unsupported",
@@ -1009,6 +1037,7 @@ mod tests {
             default_direction: "rtl".into(),
             detail_date_kind: "added".into(),
             cache_max_bytes: 4_294_967_296,
+            auto_crop_borders: true,
             prefetch_pages: 3,
             allow_progress_regression: false,
             progress_bar_visibility: "all".into(),

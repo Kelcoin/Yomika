@@ -25,7 +25,7 @@ test "$#" -gt 0 || { echo 'no packages given' >&2; exit 1; }
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-sha=$(git rev-parse --short=7 HEAD)
+sha=$(git rev-parse --short=8 HEAD)
 
 hash_of() {
   if command -v sha256sum > /dev/null 2>&1; then

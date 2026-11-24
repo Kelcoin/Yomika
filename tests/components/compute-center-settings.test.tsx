@@ -329,6 +329,31 @@ describe('compute center settings menus', () => {
   });
 });
 
+describe('iOS device discovery', () => {
+  it('searches when opened and lets the user retry or enter an address after a failure', async () => {
+    const originalPlatform = document.documentElement.getAttribute('data-native-platform');
+    document.documentElement.dataset.nativePlatform = 'ios';
+    try {
+      const discover = vi.fn()
+        .mockReturnValueOnce({ ok: false, error: { code: 'NETWORK', message: 'Denied', retryable: true } })
+        .mockReturnValueOnce({ ok: true, value: [{ name: 'DESKTOP-PC', address: '192.168.1.5:47653', port: 47653 }] });
+      setInvokeAdapterForTests(adapterFor({ compute_discover: discover }));
+      renderComputeCenter();
+      await user().click(await screen.findByRole('button', { name: '添加设备' }));
+      const dialog = within(await screen.findByRole('dialog', { name: '添加设备' }));
+      expect(await dialog.findByText(/无法搜索局域网/)).toBeInTheDocument();
+      expect(dialog.getByLabelText('设备地址')).toBeEnabled();
+      await user().click(dialog.getByRole('button', { name: '重新搜索' }));
+      await user().click(await dialog.findByText('DESKTOP-PC'));
+      expect(dialog.getByLabelText('设备地址')).toHaveValue('192.168.1.5:47653');
+      expect(discover).toHaveBeenCalledTimes(2);
+    } finally {
+      if (originalPlatform === null) delete document.documentElement.dataset.nativePlatform;
+      else document.documentElement.dataset.nativePlatform = originalPlatform;
+    }
+  });
+});
+
 describe('one paired device at a time', () => {
   it('keeps the pairing address stable while requesting its code', async () => {
     let finish!: (value: unknown) => void;

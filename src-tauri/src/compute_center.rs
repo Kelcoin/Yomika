@@ -408,6 +408,14 @@ pub struct DiscoveredDevice {
 
 fn serve_discovery(port: u16, stop: Arc<AtomicBool>) {
     let Ok(socket) = std::net::UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) else { return };
+    answer_discovery(&socket, port, &stop);
+}
+
+/// 收到 `DISCOVERY_REQUEST` 就单播回一份自我介绍。
+///
+/// 广播与单播两种来路都走这里：请求方把包发到 `DISCOVERY_PORT` 上，回包发给 `peer`
+/// 本身——所以 iOS 那条「逐台单播」的探法拿到的答案与广播完全一样。
+fn answer_discovery(socket: &std::net::UdpSocket, port: u16, stop: &AtomicBool) {
     let _ = socket.set_read_timeout(Some(std::time::Duration::from_millis(500)));
     let reply = serde_json::json!({ "service": SERVICE_NAME, "version": PROTOCOL_VERSION, "name": host_name(), "port": port }).to_string();
     let mut buffer = [0u8; 128];
@@ -420,11 +428,53 @@ fn serve_discovery(port: u16, stop: Arc<AtomicBool>) {
     }
 }
 
+/// 单播探测目标：把本机所在的 /24 逐台列出来（跳过自己）。
+///
+/// 为什么要单播：iOS 的「本地网络」权限只放行**单播**；往 `255.255.255.255` 发广播
+/// 还需要 Apple 单独审批的 Multicast Networking 权限
+/// （`com.apple.developer.networking.multicast`），没有它时 `send_to` 直接返回 EPERM——
+/// 用户明明给了局域网权限，界面却一直报「无法搜索局域网」（2026-11-24 报的就是这个）。
+/// 单播探到的那一台照样由 `serve_discovery` 单播回包，效果与广播一致。
+fn discovery_probe_targets(local: &[String]) -> Vec<std::net::SocketAddr> {
+    let mut targets = Vec::new();
+    for address in local {
+        let Ok(ip) = address.parse::<std::net::Ipv4Addr>() else { continue };
+        let octets = ip.octets();
+        for host in 1..=254u8 {
+            if host == octets[3] { continue; }
+            let target = std::net::SocketAddr::from((
+                std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], host),
+                DISCOVERY_PORT,
+            ));
+            if !targets.contains(&target) { targets.push(target); }
+        }
+    }
+    targets
+}
+
 pub fn discover_devices() -> Result<Vec<DiscoveredDevice>, String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|error| error.to_string())?;
     socket.set_broadcast(true).map_err(|error| error.to_string())?;
     socket.set_read_timeout(Some(std::time::Duration::from_millis(1200))).map_err(|error| error.to_string())?;
-    socket.send_to(DISCOVERY_REQUEST, ("255.255.255.255", DISCOVERY_PORT)).map_err(|error| error.to_string())?;
+    // 广播是尽力而为：Android/桌面上一发就够，iOS 上多半会被拒，拒了不算失败。
+    let mut sent = 0usize;
+    let mut last_error = None;
+    match socket.send_to(DISCOVERY_REQUEST, ("255.255.255.255", DISCOVERY_PORT)) {
+        Ok(_) => sent += 1,
+        Err(error) => last_error = Some(error),
+    }
+    for target in discovery_probe_targets(&local_addresses()) {
+        match socket.send_to(DISCOVERY_REQUEST, target) {
+            Ok(_) => sent += 1,
+            Err(error) => last_error = Some(error),
+        }
+    }
+    // 一条都没发出去才叫「搜不了」：报的是最后那次系统错误，用户能照着查权限。
+    if sent == 0 {
+        return Err(last_error
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "没有可用的局域网地址".to_string()));
+    }
     let mut devices = Vec::new();
     let mut buffer = [0u8; 1024];
     while let Ok((size, peer)) = socket.recv_from(&mut buffer) {
@@ -2898,6 +2948,45 @@ async fn remote_process_cached_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// iOS 的本地网络权限只放行单播，所以「逐台发一份请求」是那条平台上唯一能用的探法：
+    /// 它必须落到本机所在的那个 /24 上、跳过自己、且不重复（重复发等于把 254 包变成 508）。
+    #[test]
+    fn unicast_probes_cover_the_local_subnet_without_asking_ourselves() {
+        let targets = discovery_probe_targets(&["192.168.1.7".to_string(), "10.0.0.42".to_string(), "not-an-ip".to_string()]);
+        // 每个子网 254 台，去掉自己那台：253 + 253。
+        assert_eq!(targets.len(), 506);
+        assert!(targets.iter().all(|target| target.port() == DISCOVERY_PORT));
+        assert!(!targets.iter().any(|target| target.ip().to_string() == "192.168.1.7"));
+        assert!(!targets.iter().any(|target| target.ip().to_string() == "10.0.0.42"));
+        assert!(targets.iter().any(|target| target.ip().to_string() == "192.168.1.1"));
+        assert!(targets.iter().any(|target| target.ip().to_string() == "192.168.1.254"));
+        let unique: std::collections::HashSet<_> = targets.iter().collect();
+        assert_eq!(unique.len(), targets.len());
+    }
+
+    /// 单播请求拿到的答案与广播完全一样：`serve_discovery` 回的是 `peer` 本身。
+    /// 这一条钉住的就是 iOS 上「广播被系统拒了也还能搜到设备」的那半条路。
+    #[test]
+    fn a_unicast_request_is_answered_like_a_broadcast_one() {
+        let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let address = server.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let answering = server.try_clone().unwrap();
+        let handle = std::thread::spawn(move || answer_discovery(&answering, 47653, &thread_stop));
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        client.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        client.send_to(DISCOVERY_REQUEST, address).unwrap();
+        let mut buffer = [0u8; 1024];
+        let (size, _) = client.recv_from(&mut buffer).expect("单播请求没有回包");
+        let reply: serde_json::Value = serde_json::from_slice(&buffer[..size]).unwrap();
+        assert_eq!(reply["service"], SERVICE_NAME);
+        assert_eq!(reply["version"], PROTOCOL_VERSION);
+        assert_eq!(reply["port"], 47653);
+        stop.store(true, Ordering::SeqCst);
+        handle.join().unwrap();
+    }
 
     #[tokio::test]
     async fn remote_prefetch_survives_memory_eviction_and_invalidates_with_source_or_plan() {
