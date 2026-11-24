@@ -435,41 +435,27 @@
     --radius-overlay: 28px;
     --radius-pill: 999px;
 
-    /* ---- Motion: spring-like curve only; never linear / ease-in-out ---- */
-    --ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
-    /* Exits need a second curve. `--ease-standard` is a decelerate curve: nearly
-       all of its travel is in its first third, which is what makes an entrance
-       feel immediate — and on the way out reads as no animation at all, because
-       the element is gone before the eye catches it. M3 pairs a decelerate curve
-       with an entrance and an accelerate curve with an exit.
-       It is for elements that *leave* (the reader's two bars animate out with
-       `--duration-exit var(--ease-exit)` and are then unmounted). A surface that
-       only shrinks back into the layout it came from must not use it: the same
-       element animating both ways gets one token, or the two ends read as
-       different speeds (the multi-select bar did exactly that). */
-    --ease-exit: cubic-bezier(0.3, 0, 0.8, 0.15);
-    /* Refined motion curves for elevated interactions */
-    --ease-elastic: cubic-bezier(0.16, 1.1, 0.3, 1);
-    --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
-    --ease-spring: cubic-bezier(0.26, 1.2, 0.48, 1);
-    --motion-fast: 140ms var(--ease-standard);
-    --motion-crisp: 180ms var(--ease-smooth);
+    /* ---- Motion: iOS-refined spring curves for natural feel ---- */
+    --ease-standard: cubic-bezier(0.34, 0.74, 0, 1);
+    /* iOS-tuned exit: swift acceleration with controlled deceleration for visible departure */
+    --ease-exit: cubic-bezier(0.32, 0, 0.78, 0.18);
+    /* iOS-refined interaction curves: tighter control for premium feel */
+    --ease-elastic: cubic-bezier(0.18, 1.08, 0.32, 1);
+    --ease-smooth: cubic-bezier(0.42, 0, 0.22, 1);
+    --ease-spring: cubic-bezier(0.28, 1.18, 0.5, 1);
+    --motion-fast: 135ms var(--ease-standard);
+    --motion-crisp: 175ms var(--ease-smooth);
     --motion-toast-enter: 320ms var(--ease-spring);
-    --motion-toast-exit: 280ms cubic-bezier(.4,0,1,1);
-    --motion-dock: 280ms cubic-bezier(.22, 1, .36, 1);
-    --motion-bounce: 400ms var(--ease-elastic);
-    --motion-page: 180ms cubic-bezier(.2, .8, .2, 1);
+    --motion-toast-exit: 270ms cubic-bezier(.4,0,1,1);
+    --motion-dock: 270ms cubic-bezier(.24, 1, .32, 1);
+    --motion-bounce: 380ms var(--ease-elastic);
+    --motion-page: 175ms cubic-bezier(.2, .8, .2, 1);
     --motion-standard: var(--duration-standard) var(--ease-standard);
-    --motion-slow: 480ms var(--ease-standard);
-    /* Durations on their own, because a transition that has to delay a discrete
-       property (visibility) needs the time without the curve: pasting a whole
-       --motion-* value into that slot puts two easing functions into one
-       transition item, which makes the entire declaration invalid. */
-    --duration-standard: 220ms;
-    /* 退出比进入快一档：画面已经在走了，读者不需要再看一遍完整时长（页码胶囊
-       2026-10-18 的读数就是这条曲线的来由，见 reader.css 里那颗胶囊的注释）。 */
-    --duration-fast: 140ms;
-    --duration-exit: 260ms;
+    --motion-slow: 460ms var(--ease-standard);
+    /* iOS-optimized durations: responsive standard (210ms), snappier fast (135ms), decisive exit (250ms) */
+    --duration-standard: 210ms;
+    --duration-fast: 135ms;
+    --duration-exit: 250ms;
 
     /* Looping indicators need a linear clock, so they cannot ride --motion-*.
        They still get names, so the three spinners and the two shimmering

@@ -5,6 +5,7 @@ export function rubberBand(travel: number, limit = 80): number {
   return Math.sign(travel) * limit * distance / (distance + limit / 0.55);
 }
 
-export const EDGE_CLAIM_PX = 4;
-export const EDGE_SETTLE_MS = 360;
-export const EDGE_SETTLE_EASING = 'cubic-bezier(.22, 1, .36, 1)';
+// iOS-optimized edge bounce: 3px claim (more responsive), 340ms settle (snappier), refined curve
+export const EDGE_CLAIM_PX = 3;
+export const EDGE_SETTLE_MS = 340;
+export const EDGE_SETTLE_EASING = 'cubic-bezier(.24, 1, .32, 1)';

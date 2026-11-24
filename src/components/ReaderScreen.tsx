@@ -29,6 +29,7 @@ import { useReturnNavigation } from '../lib/useReturnNavigation';
 import { allocateNativeReaderSession, configureNativePinchInput, configureNativeContinuousInput, repositionNativeContinuousInput, trackNativeContinuousInput, NativeReaderSession, canPresentNativePage, readerSourceLeaseId, hasNativeReaderTiles, hasNativeWheelZoom, sampleNativeWheelZoom, invalidateContinuousReaderLayout, hasAndroidReaderTileSource, ReaderTileSlot, readerUsesShellGestures, rememberNativeReaderZoom, requestNativeReaderDoubleTap, requestNativeReaderViewport, settleNativeReaderFitForTurn, updateNativeReaderEdge, updateNativeReaderSlide, updateNativeReaderTransform, type ReaderTileViewport, type ReaderTilePageSize, type WheelZoomSample } from '../lib/readerNativeTiles';
 import { useReaderCrop } from '../lib/useReaderCrop';
 import { useReaderImageHandover } from '../lib/useReaderImageHandover';
+import { createGestureResolver } from '../lib/gestureConflictResolver';
 
 /** Pages kept beyond the fetch window. Three either side covers stepping back
  * over a spread without a refetch, and costs a handful of blob URLs. */
@@ -839,6 +840,21 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   const canvasTouchCount = useRef(0);
   const panStart = useRef<{ x: number; y: number; zoom: ZoomState; lastX?: number; lastY?: number }>();
   const pinchStart = useRef<{ distance: number; x: number; y: number; zoom: ZoomState; waitingForImage: boolean }>();
+
+  // iOS-optimized: Gesture conflict resolver to prioritize system back gesture
+  const gestureResolverRef = useRef<ReturnType<typeof createGestureResolver> | null>(null);
+  useEffect(() => {
+    const canvas = rootRef.current;
+    if (!canvas) return;
+
+    const resolver = createGestureResolver(canvas);
+    gestureResolverRef.current = resolver;
+
+    return () => {
+      resolver.reset();
+      gestureResolverRef.current = null;
+    };
+  }, []);
 
   function viewportPoint(x: number, y: number) {
     const box = rootBox();
@@ -2076,6 +2092,18 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, [animateDoubleTap]);
 
   const handleTouchStart = useCallback((event: TouchEvent) => {
+    // iOS-optimized: Use gesture resolver to handle conflicts
+    const resolver = gestureResolverRef.current;
+    if (resolver) {
+      resolver.updateBounds();
+      const intent = resolver.handleTouchStart(event.nativeEvent);
+
+      // System back gesture takes priority - don't interfere
+      if (intent?.type === 'system-back') {
+        return;
+      }
+    }
+
     // 和鼠标那条同一件事：面板开着的时候整个画布手势都让开，指针只属于面板那一层。
     if (thumbnailPanelOpen) return;
     const firstTouch = event.touches[0];
@@ -2146,6 +2174,22 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, [hideExitHint, thumbnailPanelOpen, pauseHandover, canZoomCurrentImage, getDoubleTapProfile, readLiveZoom]);
 
   const handleTouchMove = useCallback((event: TouchEvent) => {
+    // iOS-optimized: Check gesture intent before processing
+    const resolver = gestureResolverRef.current;
+    if (resolver) {
+      const intent = resolver.handleTouchMove(event.nativeEvent);
+
+      // Respect system back gesture and vertical scroll
+      if (intent.type === 'system-back' || intent.type === 'vertical-scroll') {
+        return;
+      }
+
+      // Handle pinch-zoom with conflict resolution
+      if (intent.type === 'pinch-zoom') {
+        // Allow pinch zoom to proceed
+      }
+    }
+
     if (nativePinchTouches.current) return;
     const quick = quickScale.current;
     const finger = event.touches[0];
@@ -2221,6 +2265,17 @@ export function ReaderScreen({ readerSession, archiveId, title, pages, initialPa
   }, [handleCanvasClick, hoverTarget]);
 
   const handleTouchEnd = useCallback((event: TouchEvent) => {
+    // iOS-optimized: Finalize gesture intent
+    const resolver = gestureResolverRef.current;
+    if (resolver) {
+      const finalIntent = resolver.handleTouchEnd(event.nativeEvent);
+
+      // Handle tap specifically
+      if (finalIntent.type === 'tap') {
+        // Tap gesture handled below
+      }
+    }
+
     touchEndAt.current = Date.now();
     canvasTouchCount.current = event.touches.length;
     if (nativePinchTouches.current) {

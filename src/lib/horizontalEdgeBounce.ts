@@ -41,6 +41,7 @@ export function installHorizontalEdgeBounce(element: HTMLElement) {
     if (frame !== undefined) cancelAnimationFrame(frame);
     frame = undefined;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { clear(); return; }
+    // iOS-optimized horizontal bounce settle with refined curve
     track.style.transition = `translate ${EDGE_SETTLE_MS}ms ${EDGE_SETTLE_EASING}`;
     track.style.translate = originalTranslate || '0px 0';
     timer = window.setTimeout(clear, EDGE_SETTLE_MS);
@@ -64,6 +65,7 @@ export function installHorizontalEdgeBounce(element: HTMLElement) {
     const step = touch.clientX - gesture.lastX;
     gesture.lastX = touch.clientX;
     if (gesture.rejected) return;
+    // iOS-refined: use optimized 3px claim threshold for immediate horizontal bounce response
     if (!active && Math.max(Math.abs(dx), Math.abs(dy)) < EDGE_CLAIM_PX) return;
     if (!active && Math.abs(dy) >= Math.abs(dx)) { gesture.rejected = true; return; }
     if (!gesture.edge) {

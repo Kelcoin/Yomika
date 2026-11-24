@@ -15,6 +15,7 @@ import { Group, Panel, Separator } from './AdaptivePanels';
 import { usePageActive } from '../app/RetainedPage';
 import { EDGE_CLAIM_PX, EDGE_SETTLE_MS, rubberBand } from '../lib/motion';
 import { createWheelMotion, isDiscreteWheel } from '../lib/wheelMotion';
+import { createScrollMonitor } from '../lib/scrollPerformance';
 
 import type { ArchiveRecord } from '../domain/library';
 import type { ArchiveMetadata, Category, SearchPreset } from '../repositories/nativeLibraryRepository';
@@ -441,6 +442,28 @@ export function LibraryWorkspace({ archives, metadata, metadataLoading, onSelect
   const pullArrowRef = useRef<HTMLSpanElement | null>(null);
   const onRefreshRef = useRef(onRefresh);
   const refreshingRef = useRef(refreshing);
+
+  // iOS-optimized: Scroll performance monitoring with 60fps tracking
+  const performanceMonitorRef = useRef<ReturnType<typeof createScrollMonitor> | null>(null);
+  useEffect(() => {
+    if (!pageActive || !scrollHostElement) return;
+
+    const monitor = createScrollMonitor(metrics => {
+      // Log performance issues in development
+      if (process.env.NODE_ENV === 'development' && !metrics.isSmooth) {
+        console.warn(`[LibraryWorkspace] Scroll performance: ${metrics.averageFps.toFixed(1)}fps, ${(metrics.smoothFrames * 100).toFixed(1)}% smooth frames`);
+      }
+    });
+
+    performanceMonitorRef.current = monitor;
+    const cleanup = monitor.observe(scrollHostElement);
+
+    return () => {
+      cleanup();
+      monitor.dispose();
+      performanceMonitorRef.current = null;
+    };
+  }, [pageActive, scrollHostElement]);
 
   /** 把位置画到 DOM 上。React 只管 state 里那一份静止值，所以手势里被直接改掉的
    * 属性要自己收回：否则抬手之后 React 认为「还是 0，不用动」，屏上留着拖到一半

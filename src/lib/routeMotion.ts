@@ -43,10 +43,11 @@ export function resolveRouteMotion(from: RouteAddress | undefined, to: RouteAddr
   return { kind: 'slide', axis: 'x', direction: historyDirection };
 }
 
-// Keep the TabController ease curve, with a shorter duration for this UI.
-export const NAVIGATION_MOTION = { duration: 180, easing: 'cubic-bezier(.25, .1, .25, 1)' } as const;
-export const DETAIL_ENTER_MS = 300;
-export const DETAIL_EXIT_MS = 180;
+// iOS-optimized motion: Material ease with iOS timing for instant feel
+export const NAVIGATION_MOTION = { duration: 175, easing: 'cubic-bezier(.25, .1, .25, 1)' } as const;
+// Detail transitions: longer entrance (320ms) for elegance, faster exit (170ms) for responsiveness
+export const DETAIL_ENTER_MS = 320;
+export const DETAIL_EXIT_MS = 170;
 
 export function routeMotionAllowed(): boolean {
   return !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -62,25 +63,22 @@ export function animateDetail(panel: HTMLElement, closing = false, target?: DOMR
   const bottom = Math.min(rect.bottom, viewport?.bottom ?? window.innerHeight);
   const transformOrigin = bottom > top ? `50% ${(top + bottom) / 2 - rect.top}px` : '50% 50%';
   if (closing) {
-    // Android's Zoom exit scales a complete page to .90, rather than morphing
-    // its text into a tiny card. The source only biases the scale origin.
+    // iOS-refined exit: scale to 0.92 (less than Android's 0.90) with smoother acceleration
     const origin = target ? `${Math.min(rect.width, Math.max(0, target.left + target.width / 2 - rect.left))}px ${Math.min(bottom, Math.max(top, target.top + target.height / 2)) - rect.top}px` : transformOrigin;
-    // One continuous accelerating scale curve. Restarting an ease at 65%
-    // brought the old exit to a visible stop before it could finish fading.
+    // Swift continuous acceleration with gentler fade curve for iOS feel
     return panel.animate([
       { offset: 0, opacity: 1, transform: 'scale(1)', transformOrigin: origin },
-      { offset: .2, opacity: 1, transform: 'scale(0.98)', transformOrigin: origin },
-      { offset: 1, opacity: 0, transform: 'scale(0.9)', transformOrigin: origin },
-    ], { duration: DETAIL_EXIT_MS, easing: 'cubic-bezier(.4, 0, 1, 1)', fill: 'forwards' });
+      { offset: .18, opacity: 1, transform: 'scale(0.985)', transformOrigin: origin },
+      { offset: 1, opacity: 0, transform: 'scale(0.92)', transformOrigin: origin },
+    ], { duration: DETAIL_EXIT_MS, easing: 'cubic-bezier(.36, 0, .66, .56)', fill: 'forwards' });
   }
-  // Flutter ZoomPageTransitionsBuilder's two-part fastOutExtraSlowIn curve:
-  // the first sixth travels 40%, then the remainder settles gently. Keep the
-  // excursion smaller than Flutter's .85 to reduce mobile text rasterization.
-  const start = .94;
+  // iOS-tuned entrance: starts at 0.95 (tighter than Flutter's 0.85), two-stage curve
+  // with swift initial expansion (45% in first 1/6) then gentle settle
+  const start = .95;
   const end = 1;
   return panel.animate([
-    { offset: 0, opacity: 0, transform: `scale(${start})`, transformOrigin, easing: 'cubic-bezier(.05, 0, .133333, .06)' },
-    { offset: 1 / 6, opacity: .4, transform: `scale(${start + (end - start) * .4})`, transformOrigin, easing: 'cubic-bezier(.208333, .82, .25, 1)' },
+    { offset: 0, opacity: 0, transform: `scale(${start})`, transformOrigin, easing: 'cubic-bezier(.06, 0, .15, .08)' },
+    { offset: 1 / 6, opacity: .42, transform: `scale(${start + (end - start) * .45})`, transformOrigin, easing: 'cubic-bezier(.22, .84, .28, 1)' },
     { offset: 1, opacity: 1, transform: `scale(${end})`, transformOrigin },
   ], { duration: DETAIL_ENTER_MS, easing: 'linear', fill: 'none' });
 }

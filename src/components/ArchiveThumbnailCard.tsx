@@ -15,8 +15,18 @@ import { useMediaQuery, COMPACT_WIDTH_QUERY } from '../lib/useMediaQuery';
 import { observeOnceInScroll } from '../lib/sharedIntersectionObserver';
 import { useProgressBarVisibility } from '../app/preferences';
 import { usePageActive } from '../app/RetainedPage';
+import { createImageDecoder } from '../lib/aggressiveImageDecode';
 
 const imageCache = getNativeImageCache();
+
+// iOS-optimized: Global image decoder for aggressive pre-decoding
+let globalImageDecoder: ReturnType<typeof createImageDecoder> | null = null;
+const getImageDecoder = (root: HTMLElement) => {
+  if (!globalImageDecoder) {
+    globalImageDecoder = createImageDecoder(root);
+  }
+  return globalImageDecoder;
+};
 
 /** The thumbnail card's media + copy stack, shared by the recommendation rail
  * and the library grid so both are literally the same card. The caller supplies
@@ -159,8 +169,27 @@ export function ArchiveThumbMedia({ scopeId, serverId, archiveId, onAspectRatio 
     const stopObserving = observeOnceInScroll(node.closest('.dedup-member') ?? node, load, '480px');
     return () => { stopObserving(); window.clearTimeout(timeout); controller.abort(); releaseHandle(); };
   }, [identity, node, retry]);
+  // iOS-optimized: Aggressive image pre-decoding for instant rendering
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  useEffect(() => {
+    const img = imgRef.current;
+    if (!img || !src || failed) return;
+
+    const scrollContainer = node?.closest('[data-scroll-region]') as HTMLElement | null;
+    if (!scrollContainer) return;
+
+    const decoder = getImageDecoder(scrollContainer);
+
+    // Observe image for automatic pre-decoding
+    decoder.observe(img);
+
+    return () => {
+      decoder.unobserve(img);
+    };
+  }, [src, failed, node]);
+
   return <div className="archive-thumb-card-media" ref={setNode}>
-    {src && !failed ? <img src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} onLoad={(event) => {
+    {src && !failed ? <img ref={imgRef} src={src} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} onLoad={(event) => {
       const image = event.currentTarget;
       if (image.naturalWidth > 0 && image.naturalHeight > 0) onAspectRatio?.(image.naturalWidth / image.naturalHeight);
     }} /> : failed ? <span className="archive-cover-retry" role="button" tabIndex={0} aria-label="重新加载封面" title="封面加载失败，点击重试" onClick={(event) => { event.preventDefault(); event.stopPropagation(); setRetry((value) => value + 1); }} onKeyDown={(event) => {

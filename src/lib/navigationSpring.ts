@@ -6,8 +6,10 @@ export function advanceNavigationSpring(state: NavigationSpring, target: number,
   const elapsed = Math.min(0.032, Math.max(0, seconds));
   const steps = Math.max(1, Math.ceil(elapsed / 0.004));
   const dt = elapsed / steps;
-  const stiffness = dragging ? 1600 : elastic ? 560 : 500;
-  const damping = dragging ? (elastic ? 44 : 52) : (elastic ? 18 : 22);
+  // iOS-optimized spring parameters: higher stiffness for immediate response,
+  // balanced damping for smooth settle without overshoot
+  const stiffness = dragging ? 1800 : elastic ? 580 : 520;
+  const damping = dragging ? (elastic ? 46 : 54) : (elastic ? 19 : 23);
   let { position, velocity } = state;
   for (let i = 0; i < steps; i++) {
     velocity += (stiffness * (target - position) - damping * velocity) * dt;

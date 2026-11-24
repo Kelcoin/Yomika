@@ -27,8 +27,9 @@ export function useEdgeBounce(workspace: RefObject<HTMLElement>, route: string) 
     const paint = (offset: number, settling = false) => {
       for (const surface of surfaces) {
         const property = surface.safe ? 'translate' : 'top';
+        // iOS-refined transitions: settling uses optimized curve, wheel uses snappier 165ms
         if (settling) surface.element.style.transition = reduced ? 'none' : `${property} ${EDGE_SETTLE_MS}ms ${EDGE_SETTLE_EASING}`;
-        else if (wheelPainting) surface.element.style.transition = reduced ? 'none' : `${property} 180ms cubic-bezier(.16,.7,.2,1)`;
+        else if (wheelPainting) surface.element.style.transition = reduced ? 'none' : `${property} 165ms cubic-bezier(.18,.72,.24,1)`;
         if (surface.safe) surface.element.style.translate = `0 ${offset}px`;
         else surface.element.style.top = `${surface.baseTop + offset}px`;
       }
