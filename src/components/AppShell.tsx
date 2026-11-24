@@ -110,7 +110,7 @@ function Navigation({ compact = false, floating = false, hidden = false, bottomN
 }
 
 /** Pinned home chrome stays outside the overscrolling, retained page content. */
-function MobileHomeTopbar({ bottomNavItems }: { bottomNavItems: readonly string[] }) {
+export function MobileHomeTopbar({ bottomNavItems }: { bottomNavItems: readonly string[] }) {
   const hidden = compactNavHiddenItems(bottomNavItems);
   return <header className="mobile-home-topbar">
     <div className="mobile-home-brand" aria-label="Yomika"><YomikaMark size={30} /><span>Yomika</span></div>
@@ -121,6 +121,12 @@ function MobileHomeTopbar({ bottomNavItems }: { bottomNavItems: readonly string[
       <Link to="/settings" state={{ homeEntry: true }} className="icon-button mobile-home-settings" aria-label="设置" title="设置"><Settings aria-hidden="true" /></Link>
     </nav>
   </header>;
+}
+
+export function workspaceClassFor(pathname: string): string {
+  if (pathname === '/settings') return 'workspace is-settings-workspace';
+  if (/^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname)) return 'workspace is-library-workspace';
+  return 'workspace';
 }
 
 /** Remembered so the rail opens the way it was left. */
@@ -394,7 +400,7 @@ export function AppShell({ children, returningHome = false }: AppShellProps) {
           // 滚不到。首页的全宽与内边距由 shell.css 里 `:has(.workspace-home)` 那条规则给；
           // 详情一开则由 `:has(.library-shell.is-home.has-detail)` 那三条把它钳成一屏两栏
           // （右栏要能自己滚），所以那一态同样不能套这条「整页滚」的容器。
-          className={`workspace${pathname === '/settings' ? ' is-settings-workspace' : ''}${!returningHome && /^\/(library|downloads|history|watchlist|to-read)(?:\/[^/]+)?$/.test(pathname) ? ' is-library-workspace' : ''}`}
+          className={workspaceClassFor(returningHome ? '/' : pathname)}
           ref={workspaceRef}
           tabIndex={-1}
         >

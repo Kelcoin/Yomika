@@ -1,3 +1,5 @@
+import { createPortal } from 'react-dom';
+import { MobileHomeTopbar, workspaceClassFor } from '../components/AppShell';
 import { RefreshIcon as RefreshCw } from '../components/RefreshIcon';
 import { loadFavoriteArchives } from '../lib/favoritesMirror';
 import { Bookmark, BookOpen, Eraser, FolderHeart, Server, Shuffle } from 'lucide-react';
@@ -1065,21 +1067,47 @@ export function WorkspaceRoutes({ direction: navigationDirection, motion: outerM
     document.addEventListener(IOS_BACK_PREVIEW, stage);
     return () => document.removeEventListener(IOS_BACK_PREVIEW, stage);
   }, []);
-  const displayedUrl = `${location.pathname}${location.search}${location.hash}`;
-  const gestureUrl = gestureTarget && gestureTarget !== displayedUrl ? new URL(gestureTarget, window.location.origin) : undefined;
-  const gestureLocation = useMemo(() => gestureUrl ? {
-    pathname: gestureUrl.pathname, search: gestureUrl.search, hash: gestureUrl.hash, key: 'ios-back', state: null,
-  } : undefined, [gestureUrl?.href]);
-  useLayoutEffect(() => {
-    if (gestureTarget === displayedUrl) setGestureTarget(undefined);
-  }, [displayedUrl, gestureTarget]);
   const visited = useRef(new Map<string, typeof location>());
   visited.current.set(routeKey, location);
   if (preview && previewKey) visited.current.set(previewKey, preview);
   return <>{[...visited.current].map(([key, saved]) => (
-    <RetainedWorkspacePage key={key} pageKey={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)} />
-  ))}{gestureLocation && <RetainedWorkspacePage key="ios-back" pageKey="ios-back" saved={gestureLocation} compact={compact} direction={-1} active={false} flow />}</>;
+    <RetainedWorkspacePage key={key} pageKey={key} saved={saved} compact={compact} direction={routeKey === key ? direction : 1} motion={routeKey === key ? motion : previewKey === key ? { kind: 'none', axis: 'x', direction: 1 } : undefined} surfaceRef={routeKey === key ? surface : undefined} active={routeKey === key || previewKey === key} flow={workspacePageFlows(key)} />
+  ))}{gestureTarget && <WorkspaceBackPreview target={gestureTarget} compact={compact} />}</>;
 }
+
+function WorkspaceBackPreview({ target, compact }: { target: string; compact: boolean }) {
+  const { preferences } = usePreferences();
+  const [layout] = useState(() => {
+    const source = document.getElementById('main-content')?.closest<HTMLElement>('.app-main');
+    if (!source?.parentElement) return undefined;
+    const { left, top, width, height } = source.getBoundingClientRect();
+    return { host: source.parentElement, left, top, width, height };
+  });
+  const saved = useMemo(() => {
+    const { pathname, search, hash } = new URL(target, window.location.origin);
+    return { pathname, search, hash, key: 'ios-back', state: null };
+  }, [target]);
+  const homeTopbar = compact && saved.pathname === '/';
+  const targetKey = pageKeyFor(saved.pathname);
+  if (!layout) return null;
+  return createPortal(
+    <div className={`app-main${homeTopbar ? ' has-home-topbar' : ''}`} data-ios-back-preview="" aria-hidden="true" ref={markBackPreviewInert}
+      style={{ left: layout.left, top: layout.top, width: layout.width, height: layout.height }}>
+      {homeTopbar && <MobileHomeTopbar bottomNavItems={preferences.bottomNavItems} />}
+      <div className={workspaceClassFor(saved.pathname)}>
+        <RetainedWorkspacePage pageKey="ios-back" saved={saved} compact={compact} direction={-1} active
+          motion={noBackPreviewMotion} flow={workspacePageFlows(targetKey)} previewOnly />
+      </div>
+    </div>, layout.host,
+  );
+}
+
+function markBackPreviewInert(node: HTMLDivElement | null) {
+  node?.setAttribute('inert', '');
+}
+
+const noBackPreviewMotion: RouteMotion = { kind: 'none', axis: 'x', direction: -1 };
+const workspacePageFlows = (key: string) => !['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key);
 
 function ActiveRedirect({ to }: { to: string }) {
   return usePageActive() ? <Navigate to={to} replace /> : null;
@@ -1092,8 +1120,8 @@ function WorkspaceRouteFallback({ path }: { path: string }) {
 
 /** Stable route elements keep unrelated retained pages out of navigation renders.
  * Active context still reaches consumers for freshness and scroll restoration. */
-const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, saved, active, flow, compact, direction, motion, surfaceRef }: {
-  pageKey: string; saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; compact: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
+const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, saved, active, flow, compact, direction, motion, surfaceRef, previewOnly = false }: {
+  previewOnly?: boolean; pageKey: string; saved: ReturnType<typeof useLocation>; active: boolean; flow: boolean; compact: boolean; direction: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined;
 }) {
   // Routes(location=...) still subscribes to the outer LocationContext. Isolate
   // that subscription too, otherwise every hidden useLocation consumer updates.
@@ -1128,7 +1156,7 @@ const RetainedWorkspacePage = memo(function RetainedWorkspacePage({ pageKey, sav
   // These compact routes scroll through the shared workspace. Animating the
   // full card/detail columns in from outside the viewport spikes raster work.
   const fadeEntry = compact && detailKey !== undefined;
-  return <RetainedPage active={active} pageKey={pageKey} pageUrl={`${saved.pathname}${saved.search}${saved.hash}`} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
+  return <RetainedPage active={active} previewOnly={previewOnly} pageKey={pageKey} pageUrl={`${saved.pathname}${saved.search}${saved.hash}`} motionSurface flow={flow} fadeEntry={fadeEntry} direction={direction} motion={motion} surfaceRef={surfaceRef} transitionKey={transitionKey} detailKey={detailKey}>
     <UNSAFE_LocationContext.Provider value={routeLocation}>{content}</UNSAFE_LocationContext.Provider>
   </RetainedPage>;
 });

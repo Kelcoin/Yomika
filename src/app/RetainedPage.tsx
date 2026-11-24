@@ -44,7 +44,7 @@ function writeInstantScroll(region: HTMLElement, write: () => void) {
 
 /** Retain component state and scroll positions; hidden regions must never save
  * their zero-sized layout over the last visible position. */
-export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSurface = false, transitionKey, detailKey, fadeEntry = false, direction = 1, motion, surfaceRef, children }: { active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; detailKey?: string | undefined; fadeEntry?: boolean; direction?: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined; pageKey?: string | undefined; pageUrl?: string | undefined; children: ReactNode }) {
+export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSurface = false, transitionKey, detailKey, fadeEntry = false, direction = 1, motion, surfaceRef, previewOnly = false, children }: { previewOnly?: boolean; active: boolean; flow?: boolean; motionSurface?: boolean; transitionKey?: string; detailKey?: string | undefined; fadeEntry?: boolean; direction?: RouteDirection; motion?: RouteMotion | undefined; surfaceRef?: MutableRefObject<HTMLElement | null> | undefined; pageKey?: string | undefined; pageUrl?: string | undefined; children: ReactNode }) {
   const parentActive = usePageActive();
   const visible = active && parentActive;
   const root = useRef<HTMLElement | null>(null);
@@ -58,7 +58,7 @@ export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSur
   const motionRef = useRef(motion);
   motionRef.current = motion;
   useLayoutEffect(() => {
-    if (!visible || !root.current) return;
+    if (!visible || previewOnly || !root.current) return;
     const panel = root.current;
     const workspace = panel.closest<HTMLElement>('.workspace');
     const restore = () => positions.current.forEach((top, region) => {
@@ -92,7 +92,7 @@ export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSur
         if (!region.isConnected) positions.current.delete(region);
       });
     };
-  }, [visible]);
+  }, [visible, previewOnly]);
   // A retained pane can show several archives during its lifetime. Scroll
   // offsets belong to the previous archive, including on compact layouts
   // where the detail and the list share the workspace scrollport.
@@ -118,7 +118,7 @@ export function RetainedPage({ active, pageKey, pageUrl, flow = false, motionSur
     const animation = animateRouteEntry(node, motionSurface, directionRef.current, motionRef.current, fadeEntry);
     return () => animation?.cancel();
   }, [visible, transitionKey, motionSurface, fadeEntry]);
-  return <PageActiveContext.Provider value={visible}>
+  return <PageActiveContext.Provider value={visible && !previewOnly}>
     {/* Workspace pages keep viewport-fixed UI in body portals. The outer shell
         and reader deliberately do not opt into this transform contract. */}
     <section ref={setRoot} data-bounce-surface={motionSurface ? '' : undefined} className={`route-cache-panel${flow ? ' is-flow' : ''}`} data-page-key={pageKey} data-page-url={pageUrl} hidden={!visible}>{children}</section>

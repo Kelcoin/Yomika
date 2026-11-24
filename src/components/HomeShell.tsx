@@ -235,7 +235,7 @@ export function HomeShell({ children }: { children: ReactNode }) {
           <section className="library-shell-detail" data-scroll-region>
             {/* 详情里的推荐条也归首页：从前它一律指向 `/library/:id`，点一条推荐就会
                 把左边那三排换成档案库，等于又从首页溜进档案库。 */}
-            <ArchiveDetailRoute archiveId={archiveId} detailBasePath="/home" />
+            <ArchiveDetailRoute key={archiveId} archiveId={archiveId} detailBasePath="/home" />
           </section>
         </Panel>
       )}

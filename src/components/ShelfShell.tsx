@@ -34,7 +34,7 @@ export function ShelfShell({ name, detailBasePath, children }: { name: string; /
     <Group className={`library-shell${archiveId ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, splitLayout)} onLayoutChanged={layout.onLayoutChanged}>
       <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-list-${name}`} minSize="40"><section ref={listRef} className="library-shell-list">{children}</section></Panel>
       {archiveId && <Separator className="panel-separator" />}
-      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-detail-${name}`} minSize="30"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} detailBasePath={detailBasePath} /></section></Panel>}
+      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id={`shelf-shell-detail-${name}`} minSize="30"><section className="library-shell-detail" data-scroll-region><ArchiveDetailRoute key={archiveId} archiveId={archiveId} detailBasePath={detailBasePath} /></section></Panel>}
     </Group>
   );
 }

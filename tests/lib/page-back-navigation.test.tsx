@@ -1,9 +1,10 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BrowserRouter, Link, MemoryRouter, useLocation } from 'react-router-dom';
-import { MOBILE_BACK_EVENT, PageBackHistory, usePageBackNavigation } from '../../src/lib/pageBackNavigation';
+import { IOS_BACK_PREVIEW, MOBILE_BACK_EVENT, PageBackHistory, usePageBackNavigation } from '../../src/lib/pageBackNavigation';
 import { useReturnNavigation } from '../../src/lib/useReturnNavigation';
-import { useState } from 'react';
+import { useLayoutEffect, useState } from 'react';
+import { resolveRouteMotion } from '../../src/lib/routeMotion';
 import { useOverlayBackGuard } from '../../src/lib/overlayBackGuard';
 import { useRouteDirection } from '../../src/lib/useRouteDirection';
 
@@ -188,82 +189,49 @@ it('uses the same workspace history for the detail back button and gesture', () 
   expect(screen.getByRole('status')).toHaveTextContent(/^\/library$/);
 });
 
-it('exposes the retained list while an iOS detail is being dragged and restores it on cancel', () => {
-  document.documentElement.dataset.nativePlatform = 'ios';
-  function Detail() {
-    usePageBackNavigation();
-    return <main className="workspace"><section className="route-cache-panel" data-page-key="/library">
-      <div className="library-shell-list">archive list</div>
-      <div className="library-shell-detail">archive detail</div>
-    </section></main>;
-  }
-  render(<MemoryRouter initialEntries={['/library/a']}><Detail /></MemoryRouter>);
-  const start = { identifier: 1, clientX: 10, clientY: 100 };
-  const move = { ...start, clientX: 42 };
-  fireEvent.touchStart(document.body, { touches: [start] });
-  fireEvent.touchMove(document.body, { touches: [move] });
-  const list = screen.getByText('archive list');
-  expect(list.closest('[data-detail-return]')).not.toBeNull();
-  expect(screen.getByText('archive detail').style.translate).toBe('32px');
-  expect(list.style.translate).toBeTruthy();
-  fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
-  expect(list.closest('[data-detail-return]')).toBeNull();
-  expect(list.style.translate).toBe('');
-});
-
-function StagedPages() {
+function GesturePages() {
   usePageBackNavigation();
   const location = useLocation();
-  const home = location.pathname === '/' || location.pathname.startsWith('/home/');
-  return (
-    <div className="workspace">
-      <section className="route-cache-panel" data-page-key="/" hidden={!home}><p>home page</p></section>
-      <section className="route-cache-panel" data-page-key="/settings" hidden={location.pathname !== '/settings'}><p data-testid="stage-route">{location.pathname}</p></section>
-    </div>
-  );
+  const [target, setTarget] = useState<string>();
+  useLayoutEffect(() => {
+    const stage = (event: Event) => setTarget((event as CustomEvent<string | undefined>).detail);
+    document.addEventListener(IOS_BACK_PREVIEW, stage);
+    return () => document.removeEventListener(IOS_BACK_PREVIEW, stage);
+  }, []);
+  return <div className="app-shell">
+    <div className="app-main"><main id="main-content" className="workspace">
+      <output data-testid="stage-route">{location.pathname}</output>
+      <output data-testid="route-motion">{resolveRouteMotion({ pathname: '/library/b', search: '' }, location, true, -1).kind}</output>
+      <Link to="/library/a">first detail</Link><Link to="/library/b">second detail</Link>
+    </main></div>
+    {target && <div data-ios-back-preview="" aria-hidden="true">{target}</div>}
+  </div>;
 }
 
-it('reveals the page behind an iOS edge swipe and hands it to the return animation', async () => {
+it.each([true, false])('settles the same detail-to-detail layers before swapping routes (commit=%s)', commit => {
   document.documentElement.dataset.nativePlatform = 'ios';
-  render(<MemoryRouter initialEntries={['/']}><StagedPages /><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></MemoryRouter>);
-  fireEvent.click(screen.getByText('home settings'));
-  const home = document.querySelector<HTMLElement>('.route-cache-panel[data-page-key="/"]')!;
-  const settings = document.querySelector<HTMLElement>('.route-cache-panel[data-page-key="/settings"]')!;
-  expect(home.hidden).toBe(true);
+  render(<MemoryRouter initialEntries={['/library']}><GesturePages /></MemoryRouter>);
+  fireEvent.click(screen.getByText('first detail'));
+  fireEvent.click(screen.getByText('second detail'));
+  const foreground = document.querySelector<HTMLElement>('.app-main')!;
+  let playback: { onfinish?: () => void; cancel: () => void } | undefined;
+  foreground.animate = frames => {
+    expect(frames).toEqual([{ translate: commit ? '110px' : '32px' }, { translate: commit ? `${window.innerWidth}px` : '0px' }]);
+    playback = { cancel() {} };
+    return playback as unknown as Animation;
+  };
   const start = { identifier: 1, clientX: 10, clientY: 300 };
-  const move = { identifier: 1, clientX: 120, clientY: 306 };
+  const move = { ...start, clientX: commit ? 120 : 42 };
   fireEvent.touchStart(document.body, { touches: [start] });
   fireEvent.touchMove(document.body, { touches: [move] });
-  // The layer behind the drag is the real page, pinned under the sliding one.
-  expect(home.hidden).toBe(false);
-  expect(home.hasAttribute('data-back-preview')).toBe(true);
-  expect(home.getAttribute('aria-hidden')).toBe('true');
-  expect(settings.style.translate).toBe('110px');
-  expect(parseFloat(home.style.translate)).toBeLessThan(-200);
+  expect(document.querySelector('[data-ios-back-preview]')).toHaveTextContent('/library/a');
   fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
-  expect(screen.getByTestId('stage-route')).toHaveTextContent(/^\/$/);
-  // A handled Back keeps the revealed page on screen for the route animation;
-  // only the drag's own inline styles and the preview bookkeeping go away.
-  expect(home.hidden).toBe(false);
-  expect(home.hasAttribute('data-back-preview')).toBe(false);
-  expect(home.style.translate).toBe('');
-  expect(settings.style.translate).toBe('');
-});
-
-it('hides the revealed page again when the iOS edge swipe is too short', async () => {
-  document.documentElement.dataset.nativePlatform = 'ios';
-  render(<MemoryRouter initialEntries={['/']}><StagedPages /><Link to="/settings" state={{ homeEntry: true }}>home settings</Link></MemoryRouter>);
-  fireEvent.click(screen.getByText('home settings'));
-  const home = document.querySelector<HTMLElement>('.route-cache-panel[data-page-key="/"]')!;
-  const start = { identifier: 1, clientX: 10, clientY: 300 };
-  const move = { identifier: 1, clientX: 40, clientY: 302 };
-  fireEvent.touchStart(document.body, { touches: [start] });
-  fireEvent.touchMove(document.body, { touches: [move] });
-  expect(home.hidden).toBe(false);
-  fireEvent.touchEnd(document.body, { touches: [], changedTouches: [move] });
-  await act(async () => { await new Promise(resolve => setTimeout(resolve, 40)); });
-  expect(screen.getByTestId('stage-route')).toHaveTextContent('/settings');
-  expect(home.hidden).toBe(true);
-  expect(home.hasAttribute('data-back-preview')).toBe(false);
+  expect(screen.getByTestId('stage-route')).toHaveTextContent('/library/b');
+  expect(foreground.style.translate).toBe(commit ? '110px' : '32px');
+  act(() => playback?.onfinish?.());
+  expect(screen.getByTestId('stage-route')).toHaveTextContent(commit ? '/library/a' : '/library/b');
+  if (commit) expect(screen.getByTestId('route-motion')).toHaveTextContent('none');
+  expect(foreground.style.translate).toBe('');
+  expect(foreground.hasAttribute('data-ios-back-foreground')).toBe(false);
+  expect(document.querySelector('[data-ios-back-preview]')).toBeNull();
 });

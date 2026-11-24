@@ -1,5 +1,5 @@
 import { setInvokeAdapterForTests } from '../localReadingDataAdapter';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, vi } from 'vitest';
@@ -14,6 +14,7 @@ vi.mock('../../src/lib/tagTranslationService', async (importOriginal) => ({
 import { COMPACT_WIDTH_QUERY } from '../../src/lib/useMediaQuery';
 import { DEFAULT_PREFERENCES } from '../../src/repositories/nativeSettingsRepository';
 import { App } from '../../src/app/App';
+import { IOS_BACK_PREVIEW } from '../../src/lib/pageBackNavigation';
 import { resetInvokeAdapterForTests } from '../../src/bridge/invoke';
 import { resetArchiveExistenceForTests } from '../../src/lib/archiveExistence';
 
@@ -34,6 +35,32 @@ function renderAt(path = '/') {
 }
 
 describe('application shell', () => {
+  it('lays out the iOS home preview using the real home header and its own workspace', () => {
+    const originalMedia = window.matchMedia;
+    window.matchMedia = query => ({
+      matches: query === COMPACT_WIDTH_QUERY, media: query, onchange: null,
+      addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true,
+    });
+    const view = renderAt('/home/example');
+    try {
+      const source = document.querySelector<HTMLElement>('#main-content')!.parentElement!;
+      vi.spyOn(source, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 402, 874));
+      act(() => { document.dispatchEvent(new CustomEvent(IOS_BACK_PREVIEW, { detail: '/' })); });
+      const preview = source.parentElement!.querySelector<HTMLElement>('[data-ios-back-preview]')!;
+      expect(preview).toHaveClass('has-home-topbar');
+      expect(preview).toHaveAttribute('inert');
+      expect(preview).toHaveStyle({ width: '402px', height: '874px' });
+      expect(preview.firstElementChild).toHaveClass('mobile-home-topbar');
+      expect(preview.querySelector('.workspace > .route-cache-panel')).not.toHaveAttribute('hidden');
+      expect(source).not.toHaveClass('has-home-topbar');
+      act(() => { document.dispatchEvent(new CustomEvent(IOS_BACK_PREVIEW)); });
+      expect(preview).not.toBeInTheDocument();
+    } finally {
+      view.unmount();
+      window.matchMedia = originalMedia;
+    }
+  });
+
   it('uses an overlay keyboard viewport only on the active reader route', () => {
     const viewport = document.createElement('meta');
     viewport.name = 'viewport';

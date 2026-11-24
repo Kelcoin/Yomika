@@ -964,8 +964,8 @@ describe('design system contract', () => {
     const home = read('src/components/HomeShell.tsx');
     const shelf = read('src/components/ShelfShell.tsx');
     const routes = read('src/app/routes.tsx');
-    expect(home).toMatch(/<ArchiveDetailRoute archiveId=\{archiveId\} detailBasePath="\/home" \/>/);
-    expect(shelf).toMatch(/<ArchiveDetailRoute archiveId=\{archiveId\} detailBasePath=\{detailBasePath\} \/>/);
+    expect(home).toMatch(/<ArchiveDetailRoute key=\{archiveId\} archiveId=\{archiveId\} detailBasePath="\/home" \/>/);
+    expect(shelf).toMatch(/<ArchiveDetailRoute key=\{archiveId\} archiveId=\{archiveId\} detailBasePath=\{detailBasePath\} \/>/);
     expect(routes).toContain('<ShelfShell name="history" detailBasePath="/history">');
     expect(routes).toContain('<ShelfShell name="toRead" detailBasePath="/to-read">');
   });
@@ -1974,7 +1974,9 @@ describe('design system contract', () => {
     const routes = read('src/app/routes.tsx');
     // route-cache-panel 的 height:100% 钳制会把溢出尾困在面板外：首页与书架
     // 面板必须随内容生长（is-flow），≤900 则所有路由（含档案库页面滚动）放开。
-    expect(routes).toContain("flow={!['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key)}");
+    expect(routes).toContain("const workspacePageFlows = (key: string) => !['/library', '/downloads', '/history', '/watchlist', '/to-read'].includes(key);");
+    expect(routes).toContain("flow={workspacePageFlows(key)}");
+    expect(routes).toContain("flow={workspacePageFlows(targetKey)}");
     expect(read('src/app/RetainedPage.tsx')).toContain("flow ? ' is-flow'");
     expect(shell).toMatch(/\.route-cache-panel\.is-flow \{[\s\S]{0,400}?height:\s*auto/);
     expect(shell, '紧凑档由设备壳层驱动').toContain(COMPACT_LAYOUT);

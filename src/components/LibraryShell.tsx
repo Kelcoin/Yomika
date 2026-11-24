@@ -44,7 +44,7 @@ export function LibraryShell({ archiveId: archiveIdProp }: { archiveId?: string 
     <Group className={`library-shell${archiveId ? ' has-detail' : ''}`} orientation="horizontal" defaultLayout={panelLayout(layout.defaultLayout, LIBRARY_SPLIT_LAYOUT)} onLayoutChanged={layout.onLayoutChanged}>
       <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-list" minSize="40"><section ref={listRef} className="library-shell-list"><LibraryRouteWorkspace showDetail={false} /></section></Panel>
       {archiveId && <Separator className="panel-separator" />}
-      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-detail" minSize="30"><section ref={detailRef} className="library-shell-detail" data-scroll-region><ArchiveDetailRoute archiveId={archiveId} /></section></Panel>}
+      {archiveId && <Panel className="library-shell-panel-content" style={{ height: '100%', overflow: 'hidden' }} id="library-shell-detail" minSize="30"><section ref={detailRef} className="library-shell-detail" data-scroll-region><ArchiveDetailRoute key={archiveId} archiveId={archiveId} /></section></Panel>}
     </Group>
   );
 }

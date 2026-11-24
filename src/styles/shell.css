@@ -2217,20 +2217,15 @@ body::-webkit-scrollbar,
 
 .route-cache-panel[hidden] { display: none; }
 
-/* The page an iOS Back gesture is dragging towards: already mounted but hidden,
-   revealed under the sliding page so the gesture shows real content instead of
-   the empty workspace background. Pinned to the viewport like the sliding panel
-   (which the return animation freezes), inert, and never interactive. */
-.workspace > .route-cache-panel[data-back-preview] {
+/* Use a separate workspace with the destination's regular chrome and gutters.
+   Slide both app-main surfaces while keeping the persistent dock in place. */
+.app-main[data-ios-back-preview] {
   position: fixed;
-  inset: 0;
   z-index: 0;
-  overflow: hidden;
   pointer-events: none;
-  background: var(--surface-panel);
 }
-
-.workspace > .route-cache-panel[data-back-foreground] { position: relative; z-index: 1; }
+.app-main[data-ios-back-preview] > .workspace { animation: none; }
+.app-main[data-ios-back-foreground] { position: relative; z-index: 1; }
 
 /* A zoom moves the complete page surface, including its canvas. Transparent
    wrappers made the outgoing text appear to float over the restored page. */

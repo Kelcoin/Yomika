@@ -3,7 +3,6 @@ import type { Location } from 'react-router-dom';
 import { animateDetail, DETAIL_EXIT_MS, resolveRouteMotion, routeMotionAllowed, type RouteDirection, type RouteMotion } from './routeMotion';
 import { DETAIL_RETURN_PREVIEW, detailReturnTarget, prepareDetailReturn } from './detailReturn';
 import { navigationOwner } from './navigationOrder';
-import { backParallax } from './pageBackNavigation';
 
 /** Keep the existing detail mounted until its reverse transition completes.
  * No duplicate React tree, screenshot, image decode or new network request. */
@@ -35,14 +34,7 @@ export function useWorkspaceRouteMotion(location: Location, compact: boolean, di
     const detail = wholePage ? surface.current : surface.current?.querySelector<HTMLElement>('.library-shell-detail');
     if (!detail || typeof detail.animate !== 'function') { setCompleted(location); return; }
     const panel = surface.current!;
-    const iosBack = location.state?.iosBack === true;
-    const offset = Math.max(0, Number(location.state?.iosBackOffset) || 0);
-    if (iosBack) {
-      detail.style.removeProperty('translate');
-      panel.removeAttribute('data-back-foreground');
-    }
     const restore = prepareDetailReturn(panel, detail, wholePage);
-    if (iosBack) detail.style.transform = `translateX(${offset}px)`;
     setReturning(location);
     let animation: Animation | undefined;
     let backdrop: Animation | undefined;
@@ -60,27 +52,12 @@ export function useWorkspaceRouteMotion(location: Location, compact: boolean, di
       // are visual coordinates, not the scroll position we intend to preserve.
       const target = detailReturnTarget(displayed);
       const underneath = wholePage
-        ? (panel.parentElement?.querySelector<HTMLElement>('[data-back-preview]')
-          ?? panel.parentElement?.querySelector<HTMLElement>('.route-cache-panel:not([hidden]):not([data-page-return])'))
+        ? panel.parentElement?.querySelector<HTMLElement>('.route-cache-panel:not([hidden]):not([data-page-return])')
         : panel.querySelector<HTMLElement>('.library-shell-list');
-      // The restored page settles underneath the departing, opaque surface.
-      // Animate the sibling only: transforming an ancestor of a fixed outgoing
-      // detail would change its containing block and make the coordinates jump.
-      // Only zoom the home page revealed by a shortcut return. A tab
-      // destination should keep its natural size beneath the outgoing page.
-      if (iosBack && underneath?.animate) {
-        const from = underneath.style.translate || backParallax(underneath, offset);
-        underneath.style.removeProperty('translate');
-        backdrop = underneath.animate([{ translate: from }, { translate: '0px' }],
-          { duration: DETAIL_EXIT_MS, easing: 'ease-out', fill: 'forwards' });
-      }
-      if (!iosBack && location.pathname === '/' && underneath?.animate) backdrop = underneath.animate([
+      if (location.pathname === '/' && underneath?.animate) backdrop = underneath.animate([
         { transform: 'scale(1.025)' }, { transform: 'scale(1)' },
       ], { duration: DETAIL_EXIT_MS, easing: 'cubic-bezier(.2, .8, .2, 1)' });
-      animation = iosBack ? detail.animate([
-        { transform: `translateX(${offset}px)` },
-        { transform: 'translateX(100%)' },
-      ], { duration: DETAIL_EXIT_MS, easing: 'ease-out', fill: 'forwards' }) : animateDetail(detail, true, target);
+      animation = animateDetail(detail, true, target);
       if (animation) animation.onfinish = finish;
       else finish();
       // Restoring a large cached page can delay this first frame. The playback
