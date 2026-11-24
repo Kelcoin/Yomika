@@ -4,6 +4,8 @@ use crate::compute::ComputeHandle;
 use crate::domain::result::CommandResult;
 use tauri::{AppHandle, State, WebviewWindow};
 
+pub(crate) mod crop;
+
 #[cfg(any(windows, target_os = "ios", target_os = "android"))]
 pub(crate) mod animation;
 #[cfg(windows)]

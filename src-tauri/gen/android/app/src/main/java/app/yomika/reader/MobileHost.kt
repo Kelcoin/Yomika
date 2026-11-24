@@ -210,27 +210,26 @@ class MobileHost(private val hostActivity: Activity) : Plugin(hostActivity) {
   @Command
   fun securityReady(invoke: Invoke) { NativeAppSecurity.ready(); invoke.resolve() }
 
-  private var lastToastText: String? = null
-  private var lastToastAt = 0L
+  private var activeToast: Toast? = null
 
   @Command
   fun showToast(invoke: Invoke) {
-    val shown = runCatching {
-      val text = invoke.parseArgs(ToastArgs::class.java).text.trim()
-      if (text.isEmpty() || text.length > 48 || text.contains('\n') || text.contains('\r') ||
-        hostActivity.isFinishing || hostActivity.isDestroyed || !hostActivity.hasWindowFocus()) {
-        false
-      } else {
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (text != lastToastText || now - lastToastAt > 2000) {
-          Toast.makeText(hostActivity.applicationContext, text, Toast.LENGTH_LONG).show()
-          lastToastText = text
-          lastToastAt = now
+    hostActivity.runOnUiThread {
+      val shown = runCatching {
+        val text = invoke.parseArgs(ToastArgs::class.java).text.trim()
+        if (text.isEmpty() || text.length > 48 || text.contains('\n') || text.contains('\r') ||
+          hostActivity.isFinishing || hostActivity.isDestroyed || !hostActivity.hasWindowFocus()) {
+          false
+        } else {
+          val toast = Toast.makeText(hostActivity.applicationContext, text, Toast.LENGTH_LONG)
+          activeToast?.cancel()
+          activeToast = toast
+          toast.show()
+          true
         }
-        true
-      }
-    }.getOrDefault(false)
-    invoke.resolve(JSObject().apply { put("shown", shown) })
+      }.getOrDefault(false)
+      invoke.resolve(JSObject().apply { put("shown", shown) })
+    }
   }
 
   @Command

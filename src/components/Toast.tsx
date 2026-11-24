@@ -43,7 +43,7 @@ const fallbackToastContext: ToastContextValue = { showToast: () => undefined, cl
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(0);
-  const pendingSystemToasts = useRef(new Map<string, { type: ToastType }>());
+  const pendingSystemToasts = useRef(new Set<{ type: ToastType }>());
   const timers = useRef(new Map<number, number>());
   /** 最新一帧的栈。`showToast` 要能看出「这句话是不是已经挂在上面」，而它读不到同一个
    * tick 里刚排进去的那一张（`setItems` 的更新还没落到 state）——所以照 render 的现值记一份。 */
@@ -89,19 +89,16 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       return;
     }
     const pending = pendingSystemToasts.current;
-    const key = `${type}:${message}`;
-    if (pending.has(key)) return;
     const request = { type };
-    pending.set(key, request);
+    pending.add(request);
     void showSystemToast(message).then((shown) => {
-      if (pending.get(key) !== request) return;
-      pending.delete(key);
+      if (!pending.delete(request)) return;
       if (!shown) showInApp(message, type, duration);
     });
   }, [showInApp]);
   const clearToasts = useCallback((type?: ToastType) => {
-    for (const [key, request] of pendingSystemToasts.current) {
-      if (!type || type === request.type) pendingSystemToasts.current.delete(key);
+    for (const request of pendingSystemToasts.current) {
+      if (!type || type === request.type) pendingSystemToasts.current.delete(request);
     }
     const removed = itemsRef.current.filter((item) => !item.closing && (!type || item.type === type));
     // Mark synchronously so a same-tick retry creates a fresh, visible toast.

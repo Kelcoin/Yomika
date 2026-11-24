@@ -541,6 +541,7 @@ pub fn run() {
             load_reader_manifest,
             load_reader_page,
             reader_open_page_file,
+            native_reader::crop::reader_crop_borders,
             native_reader::reader_prepare_native_slot,
             #[cfg(any(windows, target_os = "ios"))]
             native_reader::reader_native_slot_message,

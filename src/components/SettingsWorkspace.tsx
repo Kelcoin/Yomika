@@ -8,7 +8,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { usePageActive } from '../app/RetainedPage';
 import { useLoadingReveal } from '../lib/useLoadingReveal';
-import { Languages, ArrowDownWideNarrow, ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy, CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive, HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Paintbrush, Palette, PanelBottom, Rocket, RotateCcw, Settings2, Trash2, ShieldCheck, Check, SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, WandSparkles, BookOpenText, Gauge, ScrollText } from 'lucide-react';
+import { ScanLine, Languages, ArrowDownWideNarrow, ArrowLeft, ArrowLeftRight, Blocks, BookOpen, CalendarClock, Copy, CopyCheck, Database, Download, Eraser, EyeOff, FileDown, FileUp, FolderOpen, HardDrive, HeartOff, ImageUpscale, Images, Info, Github, Layers, ListChecks, Paintbrush, Palette, PanelBottom, Rocket, RotateCcw, Settings2, Trash2, ShieldCheck, Check, SlidersHorizontal, Sparkles, Shuffle, Tags, Upload, User, WandSparkles, BookOpenText, Gauge, ScrollText } from 'lucide-react';
 import { pickDirectory, pickModelFile, pickSavePath, pickTextFile } from '../bridge/filePicker';
 import { getPlatformCapabilities } from '../bridge/platform';
 import { writeClipboardText } from '../bridge/clipboard';
@@ -1235,6 +1235,15 @@ export function SettingsWorkspace() {
                 value={preferenceDraft.progressBarVisibility}
                 options={[{ value: 'none', label: '不显示' }, { value: 'history', label: '仅历史记录' }, { value: 'all', label: '全部档案' }]}
                 onChange={(value) => editPreferences({ progressBarVisibility: value as PreferenceSnapshot['progressBarVisibility'] })}
+              />
+            )}
+            {selectedSettingsSection === 'settings-reading' && (
+              <SettingsSwitch
+                icon={<ScanLine />}
+                label="自动裁剪"
+                hint="阅读时裁掉静态图片外围的白边和黑边"
+                checked={preferenceDraft.autoCropBorders}
+                onToggle={() => editPreferences({ autoCropBorders: !preferenceDraft.autoCropBorders })}
               />
             )}
             {selectedSettingsSection === 'settings-reading' && (

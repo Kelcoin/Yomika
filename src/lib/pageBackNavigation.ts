@@ -30,7 +30,10 @@ export class PageBackHistory {
     // Reader/editor routes belong to the page which opened them, even if their
     // route prefix is /library or /reader. Never inherit another tab's stack.
     const leaf = path.startsWith('/reader/') || path.endsWith('/edit') || Boolean(readerSettingsOrigin(url, returnTo));
-    const owner = leaf ? (returnTo ? this.ownerFor(returnTo) : this.owner) : pageRoot(path);
+    let owner = pageRoot(path);
+    if (leaf && returnTo) owner = this.ownerFor(returnTo);
+    else if (leaf && this.pages.size > 0) owner = this.owner;
+    else if (owner === '/reader') owner = '/library';
     // Home shortcuts open a page excursion; bottom tabs explicitly select an
     // independent workspace and must never inherit that excursion later.
     if (navigationTab || (owner !== this.owner && !homeEntry)) this.homeEntries.delete(owner);

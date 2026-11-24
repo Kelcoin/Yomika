@@ -678,6 +678,7 @@ body:has(.reader-screen [data-native-reader-visible]),
    黑画布上的控件用的（只剩重试那颗），在这两条主题色的栏上会淡得看不见。 */
 @media (hover: hover) {
   .reader-icon-button:hover,
+  .reader-chrome-top .reader-icon-button:hover::before,
   .reader-toolbar button:hover:not(:disabled)::before {
     background: var(--surface-container-high);
   }
@@ -686,8 +687,11 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-toolbar button:is(.is-pressed, :active):not(:disabled)::before { background: var(--surface-container-highest); }
 
   .reader-icon-button:active:not(:disabled) {
-    background: var(--surface-container-highest);
     transform: translateY(1px) scale(0.94);
+  }
+
+  .reader-icon-button:active:not(:disabled):where(:not(.reader-chrome-top *)) {
+    background: var(--surface-container-highest);
   }
 }
 
@@ -705,6 +709,21 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-retry-button:is(.is-pressed, :active) {
     background: var(--reader-control-hover);
   }
+}
+
+/* Narrow top-bar hit targets still use the same circular layer as the bottom bar. */
+.reader-chrome-top .reader-icon-button {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+}
+
+@media (hover: hover) {
+  .reader-chrome-top .reader-icon-button:active:not(:disabled)::before { background: var(--surface-container-highest); }
+}
+
+@media (hover: none) {
+  .reader-chrome-top .reader-icon-button:is(.is-pressed, :active)::before { background: var(--surface-container-high); }
 }
 
 .reader-toolbar button:active { transform: none; }
@@ -799,13 +818,14 @@ body:has(.reader-screen [data-native-reader-visible]),
 }
 
 /* Keep the state layer circular even when the phone layout narrows the hit area. */
+.reader-chrome-top .reader-icon-button::before,
 .reader-toolbar button::before {
   position: absolute;
   z-index: -1;
   inset: 0;
   margin: auto;
-  inline-size: var(--reader-action-width);
-  block-size: var(--reader-action-width);
+  inline-size: var(--reader-action-width, var(--icon-button-size));
+  block-size: var(--reader-action-width, var(--icon-button-size));
   border-radius: 50%;
   transition: background-color var(--motion-standard);
   content: '';
@@ -1059,7 +1079,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   }
   .reader-toolbar-group { min-height: 44px; gap: var(--space-2); }
   .reader-toolbar button { --reader-action-width: 36px; }
-  .reader-chrome-top .reader-icon-button { width: 36px; min-width: 36px; flex-basis: 36px; }
+  .reader-chrome-top .reader-icon-button { --reader-action-width: 36px; width: 36px; min-width: 36px; flex-basis: 36px; }
   .reader-chrome-actions { gap: 0; }
 }
 
@@ -1067,7 +1087,7 @@ body:has(.reader-screen [data-native-reader-visible]),
   .reader-toolbar { column-gap: var(--space-2); }
   .reader-toolbar-group { gap: 6px; }
   .reader-toolbar button { --reader-action-width: 30px; }
-  .reader-chrome-top .reader-icon-button { width: 30px; min-width: 30px; flex-basis: 30px; }
+  .reader-chrome-top .reader-icon-button { --reader-action-width: 30px; width: 30px; min-width: 30px; flex-basis: 30px; }
   .reader-toolbar-counter { min-inline-size: 56px; padding-inline: 4px; }
   .reader-toolbar svg,
   .reader-chrome-top .reader-icon-button svg { width: 22px; height: 22px; }

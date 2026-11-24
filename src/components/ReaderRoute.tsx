@@ -1697,6 +1697,7 @@ export function ReaderRoute({ archiveId }: { archiveId: string }) {
       direction={readingDirection}
       loadPage={loadPage}
       loadPageThumbnail={loadPageThumbnail}
+      autoCropBorders={preferences.autoCropBorders}
       prefetchDistance={prefetchDistance}
       releasePage={releasePage}
       info={info}

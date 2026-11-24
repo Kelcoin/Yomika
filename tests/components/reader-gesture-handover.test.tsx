@@ -727,3 +727,64 @@ it('hides and re-presents the same native slot during a reading settings round t
     vi.unstubAllGlobals();
   }
 });
+
+
+it('keeps the native swipe neighbour selected while auto turn is enabled', async () => {
+  const messages: unknown[] = [];
+  vi.stubGlobal('YomikaTiles', { postMessage: (message: string) => messages.push(JSON.parse(message)) });
+  const invoke = vi.fn(async (_command: string, _args?: Record<string, unknown>) => ({ ok: true, value: true }));
+  setInvokeAdapterForTests(invoke);
+  rememberTileSource(plain, { contentHash: 'a'.repeat(64), leaseId: 'auto-original', decodedBytes: 16 });
+  const rendered = render(<MemoryRouter><ReaderScreen archiveId="a" title="Reader" layout="single" pages={[plain, 'blob:next']} /></MemoryRouter>);
+  try {
+    const slot = invoke.mock.calls.find(([, args]) => args?.leaseId === 'auto-original')?.[1]?.slot;
+    expect(slot).toBeDefined();
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('yomika-reader-tile-status', { detail: { slot, width: 128, height: 192 } }));
+    });
+    fireEvent.click(screen.getByRole('main', { name: '漫画阅读器' }));
+    fireEvent.click(screen.getByRole('button', { name: '自动翻页' }));
+    expect(screen.getByRole('button', { name: '停止自动翻页' })).toBeInTheDocument();
+    expect(messages.filter(message => (message as { op: string }).op === 'select').at(-1))
+      .toEqual(expect.objectContaining({ id: slot, left: 2 }));
+  } finally {
+    rendered.unmount();
+    forgetTileSource(plain);
+    resetInvokeAdapterForTests();
+    vi.unstubAllGlobals();
+  }
+});
+
+it('renders a crop through the native slot and uses the original crop for an enhanced page', async () => {
+  vi.stubGlobal('YomikaTiles', { postMessage: vi.fn() });
+  const insets = { left: .1, top: .1, right: .1, bottom: .1 };
+  const lease = (leaseId: string, width: number, height: number) => ({
+    leaseId, artifactId: leaseId, jobId: 'crop', url: `blob:${leaseId}`, mime: 'image/png', byteLength: 128,
+    width, height, estimatedDecodedBytes: width * height * 4, pipelineRevision: leaseId, expiresInMs: 6000,
+  });
+  const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => ({
+    ok: true, value: command === 'reader_crop_borders'
+      ? { lease: args?.leaseId === 'plain-crop-input' ? lease('cropped', 80, 120) : lease('enhanced-cropped', 160, 240), insets }
+      : true,
+  }));
+  setInvokeAdapterForTests(invoke);
+  const enhanced = 'blob:enhanced-crop-input';
+  rememberTileSource(plain, { contentHash: 'a'.repeat(64), leaseId: 'plain-crop-input', decodedBytes: 60000 });
+  rememberTileSource(enhanced, { contentHash: 'b'.repeat(64), leaseId: 'enhanced-crop-input', decodedBytes: 240000 });
+  const reader = (enabled: boolean, derived?: Map<number, string>) => <MemoryRouter><ReaderScreen archiveId="crop" title="Reader" layout="single" pages={[plain]} autoCropBorders={enabled} derivedPages={derived} /></MemoryRouter>;
+  const rendered = render(reader(false));
+  try {
+    expect(invoke.mock.calls.some(([command]) => command === 'reader_crop_borders')).toBe(false);
+    rendered.rerender(reader(true));
+    await vi.waitFor(() => expect(invoke.mock.calls).toContainEqual(['reader_prepare_native_slot', expect.objectContaining({ leaseId: 'cropped', page: 1 })]));
+    rendered.rerender(reader(true, new Map([[0, enhanced]])));
+    await vi.waitFor(() => expect(invoke.mock.calls).toContainEqual(['reader_crop_borders', expect.objectContaining({ leaseId: 'enhanced-crop-input', reference: insets })]));
+    await vi.waitFor(() => expect(invoke.mock.calls).toContainEqual(['reader_prepare_native_slot', expect.objectContaining({ leaseId: 'enhanced-cropped', page: 1 })]));
+  } finally {
+    rendered.unmount();
+    forgetTileSource(plain);
+    forgetTileSource(enhanced);
+    resetInvokeAdapterForTests();
+    vi.unstubAllGlobals();
+  }
+});

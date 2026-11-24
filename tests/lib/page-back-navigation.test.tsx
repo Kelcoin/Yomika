@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { BrowserRouter, Link, MemoryRouter, useLocation } from 'react-router-dom';
 import { MOBILE_BACK_EVENT, PageBackHistory, usePageBackNavigation } from '../../src/lib/pageBackNavigation';
+import { useReturnNavigation } from '../../src/lib/useReturnNavigation';
 import { useState } from 'react';
 import { useOverlayBackGuard } from '../../src/lib/overlayBackGuard';
 import { useRouteDirection } from '../../src/lib/useRouteDirection';
@@ -166,4 +167,23 @@ it('uses an iOS edge swipe for page-scoped Back without taking vertical or inter
   expect(screen.getByTestId('route')).toHaveTextContent('/home/a');
   swiping(10, 100, 10);
   expect(screen.getByTestId('route')).toHaveTextContent(/^\/$/);
+});
+
+function NestedDetailNavigation() {
+  usePageBackNavigation();
+  const { pathname } = useLocation();
+  const goBack = useReturnNavigation();
+  return <><output>{pathname}</output><Link to="/library/a">first</Link>
+    <Link to="/library/b" state={{ returnTo: '/library' }}>second</Link>
+    <button onClick={goBack}>back button</button></>;
+}
+
+it('uses the same workspace history for the detail back button and gesture', () => {
+  render(<MemoryRouter initialEntries={['/library']}><NestedDetailNavigation /></MemoryRouter>);
+  fireEvent.click(screen.getByText('first'));
+  fireEvent.click(screen.getByText('second'));
+  fireEvent.click(screen.getByText('back button'));
+  expect(screen.getByRole('status')).toHaveTextContent('/library/a');
+  expect(back()).toBe(false);
+  expect(screen.getByRole('status')).toHaveTextContent(/^\/library$/);
 });

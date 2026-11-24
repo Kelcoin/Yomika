@@ -20,6 +20,7 @@ const ALLOW_PROGRESS_REGRESSION_KEY: &str = "preferences.allow_progress_regressi
 const PROGRESS_BAR_VISIBILITY_KEY: &str = "preferences.progress_bar_visibility";
 const CACHE_MAX_BYTES_KEY: &str = "preferences.cache_max_bytes";
 const CUSTOM_CSS_KEY: &str = "preferences.custom_css";
+const AUTO_CROP_BORDERS_KEY: &str = "preferences.auto_crop_borders";
 const PREFETCH_PAGES_KEY: &str = "preferences.prefetch_pages";
 const COVER_CONCURRENCY_KEY: &str = "preferences.cover_concurrency";
 const STARTUP_ROUTE_KEY: &str = "preferences.startup_route";
@@ -124,6 +125,8 @@ pub struct PreferenceSnapshot {
     pub progress_bar_visibility: String,
     pub cache_max_bytes: u64,
     /// How many pages either side of the current one the reader preloads.
+    #[serde(default)]
+    pub auto_crop_borders: bool,
     #[serde(default = "default_prefetch_pages")]
     pub prefetch_pages: u8,
     /// Concurrent cover requests; LANraragi queues thumbnail extraction.
@@ -323,6 +326,7 @@ impl Default for PreferenceSnapshot {
             allow_progress_regression: true,
             progress_bar_visibility: default_progress_bar_visibility(),
             cache_max_bytes: 2_147_483_648,
+            auto_crop_borders: false,
             prefetch_pages: default_prefetch_pages(),
             cover_concurrency: default_cover_concurrency(),
             startup_route: default_startup_route(),
@@ -484,6 +488,7 @@ pub fn load_preferences_from(connection: &Connection) -> Result<PreferenceSnapsh
         allow_progress_regression: map_value(&stored, ALLOW_PROGRESS_REGRESSION_KEY, defaults.allow_progress_regression)?,
         progress_bar_visibility: map_value(&stored, PROGRESS_BAR_VISIBILITY_KEY, defaults.progress_bar_visibility)?,
         cache_max_bytes: map_value(&stored, CACHE_MAX_BYTES_KEY, defaults.cache_max_bytes)?,
+        auto_crop_borders: map_value(&stored, AUTO_CROP_BORDERS_KEY, defaults.auto_crop_borders)?,
         prefetch_pages: map_value(&stored, PREFETCH_PAGES_KEY, defaults.prefetch_pages)?,
         cover_concurrency: map_value(
             &stored,
@@ -602,6 +607,7 @@ pub(crate) fn write_preference_keys(
             CACHE_MAX_BYTES_KEY,
             serde_json::to_string(&value.cache_max_bytes),
         ),
+        (AUTO_CROP_BORDERS_KEY, serde_json::to_string(&value.auto_crop_borders)),
         (
             PREFETCH_PAGES_KEY,
             serde_json::to_string(&value.prefetch_pages),
@@ -1020,6 +1026,7 @@ mod tests {
             default_direction: "rtl".into(),
             detail_date_kind: "added".into(),
             cache_max_bytes: 4_294_967_296,
+            auto_crop_borders: true,
             prefetch_pages: 3,
             allow_progress_regression: false,
             progress_bar_visibility: "all".into(),

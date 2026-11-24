@@ -1545,9 +1545,12 @@ describe('design system contract', () => {
     expect(ruleBody(reader, '.reader-toolbar button:hover:not(:disabled)::before')).toMatch(/background:\s*var\(--surface-container-high\)/);
     expect(reader).toMatch(/\.reader-toolbar button:is\(\.is-pressed, :active\):not\(:disabled\)::before \{ background: var\(--surface-container-highest\); \}/);
     expect(reader).toMatch(/\.reader-toolbar button\.is-pressed:not\(:disabled\) \{ transform: scale\(/);
+    // 顶栏图标按钮（窄屏才收窄）与底栏共用同一层圆形按压：它们不设 --reader-action-width，
+    // 所以宽度要带 --icon-button-size 回落，两条选择器也必须挂在同一条规则上。
+    expect(reader, '顶栏图标与底栏共用同一层圆形按压').toMatch(/\.reader-chrome-top \.reader-icon-button::before,\s*\n\s*\.reader-toolbar button::before \{/);
     const stateLayer = ruleBody(reader, '.reader-toolbar button::before');
-    expect(stateLayer).toMatch(/inline-size:\s*var\(--reader-action-width\)/);
-    expect(stateLayer).toMatch(/block-size:\s*var\(--reader-action-width\)/);
+    expect(stateLayer).toMatch(/inline-size:\s*var\(--reader-action-width(?:,\s*var\(--icon-button-size\))?\)/);
+    expect(stateLayer).toMatch(/block-size:\s*var\(--reader-action-width(?:,\s*var\(--icon-button-size\))?\)/);
     expect(stateLayer).toMatch(/border-radius:\s*50%/);
     expect(reader).not.toContain('reader-toolbar-turn');
     expect(read('src/components/ReaderScreen.tsx')).not.toContain('reader-toolbar-turn');
