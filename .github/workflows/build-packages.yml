@@ -284,10 +284,39 @@ jobs:
           generated.update(overrides)
           target.write_bytes(plistlib.dumps(generated, sort_keys=False))
           PY
+      - name: Identify the iOS runtime toolchain
+        id: ios-ort-toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain=$( { xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; } | shasum -a 256 )
+          echo "fingerprint=${toolchain%% *}" >> "$GITHUB_OUTPUT"
+      - name: Restore the iOS ONNX Runtime framework
+        id: ios-ort-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: src-tauri/target/mobile-ort/onnxruntime.xcframework
+          key: ios-ort-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.ios-ort-toolchain.outputs.fingerprint }}-${{ hashFiles('.github/scripts/prepare-mobile-ort.py') }}
       - name: Build pinned iOS ONNX Runtime with CoreML
+        if: steps.ios-ort-cache.outputs.cache-hit != 'true'
         run: |
           python3 -m pip install --break-system-packages 'cmake==3.31.6' numpy packaging
           python3 .github/scripts/prepare-mobile-ort.py ios
+      # Save as soon as the framework builds so a later packaging failure can reuse it.
+      - name: Save the iOS ONNX Runtime framework
+        if: steps.ios-ort-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: src-tauri/target/mobile-ort/onnxruntime.xcframework
+          key: ${{ steps.ios-ort-cache.outputs.cache-primary-key }}
+      - name: Configure Cargo to link the iOS ONNX Runtime framework
+        if: steps.ios-ort-cache.outputs.cache-hit == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          framework="$GITHUB_WORKSPACE/src-tauri/target/mobile-ort/onnxruntime.xcframework"
+          plutil -lint "$framework/Info.plist"
+          printf 'ORT_SKIP_DOWNLOAD=1\nORT_IOS_XCFWK_PATH=%s\n' "$framework" >> "$GITHUB_ENV"
       # 与 Android 作业同理：init 生成的资产目录里是 Tauri 的默认图标，这一步用
       # 项目图标（icon-manifest.json）覆盖 AppIcon.appiconset。
       - name: Write the project icons into the generated Xcode project
@@ -382,7 +411,7 @@ jobs:
           fi
           test ! -e "$app/__preview.dylib"
           executable=$(plutil -extract CFBundleExecutable raw "$app/Info.plist")
-          lipo -verify_arch arm64 "$app/$executable"
+          lipo "$app/$executable" -verify_arch arm64
           test "$(stat -f %z "$app/$executable")" -gt 1048576
           mkdir -p artifacts/Payload
           cp -R "$app" artifacts/Payload/Yomika.app

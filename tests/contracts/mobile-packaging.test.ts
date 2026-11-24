@@ -297,6 +297,17 @@ describe('mobile packaging', () => {
     );
   });
 
+  it('restores the pinned iOS runtime and saves it before building the app', () => {
+    const workflow = read('../../.github/workflows/build-packages.yml');
+    const ios = workflow.split('  ios-unsigned:')[1]!.split('  prepare-release:')[0]!;
+    expect(ios).toContain('actions/cache/restore@v4');
+    expect(ios).toContain('actions/cache/save@v4');
+    expect(ios).toContain("hashFiles('.github/scripts/prepare-mobile-ort.py')");
+    expect(ios).toContain('xcrun --sdk iphoneos --show-sdk-version');
+    expect(ios).toContain("if: steps.ios-ort-cache.outputs.cache-hit != 'true'");
+    expect(ios).toMatch(/actions\/cache\/restore@v4[\s\S]+prepare-mobile-ort.py ios[\s\S]+actions\/cache\/save@v4[\s\S]+ORT_IOS_XCFWK_PATH=[\s\S]+name: Build Rust for iOS/);
+  });
+
   it('ships a single-executable iOS bundle instead of the debug dylib split', () => {
     const workflow = read('../../.github/workflows/build-packages.yml');
     expect(workflow).toContain('-configuration release');
@@ -306,6 +317,7 @@ describe('mobile packaging', () => {
     expect(workflow).not.toContain('for config in debug release');
     expect(workflow).toContain('*.debug.dylib');
     expect(workflow).toContain('test ! -e "$app/__preview.dylib"');
+    expect(workflow).toContain('lipo "$app/$executable" -verify_arch arm64');
     expect(workflow).toContain('cmp src-tauri/PrivacyInfo.xcprivacy "$app/PrivacyInfo.xcprivacy"');
     expect(read('../../src-tauri/PrivacyInfo.xcprivacy')).toContain('C617.1');
     // 合并进生成工程不算数，最终 bundle 里也得有这几个键。
